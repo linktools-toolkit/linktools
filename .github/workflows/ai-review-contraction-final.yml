@@ -1,0 +1,139 @@
+name: Final AI review contraction
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply corrected review contraction
+        shell: bash
+        run: |
+          python - <<'RUNNER'
+          from __future__ import annotations
+
+          import subprocess
+          import textwrap
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/ai-review-contraction.yml').read_text(encoding='utf-8')
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          repair = Path('/tmp/ai-review-contraction.py')
+          repair.write_text(textwrap.dedent(workflow[start:end]), encoding='utf-8')
+          subprocess.run(['python', str(repair)], check=True)
+
+          capabilities = Path('linktools-ai/src/linktools/ai/runtime/_capabilities.py')
+          text = capabilities.read_text(encoding='utf-8')
+          marker = '    async def wrap_model_request(\n'
+          method = '''    async def before_model_request(\n        self,\n        ctx: RunContext[None],\n        request_context: ModelRequestContext,\n    ) -> ModelRequestContext:\n        """Defer Harness start persistence until Runtime request metadata is bound."""\n        return request_context\n\n'''
+          if marker not in text:
+              raise SystemExit('wrap_model_request marker missing')
+          capabilities.write_text(text.replace(marker, method + marker, 1), encoding='utf-8')
+
+          fs_path = Path('linktools-ai/src/linktools/ai/runtime/state/_filesystem.py')
+          text = fs_path.read_text(encoding='utf-8')
+          text = text.replace('        range_index: bool = False,\n', '        _range_index: bool = False,\n', 1)
+          text = text.replace(
+              '''        if not isinstance(range_index, bool):\n            raise TypeError("range_index must be bool")\n        self._runtime_domain = runtime_domain\n        self._range_index_enabled = range_index\n''',
+              '''        if not isinstance(_range_index, bool):\n            raise TypeError("_range_index must be bool")\n        self._runtime_domain = runtime_domain\n        self._range_index_enabled = _range_index\n''',
+              1,
+          )
+          fs_path.write_text(text, encoding='utf-8')
+
+          materializer = Path('linktools-ai/src/linktools/ai/runtime/state/_materializer.py')
+          text = materializer.read_text(encoding='utf-8')
+          text = text.replace(
+              '                    range_index=domain is RuntimeDomain.MEMORY,\n',
+              '                    _range_index=domain is RuntimeDomain.MEMORY,\n',
+              1,
+          )
+          materializer.write_text(text, encoding='utf-8')
+
+          for test_path in (
+              Path('tests/ai/test_state_range_index.py'),
+              Path('tests/ai/test_memory_bounded_listing.py'),
+          ):
+              text = test_path.read_text(encoding='utf-8').replace(
+                  '        range_index=True,\n',
+                  '        _range_index=True,\n',
+              )
+              test_path.write_text(text, encoding='utf-8')
+
+          memory_test = Path('tests/ai/test_memory_bounded_listing.py')
+          text = memory_test.read_text(encoding='utf-8')
+          text = text.replace(
+              'def test_memory_receipt_rejects_unwritten_appended_status() -> None:\n',
+              'async def test_memory_receipt_rejects_unwritten_appended_status() -> None:\n',
+              1,
+          )
+          memory_test.write_text(text, encoding='utf-8')
+
+          for path in (
+              capabilities,
+              fs_path,
+              materializer,
+              memory_test,
+              Path('tests/ai/test_state_range_index.py'),
+          ):
+              compile(path.read_text(encoding='utf-8'), str(path), 'exec')
+          RUNNER
+      - name: Install project
+        shell: bash
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Format changed Python
+        shell: bash
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=ACM -- '*.py')
+          if ((${#files[@]})); then
+            python -m ruff format "${files[@]}"
+          fi
+      - name: Run focused regressions
+        shell: bash
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/ai/test_memory_bounded_listing.py \
+            tests/ai/test_state_range_index.py \
+            tests/ai/test_compaction_harness_observability.py \
+            tests/ai/test_model_usage_trace.py \
+            tests/ai/test_spec_capability_refactor.py \
+            tests/ai/test_deferred_frontier_contract.py \
+            tests/ai/test_deferred_native_conformance.py \
+            tests/ai/test_tool_effect_semantics.py \
+            tests/ai/test_review_contract_cleanup.py
+      - name: Run package gate
+        shell: bash
+        run: |
+          python manage.py check linktools-ai
+          git diff --check
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm \
+            .github/workflows/ai-review-contraction.yml \
+            .github/workflows/ai-review-contraction-retry.yml \
+            .github/workflows/ai-review-contraction-final.yml
+          git add -A
+          git commit -m 'fix(ai): tighten review contracts'
+          git push origin HEAD:refactor/ai-harness-capabilities
