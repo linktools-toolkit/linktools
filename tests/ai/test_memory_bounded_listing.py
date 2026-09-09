@@ -279,7 +279,7 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
         runtime_domain=RuntimeDomain.MEMORY.value,
     )
     await reopened.initialize()
-    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "2"
+    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "3"
     repository = MemoryRepositoryImpl(
         reopened,
         namespace="memory-reindex",

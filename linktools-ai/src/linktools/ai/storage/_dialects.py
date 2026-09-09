@@ -29,6 +29,7 @@ class _SqliteConnection(Protocol):
 class _SqliteEventValue(Protocol):
     pass
 
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
@@ -160,7 +161,9 @@ class SqlAlchemyDialect(Protocol):
         returning: "Sequence[str]",
     ) -> "tuple[RowMapping, ...]": ...
 
-    def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind: ...
+    def classify_integrity_error(
+        self, error: BaseException
+    ) -> IntegrityViolationKind: ...
 
     def classify_transaction_error(
         self,
@@ -188,7 +191,11 @@ class SQLiteDialect:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if not isinstance(value, datetime):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        return (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
 
     def _database_now_expression(self) -> "ColumnElement[str]":
         from sqlalchemy import func
@@ -324,14 +331,10 @@ class SQLiteDialect:
             from sqlalchemy import func
 
             set_values["updated_at"] = func.current_timestamp()
-        statement = (
-            insert_statement
-            .on_conflict_do_update(
-                index_elements=list(index_elements),
-                set_=set_values,
-            )
-            .returning(table.c[index_elements[0]], value_column)
-        )
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=list(index_elements),
+            set_=set_values,
+        ).returning(table.c[index_elements[0]], value_column)
         result = (await session.execute(statement)).all()
         _logger.debug(
             "SQL batch executed: backend=%s operation=reserve_sequences "
@@ -507,14 +510,10 @@ class PostgreSQLDialect(SQLiteDialect):
             from sqlalchemy import func
 
             set_values["updated_at"] = func.current_timestamp()
-        statement = (
-            insert_statement
-            .on_conflict_do_update(
-                index_elements=list(index_elements),
-                set_=set_values,
-            )
-            .returning(table.c[index_elements[0]], value_column)
-        )
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=list(index_elements),
+            set_=set_values,
+        ).returning(table.c[index_elements[0]], value_column)
         result = (await session.execute(statement)).all()
         _logger.debug(
             "SQL batch executed: backend=%s operation=reserve_sequences "
@@ -547,7 +546,9 @@ class MySQLDialect(SQLiteDialect):
 
         statement = insert(table).values(dict(values))
         column = index_elements[0]
-        statement = statement.on_duplicate_key_update(**{column: statement.inserted[column]})
+        statement = statement.on_duplicate_key_update(
+            **{column: statement.inserted[column]}
+        )
         result = await session.execute(statement)
         return InsertResult(result.rowcount == 1, None)
 
@@ -565,7 +566,9 @@ class MySQLDialect(SQLiteDialect):
 
         statement = insert(table).values([dict(row) for row in rows])
         column = index_elements[0]
-        await session.execute(statement.on_duplicate_key_update(**{column: statement.inserted[column]}))
+        await session.execute(
+            statement.on_duplicate_key_update(**{column: statement.inserted[column]})
+        )
 
     async def upsert(
         self,
@@ -578,7 +581,11 @@ class MySQLDialect(SQLiteDialect):
     ) -> None:
         from sqlalchemy.dialects.mysql import insert
 
-        statement = insert(table).values(dict(values)).on_duplicate_key_update(**dict(set_values))
+        statement = (
+            insert(table)
+            .values(dict(values))
+            .on_duplicate_key_update(**dict(set_values))
+        )
         await session.execute(statement)
 
     async def upsert_increment(
@@ -600,7 +607,9 @@ class MySQLDialect(SQLiteDialect):
         set_values = {column: func.last_insert_id(value_column + step)}
         if "updated_at" in table.c:
             set_values["updated_at"] = func.current_timestamp()
-        statement = insert(table).values(insert_values).on_duplicate_key_update(**set_values)
+        statement = (
+            insert(table).values(insert_values).on_duplicate_key_update(**set_values)
+        )
         result = await session.execute(statement)
         if result.rowcount == 1:
             return step
@@ -625,7 +634,9 @@ class MySQLDialect(SQLiteDialect):
 
         statement = insert(table).values([dict(row) for row in rows])
         await session.execute(
-            statement.on_duplicate_key_update(**{column: statement.inserted[column] for column in set_columns})
+            statement.on_duplicate_key_update(
+                **{column: statement.inserted[column] for column in set_columns}
+            )
         )
 
     async def upsert_increment_many(
@@ -679,7 +690,13 @@ class MySQLDialect(SQLiteDialect):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return_columns = tuple(table.c[column] for column in returning)
         selected = tuple(
-            (await session.execute(select(*primary_columns, *return_columns).where(where))).mappings().all()
+            (
+                await session.execute(
+                    select(*primary_columns, *return_columns).where(where)
+                )
+            )
+            .mappings()
+            .all()
         )
         if not selected:
             return ()
@@ -692,9 +709,13 @@ class MySQLDialect(SQLiteDialect):
                 values = []
                 for column in (*primary_columns, *return_columns):
                     value = row[column.key]
-                    values.append(column.is_(None) if value is None else column == value)
+                    values.append(
+                        column.is_(None) if value is None else column == value
+                    )
                 predicates.append(and_(*values))
-            result = await session.execute(delete(table).where(and_(where, or_(*predicates))))
+            result = await session.execute(
+                delete(table).where(and_(where, or_(*predicates)))
+            )
             deleted_count += result.rowcount
         if deleted_count != len(selected):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -762,7 +783,9 @@ def sql_sha256() -> "CHAR":
     from sqlalchemy import CHAR
     from sqlalchemy.dialects import mysql
 
-    return CHAR(64).with_variant(mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
+    return CHAR(64).with_variant(
+        mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql"
+    )
 
 
 def sql_digest() -> "CHAR":
@@ -784,9 +807,14 @@ def sql_sort_key() -> "String":
     from sqlalchemy import String
     from sqlalchemy.dialects import mysql
 
-    return String(128).with_variant(
-        mysql.VARCHAR(128, charset="utf8mb4", collation="utf8mb4_bin"),
-        "mysql",
+    return (
+        String(128)
+        .with_variant(String(128, collation="BINARY"), "sqlite")
+        .with_variant(String(128, collation="C"), "postgresql")
+        .with_variant(
+            mysql.VARCHAR(128, charset="utf8mb4", collation="utf8mb4_bin"),
+            "mysql",
+        )
     )
 
 
@@ -798,7 +826,11 @@ def sql_blob() -> "LargeBinary":
 
 
 def sql_table_options() -> "Mapping[str, str]":
-    return {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_bin"}
+    return {
+        "mysql_engine": "InnoDB",
+        "mysql_charset": "utf8mb4",
+        "mysql_collate": "utf8mb4_bin",
+    }
 
 
 def sql_audit_columns() -> "tuple[Column, Column]":
@@ -817,19 +849,27 @@ def sql_audit_columns() -> "tuple[Column, Column]":
         inherit_cache = True
 
     @compiles(AuditCurrentTimestamp)
-    def compile_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+    def compile_audit_timestamp(
+        element: object, compiler: object, **kwargs: object
+    ) -> str:
         return "CURRENT_TIMESTAMP"
 
     @compiles(AuditCurrentTimestamp, "mysql")
-    def compile_mysql_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+    def compile_mysql_audit_timestamp(
+        element: object, compiler: object, **kwargs: object
+    ) -> str:
         return "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
 
     @compiles(AuditCreatedTimestamp)
-    def compile_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+    def compile_created_timestamp(
+        element: object, compiler: object, **kwargs: object
+    ) -> str:
         return "CURRENT_TIMESTAMP"
 
     @compiles(AuditCreatedTimestamp, "mysql")
-    def compile_mysql_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+    def compile_mysql_created_timestamp(
+        element: object, compiler: object, **kwargs: object
+    ) -> str:
         return "CURRENT_TIMESTAMP"
 
     timestamp_type = DateTime(timezone=True).with_variant(mysql.DATETIME(), "mysql")
@@ -876,7 +916,9 @@ def sql_unique(table: "Table", *columns: str) -> None:
     index.ddl_if(dialect="mysql")
 
 
-def sql_query_index(table: "Table", *columns: str, mysql_length: int | None = None) -> "Index":
+def sql_query_index(
+    table: "Table", *columns: str, mysql_length: int | None = None
+) -> "Index":
     from sqlalchemy import Index
 
     _validate_index_columns(columns)
@@ -941,15 +983,22 @@ def column_type_matches(
     expected_type = expected.type.dialect_impl(connection.dialect)
     actual_type = actual.get("type")
     dialect_name = connection.dialect.name
-    if _type_family(expected_type) != _type_family(actual_type) and not _boolean_compatible(
+    if _type_family(expected_type) != _type_family(
+        actual_type
+    ) and not _boolean_compatible(dialect_name, expected_type, actual_type):
+        return False
+    if isinstance(expected_type, LargeBinary) and not _binary_compatible(
         dialect_name, expected_type, actual_type
     ):
         return False
-    if isinstance(expected_type, LargeBinary) and not _binary_compatible(dialect_name, expected_type, actual_type):
+    if isinstance(expected_type, JSON) and not _json_compatible(
+        expected_type, actual_type
+    ):
         return False
-    if isinstance(expected_type, JSON) and not _json_compatible(expected_type, actual_type):
-        return False
-    return not (_type_family(expected_type) == "integer" and not _integer_compatible(dialect_name, expected_type, actual_type))
+    return not (
+        _type_family(expected_type) == "integer"
+        and not _integer_compatible(dialect_name, expected_type, actual_type)
+    )
 
 
 def _type_family(value: object) -> str:
@@ -965,9 +1014,19 @@ def _type_family(value: object) -> str:
         return "boolean"
     if isinstance(value, (LargeBinary,)) or "binary" in name or "blob" in rendered:
         return "binary"
-    if isinstance(value, Text) or "char" in rendered or "text" in rendered or "clob" in rendered:
+    if (
+        isinstance(value, Text)
+        or "char" in rendered
+        or "text" in rendered
+        or "clob" in rendered
+    ):
         return "text"
-    if "int" in name or "int" in rendered or "numeric" in rendered or "decimal" in rendered:
+    if (
+        "int" in name
+        or "int" in rendered
+        or "numeric" in rendered
+        or "decimal" in rendered
+    ):
         return "integer"
     if "float" in name or "real" in rendered:
         return "float"
@@ -992,7 +1051,10 @@ def _boolean_compatible(dialect_name: str, expected: object, actual: object) -> 
 
             width = actual.display_width if isinstance(actual, TINYINT) else None
             return width == 1 or rendered == "tinyint(1)"
-    return type(actual).__name__.lower() in {"boolean", "bool"} or rendered in {"boolean", "bool"}
+    return type(actual).__name__.lower() in {"boolean", "bool"} or rendered in {
+        "boolean",
+        "bool",
+    }
 
 
 def _binary_compatible(dialect_name: str, expected: object, actual: object) -> bool:
@@ -1001,7 +1063,10 @@ def _binary_compatible(dialect_name: str, expected: object, actual: object) -> b
         return rendered == "longblob" or type(actual).__name__.lower() == "longblob"
     if dialect_name == "postgresql":
         return rendered == "bytea" or type(actual).__name__.lower() == "bytea"
-    return rendered in {"blob", "largebinary"} or type(actual).__name__.lower() in {"blob", "largebinary"}
+    return rendered in {"blob", "largebinary"} or type(actual).__name__.lower() in {
+        "blob",
+        "largebinary",
+    }
 
 
 def _json_compatible(expected: object, actual: object) -> bool:
@@ -1023,7 +1088,9 @@ def _integer_compatible(dialect_name: str, expected: object, actual: object) -> 
     if "bigint" in expected_name:
         return "bigint" in actual_name
     if "smallint" in expected_name:
-        return any(name in actual_name for name in ("smallint", "integer", "int", "bigint"))
+        return any(
+            name in actual_name for name in ("smallint", "integer", "int", "bigint")
+        )
     return any(name in actual_name for name in ("integer", "int", "bigint"))
 
 
@@ -1132,11 +1199,18 @@ def _read_mysql_errno(error: BaseException) -> "int | None":
         return None
 
 
-def _classify_error(error: BaseException, unique_markers: "tuple[str, ...]") -> IntegrityViolationKind:
+def _classify_error(
+    error: BaseException, unique_markers: "tuple[str, ...]"
+) -> IntegrityViolationKind:
     message = str(error).lower()
     if any(marker in message for marker in unique_markers):
         return IntegrityViolationKind.UNIQUE_CONFLICT
-    if "foreign key" in message or "1451" in message or "1452" in message or "23503" in message:
+    if (
+        "foreign key" in message
+        or "1451" in message
+        or "1452" in message
+        or "23503" in message
+    ):
         return IntegrityViolationKind.FOREIGN_KEY
     if "check constraint" in message or "3819" in message or "23514" in message:
         return IntegrityViolationKind.CHECK

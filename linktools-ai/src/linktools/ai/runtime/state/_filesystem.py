@@ -4,7 +4,6 @@
 
 import asyncio
 import hashlib
-import heapq
 import json
 import os
 import shutil
@@ -80,8 +79,8 @@ class _FactStreamInfo:
 @dataclass(frozen=True, slots=True)
 class _RecordIndexNode:
     token: str
+    key_digests: tuple[bytes, ...]
     children: tuple[str, ...]
-    key_digest: bytes | None = None
 
 
 class _FilesystemCache:
@@ -165,11 +164,9 @@ class _FilesystemCache:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         selected = _record_index_select(self._root, query)
         values: list[StoredRecord] = []
-        for token, key in selected:
+        for sort_key, key in selected:
             value = self._indexed_record(query.kind, key)
-            if _record_sort_token(value.sort_key) != token or not _matches_record(
-                value, query
-            ):
+            if value.sort_key != sort_key or not _matches_record(value, query):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values.append(value)
         return tuple(values)
@@ -2755,86 +2752,151 @@ class _FilesystemTransaction:
 
     def _record_index_node(
         self,
+        kind: str,
         scope_digest: bytes,
         token: str,
     ) -> _RecordIndexNode | None:
-        relative = _record_index_node_path("memory", scope_digest, token)
+        relative = _record_index_node_path(kind, scope_digest, token)
         if relative in self.deletes:
             return None
         pending = self.writes.get(relative)
         if pending is not None:
             return _decode_record_index_node_bytes(pending, expected_token=token)
-        return _read_record_index_node(
-            self._root,
-            "memory",
-            scope_digest,
-            token,
-        )
+        return _read_record_index_node(self._root, kind, scope_digest, token)
 
     def _store_record_index_node(
         self,
+        kind: str,
         scope_digest: bytes,
         node: _RecordIndexNode,
     ) -> None:
         self._write(
-            _record_index_node_path("memory", scope_digest, node.token),
+            _record_index_node_path(kind, scope_digest, node.token),
             _record_index_node_payload(node),
         )
 
     def _add_record_index_entry(
         self,
-        identity: tuple[bytes, str, bytes],
+        identity: tuple[str, bytes, str, bytes],
     ) -> None:
-        scope_digest, token, key_digest = identity
-        for index in range(len(token) + 1):
-            prefix = token[:index]
-            current = self._record_index_node(scope_digest, prefix)
-            if current is None:
-                current = _RecordIndexNode(prefix, ())
-            children = current.children
-            terminal = current.key_digest
-            if index < len(token):
-                child = token[index]
-                if child not in children:
-                    children = tuple(sorted((*children, child)))
-            else:
-                if terminal is not None and terminal != key_digest:
+        kind, scope_digest, token, key_digest = identity
+        current = self._record_index_node(kind, scope_digest, "")
+        if current is None:
+            current = _RecordIndexNode("", (), ())
+        while True:
+            if token == current.token:
+                if key_digest in current.key_digests:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                terminal = key_digest
-            updated = _RecordIndexNode(prefix, children, terminal)
-            if updated != current:
-                self._store_record_index_node(scope_digest, updated)
+                updated = _RecordIndexNode(
+                    current.token,
+                    tuple(sorted((*current.key_digests, key_digest))),
+                    current.children,
+                )
+                self._store_record_index_node(kind, scope_digest, updated)
+                return
+            if not token.startswith(current.token):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            child_token = _record_index_child(current, token)
+            if child_token is None:
+                leaf = _RecordIndexNode(token, (key_digest,), ())
+                self._store_record_index_node(kind, scope_digest, leaf)
+                updated = _RecordIndexNode(
+                    current.token,
+                    current.key_digests,
+                    tuple(sorted((*current.children, token))),
+                )
+                self._store_record_index_node(kind, scope_digest, updated)
+                return
+            child = self._record_index_node(kind, scope_digest, child_token)
+            if child is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            common = _record_index_common_prefix((token, child_token))
+            if common == child_token:
+                current = child
+                continue
+            if len(common) <= len(current.token):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if common == token:
+                inserted = _RecordIndexNode(token, (key_digest,), (child_token,))
+                self._store_record_index_node(kind, scope_digest, inserted)
+                updated = _record_index_replace_child(current, child_token, token)
+                self._store_record_index_node(kind, scope_digest, updated)
+                return
+            leaf = _RecordIndexNode(token, (key_digest,), ())
+            branch = _RecordIndexNode(
+                common,
+                (),
+                tuple(sorted((child_token, token))),
+            )
+            self._store_record_index_node(kind, scope_digest, leaf)
+            self._store_record_index_node(kind, scope_digest, branch)
+            updated = _record_index_replace_child(current, child_token, common)
+            self._store_record_index_node(kind, scope_digest, updated)
+            return
 
     def _remove_record_index_entry(
         self,
-        identity: tuple[bytes, str, bytes],
+        identity: tuple[str, bytes, str, bytes],
     ) -> None:
-        scope_digest, token, key_digest = identity
-        terminal = self._record_index_node(scope_digest, token)
-        if terminal is None or terminal.key_digest != key_digest:
+        kind, scope_digest, token, key_digest = identity
+        root = self._record_index_node(kind, scope_digest, "")
+        if root is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for index in range(len(token), -1, -1):
-            prefix = token[:index]
-            current = self._record_index_node(scope_digest, prefix)
-            if current is None:
+        path = [root]
+        current = root
+        while current.token != token:
+            if not token.startswith(current.token):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            children = current.children
-            terminal_key = None if index == len(token) else current.key_digest
-            if index < len(token):
-                child = token[index]
-                child_node = self._record_index_node(scope_digest, token[: index + 1])
-                if child_node is None:
-                    if child not in children:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    children = tuple(value for value in children if value != child)
-                elif child not in children:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            updated = _RecordIndexNode(prefix, children, terminal_key)
-            relative = _record_index_node_path("memory", scope_digest, prefix)
-            if updated.key_digest is None and not updated.children:
-                self._delete(relative)
-            elif updated != current:
-                self._store_record_index_node(scope_digest, updated)
+            child_token = _record_index_child(current, token)
+            if child_token is None or not token.startswith(child_token):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            child = self._record_index_node(kind, scope_digest, child_token)
+            if child is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            path.append(child)
+            current = child
+        if key_digest not in current.key_digests:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        updated = _RecordIndexNode(
+            current.token,
+            tuple(key for key in current.key_digests if key != key_digest),
+            current.children,
+        )
+        if current.token == "":
+            if updated.key_digests or updated.children:
+                self._store_record_index_node(kind, scope_digest, updated)
+            else:
+                self._delete(_record_index_node_path(kind, scope_digest, ""))
+            return
+        if updated.key_digests or len(updated.children) >= 2:
+            self._store_record_index_node(kind, scope_digest, updated)
+            return
+        removed_token = current.token
+        replacement = updated.children[0] if updated.children else None
+        self._delete(_record_index_node_path(kind, scope_digest, removed_token))
+        for parent in reversed(path[:-1]):
+            children = [child for child in parent.children if child != removed_token]
+            if len(children) == len(parent.children):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if replacement is not None:
+                children.append(replacement)
+            next_parent = _RecordIndexNode(
+                parent.token,
+                parent.key_digests,
+                tuple(sorted(children)),
+            )
+            if parent.token == "":
+                if next_parent.key_digests or next_parent.children:
+                    self._store_record_index_node(kind, scope_digest, next_parent)
+                else:
+                    self._delete(_record_index_node_path(kind, scope_digest, ""))
+                return
+            if next_parent.key_digests or len(next_parent.children) >= 2:
+                self._store_record_index_node(kind, scope_digest, next_parent)
+                return
+            removed_token = parent.token
+            replacement = next_parent.children[0] if next_parent.children else None
+            self._delete(_record_index_node_path(kind, scope_digest, removed_token))
 
     def _write(self, relative: str | Path, value: Mapping[str, object] | bytes) -> None:
         relative = _relative_path(self._root, relative)
@@ -2873,19 +2935,8 @@ def _relative_path(root: Path, value: str | Path) -> str:
 
 
 _RECORD_INDEX_MARKER = "record-index/complete"
-_RECORD_INDEX_VERSION = "2"
-_RECORD_INDEX_NODE_VERSION = 1
-_RECORD_SORT_SOURCE = (
-    "-./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
-)
-
-
-def _record_sort_token(value: str | None) -> str | None:
-    if value is None or any(
-        character not in _RECORD_SORT_SOURCE for character in value
-    ):
-        return None
-    return value
+_RECORD_INDEX_VERSION = "3"
+_RECORD_INDEX_NODE_VERSION = 2
 
 
 def _record_index_marker_valid(root: Path) -> bool:
@@ -2898,44 +2949,29 @@ def _record_index_marker_valid(root: Path) -> bool:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if value == _RECORD_INDEX_VERSION:
         return True
-    if value == "1":
+    if value in {"1", "2"}:
         return False
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _record_query_indexable(query: RecordQuery) -> bool:
-    after_valid = (
-        query.after_sort_key is None
-        and query.after_key_digest is None
-        or query.after_sort_key is not None
-        and query.after_key_digest is not None
-        and _record_sort_token(query.after_sort_key) is not None
-    )
-    prefix_valid = (
-        query.sort_key_prefix is None
-        or _record_sort_token(query.sort_key_prefix) is not None
-    )
     return (
-        query.kind == "memory"
+        query.kind is not None
         and query.scope_digest is not None
         and query.partition_digest is None
         and query.parent_digest is None
         and query.states is None
         and query.limit is not None
-        and prefix_valid
-        and after_valid
     )
 
 
 def _record_index_identity(
     record: StoredRecord | None,
-) -> tuple[bytes, str, bytes] | None:
-    if record is None or record.kind != "memory":
+) -> tuple[str, bytes, str, bytes] | None:
+    if record is None or record.scope_digest is None:
         return None
-    token = _record_sort_token(record.sort_key)
-    if record.scope_digest is None or token is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return record.scope_digest, token, record.key_digest
+    validate_record_identity(record)
+    return record.kind, record.scope_digest, record.sort_key, record.key_digest
 
 
 def _record_index_node_path(
@@ -2951,8 +2987,8 @@ def _record_index_node_payload(node: _RecordIndexNode) -> Mapping[str, object]:
     return {
         "version": _RECORD_INDEX_NODE_VERSION,
         "token": node.token,
+        "keys": [key.hex() for key in node.key_digests],
         "children": list(node.children),
-        "key": None if node.key_digest is None else node.key_digest.hex(),
     }
 
 
@@ -2961,27 +2997,43 @@ def _decode_record_index_node(
     *,
     expected_token: str,
 ) -> _RecordIndexNode:
-    _require_layout_keys(raw, frozenset({"version", "token", "children", "key"}))
+    _require_layout_keys(raw, frozenset({"version", "token", "keys", "children"}))
     token = raw["token"]
+    keys = raw["keys"]
     children = raw["children"]
-    key = raw["key"]
     if (
         raw["version"] != _RECORD_INDEX_NODE_VERSION
         or token != expected_token
         or not isinstance(token, str)
-        or _record_sort_token(token) != token
+        or len(token) > 128
+        or not token.isascii()
+        or not isinstance(keys, list)
         or not isinstance(children, list)
-        or any(
-            not isinstance(child, str)
-            or len(child) != 1
-            or child not in _RECORD_SORT_SOURCE
-            for child in children
-        )
+        or any(not isinstance(child, str) for child in children)
         or children != sorted(set(children))
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    key_digest = None if key is None else _layout_digest(key)
-    return _RecordIndexNode(token, tuple(children), key_digest)
+    key_digests = tuple(_layout_digest(key) for key in keys)
+    if key_digests != tuple(sorted(set(key_digests))):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    next_characters: set[str] = set()
+    for child in children:
+        if (
+            len(child) <= len(token)
+            or len(child) > 128
+            or not child.isascii()
+            or not child.startswith(token)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        next_character = child[len(token)]
+        if next_character in next_characters:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        next_characters.add(next_character)
+    if token and not key_digests and len(children) < 2:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if not token and not key_digests and not children:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _RecordIndexNode(token, key_digests, tuple(children))
 
 
 def _decode_record_index_node_bytes(
@@ -3022,79 +3074,149 @@ def _read_record_index_node(
     return _read_record_index_node_path(path, expected_token=token)
 
 
+def _record_index_child(node: _RecordIndexNode, token: str) -> str | None:
+    if len(token) <= len(node.token):
+        return None
+    target = token[len(node.token)]
+    matches = [child for child in node.children if child[len(node.token)] == target]
+    if len(matches) > 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return None if not matches else matches[0]
+
+
+def _record_index_replace_child(
+    node: _RecordIndexNode,
+    previous: str,
+    current: str,
+) -> _RecordIndexNode:
+    children = [child for child in node.children if child != previous]
+    if len(children) == len(node.children):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    children.append(current)
+    return _RecordIndexNode(
+        node.token,
+        node.key_digests,
+        tuple(sorted(children)),
+    )
+
+
+def _record_index_common_prefix(values: Sequence[str]) -> str:
+    if not values:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    first = min(values)
+    last = max(values)
+    limit = min(len(first), len(last))
+    index = 0
+    while index < limit and first[index] == last[index]:
+        index += 1
+    return first[:index]
+
+
 def _record_index_select(
     root: Path,
     query: RecordQuery,
 ) -> tuple[tuple[str, bytes], ...]:
-    if query.kind != "memory" or query.scope_digest is None or query.limit is None:
+    if query.kind is None or query.scope_digest is None or query.limit is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    prefix = (
-        ""
-        if query.sort_key_prefix is None
-        else _record_sort_token(query.sort_key_prefix)
-    )
-    after = _record_sort_token(query.after_sort_key)
-    if prefix is None or query.after_sort_key is not None and after is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    heap = [prefix]
-    selected: list[tuple[str, bytes]] = []
-    while heap and len(selected) < query.limit:
-        token = heapq.heappop(heap)
-        node = _read_record_index_node(root, query.kind, query.scope_digest, token)
-        if node is None:
-            if token == prefix:
-                return ()
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if node.key_digest is not None and (
-            after is None
-            or query.after_key_digest is not None
-            and (token, node.key_digest) > (after, query.after_key_digest)
+    prefix = "" if query.sort_key_prefix is None else query.sort_key_prefix
+    node = _read_record_index_node(root, query.kind, query.scope_digest, "")
+    if node is None:
+        return ()
+    while not node.token.startswith(prefix):
+        if not prefix.startswith(node.token):
+            return ()
+        child_token = _record_index_child(node, prefix)
+        if child_token is None or not (
+            prefix.startswith(child_token) or child_token.startswith(prefix)
         ):
-            selected.append((token, node.key_digest))
-            if len(selected) == query.limit:
-                break
-        for child in node.children:
-            child_token = token + child
+            return ()
+        child = _read_record_index_node(
+            root, query.kind, query.scope_digest, child_token
+        )
+        if child is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        node = child
+
+    selected: list[tuple[str, bytes]] = []
+    after_sort_key = query.after_sort_key
+    after_key_digest = query.after_key_digest
+
+    def visit(current: _RecordIndexNode) -> None:
+        if len(selected) >= query.limit:
+            return
+        for key_digest in current.key_digests:
+            if after_sort_key is None or (
+                current.token,
+                key_digest,
+            ) > (after_sort_key, after_key_digest):
+                selected.append((current.token, key_digest))
+                if len(selected) >= query.limit:
+                    return
+        for child_token in current.children:
             if (
-                after is not None
-                and child_token < after
-                and not after.startswith(child_token)
+                after_sort_key is not None
+                and child_token < after_sort_key
+                and not after_sort_key.startswith(child_token)
             ):
                 continue
-            heapq.heappush(heap, child_token)
+            child = _read_record_index_node(
+                root, query.kind, query.scope_digest, child_token
+            )
+            if child is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            visit(child)
+            if len(selected) >= query.limit:
+                return
+
+    visit(node)
     return tuple(selected)
 
 
 def _build_record_index_nodes(
     records: Sequence[StoredRecord],
 ) -> dict[str, _RecordIndexNode]:
-    nodes: dict[tuple[bytes, str], _RecordIndexNode] = {}
+    groups: dict[tuple[str, bytes], dict[str, set[bytes]]] = {}
     for record in records:
         identity = _record_index_identity(record)
         if identity is None:
             continue
-        scope_digest, token, key_digest = identity
-        for index in range(len(token) + 1):
-            prefix = token[:index]
-            identity_key = (scope_digest, prefix)
-            current = nodes.get(identity_key, _RecordIndexNode(prefix, ()))
-            children = current.children
-            terminal = current.key_digest
-            if index < len(token):
-                child = token[index]
-                if child not in children:
-                    children = tuple(sorted((*children, child)))
-            else:
-                if terminal is not None and terminal != key_digest:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                terminal = key_digest
-            nodes[identity_key] = _RecordIndexNode(prefix, children, terminal)
+        kind, scope_digest, token, key_digest = identity
+        by_token = groups.setdefault((kind, scope_digest), {})
+        by_token.setdefault(token, set()).add(key_digest)
+
     result: dict[str, _RecordIndexNode] = {}
-    for (scope_digest, token), node in nodes.items():
-        path = _record_index_node_path("memory", scope_digest, token)
-        if path in result and result[path] != node:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result[path] = node
+    for (kind, scope_digest), by_token in groups.items():
+        entries = tuple(
+            (token, tuple(sorted(keys))) for token, keys in sorted(by_token.items())
+        )
+
+        def build(
+            prefix: str,
+            values: Sequence[tuple[str, tuple[bytes, ...]]],
+        ) -> str:
+            exact = next((keys for token, keys in values if token == prefix), ())
+            descendants: dict[str, list[tuple[str, tuple[bytes, ...]]]] = {}
+            for token, keys in values:
+                if token == prefix:
+                    continue
+                if not token.startswith(prefix) or len(token) <= len(prefix):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                descendants.setdefault(token[len(prefix)], []).append((token, keys))
+            children: list[str] = []
+            for child_values in descendants.values():
+                child_prefix = _record_index_common_prefix(
+                    tuple(token for token, _keys in child_values)
+                )
+                build(child_prefix, tuple(child_values))
+                children.append(child_prefix)
+            node = _RecordIndexNode(prefix, tuple(exact), tuple(sorted(children)))
+            relative = _record_index_node_path(kind, scope_digest, prefix)
+            if relative in result and result[relative] != node:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result[relative] = node
+            return prefix
+
+        build("", entries)
     return result
 
 
