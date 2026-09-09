@@ -70,7 +70,7 @@ class _SessionReleaseCallback(Protocol):
 
 
 class _SessionExecutionService(ExecutionService, Protocol):
-    async def run_for_session(
+    async def start_for_session(
         self,
         agent_id: str,
         binding_digest: str,
@@ -377,7 +377,7 @@ class DefaultSessionService:
                 files=request.files,
             )
             try:
-                return await self._execution.run_for_session(
+                return await self._execution.start_for_session(
                     agent_id,
                     binding_digest,
                     session_id,

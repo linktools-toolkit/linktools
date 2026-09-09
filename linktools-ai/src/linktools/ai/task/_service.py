@@ -26,7 +26,7 @@ class TaskQueryApi(Protocol):
         principal: Principal,
     ) -> TaskGraphView: ...
 
-    async def inspect_graph_state(
+    async def snapshot_graph(
         self,
         graph_id: str,
         *,
@@ -60,9 +60,9 @@ class TaskQueryApi(Protocol):
 
 
 class TaskApi(TaskQueryApi, Protocol):
-    async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
+    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
 
-    async def run_graph_and_wait(
+    async def run_graph(
         self,
         request: TaskGraphRequest,
         *,

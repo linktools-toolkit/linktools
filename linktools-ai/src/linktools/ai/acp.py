@@ -130,7 +130,10 @@ class ACPAgent:
             session_id=session_id,
             memory_scope=self._memory_scope,
         )
-        async for event in execution.stream():
+        async for item in execution.watch():
+            if item.depth != 0:
+                continue
+            event = item.event
             if self._connection is not None:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:

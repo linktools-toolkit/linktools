@@ -229,10 +229,10 @@ class DefaultTaskService(TaskApi):
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
-    async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
-        return await self._run_graph(request)
+    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
+        return await self._start_graph(request)
 
-    async def _run_graph(
+    async def _start_graph(
         self,
         request: TaskGraphRequest,
     ) -> TaskGraphResult:
@@ -345,13 +345,13 @@ class DefaultTaskService(TaskApi):
             cursor = page.next_cursor
         _logger.info("task graph recovery scan completed: graphs=%s", recovered)
 
-    async def run_graph_and_wait(
+    async def run_graph(
         self,
         request: TaskGraphRequest,
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult:
-        submitted = await self._run_graph(request)
+        submitted = await self._start_graph(request)
         return await self.wait_graph(
             submitted.graph_id,
             principal=request.principal,
@@ -383,7 +383,7 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return view
 
-    async def inspect_graph_state(
+    async def snapshot_graph(
         self,
         graph_id: str,
         *,

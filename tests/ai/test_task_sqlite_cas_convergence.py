@@ -151,7 +151,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
                     agent.task("b", "run b", dependencies=("a",)),
                 ),
             )
-            result = await runtime.run_graph_and_wait(
+            result = await runtime.run_graph(
                 graph,
                 idempotency_key=f"submit:serial:{index}",
                 limits=TaskGraphLimits(max_concurrency=1),
@@ -176,7 +176,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
                     ),
                 ),
             )
-            result = await runtime.run_graph_and_wait(
+            result = await runtime.run_graph(
                 graph,
                 idempotency_key=f"submit:parallel:{index}",
                 limits=TaskGraphLimits(max_concurrency=3),
@@ -232,7 +232,7 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
                 agent.task("dependent", "dependent", dependencies=("fail",)),
             ),
         )
-        result = await runtime.run_graph_and_wait(
+        result = await runtime.run_graph(
             graph,
             idempotency_key="submit:failure",
             limits=TaskGraphLimits(max_concurrency=1),
@@ -288,7 +288,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         agent = runtime.agent("default")
         graph = TaskGraph("timeout", (agent.task("blocked", "blocked"),))
         with pytest.raises(AIError) as raised:
-            await runtime.run_graph_and_wait(
+            await runtime.run_graph(
                 graph,
                 idempotency_key="submit:timeout",
                 limits=TaskGraphLimits(max_concurrency=1),
