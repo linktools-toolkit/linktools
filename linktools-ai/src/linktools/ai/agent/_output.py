@@ -66,6 +66,15 @@ class OutputBinding:
             }
         )
 
+    def validate_payload(self, value: JsonValue) -> None:
+        """Validate one final JSON payload against this durable output contract."""
+        try:
+            _schema_validator(self.schema_definition).validate(value)
+        except JsonSchemaValidationError as error:
+            raise AIError(
+                ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
+            ) from error
+
     @property
     def runtime_output_type(self) -> "type[object]":
         if self.mode == "text":

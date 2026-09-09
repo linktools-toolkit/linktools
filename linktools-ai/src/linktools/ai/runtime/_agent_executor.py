@@ -738,6 +738,7 @@ class AgentExecutor:
             raise AIError(
                 ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
             ) from error
+        binding.output_binding.validate_payload(payload)
         usage = _usage_metrics(run_usage)
         return AgentExecutionResult(
             final_result.run_id, payload, final_result.all_messages(), usage

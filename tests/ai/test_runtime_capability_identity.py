@@ -5,6 +5,7 @@
 from dataclasses import dataclass, fields
 
 import pytest
+from linktools.ai.agent import OutputBinding
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup, AgentContext
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec
@@ -89,6 +90,24 @@ class _ModelRequestCapability(AbstractCapability[AgentContext[None]]):
     async def before_model_request(self, ctx, request_context):  # type: ignore[no-untyped-def]
         del ctx
         return request_context
+
+
+@dataclass
+class _DeferredResolverCapability(AbstractCapability[AgentContext[None]]):
+    id: str = "deferred-resolver-capability"
+
+    async def handle_deferred_tool_calls(self, ctx, *, requests):  # type: ignore[no-untyped-def]
+        del ctx, requests
+        return None
+
+
+@dataclass
+class _OutputTransformCapability(AbstractCapability[AgentContext[None]]):
+    id: str = "output-transform-capability"
+
+    async def after_output_validate(self, ctx, *, output_context, output):  # type: ignore[no-untyped-def]
+        del ctx, output_context
+        return output
 
 
 @pytest.mark.asyncio
@@ -241,6 +260,7 @@ async def test_capability_implementation_identity_is_fingerprint_input() -> None
         (_PrepareToolsCapability(), "tool_lifecycle_not_supported"),
         (_ToolExecuteCapability(), "tool_lifecycle_not_supported"),
         (_ModelRequestCapability(), "model_request_lifecycle_not_supported"),
+        (_DeferredResolverCapability(), "deferred_tool_resolution_not_supported"),
         (_DynamicCapability(), "dynamic_binding_not_supported"),
     ),
 )
@@ -252,3 +272,32 @@ def test_external_capability_cannot_compete_with_runtime_ownership(
         group.capability(capability, semantic_config={})
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     assert error.value.safe_details["reason"] == reason
+
+
+@pytest.mark.asyncio
+async def test_external_capability_keeps_output_transformation_hooks() -> None:
+    group = CapabilityGroup[None]("group")
+    group.capability(
+        _OutputTransformCapability(),
+        semantic_config={"mode": "identity"},
+    )
+
+    candidate = (await group.freeze())[0]
+    assert candidate.id == "output-transform-capability"
+
+
+def test_output_binding_revalidates_final_payload() -> None:
+    binding = OutputBinding.create(
+        "structured",
+        {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+    )
+
+    binding.validate_payload({"answer": "ok"})
+    with pytest.raises(AIError) as error:
+        binding.validate_payload({"unexpected": True})
+    assert error.value.code is ErrorCode.OUTPUT_VALIDATION_FAILED

@@ -763,6 +763,17 @@ def _validate_external_capability(value: AbstractCapability[object]) -> None:
                 "reason": "model_request_lifecycle_not_supported",
             },
         )
+    if (
+        type(value).handle_deferred_tool_calls
+        is not AbstractCapability.handle_deferred_tool_calls
+    ):
+        raise AIError(
+            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+            safe_details={
+                "capability_id": capability_id,
+                "reason": "deferred_tool_resolution_not_supported",
+            },
+        )
 
 
 def _validate_external_capability_id(value: str) -> None:
