@@ -13,6 +13,7 @@ from ._metric_id import _model_observation_id
 ModelRequestPurpose = Literal["agent", "compaction"]
 REQUEST_PURPOSE_METADATA_KEY = "linktools.ai.request_purpose"
 REQUEST_SEQUENCE_METADATA_KEY = "linktools.ai.request_sequence"
+OUTPUT_RETRY_INDEX_METADATA_KEY = "linktools.ai.output_retry_index"
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +25,7 @@ class ModelRequestFact:
     purpose: ModelRequestPurpose
     observation_id: str
     started_ns: int
+    output_retry_index: int | None = None
     duration_ns: int | None = None
     status: str | None = None
 
@@ -34,6 +36,8 @@ class ModelRequestFact:
         }
         if include_observation:
             values["linktools.ai.observation_id"] = self.observation_id
+        if self.output_retry_index is not None:
+            values[OUTPUT_RETRY_INDEX_METADATA_KEY] = str(self.output_retry_index)
         if self.duration_ns is not None:
             values["linktools.ai.duration_ns"] = str(self.duration_ns)
         return values
@@ -62,7 +66,14 @@ class ModelRequestJournal:
         step_index: int,
         *,
         purpose: ModelRequestPurpose = "agent",
+        output_retry_index: int | None = None,
     ) -> ModelRequestFact:
+        if output_retry_index is not None and (
+            isinstance(output_retry_index, bool)
+            or not isinstance(output_retry_index, int)
+            or output_retry_index < 1
+        ):
+            raise ValueError("output_retry_index must be a positive integer or None")
         sequence = self._next_sequence
         self._next_sequence += 1
         fact = ModelRequestFact(
@@ -78,6 +89,7 @@ class ModelRequestJournal:
                 purpose,
             ),
             started_ns=monotonic_ns(),
+            output_retry_index=output_retry_index,
         )
         self._facts[sequence] = fact
         return fact
@@ -120,6 +132,7 @@ __all__ = [
     "ModelRequestFact",
     "ModelRequestJournal",
     "ModelRequestPurpose",
+    "OUTPUT_RETRY_INDEX_METADATA_KEY",
     "REQUEST_PURPOSE_METADATA_KEY",
     "REQUEST_SEQUENCE_METADATA_KEY",
 ]

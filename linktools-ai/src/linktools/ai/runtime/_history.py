@@ -24,7 +24,11 @@ from ..core import (
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
-from ._journal import REQUEST_PURPOSE_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
+from ._journal import (
+    OUTPUT_RETRY_INDEX_METADATA_KEY,
+    REQUEST_PURPOSE_METADATA_KEY,
+    REQUEST_SEQUENCE_METADATA_KEY,
+)
 from .service_api import (
     ExecutionHistoryItem,
     ExecutionTraceItem,
@@ -942,6 +946,11 @@ def _trace_item(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["request_sequence"] = int(request_sequence)
         payload["purpose"] = request_purpose
+    retry_value = event.metadata.get(OUTPUT_RETRY_INDEX_METADATA_KEY)
+    if retry_value is not None:
+        if not retry_value.isdigit() or int(retry_value) < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["output_retry_index"] = int(retry_value)
     if kind == "MODEL_RESPONSE":
         payload["token_usage"] = (
             _model_token_usage(event) if status == "SUCCEEDED" else None

@@ -509,6 +509,7 @@ class _CaptureExecution:
         mode: str,
         parent_execution_id: str,
         root_execution_id: str,
+        parent_invocation_id: str,
     ) -> "ExecutionHandle | None":
         assert agent_id == "child"
         assert user_prompt
@@ -528,6 +529,7 @@ class _CaptureExecution:
         *,
         parent_execution_id: str,
         root_execution_id: str,
+        parent_invocation_id: str,
     ) -> ExecutionHandle:
         assert parent_execution_id == "parent-execution"
         assert root_execution_id == "root-execution"
@@ -714,6 +716,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
         lineage_kind=ExecutionLineageKind.SUBAGENT,
         parent_execution_id="parent-execution",
         root_execution_id="root-execution",
+        parent_invocation_id="delegate-call",
         planning=True,
         thinking="high",
         correlation={},
@@ -737,6 +740,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
         mode="run",
         parent_execution_id="parent-execution",
         root_execution_id="root-execution",
+        parent_invocation_id="delegate-call",
     )
 
     assert handle == ExecutionHandle("child-execution")
@@ -744,6 +748,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
     assert request.planning is True
     assert request.thinking == "high"
     assert start_subagent.await_args.args[0] == "a" * 64
+    assert start_subagent.await_args.kwargs["parent_invocation_id"] == "delegate-call"
 
 
 @pytest.mark.asyncio

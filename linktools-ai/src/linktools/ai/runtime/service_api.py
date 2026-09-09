@@ -15,6 +15,7 @@ from ..core import (
     EvaluationStatus,
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionLineageKind,
     ExecutionMode,
     ExecutionStatus,
     JsonValue,
@@ -43,6 +44,11 @@ from ..task import (
 )
 from ._input_contract import validate_user_input
 from ._snapshot import RunSnapshot
+from .recovery import (
+    ExecutionRecoveryEffect,
+    ResolveToolEffectRequest,
+    ToolEffectResolutionResult,
+)
 
 if TYPE_CHECKING:
     from .state import RuntimeStorageContract, StoredUserInput
@@ -166,7 +172,12 @@ class ExecutionHandle:
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
+    agent_id: str
     status: ExecutionStatus
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -659,6 +670,77 @@ class ExecutionStreamEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionTreeEvent:
+    execution_id: str
+    agent_id: str
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
+    depth: int
+    event: ExecutionStreamEvent
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value
+            for value in (self.execution_id, self.agent_id, self.root_execution_id)
+        ):
+            raise ValueError("execution tree event identity is invalid")
+        if not isinstance(self.lineage_kind, ExecutionLineageKind):
+            raise TypeError("execution tree event lineage kind is invalid")
+        if (
+            isinstance(self.depth, bool)
+            or not isinstance(self.depth, int)
+            or self.depth not in (0, 1)
+        ):
+            raise ValueError("execution tree event depth must be zero or one")
+        if not isinstance(self.event, ExecutionStreamEvent):
+            raise TypeError("execution tree event requires an execution event")
+        if self.execution_id != self.event.execution_id:
+            raise ValueError("execution tree event identity does not match execution")
+        if self.depth == 0:
+            if (
+                self.parent_execution_id is not None
+                or self.parent_invocation_id is not None
+                or self.lineage_kind is ExecutionLineageKind.SUBAGENT
+            ):
+                raise ValueError("root execution tree event lineage is invalid")
+        elif (
+            self.lineage_kind is not ExecutionLineageKind.SUBAGENT
+            or not self.parent_execution_id
+            or not self.parent_invocation_id
+        ):
+            raise ValueError("child execution tree event lineage is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphRunEvent:
+    graph_id: str
+    node_id: "str | None"
+    event: "TaskEvent | ExecutionTreeEvent"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
+            raise ValueError("task graph run event graph id is required")
+        if self.node_id is not None and (
+            not isinstance(self.node_id, str) or not self.node_id.strip()
+        ):
+            raise ValueError("task graph run event node id is invalid")
+        if isinstance(self.event, TaskEvent):
+            if (
+                self.event.graph_id != self.graph_id
+                or self.event.node_id != self.node_id
+            ):
+                raise ValueError("task graph run event task identity is invalid")
+            return
+        if isinstance(self.event, ExecutionTreeEvent):
+            if self.node_id is None:
+                raise ValueError("task run execution event requires a node id")
+            return
+        raise TypeError("task graph run event payload is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactView:
     artifact_id: str
     execution_id: str
@@ -702,7 +784,7 @@ class ExecutionHistoryService(Protocol):
 
 
 class ExecutionService(Protocol):
-    async def run(
+    async def start(
         self, binding_digest: str, request: ExecutionRequest
     ) -> ExecutionHandle: ...
     async def resolve_existing(
@@ -713,6 +795,13 @@ class ExecutionService(Protocol):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
+    def stream_tree(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> "AsyncIterator[ExecutionTreeEvent]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
@@ -723,7 +812,7 @@ class ExecutionService(Protocol):
         principal: Principal,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult: ...
-    async def run_and_wait(
+    async def run(
         self,
         binding_digest: str,
         request: ExecutionRequest,
@@ -739,6 +828,23 @@ class ExecutionService(Protocol):
     async def cancel(
         self, execution_id: str, request: CancelExecutionRequest
     ) -> CancelExecutionResult: ...
+    async def recovery_effects(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[ExecutionRecoveryEffect, ...]: ...
+    async def resolve_tool_effect(
+        self,
+        execution_id: str,
+        request: ResolveToolEffectRequest,
+    ) -> ToolEffectResolutionResult: ...
+    async def recover(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionHandle: ...
     async def trace(
         self,
         execution_id: str,
@@ -799,14 +905,14 @@ class SessionService(Protocol):
 
 
 class TaskService(Protocol):
-    async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
-    async def run_graph_and_wait(
+    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
+    async def run_graph(
         self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None
     ) -> TaskGraphResult: ...
     async def inspect_graph(
         self, graph_id: str, *, principal: Principal
     ) -> TaskGraphView: ...
-    async def inspect_graph_state(
+    async def snapshot_graph(
         self,
         graph_id: str,
         *,
@@ -936,6 +1042,7 @@ __all__ = [
     "ExecutionService",
     "ExecutionStreamEvent",
     "ExecutionTraceItem",
+    "ExecutionTreeEvent",
     "ExecutionView",
     "ExternalService",
     "ExternalSupplyRequest",
@@ -955,6 +1062,7 @@ __all__ = [
     "SessionView",
     "TaskEvent",
     "TaskEventType",
+    "TaskGraphRunEvent",
     "TaskService",
     "ToolApprovalContext",
     "TranscriptItem",

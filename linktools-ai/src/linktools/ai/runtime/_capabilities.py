@@ -87,6 +87,8 @@ from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.runtime.capabilities")
 
+_OUTPUT_RETRY_INDEX_METADATA_KEY = "linktools.ai.output_retry_index"
+
 
 @dataclass(kw_only=True, eq=False)
 class _RuntimeStepPersistence(StepPersistence[None]):
@@ -134,6 +136,12 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         compare=False,
     )
     _model_request_tokens: dict[int, int] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _model_retry_indices: dict[int, int | None] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -227,22 +235,31 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> ModelResponse:
         fact = None
         request_sequence: int | None = None
+        if ctx.run_step in self._model_retry_indices:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        retry_index = None if ctx.retry <= 0 else ctx.retry
+        self._model_retry_indices[ctx.run_step] = retry_index
         if self.model_journal is not None:
             if ctx.run_step in self._model_request_tokens:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            fact = self.model_journal.begin(ctx.run_step, purpose="agent")
+            fact = self.model_journal.begin(
+                ctx.run_step,
+                purpose="agent",
+                output_retry_index=None if ctx.retry <= 0 else ctx.retry,
+            )
             request_sequence = fact.request_sequence
             self._model_request_tokens[ctx.run_step] = request_sequence
-        start_metadata = (
-            {}
-            if fact is None
-            else fact.metadata(include_observation=self.tool_metrics is not None)
-        )
+        start_metadata = self._model_retry_metadata(retry_index)
+        if fact is not None:
+            start_metadata.update(
+                fact.metadata(include_observation=self.tool_metrics is not None)
+            )
         await self._harness_before_model_request(ctx, request_context, start_metadata)
         try:
             response = await handler(request_context)
         except asyncio.CancelledError as error:
             if self.model_journal is None or request_sequence is None:
+                self._model_retry_indices.pop(ctx.run_step, None)
                 raise
             self.model_journal.finish(request_sequence, status="CANCELLED")
             fact = self.model_journal.consume(request_sequence)
@@ -267,6 +284,22 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             self.model_journal.finish(request_sequence, status="SUCCEEDED")
         return response
 
+    def _model_retry_metadata(self, retry_index: int | None) -> dict[str, str]:
+        metadata: dict[str, str] = {}
+        if retry_index is not None:
+            metadata[_OUTPUT_RETRY_INDEX_METADATA_KEY] = str(retry_index)
+        return metadata
+
+    def _consume_model_retry_metadata(
+        self,
+        ctx: RunContext[None],
+    ) -> dict[str, str]:
+        if ctx.run_step not in self._model_retry_indices:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self._model_retry_metadata(
+            self._model_retry_indices.pop(ctx.run_step)
+        )
+
     async def _harness_before_model_request(
         self,
         ctx: RunContext[None],
@@ -287,7 +320,10 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         error: asyncio.CancelledError,
         fact: ModelRequestFact,
     ) -> None:
-        metadata = fact.metadata(include_observation=self.tool_metrics is not None)
+        metadata = self._consume_model_retry_metadata(ctx)
+        metadata.update(
+            fact.metadata(include_observation=self.tool_metrics is not None)
+        )
         previous = self.metadata
         self.metadata = {**previous, **metadata}
         try:
@@ -320,6 +356,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         self._runtime_store.capture_model_context(request_context.messages)
         fact = self._consume_model_fact(ctx, status="SUCCEEDED")
         metadata = _model_usage_metadata(response)
+        metadata.update(self._consume_model_retry_metadata(ctx))
         if fact is not None:
             metadata.update(
                 fact.metadata(include_observation=self.tool_metrics is not None)
@@ -360,11 +397,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 else "FAILED"
             ),
         )
-        metadata = (
-            {}
-            if fact is None
-            else fact.metadata(include_observation=self.tool_metrics is not None)
-        )
+        metadata = self._consume_model_retry_metadata(ctx)
+        if fact is not None:
+            metadata.update(
+                fact.metadata(include_observation=self.tool_metrics is not None)
+            )
         previous = self.metadata
         self.metadata = {**previous, **metadata}
         try:
@@ -477,18 +514,13 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         effective_args = await self.tool_operations.effective_args(
             ctx, call, tool_def, args
         )
-        try:
-            decision = await self.tool_operations.begin(
-                ctx,
-                call,
-                tool_def,
-                args,
-                policy.replay_safe,
-            )
-        except AIError as error:
-            if error.code is ErrorCode.TOOL_EFFECT_UNKNOWN:
-                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-            raise
+        decision = await self.tool_operations.begin(
+            ctx,
+            call,
+            tool_def,
+            args,
+            policy.replay_safe,
+        )
         if decision.replay_safe is not policy.replay_safe:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = self._decision_key(ctx, call)

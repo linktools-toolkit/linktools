@@ -232,7 +232,7 @@ class _AgentTaskNodeHandler:
         )
         key = (principal.tenant_id, graph_id, node.node_id)
         launch_task = asyncio.create_task(
-            self._execution.run(binding_digest, request),
+            self._execution.start(binding_digest, request),
             name=f"task-execution-launch-{graph_id}-{node.node_id}",
         )
         self._active_launch_tasks[key] = launch_task

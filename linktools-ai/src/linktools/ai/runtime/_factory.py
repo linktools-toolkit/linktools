@@ -48,6 +48,7 @@ from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
+from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend
@@ -55,6 +56,8 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
+from ._recovery_impl import RecoveryExecutionService, RecoveryLocalExecutionBackend
+from ._recovery_task import RecoveryRuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from ._workspace_binding import WorkspaceToolCallBinder
@@ -89,7 +92,6 @@ class _RuntimeComponents:
     artifact: DefaultArtifactService
     tenant_id: str
     close_callback: Callable[[], Awaitable[None]]
-    local_coordinator: _LocalRuntimeCoordinator
     task_node_runtime: RuntimeTaskNodeRunner[object]
     metric_control: _RuntimeMetricBuffer | None
 
@@ -496,7 +498,7 @@ async def _build_local_components(
         )
         await workspace_binding_store.release_execution(execution_id)
 
-    execution = DefaultExecutionService(
+    execution = RecoveryExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
         authorization,
@@ -512,7 +514,13 @@ async def _build_local_components(
         storage_contract_factory=storage_contract_factory,
         session_execution_ready=session_execution_ready,
     )
-    dispatcher = SubagentDispatcher(catalog, compiler, execution)
+    execution_tree_broker = ExecutionTreeBroker()
+    dispatcher = SubagentDispatcher(
+        catalog,
+        compiler,
+        execution,
+        child_observer=execution_tree_broker,
+    )
     executor = AgentExecutor(
         skill_sources,
         instruction_resolver=instruction_resolver,
@@ -553,7 +561,7 @@ async def _build_local_components(
     task_service: DefaultTaskService | None = None
     live_broker = LiveExecutionEventBroker()
     try:
-        backend = LocalExecutionBackend(
+        backend = RecoveryLocalExecutionBackend(
             state.conversation,
             state.execution,
             state.recovery,
@@ -614,7 +622,7 @@ async def _build_local_components(
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )
-        task_runner = RuntimeTaskNodeRunner(
+        task_runner = RecoveryRuntimeTaskNodeRunner(
             execution,
             catalog,
             compiler,
@@ -674,6 +682,13 @@ async def _build_local_components(
             live_broker.abandon_prepared_local_producer,
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
+        execution.bind_tree_streamer(
+            ExecutionTreeStreamer(
+                execution,
+                local_coordinator,
+                execution_tree_broker,
+            )
+        )
         close_actions: list[Callable[[], Awaitable[None]]] = [
             task_service.drain_owned_finalizers,
             task_service.preflight_close,
@@ -715,7 +730,6 @@ async def _build_local_components(
         artifact=artifact,
         tenant_id=tenant_id,
         close_callback=coordinator.close,
-        local_coordinator=local_coordinator,
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         metric_control=metric_buffer,
     )

@@ -17,6 +17,7 @@ def _record() -> ToolOperationRecord:
     return ToolOperationRecord(
         tool_operation_id="tool-operation",
         tenant_id="tenant",
+        execution_id="execution",
         step_run_id="step-run",
         tool_call_id="tool-call",
         idempotency_key_digest=canonical_sha256({"call": "tool-call"}),
@@ -37,6 +38,7 @@ def _record() -> ToolOperationRecord:
 def _admission() -> ToolOperationAdmission:
     return ToolOperationAdmission(
         tenant_id="tenant",
+        execution_id="execution",
         tool_operation_id="tool-operation",
         step_run_id="step-run",
         recovery_step_run_id=None,

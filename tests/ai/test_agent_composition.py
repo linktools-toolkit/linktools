@@ -129,7 +129,7 @@ class _CaptureSessionExecution:
         self.binding_digest: str | None = None
         self.session_id: str | None = None
 
-    async def run_for_session(
+    async def start_for_session(
         self,
         agent_id: str,
         binding_digest: str,

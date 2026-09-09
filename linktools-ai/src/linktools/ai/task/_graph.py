@@ -159,6 +159,15 @@ class TaskNodeView:
                 validate_lease_owner(self.owner)
             except AIError as error:
                 raise ValueError("task node lease owner is invalid") from error
+        if self.status is TaskStatus.RECOVERY_REQUIRED and (
+            self.owner is not None
+            or self.lease_expires_at is not None
+            or self.fence < 1
+            or self.result_digest is not None
+            or self.error_code is None
+            or not self.error_code.strip()
+        ):
+            raise ValueError("recovery-required task node state is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,6 +576,8 @@ def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
     statuses = {node.status for node in nodes}
     if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
         return TaskStatus.SUCCEEDED
+    if TaskStatus.RECOVERY_REQUIRED in statuses:
+        return TaskStatus.RECOVERY_REQUIRED
     if TaskStatus.FAILED in statuses:
         return TaskStatus.FAILED
     if TaskStatus.BLOCKED in statuses:
@@ -588,6 +599,15 @@ class CancelGraphRequest:
         validate_idempotency_key(self.idempotency_key)
 
 
+@dataclass(frozen=True, slots=True)
+class RecoverGraphRequest:
+    principal: Principal
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
+
+
 def ready_nodes(
     graph: TaskGraph, completed: "frozenset[str]"
 ) -> "tuple[TaskNode, ...]":
@@ -601,6 +621,7 @@ def ready_nodes(
 
 __all__ = [
     "CancelGraphRequest",
+    "RecoverGraphRequest",
     "TaskCompletionLedger",
     "TaskDependencyResult",
     "TaskGraph",

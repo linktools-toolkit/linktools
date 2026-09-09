@@ -6,6 +6,7 @@ from ._api import open_local_task_api
 from ._event import TaskEvent, TaskEventType
 from ._graph import (
     CancelGraphRequest,
+    RecoverGraphRequest,
     TaskCompletionLedger,
     TaskDependencyResult,
     TaskGraph,
@@ -42,6 +43,7 @@ __all__ = [
     "CancelGraphRequest",
     "DefaultTaskService",
     "LocalTaskGraphLauncher",
+    "RecoverGraphRequest",
     "TaskApi",
     "TaskCompletionLedger",
     "TaskDependency",

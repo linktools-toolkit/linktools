@@ -32,6 +32,17 @@ _TERMINAL_EVENT_TYPES = frozenset({
     ExecutionEventType.EXECUTION_FAILED,
     ExecutionEventType.EXECUTION_CANCELLED,
 })
+_OBSERVATION_BOUNDARY_EVENT_TYPES = _TERMINAL_EVENT_TYPES | frozenset(
+    {ExecutionEventType.EXECUTION_RECOVERY_REQUIRED}
+)
+_OBSERVATION_BOUNDARY_STATUSES = frozenset(
+    {
+        ExecutionStatus.SUCCEEDED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.RECOVERY_REQUIRED,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +371,14 @@ class LiveExecutionEventBroker:
     def is_completed(self, execution_id: str) -> bool:
         return execution_id in self._completed
 
+    def reset_completed_local_producer(self, execution_id: str) -> None:
+        if execution_id not in self._completed:
+            return
+        subscriptions = tuple(self._subscriptions.pop(execution_id, ()))
+        for subscription in subscriptions:
+            subscription.finish()
+        self._release_execution(execution_id)
+
     async def wait_for_activity(self, execution_id: str) -> None:
         event = self._activity.setdefault(execution_id, asyncio.Event())
         await event.wait()
@@ -551,7 +570,7 @@ class DefaultEventService:
                         event.event_type,
                         event.payload,
                     )
-                    if event.event_type in _TERMINAL_EVENT_TYPES:
+                    if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
                         return
 
             replay_cursor = after_sequence if after_sequence > base_sequence else None
@@ -596,7 +615,7 @@ class DefaultEventService:
                     item.event_type,
                     item.payload,
                 )
-                if item.event_type in _TERMINAL_EVENT_TYPES:
+                if item.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
                     return
         finally:
             await live.close()
@@ -604,6 +623,16 @@ class DefaultEventService:
         failure = self._worker_failure(execution_id, tenant_id=principal.tenant_id)
         if failure is not None:
             raise failure
+        execution = await self._executions.get(
+            execution_id,
+            tenant_id=principal.tenant_id,
+        )
+        if execution is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.status in _OBSERVATION_BOUNDARY_STATUSES:
+            if cursor >= execution.event_sequence:
+                return
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -633,7 +662,7 @@ class DefaultEventService:
                         event.event_type,
                         event.payload,
                     )
-                    if event.event_type in _TERMINAL_EVENT_TYPES:
+                    if event.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
                         return
                 continue
             failure = self._worker_failure(execution_id, tenant_id=tenant_id)
@@ -642,11 +671,7 @@ class DefaultEventService:
             execution = await self._executions.get(execution_id, tenant_id=tenant_id)
             if execution is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if execution.status in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
+            if execution.status in _OBSERVATION_BOUNDARY_STATUSES:
                 if cursor >= execution.event_sequence:
                     return
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

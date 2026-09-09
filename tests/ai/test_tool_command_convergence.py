@@ -24,6 +24,7 @@ def _record(
     return ToolOperationRecord(
         "operation",
         "tenant",
+        "execution",
         "step",
         "call",
         canonical_sha256({"call": "call"}),
@@ -44,6 +45,7 @@ def _record(
 def _admission() -> ToolOperationAdmission:
     return ToolOperationAdmission(
         tenant_id="tenant",
+        execution_id="execution",
         tool_operation_id="operation",
         step_run_id="step",
         recovery_step_run_id=None,

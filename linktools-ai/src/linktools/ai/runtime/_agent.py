@@ -11,13 +11,19 @@ from pydantic_ai.messages import UserContent
 
 from ..core import JsonValue, Page, Principal, ThinkingValue
 from ._input import validate_user_input
+from .recovery import (
+    ExecutionRecoveryEffect,
+    ResolveToolEffectRequest,
+    ToolEffectResolution,
+    ToolEffectResolutionResult,
+)
 from .service_api import (
     CancelExecutionResult,
     EvaluationHandle,
     ExecutionHistoryItem,
     ExecutionResult,
-    ExecutionStreamEvent,
     ExecutionTraceItem,
+    ExecutionTreeEvent,
     ReplayEvaluationRequest,
     RunEvaluationRequest,
     SessionHistoryItem,
@@ -46,11 +52,15 @@ class Execution(Generic[AppT]):
             timeout_seconds=timeout_seconds,
         )
 
-    def stream(self, *, after_sequence: int = 0) -> AsyncIterator[ExecutionStreamEvent]:
-        return self._runtime._execution_stream(
+    def watch(
+        self,
+        *,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        return self._runtime.execution.stream_tree(
             self.execution_id,
             principal=self._principal,
-            after_sequence=after_sequence,
+            after_sequences=after_sequences,
         )
 
     async def cancel(
@@ -65,6 +75,38 @@ class Execution(Generic[AppT]):
             idempotency_key=idempotency_key,
             force=force,
         )
+
+    async def recovery_effects(self) -> tuple[ExecutionRecoveryEffect, ...]:
+        return await self._runtime.execution.recovery_effects(
+            self.execution_id,
+            principal=self._principal,
+        )
+
+    async def resolve_tool_effect(
+        self,
+        operation_id: str,
+        *,
+        expected_fence: int,
+        resolution: ToolEffectResolution,
+        idempotency_key: str,
+    ) -> ToolEffectResolutionResult:
+        return await self._runtime.execution.resolve_tool_effect(
+            self.execution_id,
+            ResolveToolEffectRequest(
+                self._principal,
+                operation_id,
+                expected_fence,
+                resolution,
+                idempotency_key,
+            ),
+        )
+
+    async def recover(self) -> "Execution[AppT]":
+        await self._runtime.execution.recover(
+            self.execution_id,
+            principal=self._principal,
+        )
+        return self
 
     async def retry(
         self,

@@ -178,8 +178,8 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
             memory_scope="test",
         )
         first, second = await asyncio.gather(
-            service.run("a" * 64, request),
-            service.run("a" * 64, request),
+            service.start("a" * 64, request),
+            service.start("a" * 64, request),
         )
         assert first.execution_id == second.execution_id
         assert launcher.calls == 1
@@ -212,7 +212,7 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
     await state.initialize(namespace="sql-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
-        handle = await service.run(
+        handle = await service.start(
             "b" * 64,
             _request("hello", Principal("owner", "tenant"), "sql-start-key"),
         )
@@ -230,7 +230,7 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
     await state.initialize(namespace="filesystem-start", tenant_id="tenant")
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
-        handle = await service.run(
+        handle = await service.start(
             "c" * 64,
             _request(
                 "hello",
@@ -299,7 +299,7 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
         principal = Principal("owner", "tenant")
-        handle = await service.run(
+        handle = await service.start(
             "a" * 64,
             _request("without memory", principal, "without-memory"),
         )
@@ -312,7 +312,7 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
 
         for value in ("", "  "):
             with pytest.raises(AIError) as error:
-                await service.run(
+                await service.start(
                     "a" * 64,
                     _request(
                         "invalid memory",

@@ -17,8 +17,18 @@ from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_o
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
 from ._runtime_service import Runtime
+from ._task import TaskGraphRun
 from ._session import DefaultSessionService
 from ._snapshot import RunSnapshot, snapshot_digest
+from .recovery import (
+    ExecutionRecoveryEffect,
+    ResolveToolEffectRequest,
+    ToolEffectApplied,
+    ToolEffectFailed,
+    ToolEffectNotApplied,
+    ToolEffectResolution,
+    ToolEffectResolutionResult,
+)
 from .service_api import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
@@ -49,6 +59,7 @@ from .service_api import (
     ExecutionService,
     ExecutionStreamEvent,
     ExecutionTraceItem,
+    ExecutionTreeEvent,
     ExecutionView,
     ExternalService,
     ExternalSupplyRequest,
@@ -68,6 +79,7 @@ from .service_api import (
     SessionView,
     TaskEvent,
     TaskEventType,
+    TaskGraphRunEvent,
     TaskService,
     TranscriptItem,
     UpdateSessionRequest,
@@ -120,11 +132,13 @@ __all__ = [
     "ExecutionHistoryItem",
     "ExecutionHistoryReader",
     "ExecutionHistoryService",
+    "ExecutionRecoveryEffect",
     "ExecutionRequest",
     "ExecutionResult",
     "ExecutionService",
     "ExecutionStreamEvent",
     "ExecutionTraceItem",
+    "ExecutionTreeEvent",
     "ExecutionView",
     "ExternalService",
     "ExternalSupplyRequest",
@@ -137,6 +151,7 @@ __all__ = [
     "LocalExecutionBackend",
     "Page",
     "ReplayEvaluationRequest",
+    "ResolveToolEffectRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "RunEvaluationRequest",
@@ -161,7 +176,14 @@ __all__ = [
     "StoredUserInput",
     "TaskEvent",
     "TaskEventType",
+    "TaskGraphRun",
+    "TaskGraphRunEvent",
     "TaskService",
+    "ToolEffectApplied",
+    "ToolEffectFailed",
+    "ToolEffectNotApplied",
+    "ToolEffectResolution",
+    "ToolEffectResolutionResult",
     "TranscriptItem",
     "UpdateSessionRequest",
     "put_runtime_object",

@@ -168,8 +168,10 @@ async def _emit_result(
     terminal_error_code: object = None
     terminal_safe_details: object = {}
     try:
-        async for event in execution.stream():
-            execution_id = event.execution_id
+        async for item in execution.watch():
+            if item.depth != 0:
+                continue
+            event = item.event
             if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
                 text = event.payload.get("text") if isinstance(event.payload, dict) else None
                 if isinstance(text, str):

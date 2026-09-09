@@ -45,6 +45,7 @@ from ...core import (
     normalize_thinking,
     validate_agent_id,
     validate_lease_owner,
+    validate_resource_id,
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
@@ -664,6 +665,7 @@ class ExecutionRecord:
     planning: bool
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
+    parent_invocation_id: str | None = None
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
     result: ResultRecord | None = None
@@ -681,6 +683,18 @@ class ExecutionRecord:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
+        if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
+            if (
+                not isinstance(self.parent_execution_id, str)
+                or not self.parent_execution_id
+                or not isinstance(self.parent_invocation_id, str)
+                or not self.parent_invocation_id
+                or self.source_execution_id is not None
+                or self.base_execution_id is not None
+            ):
+                raise ValueError("subagent execution lineage is invalid")
+        elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
+            raise ValueError("non-subagent execution cannot carry parent lineage")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -887,6 +901,7 @@ class ToolOperationRecord:
 
     tool_operation_id: str
     tenant_id: str
+    execution_id: str
     step_run_id: str
     tool_call_id: str
     idempotency_key_digest: str
@@ -909,6 +924,7 @@ class ToolOperationRecord:
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
         try:
             validate_tenant_id(self.tenant_id)
+            validate_resource_id(self.execution_id)
             if self.owner is not None:
                 validate_lease_owner(self.owner)
         except AIError as error:
@@ -1246,6 +1262,7 @@ class RecoveryExecutionInput:
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
     storage_contract: RuntimeStorageContract
+    parent_invocation_id: str | None = None
     repository_instructions: RuntimePayloadRef | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
 
@@ -1263,6 +1280,18 @@ class RecoveryExecutionInput:
         object.__setattr__(self, "mode", mode)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
+        if self.lineage_kind == ExecutionLineageKind.SUBAGENT.value:
+            if (
+                not isinstance(self.parent_execution_id, str)
+                or not self.parent_execution_id
+                or not isinstance(self.parent_invocation_id, str)
+                or not self.parent_invocation_id
+                or self.source_execution_id is not None
+                or self.base_execution_id is not None
+            ):
+                raise ValueError("subagent recovery lineage is invalid")
+        elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
+            raise ValueError("non-subagent recovery cannot carry parent lineage")
         if (
             not isinstance(self.binding, AgentBindingSnapshot)
             or self.binding.binding_digest != self.binding_digest
@@ -1747,6 +1776,7 @@ class ExecutionEventAppend:
 @dataclass(frozen=True, slots=True)
 class ToolOperationAdmission:
     tenant_id: str
+    execution_id: str
     tool_operation_id: str
     step_run_id: str
     recovery_step_run_id: str | None
@@ -1762,6 +1792,10 @@ class ToolOperationAdmission:
 
     def __post_init__(self) -> None:
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
+        try:
+            validate_resource_id(self.execution_id)
+        except AIError as error:
+            raise ValueError("tool operation execution identifier is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)

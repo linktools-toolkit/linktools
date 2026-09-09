@@ -790,6 +790,7 @@ class LocalExecutionBackend:
             lineage_kind=execution.lineage_kind.value,
             parent_execution_id=execution.parent_execution_id,
             root_execution_id=execution.root_execution_id,
+            parent_invocation_id=execution.parent_invocation_id,
             source_execution_id=execution.source_execution_id,
             base_execution_id=execution.base_execution_id,
             conversation_step_run_id=execution.conversation_step_run_id,
@@ -2315,6 +2316,7 @@ class LocalExecutionBackend:
             or execution.binding_digest != recovery_input.binding_digest
             or execution.parent_execution_id != recovery_input.parent_execution_id
             or execution.root_execution_id != recovery_input.root_execution_id
+            or execution.parent_invocation_id != recovery_input.parent_invocation_id
             or execution.source_execution_id != recovery_input.source_execution_id
             or execution.base_execution_id != recovery_input.base_execution_id
             or execution.conversation_step_run_id
@@ -2863,6 +2865,7 @@ class LocalExecutionBackend:
             binding_digest=recovery_input.binding_digest,
             parent_execution_id=recovery_input.parent_execution_id,
             root_execution_id=recovery_input.root_execution_id,
+            parent_invocation_id=recovery_input.parent_invocation_id,
             source_execution_id=recovery_input.source_execution_id,
             base_execution_id=recovery_input.base_execution_id,
             lineage_kind=ExecutionLineageKind(recovery_input.lineage_kind),

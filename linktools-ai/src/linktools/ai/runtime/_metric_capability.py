@@ -105,7 +105,13 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             return await handler(request_context)
         run_context = None if ctx is None else ctx.deps
         step_index = 0 if ctx is None else ctx.run_step
-        fact = self._journal.begin(step_index, purpose="agent")
+        fact = self._journal.begin(
+            step_index,
+            purpose="agent",
+            output_retry_index=(
+                None if ctx is None or ctx.retry <= 0 else ctx.retry
+            ),
+        )
         request_sequence = fact.request_sequence
         try:
             response = await handler(request_context)
@@ -211,6 +217,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                     step_run_id=self._step_run_id,
                     request_sequence=fact.request_sequence,
                     request_purpose=fact.purpose,
+                    output_retry_index=fact.output_retry_index,
                 ),
                 dimensions={
                     "agent_id": self._agent_id,

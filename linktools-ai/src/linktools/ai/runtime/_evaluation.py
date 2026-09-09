@@ -210,7 +210,7 @@ class DefaultEvaluationService:
                     and existing.status is IdempotencyStatus.COMPLETED
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                execution = await self._execution.run(
+                execution = await self._execution.start(
                     binding_digest,
                     ExecutionRequest(
                         user_prompt=f"evaluation:{request.dataset_digest}",
@@ -458,7 +458,7 @@ class DefaultEvaluationService:
             )
             if record.binding_digest != binding_digest:
                 raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
-            handle = await self._execution.run(
+            handle = await self._execution.start(
                 binding_digest,
                 ExecutionRequest(
                     user_prompt=f"replay:{record.evaluation_id}",
