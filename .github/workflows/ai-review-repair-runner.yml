@@ -44,8 +44,6 @@ jobs:
           repair.write_text(script, encoding='utf-8')
           subprocess.run(['python', str(repair)], check=True)
 
-          # These bindings remain available only inside the Runtime owner; static __all__
-          # stays identical to master and therefore does not expand the package API.
           state_path = Path('linktools-ai/src/linktools/ai/runtime/state/__init__.py')
           state = state_path.read_text(encoding='utf-8')
           internal_bindings = (
@@ -111,6 +109,26 @@ jobs:
               'assert any(isinstance(capability, RuntimeCompaction) for capability in capabilities)',
           )
           regression_path.write_text(regression, encoding='utf-8')
+
+          filesystem_path = Path('linktools-ai/src/linktools/ai/runtime/state/_filesystem.py')
+          filesystem = filesystem_path.read_text(encoding='utf-8')
+          filesystem = filesystem.replace(
+              '''        query.kind is not None\n        and query.partition_digest is not None\n        and query.scope_digest is not None\n''',
+              '''        query.kind is not None\n        and query.scope_digest is not None\n''',
+          )
+          filesystem = filesystem.replace(
+              '''    if (\n        query.kind is None\n        or query.partition_digest is None\n        or query.scope_digest is None\n    ):\n        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n    return (\n        f"record-index/{query.kind}/{query.partition_digest.hex()}/"\n        f"{query.scope_digest.hex()}"\n    )\n''',
+              '''    if query.kind is None or query.scope_digest is None:\n        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n    return f"record-index/{query.kind}/{query.scope_digest.hex()}"\n''',
+          )
+          filesystem = filesystem.replace(
+              '''    if record.partition_digest is None or record.scope_digest is None:\n        return None\n''',
+              '''    if record.scope_digest is None:\n        return None\n''',
+          )
+          filesystem = filesystem.replace(
+              '''        f"record-index/{record.kind}/{record.partition_digest.hex()}/"\n        f"{record.scope_digest.hex()}/{token}!{record.key_digest.hex()}.ref"\n''',
+              '''        f"record-index/{record.kind}/{record.scope_digest.hex()}/"\n        f"{token}!{record.key_digest.hex()}.ref"\n''',
+          )
+          filesystem_path.write_text(filesystem, encoding='utf-8')
           RUNNER_PY
       - name: Install project
         shell: bash
