@@ -11,6 +11,7 @@ import pytest
 from linktools.ai.core import (
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionLineageKind,
     ExecutionStatus,
     JsonValue,
     Principal,
@@ -27,6 +28,7 @@ from linktools.ai.runtime import (
     DefaultExecutionService,
     ExecutionResult,
     ExecutionStreamEvent,
+    ExecutionTreeEvent,
 )
 from linktools.ai.runtime._agent_executor import (
     DurableBoundary,
@@ -365,20 +367,27 @@ class _FailedRuntime:
 class _StreamingExecution:
     execution_id = "streaming-execution"
 
-    def stream(self) -> AsyncIterator[ExecutionStreamEvent]:
-        async def events() -> AsyncIterator[ExecutionStreamEvent]:
-            yield ExecutionStreamEvent(
-                self.execution_id,
-                1,
-                ExecutionDeltaType.ASSISTANT_TEXT_DELTA,
-                {"text": "hello"},
-            )
-            yield ExecutionStreamEvent(
-                self.execution_id,
-                2,
-                ExecutionEventType.EXECUTION_SUCCEEDED,
-                {},
-            )
+    def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
+        async def events() -> AsyncIterator[ExecutionTreeEvent]:
+            for sequence, event_type, payload in (
+                (1, ExecutionDeltaType.ASSISTANT_TEXT_DELTA, {"text": "hello"}),
+                (2, ExecutionEventType.EXECUTION_SUCCEEDED, {}),
+            ):
+                yield ExecutionTreeEvent(
+                    self.execution_id,
+                    "agent",
+                    ExecutionLineageKind.RUN,
+                    None,
+                    self.execution_id,
+                    None,
+                    0,
+                    ExecutionStreamEvent(
+                        self.execution_id,
+                        sequence,
+                        event_type,
+                        payload,
+                    ),
+                )
 
         return events()
 

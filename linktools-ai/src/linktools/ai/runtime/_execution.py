@@ -577,7 +577,7 @@ class DefaultExecutionService:
             if owner:
                 await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
-    async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
+    async def start(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
         return await self._start(
             binding_digest,
             request,
@@ -672,7 +672,7 @@ class DefaultExecutionService:
             return ExecutionHandle(execution.execution_id)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def run_for_session(
+    async def start_for_session(
         self,
         agent_id: str,
         binding_digest: str,
@@ -1518,8 +1518,8 @@ class DefaultExecutionService:
         except asyncio.TimeoutError as error:
             raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT) from error
 
-    async def run_and_wait(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
-        handle = await self.run(binding_digest, request)
+    async def run(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        handle = await self.start(binding_digest, request)
         return await self.wait(handle.execution_id, principal=request.principal, timeout_seconds=timeout_seconds)
 
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:

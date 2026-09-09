@@ -179,7 +179,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
         last = handler.node("custom-last", dependencies=("agent",))
         graph = TaskGraph("mixed-graph", (first, agent, last))
 
-        result = await runtime.run_graph_and_wait(
+        result = await runtime.run_graph(
             graph,
             idempotency_key="mixed-graph-run-0001",
             timeout_seconds=10,
@@ -311,12 +311,12 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
         state=state,
         capabilities=(application,),
     ) as runtime:
-        await runtime.run_graph(
+        await runtime.start_graph(
             graph,
             idempotency_key="shutdown-graph-run-0001",
         )
         await asyncio.wait_for(entered.wait(), 1)
-        snapshot = await runtime.task.inspect_graph_state(
+        snapshot = await runtime.task.snapshot_graph(
             graph.graph_id,
             principal=runtime.default_principal,
         )

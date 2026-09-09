@@ -351,7 +351,7 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             )
         )
         with pytest.raises(AIError) as error:
-            await service.run_for_session(
+            await service.start_for_session(
                 "agent",
                 "b" * 64,
                 "session",

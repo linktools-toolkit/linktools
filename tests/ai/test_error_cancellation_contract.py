@@ -123,7 +123,7 @@ async def test_task_runner_cancellation_does_not_business_cancel_running_executi
             self.wait_cancelled = asyncio.Event()
             self.cancel_called = asyncio.Event()
 
-        async def run(self, *args, **kwargs):
+        async def start(self, *args, **kwargs):
             del args, kwargs
             return SimpleNamespace(execution_id="execution")
 
@@ -185,7 +185,7 @@ async def test_task_runner_binds_execution_that_finishes_launch_after_caller_can
             self.release_launch = asyncio.Event()
             self.cancel_called = asyncio.Event()
 
-        async def run(self, *args, **kwargs):
+        async def start(self, *args, **kwargs):
             del args, kwargs
             self.launch_started.set()
             await self.release_launch.wait()
@@ -249,7 +249,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
             self.launch_started = asyncio.Event()
             self.release_launch = asyncio.Event()
 
-        async def run(self, *args, **kwargs):
+        async def start(self, *args, **kwargs):
             del args, kwargs
             self.launch_started.set()
             await self.release_launch.wait()

@@ -16,7 +16,6 @@ from .service_api import (
     EvaluationHandle,
     ExecutionHistoryItem,
     ExecutionResult,
-    ExecutionStreamEvent,
     ExecutionTraceItem,
     ExecutionTreeEvent,
     ReplayEvaluationRequest,
@@ -47,14 +46,7 @@ class Execution(Generic[AppT]):
             timeout_seconds=timeout_seconds,
         )
 
-    def stream(self, *, after_sequence: int = 0) -> AsyncIterator[ExecutionStreamEvent]:
-        return self._runtime._execution_stream(
-            self.execution_id,
-            principal=self._principal,
-            after_sequence=after_sequence,
-        )
-
-    def stream_tree(
+    def watch(
         self,
         *,
         after_sequences: "Mapping[str, int] | None" = None,
