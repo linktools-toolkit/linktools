@@ -5,6 +5,7 @@
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from datetime import datetime, timezone
 
 from ...core import (
     ExecutionEventType,
@@ -91,6 +92,53 @@ class RuntimeRecoveryCommands:
             next_error_code=None,
             next_safe_error_details={},
         )
+
+    async def commit_cancel_claim(self, execution: ExecutionRecord) -> ExecutionRecord:
+        if execution.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        target = replace(
+            execution,
+            status=ExecutionStatus.CANCELLING,
+            revision=execution.revision + 1,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+        async def operation() -> ExecutionRecord:
+            return await self._execution.compare_and_swap(
+                execution.execution_id,
+                tenant_id=execution.tenant_id,
+                expected_revision=execution.revision,
+                next_record=target,
+            )
+
+        async def readback() -> CommitObservation[ExecutionRecord]:
+            try:
+                current = await self._execution.get(
+                    execution.execution_id,
+                    tenant_id=execution.tenant_id,
+                )
+                if current is None:
+                    return _partial()
+                if (
+                    current.status is ExecutionStatus.CANCELLING
+                    and current.revision >= target.revision
+                    and current.event_sequence == execution.event_sequence
+                ):
+                    return CommitObservation(DurableCommitState.COMMITTED, value=current)
+                if current == execution:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                return _partial()
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return _partial(error)
+                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
+
+        outcome = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=self._background_tasks,
+        )
+        return _require_committed(outcome)
 
     async def commit_cancel_intent(
         self,
