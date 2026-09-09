@@ -371,6 +371,14 @@ class LiveExecutionEventBroker:
     def is_completed(self, execution_id: str) -> bool:
         return execution_id in self._completed
 
+    def reset_completed_local_producer(self, execution_id: str) -> None:
+        if execution_id not in self._completed:
+            return
+        subscriptions = tuple(self._subscriptions.pop(execution_id, ()))
+        for subscription in subscriptions:
+            subscription.finish()
+        self._release_execution(execution_id)
+
     async def wait_for_activity(self, execution_id: str) -> None:
         event = self._activity.setdefault(execution_id, asyncio.Event())
         await event.wait()
@@ -581,7 +589,7 @@ class DefaultEventService:
                         except TimeoutError:
                             pass
                     if item.durable_sequence <= replay_cursor:
-                        if item.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
+                        if item.event_type in _TERMINAL_EVENT_TYPES:
                             return
                         if item.durable_sequence == replay_cursor:
                             replay_cursor = None
@@ -597,7 +605,7 @@ class DefaultEventService:
                     continue
                 if item.durable_sequence is not None:
                     if item.durable_sequence <= after_sequence:
-                        if item.event_type in _OBSERVATION_BOUNDARY_EVENT_TYPES:
+                        if item.event_type in _TERMINAL_EVENT_TYPES:
                             return
                         continue
                     cursor = max(cursor, item.durable_sequence)

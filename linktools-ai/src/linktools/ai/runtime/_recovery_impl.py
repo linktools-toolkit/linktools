@@ -416,6 +416,7 @@ class RecoveryLocalExecutionBackend(LocalExecutionBackend):
             execution_id,
             tenant_id=tenant_id,
         )
+        self._live_broker.reset_completed_local_producer(execution_id)
         resumed = await self._recovery_commands_for(
             execution_id
         ).commit_resumed(current)
