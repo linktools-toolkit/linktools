@@ -1,4 +1,4 @@
-name: Temporary AI Runtime Recovery Merge Helper
+name: Temporary AI Runtime Recovery Repair Gate
 
 on:
   push:
@@ -13,8 +13,8 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
-  apply-ci-fixes:
-    if: "${{ github.event.head_commit.message == 'chore(ai): apply recovery ci fixes' }}"
+  validate-repair:
+    if: "${{ github.event.head_commit.message == 'ci(ai): validate recovery repair' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -23,12 +23,12 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
-      - name: Install tooling
+      - name: Install repository
         run: |
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Apply reviewed fixes
+      - name: Apply repair and validate
         shell: bash
         run: |
           set -euo pipefail
@@ -43,47 +43,53 @@ jobs:
                   raise RuntimeError(f"{path}: expected one match, found {count}")
               file.write_text(text.replace(old, new, 1))
 
-          # A stale recovery transition is a normal CAS conflict, not an integrity failure.
           replace_once(
               "linktools-ai/src/linktools/ai/runtime/state/_recovery_commands.py",
               """                predecessor = current == execution and not page.items\n                if predecessor:\n                    return CommitObservation(DurableCommitState.NOT_COMMITTED)\n                return _partial()\n""",
               """                predecessor = current == execution and not page.items\n                if predecessor:\n                    return CommitObservation(DurableCommitState.NOT_COMMITTED)\n                if (\n                    current.revision > execution.revision\n                    or current.event_sequence > execution.event_sequence\n                ):\n                    return CommitObservation(\n                        DurableCommitState.NOT_COMMITTED,\n                        error=AIError(ErrorCode.STORAGE_CONFLICT),\n                    )\n                return _partial()\n""",
           )
 
-          # Direct internal callers that do not attach retry lineage remain valid.
           replace_once(
               "linktools-ai/src/linktools/ai/runtime/_metric_capability.py",
               """        measurements: tuple[MetricMeasurement, ...],\n        output_retry_index: int | None,\n    ) -> None:\n""",
               """        measurements: tuple[MetricMeasurement, ...],\n        output_retry_index: int | None = None,\n    ) -> None:\n""",
           )
 
-          # Lease-projected records must be valid before their dataclass constructors run.
-          replace_once(
-              "linktools-ai/src/linktools/ai/runtime/state/_repositories.py",
-              """        value = _decode_enveloped_domain(\n            record.data,\n            target,\n            payload_transform=lambda payload: _restore_lease_fields(payload, target),\n        )\n""",
-              """        value = _decode_enveloped_domain(\n            record.data,\n            target,\n            payload_transform=lambda payload: _restore_lease_fields(\n                payload,\n                target,\n                owner=record.lease_owner,\n                fence=record.lease_fence,\n                lease_expires_at=record.lease_expires_at,\n            ),\n        )\n""",
-          )
           replace_once(
               "linktools-ai/src/linktools/ai/runtime/state/_repositories.py",
               """def _restore_lease_fields(payload: object, target: type[ValueT]) -> object:\n    if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(\n        payload, Mapping\n    ):\n        return payload\n    fields = payload.get(\"fields\")\n    if not isinstance(fields, Mapping):\n        return payload\n    restored = dict(payload)\n    restored[\"fields\"] = {\n        **fields,\n        \"owner\": None,\n        \"fence\": 0,\n        \"lease_expires_at\": None,\n    }\n    return restored\n""",
-              """def _restore_lease_fields(\n    payload: object,\n    target: type[ValueT],\n    *,\n    owner: str | None,\n    fence: int,\n    lease_expires_at: datetime | None,\n) -> object:\n    if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(\n        payload, Mapping\n    ):\n        return payload\n    fields = payload.get(\"fields\")\n    if not isinstance(fields, Mapping):\n        return payload\n    restored = dict(payload)\n    restored[\"fields\"] = {\n        **fields,\n        \"owner\": owner,\n        \"fence\": fence,\n        \"lease_expires_at\": lease_expires_at,\n    }\n    return restored\n""",
+              """def _restore_lease_fields(payload: object, target: type[ValueT]) -> object:\n    if target not in {TaskNodeView, ToolOperationRecord} or not isinstance(\n        payload, Mapping\n    ):\n        return payload\n    fields = payload.get(\"fields\")\n    if not isinstance(fields, Mapping):\n        return payload\n    restored = dict(payload)\n    restored[\"fields\"] = {\n        **fields,\n        \"owner\": None,\n        \"fence\": 1,\n        \"lease_expires_at\": None,\n    }\n    return restored\n""",
           )
 
-          # Durable truth wins first; a caller cancellation is propagated immediately after it is known.
           replace_once(
               "linktools-ai/src/linktools/ai/runtime/_tool.py",
               """            _logger.error(\n                \"tool operation effect became unknown: execution=%s operation=%s error=%s\",\n                self._execution_id,\n                decision.operation_id,\n                type(error).__name__,\n            )\n            raise AIError(\n""",
               """            _logger.error(\n                \"tool operation effect became unknown: execution=%s operation=%s error=%s\",\n                self._execution_id,\n                decision.operation_id,\n                type(error).__name__,\n            )\n            if result.cancelled:\n                raise asyncio.CancelledError\n            raise AIError(\n""",
           )
 
-          # Output-retry lineage tests need a model that returns valid text on every retry attempt.
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_capabilities.py",
+              """    _model_metric_started_ns: \"dict[int, int]\" = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n\n    def __post_init__(self) -> None:\n""",
+              """    _model_metric_started_ns: \"dict[int, int]\" = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n    _model_retry_indices: \"dict[int, int | None]\" = field(\n        default_factory=dict,\n        init=False,\n        repr=False,\n        compare=False,\n    )\n\n    def __post_init__(self) -> None:\n""",
+          )
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_capabilities.py",
+              """    async def before_model_request(\n        self,\n        ctx: \"RunContext[None]\",\n        request_context: ModelRequestContext,\n    ) -> ModelRequestContext:\n        await self._record_runtime_event(\n            ctx,\n            kind=\"model_request_started\",\n            metadata=self._model_retry_metadata(ctx),\n        )\n        if self.tool_metrics is not None:\n            if ctx.run_step in self._model_metric_started_ns:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            self._model_metric_started_ns[ctx.run_step] = monotonic_ns()\n        return request_context\n""",
+              """    async def before_model_request(\n        self,\n        ctx: \"RunContext[None]\",\n        request_context: ModelRequestContext,\n    ) -> ModelRequestContext:\n        if ctx.run_step in self._model_retry_indices:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        retry_index = None if ctx.retry <= 0 else ctx.retry\n        await self._record_runtime_event(\n            ctx,\n            kind=\"model_request_started\",\n            metadata=self._model_retry_metadata(retry_index),\n        )\n        self._model_retry_indices[ctx.run_step] = retry_index\n        if self.tool_metrics is not None:\n            if ctx.run_step in self._model_metric_started_ns:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            self._model_metric_started_ns[ctx.run_step] = monotonic_ns()\n        return request_context\n""",
+          )
+          replace_once(
+              "linktools-ai/src/linktools/ai/runtime/_capabilities.py",
+              """    def _model_retry_metadata(self, ctx: \"RunContext[None]\") -> dict[str, str]:\n        metadata = dict(self.metadata)\n        if ctx.retry > 0:\n            metadata[_OUTPUT_RETRY_INDEX_METADATA_KEY] = str(ctx.retry)\n        return metadata\n\n    def _model_metric_metadata(self, ctx: \"RunContext[None]\") -> dict[str, str]:\n        metadata = self._model_retry_metadata(ctx)\n        if self.tool_metrics is not None:\n""",
+              """    def _model_retry_metadata(self, retry_index: int | None) -> dict[str, str]:\n        metadata = dict(self.metadata)\n        if retry_index is not None:\n            metadata[_OUTPUT_RETRY_INDEX_METADATA_KEY] = str(retry_index)\n        return metadata\n\n    def _model_metric_metadata(self, ctx: \"RunContext[None]\") -> dict[str, str]:\n        if ctx.run_step not in self._model_retry_indices:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        metadata = self._model_retry_metadata(\n            self._model_retry_indices.pop(ctx.run_step)\n        )\n        if self.tool_metrics is not None:\n""",
+          )
+
           path = Path("tests/ai/test_model_metric_trace_link.py")
           text = path.read_text()
-          replace = "from pydantic_ai.messages import ModelMessage, ModelResponse\n"
-          if text.count(replace) != 1:
+          old_import = "from pydantic_ai.messages import ModelMessage, ModelResponse\n"
+          if text.count(old_import) != 1:
               raise RuntimeError("model metric trace import changed")
           text = text.replace(
-              replace,
+              old_import,
               "from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart\n",
               1,
           )
@@ -103,7 +109,6 @@ jobs:
               text = text.replace(old, new, 1)
           path.write_text(text)
 
-          # READY may retain a historical fence after explicit graph recovery.
           path = Path("tests/ai/test_task_event_codec_contract.py")
           text = path.read_text()
           stale = """        _node_event(\n            status=\"READY\",\n            previous_status=\"PENDING\",\n            owner=None,\n            fence=1,\n        ),\n"""
@@ -111,7 +116,6 @@ jobs:
               raise RuntimeError("task event stale fixture changed")
           path.write_text(text.replace(stale, "", 1))
 
-          # ToolOperation execution ownership is now part of the durable identity.
           path = Path("tests/ai/test_tool_effect_semantics.py")
           text = path.read_text()
           old = """        tool_operation_id=\"operation\",\n        tenant_id=\"tenant\",\n        step_run_id=\"run\",\n"""
@@ -133,7 +137,8 @@ jobs:
             tests/ai/test_task_*.py \
             tests/ai/test_tool_cas_convergence.py \
             tests/ai/test_tool_effect_semantics.py
-      - name: Commit fixes
+          python manage.py check linktools-ai
+      - name: Commit repair
         shell: bash
         run: |
           set -euo pipefail
@@ -144,8 +149,9 @@ jobs:
             linktools-ai/src/linktools/ai/runtime/_metric_capability.py \
             linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
             linktools-ai/src/linktools/ai/runtime/_tool.py \
+            linktools-ai/src/linktools/ai/runtime/_capabilities.py \
             tests/ai/test_model_metric_trace_link.py \
             tests/ai/test_task_event_codec_contract.py \
             tests/ai/test_tool_effect_semantics.py
-          git commit -m 'fix(ai): close durable recovery regressions'
+          git commit -m 'fix(ai): preserve recovery state and retry lineage'
           git push origin HEAD:feat/ai-runtime-durable-recovery
