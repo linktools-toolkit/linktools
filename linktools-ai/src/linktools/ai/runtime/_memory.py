@@ -423,8 +423,8 @@ def _normalize_path(path: str) -> str:
 def _normalize_prefix(prefix: str) -> str:
     if prefix == "":
         return ""
-    normalized = prefix.removesuffix("/")
-    return f"{_normalize_path(normalized)}/"
+    _normalize_path(prefix.removesuffix("/"))
+    return prefix
 
 
 def _validate_content(content: str) -> None:

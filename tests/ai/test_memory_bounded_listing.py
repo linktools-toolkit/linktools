@@ -53,7 +53,7 @@ async def test_list_paths_pushes_prefix_and_limit_to_repository_once() -> None:
         {
             "tenant_id": "tenant",
             "memory_scope_digest": "scope-digest",
-            "prefix": "memory/",
+            "prefix": "memory",
             "cursor": None,
             "limit": 10,
         }
@@ -279,7 +279,7 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
         runtime_domain=RuntimeDomain.MEMORY.value,
     )
     await reopened.initialize()
-    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "1"
+    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "2"
     repository = MemoryRepositoryImpl(
         reopened,
         namespace="memory-reindex",
@@ -304,4 +304,119 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
     )
     assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
     assert record_reads == 2
+    await reopened.close()
+
+
+async def test_list_paths_preserves_lexical_prefix() -> None:
+    records = _RecordingMemoryRepository(("memory/001.md", "memory/010.md"))
+    store = _runtime_store(records)
+
+    assert await store.list_paths("memory/0", limit=2) == [
+        "memory/001.md",
+        "memory/010.md",
+    ]
+    assert records.calls == [
+        {
+            "tenant_id": "tenant",
+            "memory_scope_digest": "scope-digest",
+            "prefix": "memory/0",
+            "cursor": None,
+            "limit": 2,
+        }
+    ]
+
+
+async def test_list_paths_preserves_empty_prefix() -> None:
+    records = _RecordingMemoryRepository(("memory/a.md",))
+    store = _runtime_store(records)
+
+    assert await store.list_paths("", limit=1) == ["memory/a.md"]
+    assert records.calls[0]["prefix"] == ""
+
+
+async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from linktools.ai.runtime.state import _filesystem as filesystem
+    from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+    from linktools.ai.runtime.state._plan import RuntimeDomain
+
+    root = tmp_path / "memory-prefix-trie"
+    state = FilesystemStateStore(
+        root,
+        namespace="memory-prefix-trie",
+        tenant_id="tenant",
+        runtime_domain=RuntimeDomain.MEMORY.value,
+    )
+    await state.initialize()
+    repository = MemoryRepositoryImpl(
+        state,
+        namespace="memory-prefix-trie",
+        tenant_id="tenant",
+    )
+    now = datetime.now(timezone.utc)
+    values = tuple(
+        MemoryRecord(
+            f"memory-{index}",
+            "tenant",
+            "scope-digest",
+            StoredPayload.inline_text("content"),
+            {"path": f"memory/{index:03d}.md"},
+            1,
+            now,
+            now,
+        )
+        for index in range(200)
+    )
+    await state.mutate(
+        lambda transaction: transaction.insert_records(
+            tuple(
+                repository._stored("memory", value.memory_id, value) for value in values
+            )
+        )
+    )
+    await state.close()
+
+    reopened = FilesystemStateStore(
+        root,
+        namespace="memory-prefix-trie",
+        tenant_id="tenant",
+        runtime_domain=RuntimeDomain.MEMORY.value,
+    )
+    await reopened.initialize()
+    repository = MemoryRepositoryImpl(
+        reopened,
+        namespace="memory-prefix-trie",
+        tenant_id="tenant",
+    )
+
+    original_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if "record-index" in path.parts:
+            raise AssertionError(
+                "bounded record-index query must not enumerate directories"
+            )
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    page = await repository.list(
+        tenant_id="tenant",
+        memory_scope_digest="scope-digest",
+        prefix="",
+        cursor=None,
+        limit=1,
+    )
+    assert [value.metadata["path"] for value in page.items] == ["memory/000.md"]
+    assert page.next_cursor is not None
+
+    second = await repository.list(
+        tenant_id="tenant",
+        memory_scope_digest="scope-digest",
+        prefix="memory/0",
+        cursor=page.next_cursor,
+        limit=1,
+    )
+    assert [value.metadata["path"] for value in second.items] == ["memory/001.md"]
     await reopened.close()
