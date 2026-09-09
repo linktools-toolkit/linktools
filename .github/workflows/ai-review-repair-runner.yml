@@ -95,6 +95,22 @@ jobs:
               1,
           )
           state_path.write_text(state, encoding='utf-8')
+
+          regression_path = Path('tests/ai/test_error_review_regressions.py')
+          regression = regression_path.read_text(encoding='utf-8')
+          regression = regression.replace(
+              'from linktools.ai.runtime._capabilities import (\n'
+              '    _CompactionCapability,\n'
+              '    compose_platform_capabilities,\n'
+              ')\n',
+              'from linktools.ai.runtime._capabilities import compose_platform_capabilities\n'
+              'from linktools.ai.runtime._compaction import RuntimeCompaction\n',
+          )
+          regression = regression.replace(
+              'assert any(isinstance(capability, _CompactionCapability) for capability in capabilities)',
+              'assert any(isinstance(capability, RuntimeCompaction) for capability in capabilities)',
+          )
+          regression_path.write_text(regression, encoding='utf-8')
           RUNNER_PY
       - name: Install project
         shell: bash
