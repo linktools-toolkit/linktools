@@ -683,8 +683,12 @@ class ExecutionTreeEvent:
             raise ValueError("execution tree event identity is invalid")
         if not isinstance(self.lineage_kind, ExecutionLineageKind):
             raise TypeError("execution tree event lineage kind is invalid")
-        if isinstance(self.depth, bool) or not isinstance(self.depth, int) or self.depth < 0:
-            raise ValueError("execution tree event depth must be non-negative")
+        if (
+            isinstance(self.depth, bool)
+            or not isinstance(self.depth, int)
+            or self.depth not in (0, 1)
+        ):
+            raise ValueError("execution tree event depth must be zero or one")
         if not isinstance(self.event, ExecutionStreamEvent):
             raise TypeError("execution tree event requires an execution event")
         if self.execution_id != self.event.execution_id:
