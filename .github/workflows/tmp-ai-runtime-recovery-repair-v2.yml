@@ -1,0 +1,75 @@
+name: Temporary AI Runtime Recovery Repair V2
+
+on:
+  push:
+    branches:
+      - feat/ai-runtime-durable-recovery
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  repair:
+    if: "${{ github.event.head_commit.message == 'ci(ai): run recovery repair v2' }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install repository
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Apply reviewed repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          helper = Path('.github/workflows/tmp-ai-runtime-recovery-merge.yml').read_text()
+          marker = "          python - <<'PY'\n"
+          start = helper.index(marker) + len(marker)
+          end = helper.index("          PY\n", start)
+          script = textwrap.dedent(helper[start:end])
+          exec(compile(script, 'recovery-repair.py', 'exec'))
+          PY
+
+          # Durable EFFECT_UNKNOWN is authoritative even when the caller is cancelled.
+          git checkout -- linktools-ai/src/linktools/ai/runtime/_tool.py
+          git diff --check
+          python -m pytest -q \
+            tests/ai/test_execution_recovery_commands.py \
+            tests/ai/test_metrics_review_repairs.py \
+            tests/ai/test_model_metric_trace_link.py \
+            tests/ai/test_task_event_codec_contract.py \
+            tests/ai/test_task_*.py \
+            tests/ai/test_tool_cas_convergence.py \
+            tests/ai/test_tool_effect_semantics.py \
+            tests/ai/test_tool_unknown_execution_boundary.py
+          python manage.py check linktools-ai
+      - name: Commit repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            linktools-ai/src/linktools/ai/runtime/state/_recovery_commands.py \
+            linktools-ai/src/linktools/ai/runtime/_metric_capability.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            linktools-ai/src/linktools/ai/runtime/_capabilities.py \
+            tests/ai/test_model_metric_trace_link.py \
+            tests/ai/test_task_event_codec_contract.py \
+            tests/ai/test_tool_effect_semantics.py
+          git commit -m 'fix(ai): preserve recovery state and retry lineage'
+          git push origin HEAD:feat/ai-runtime-durable-recovery
