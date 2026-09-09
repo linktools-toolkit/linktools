@@ -168,11 +168,12 @@ class RuntimeCompaction(AbstractCapability[None]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         source = tuple(request_context.messages)
-        request_context = await self._deduplicate.before_model_request(
-            ctx,
-            request_context,
-        )
-        if self._target_tokens is not None:
+        if self._target_tokens is None:
+            request_context = await self._deduplicate.before_model_request(
+                ctx,
+                request_context,
+            )
+        else:
             summary_model: Model | None = None
             if self._journal is not None and self._observer is not None:
                 summary_model = _ObservedCompactionModel(
@@ -183,6 +184,7 @@ class RuntimeCompaction(AbstractCapability[None]):
                 )
             tiered = TieredCompaction(
                 tiers=(
+                    self._deduplicate,
                     ClearToolResults(
                         max_tokens=1,
                         keep_pairs=_KEEP_COMPLETED_PAIRS,

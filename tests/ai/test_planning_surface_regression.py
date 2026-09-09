@@ -3,6 +3,7 @@
 """Harness Planning must preserve the intentionally narrow LinkTools surface."""
 
 import pytest
+from linktools.ai.runtime._plan import PlanItem as RuntimePlanItem, _validated_items
 from linktools.ai.runtime._capabilities import (
     PLANNING_TOOL_NAMES,
     compose_platform_capabilities,
@@ -90,3 +91,9 @@ async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> Non
     assert not isinstance(reminder.content, str)
     assert any(isinstance(item, CachePoint) for item in reminder.content)
     assert request_context.messages[0].parts[0] is original
+
+
+async def test_runtime_plan_persistence_adds_no_arbitrary_size_limit() -> None:
+    items = [RuntimePlanItem("x" * 600) for _ in range(129)]
+
+    assert len(_validated_items(items)) == 129

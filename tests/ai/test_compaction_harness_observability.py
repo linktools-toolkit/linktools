@@ -12,6 +12,8 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -127,3 +129,95 @@ def test_journal_rejects_double_finish() -> None:
         journal.finish(fact.request_sequence, status="FAILED")
 
     journal.consume(fact.request_sequence)
+
+
+def _duplicate_read_history() -> list[ModelMessage]:
+    return [
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    "read_file",
+                    {"path": "same.txt"},
+                    tool_call_id="read-1",
+                )
+            ]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    "read_file",
+                    "old content",
+                    tool_call_id="read-1",
+                )
+            ]
+        ),
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    "read_file",
+                    {"path": "same.txt"},
+                    tool_call_id="read-2",
+                )
+            ]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    "read_file",
+                    "new content",
+                    tool_call_id="read-2",
+                )
+            ]
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_compaction_target_does_not_rewrite_history_below_threshold() -> None:
+    model = TestModel()
+    ctx = RunContext(
+        deps=None,
+        model=model,
+        usage=RunUsage(),
+        run_id="run",
+    )
+    messages = _duplicate_read_history()
+    request_context = ModelRequestContext(
+        model=model,
+        messages=list(messages),
+        model_settings=None,
+        model_request_parameters=ModelRequestParameters(),
+    )
+
+    await RuntimeCompaction(
+        1_000_000,
+        trusted_workspace_read=True,
+    ).before_model_request(ctx, request_context)
+
+    assert request_context.messages == messages
+
+
+@pytest.mark.asyncio
+async def test_compaction_without_target_still_deduplicates_file_reads() -> None:
+    model = TestModel()
+    ctx = RunContext(
+        deps=None,
+        model=model,
+        usage=RunUsage(),
+        run_id="run",
+    )
+    messages = _duplicate_read_history()
+    request_context = ModelRequestContext(
+        model=model,
+        messages=list(messages),
+        model_settings=None,
+        model_request_parameters=ModelRequestParameters(),
+    )
+
+    await RuntimeCompaction(
+        None,
+        trusted_workspace_read=True,
+    ).before_model_request(ctx, request_context)
+
+    assert request_context.messages != messages
+    assert "[superseded file read]" in str(request_context.messages)

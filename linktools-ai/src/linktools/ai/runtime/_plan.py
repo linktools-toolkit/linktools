@@ -37,8 +37,6 @@ _logger = environ.get_logger("ai.runtime.plan")
 _OWNER_KINDS = frozenset({"session", "execution"})
 _KIND = "agent_plan"
 _VERSION = 2
-_MAX_ITEMS = 128
-_MAX_BYTES = 64 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 PlanOwnerKind = Literal["session", "execution"]
@@ -248,14 +246,6 @@ class RuntimePlanStore:
             "revision": revision,
             "items": [_item_payload(item) for item in items],
         }
-        encoded = json.dumps(
-            payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        if len(encoded) > _MAX_BYTES:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return StoredRecord(
             key_digest=self._key,
             partition_digest=self._partition,
@@ -334,7 +324,7 @@ def _decode_payload(
 
 
 def _validated_items(items: list[PlanItem]) -> list[PlanItem]:
-    if not isinstance(items, list) or len(items) > _MAX_ITEMS:
+    if not isinstance(items, list):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     values: list[PlanItem] = []
     for item in items:
@@ -352,14 +342,6 @@ def _validated_items(items: list[PlanItem]) -> list[PlanItem]:
         if not item.content.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         values.append(PlanItem(item.content, item.status))
-    encoded = json.dumps(
-        [_item_payload(item) for item in values],
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    if len(encoded) > _MAX_BYTES:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return values
 
 

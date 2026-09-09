@@ -43,7 +43,6 @@ _logger = environ.get_logger("ai.workspace.local_sandbox")
 _MAX_OUTPUT_CHARS = 50_000
 _MAX_RENDERED_CHARS = 50_000
 _MAX_CONTENT_CHARS = 50_000
-_MAX_SEARCH_CONTENT_CHARS = 65_536
 _MAX_READ_LINES = 2_000
 _MAX_ITEMS = 1_000
 _MAX_SEARCH_PATTERN_CHARS = 1_000
@@ -344,6 +343,12 @@ class _LocalSandboxSession:
 
         def operation() -> str:
             target = self._file_path(normalized, write=False)
+            binary_size = _binary_file_size(target)
+            if binary_size is not None:
+                return _bound_output(
+                    f"[Binary file: {binary_size} bytes. "
+                    "Use a binary-aware tool to inspect.]"
+                )
             digest, line_count, visible, selected_truncated = _read_selected_lines(
                 target,
                 normalized,
@@ -448,24 +453,25 @@ class _LocalSandboxSession:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
             except OSError as error:
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            if len(entries) > _MAX_ITEMS:
-                visible = entries[:_MAX_ITEMS]
-                truncated = True
-            else:
-                visible = entries
-                truncated = False
-            rows = []
+            visible = entries[:_MAX_ITEMS]
+            incomplete = len(entries) > _MAX_ITEMS
+            rows: list[str] = []
             for entry in visible:
-                if entry.is_symlink():
-                    marker = "@"
-                elif entry.is_dir():
-                    marker = "/"
-                else:
-                    marker = ""
-                rows.append(entry.name + marker)
-            if truncated:
-                rows.append("[truncated]")
-            return _bound_output("\n".join(rows))
+                try:
+                    info = entry.lstat()
+                except OSError:
+                    incomplete = True
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    rows.append(entry.name + "@")
+                elif stat.S_ISDIR(info.st_mode):
+                    rows.append(entry.name + "/")
+                elif stat.S_ISREG(info.st_mode):
+                    rows.append(f"{entry.name}  ({info.st_size} bytes)")
+            result = "\n".join(rows) if rows else "(empty directory)"
+            if incomplete:
+                return _bound_output_with_marker(result, "\n[truncated]")
+            return _bound_output(result)
 
         return await self._run_sync(operation)
 
@@ -492,52 +498,64 @@ class _LocalSandboxSession:
         )
 
         def operation() -> str:
-            directory = self._directory_path(normalized)
+            target = self._resolve_path(normalized, allow_missing=False)
+            walk_state = _WalkState()
+            if target.is_file():
+                candidates: Iterable[Path] = (target,)
+            elif target.is_dir():
+                candidates = _walk_files(target, walk_state)
+            else:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
             rows: list[str] = []
             row_chars = 0
-            truncated = False
-            walk_state = _WalkState()
-            for target in _walk_files(directory, walk_state):
-                relative = _relative(self._root, target)
+            incomplete = False
+            for candidate in candidates:
+                relative = _relative(self._root, candidate)
                 if include_glob is not None and not fnmatch.fnmatchcase(
                     relative, include_glob
                 ):
                     continue
                 try:
-                    content, content_truncated = _read_search_text(target, relative)
-                    truncated = truncated or content_truncated
+                    matches, file_truncated = _search_file_lines(
+                        candidate,
+                        relative,
+                        expression,
+                        _MAX_ITEMS - len(rows),
+                    )
                 except AIError as error:
                     if error.code in {
                         ErrorCode.REQUEST_FIELD_INVALID,
                         ErrorCode.STORAGE_NOT_FOUND,
                         ErrorCode.STORAGE_UNAVAILABLE,
+                        ErrorCode.STORAGE_CONFLICT,
                     }:
-                        truncated = True
+                        incomplete = True
                         continue
                     raise
-                for line_number, line in enumerate(content.splitlines(), 1):
-                    if expression.search(line):
-                        if len(rows) >= _MAX_ITEMS:
-                            truncated = True
-                            break
-                        row = f"{relative}:{line_number}:{line}"
-                        separator_chars = 1 if rows else 0
-                        if (
-                            row_chars
-                            + separator_chars
-                            + len(row)
-                            > _MAX_RENDERED_CHARS - len("\n[results incomplete]")
-                        ):
-                            truncated = True
-                            break
-                        rows.append(row)
-                        row_chars += separator_chars + len(row)
-                if truncated:
+                for row in matches:
+                    separator_chars = 1 if rows else 0
+                    if (
+                        row_chars
+                        + separator_chars
+                        + len(row)
+                        > _MAX_RENDERED_CHARS - len("\n[results incomplete]")
+                    ):
+                        incomplete = True
+                        break
+                    rows.append(row)
+                    row_chars += separator_chars + len(row)
+                if len(rows) >= _MAX_ITEMS or file_truncated:
+                    incomplete = True
+                if incomplete and (
+                    len(rows) >= _MAX_ITEMS
+                    or row_chars >= _MAX_RENDERED_CHARS - len("\n[results incomplete]")
+                ):
                     break
             if walk_state.failed:
-                truncated = True
-            result = "\n".join(rows)
-            if truncated:
+                incomplete = True
+            result = "\n".join(rows) if rows else "No matches found."
+            if incomplete:
                 return _bound_output_with_marker(
                     result,
                     "\n[results incomplete]",
@@ -568,7 +586,7 @@ class _LocalSandboxSession:
                         break
                     matches.append(relative)
             matches.sort()
-            result = "\n".join(matches)
+            result = "\n".join(matches) if matches else "No matches found."
             if too_many or walk_state.failed:
                 return _bound_output_with_marker(
                     result,
@@ -608,19 +626,39 @@ class _LocalSandboxSession:
         validate_request_size("file_info", {"path": path})
 
         def operation() -> str:
+            original = self._root / normalized
+            is_link = original.is_symlink()
             target = self._resolve_path(normalized, allow_missing=False)
-            info = target.lstat()
-            if stat.S_ISLNK(info.st_mode):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            try:
+                info = target.stat()
+            except FileNotFoundError as error:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            except OSError as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             if not stat.S_ISREG(info.st_mode) and not stat.S_ISDIR(info.st_mode):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             kind = "directory" if stat.S_ISDIR(info.st_mode) else "file"
-            return _bound_output(
-                f"path: {normalized}\n"
-                f"type: {kind}\n"
-                f"size: {info.st_size}\n"
-                f"mode: {stat.S_IMODE(info.st_mode):04o}"
-            )
+            parts = [
+                f"path: {normalized}",
+                f"type: {kind}",
+                f"size: {info.st_size} bytes",
+                f"mode: {stat.S_IMODE(info.st_mode):04o}",
+            ]
+            if stat.S_ISREG(info.st_mode):
+                binary = _binary_file_size(target) is not None
+                parts.append(f"binary: {str(binary).lower()}")
+                if not binary:
+                    digest, line_count, _visible, _truncated = _read_selected_lines(
+                        target,
+                        normalized,
+                        0,
+                        1,
+                    )
+                    parts.append(f"lines: {line_count}")
+                    parts.append(f"hash: {digest}")
+            if is_link:
+                parts.append(f"symlink_target: {_relative(self._root, target.resolve())}")
+            return _bound_output("\n".join(parts))
 
         return await self._run_sync(operation)
 
@@ -861,7 +899,8 @@ class _LocalSandboxSession:
     def _resolve_path(self, path: str, *, allow_missing: bool) -> Path:
         self._ensure_open_sync()
         candidate = self._root / path
-        _check_parent_chain(self._root, candidate.parent)
+        if candidate != self._root:
+            _check_parent_chain(self._root, candidate.parent)
         try:
             if candidate.is_symlink():
                 link = os.readlink(candidate)
@@ -1544,7 +1583,7 @@ def _read_selected_lines(
 ) -> tuple[str, int, list[str], bool]:
     try:
         digest = hashlib.sha256()
-        decoder = codecs.getincrementaldecoder("utf-8")()
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         selected: list[str] = []
         selected_chars = 0
         selected_truncated = False
@@ -1625,7 +1664,7 @@ def _read_selected_lines(
                     line_started = False
                 else:
                     if character == "\x00":
-                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                        character = "\ufffd"
                     line_started = True
                     append_text(character)
 
@@ -1698,74 +1737,65 @@ def _read_text(path: Path, logical: str) -> str:
     return _read_text_with_digest(path, logical)[0]
 
 
-def _read_search_text(path: Path, logical: str) -> tuple[str, bool]:
+def _binary_file_size(path: Path) -> int | None:
     try:
-        decoder = codecs.getincrementaldecoder("utf-8")()
-        chunks: list[str] = []
-        characters = 0
-        truncated = False
         with path.open("rb") as stream:
             identity = _file_identity(stream.fileno())
-            while True:
-                chunk = stream.read(64 * 1024)
-                if not chunk:
-                    try:
-                        decoded = decoder.decode(b"", final=True)
-                    except UnicodeDecodeError as error:
-                        raise AIError(
-                            ErrorCode.REQUEST_FIELD_INVALID,
-                            safe_details={
-                                "path": logical,
-                                "reason": "invalid_utf8",
-                            },
-                        ) from error
-                    if "\x00" in decoded:
-                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                    if decoded:
-                        remaining = _MAX_SEARCH_CONTENT_CHARS - characters
-                        if len(decoded) > remaining:
-                            chunks.append(decoded[:remaining])
-                            characters = _MAX_SEARCH_CONTENT_CHARS
-                            truncated = True
-                        else:
-                            chunks.append(decoded)
-                            characters += len(decoded)
-                    break
-                try:
-                    decoded = decoder.decode(chunk, final=False)
-                except UnicodeDecodeError as error:
-                    raise AIError(
-                        ErrorCode.REQUEST_FIELD_INVALID,
-                        safe_details={
-                            "path": logical,
-                            "reason": "invalid_utf8",
-                        },
-                    ) from error
-                if "\x00" in decoded:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                if characters < _MAX_SEARCH_CONTENT_CHARS:
-                    remaining = _MAX_SEARCH_CONTENT_CHARS - characters
-                    if len(decoded) > remaining:
-                        chunks.append(decoded[:remaining])
-                        characters = _MAX_SEARCH_CONTENT_CHARS
-                        truncated = True
-                        break
-                    elif decoded:
-                        chunks.append(decoded)
-                        characters += len(decoded)
-                if characters == _MAX_SEARCH_CONTENT_CHARS:
-                    probe = stream.read(1)
-                    if probe:
-                        truncated = True
-                    else:
-                        try:
-                            decoder.decode(b"", final=True)
-                        except UnicodeDecodeError:
-                            truncated = True
-                    break
-            if _file_identity(stream.fileno()) != identity or _path_identity(path) != identity:
+            info = os.fstat(stream.fileno())
+            sample = stream.read(8192)
+            if (
+                _file_identity(stream.fileno()) != identity
+                or _path_identity(path) != identity
+            ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return "".join(chunks), truncated
+        return info.st_size if b"\x00" in sample else None
+    except AIError:
+        raise
+    except FileNotFoundError as error:
+        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+    except OSError as error:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+
+def _search_file_lines(
+    path: Path,
+    logical: str,
+    expression: re.Pattern[str],
+    limit: int,
+) -> tuple[list[str], bool]:
+    if limit <= 0:
+        return [], True
+    try:
+        with path.open("rb") as probe:
+            identity = _file_identity(probe.fileno())
+            if b"\x00" in probe.read(8192):
+                return [], False
+        matches: list[str] = []
+        truncated = False
+        with path.open(
+            "r",
+            encoding="utf-8",
+            errors="replace",
+            newline=None,
+        ) as stream:
+            if _file_identity(stream.fileno()) != identity:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            for line_number, line in enumerate(stream, 1):
+                value = line.rstrip("\r\n")
+                if not expression.search(value):
+                    continue
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+                matches.append(f"{logical}:{line_number}:{value}")
+            if (
+                _file_identity(stream.fileno()) != identity
+                or _path_identity(path) != identity
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return matches, truncated
+    except AIError:
+        raise
     except FileNotFoundError as error:
         raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
     except OSError as error:

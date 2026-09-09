@@ -173,3 +173,88 @@ async def test_local_sandbox_allows_explicit_skill_resource_under_storage(
         assert session.resource_path("resource") == str(source.resolve())
     finally:
         await session.close()
+
+
+async def test_local_sandbox_search_continues_after_large_file(tmp_path: Path) -> None:
+    (tmp_path / "a-large.txt").write_text("x" * 70_000, encoding="utf-8")
+    (tmp_path / "b-target.txt").write_text("needle\n", encoding="utf-8")
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        result = await session.search_files("needle")
+    finally:
+        await session.close()
+
+    assert "b-target.txt:1:needle" in result
+
+
+async def test_local_sandbox_search_reads_beyond_old_file_prefix(tmp_path: Path) -> None:
+    (tmp_path / "large.txt").write_text(
+        "x" * 70_000 + "\nneedle-after-prefix\n",
+        encoding="utf-8",
+    )
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        result = await session.search_files("needle-after-prefix")
+    finally:
+        await session.close()
+
+    assert "large.txt:2:needle-after-prefix" in result
+
+
+async def test_local_sandbox_search_accepts_single_file_path(tmp_path: Path) -> None:
+    (tmp_path / "target.txt").write_text("needle\n", encoding="utf-8")
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        result = await session.search_files("needle", path="target.txt")
+    finally:
+        await session.close()
+
+    assert result == "target.txt:1:needle"
+
+
+async def test_local_sandbox_read_reports_binary_file(tmp_path: Path) -> None:
+    payload = b"\x89PNG\r\n\x1a\n\x00payload"
+    (tmp_path / "image.bin").write_bytes(payload)
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        result = await session.read_file("image.bin")
+    finally:
+        await session.close()
+
+    assert result == f"[Binary file: {len(payload)} bytes. Use a binary-aware tool to inspect.]"
+
+
+async def test_local_sandbox_read_replaces_invalid_utf8(tmp_path: Path) -> None:
+    (tmp_path / "mixed.txt").write_bytes(b"before-\xff-after\n")
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        result = await session.read_file("mixed.txt")
+    finally:
+        await session.close()
+
+    assert "before-\ufffd-after" in result
+
+
+async def test_local_sandbox_listing_includes_regular_file_size(tmp_path: Path) -> None:
+    (tmp_path / "sample.txt").write_bytes(b"abc")
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        result = await session.list_directory()
+    finally:
+        await session.close()
+
+    assert "sample.txt  (3 bytes)" in result
+
+
+async def test_local_sandbox_file_info_includes_text_metadata(tmp_path: Path) -> None:
+    content = "first\nsecond\n"
+    (tmp_path / "sample.txt").write_text(content, encoding="utf-8")
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        result = await session.file_info("sample.txt")
+    finally:
+        await session.close()
+
+    assert "binary: false" in result
+    assert "lines: 2" in result
+    assert f"hash: {hashlib.sha256(content.encode()).hexdigest()}" in result
