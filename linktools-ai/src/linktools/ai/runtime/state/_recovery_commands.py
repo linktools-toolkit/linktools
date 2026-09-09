@@ -44,11 +44,13 @@ class RuntimeRecoveryCommands:
         operations: OperationLedgerRepository,
         tools: ToolRepositoryImpl,
         *,
+        execution_operations: OperationLedgerRepository,
         background_tasks: "set[asyncio.Task[object]]",
     ) -> None:
         self._execution = execution
         self._events = events
         self._operations = operations
+        self._execution_operations = execution_operations
         self._tools = tools
         self._background_tasks = background_tasks
 
@@ -89,6 +91,135 @@ class RuntimeRecoveryCommands:
             next_error_code=None,
             next_safe_error_details={},
         )
+
+    async def commit_cancel_intent(
+        self,
+        execution: ExecutionRecord,
+        operation: OperationLedgerInput,
+    ) -> OperationLedgerRecord:
+        if (
+            execution.status is not ExecutionStatus.RECOVERY_REQUIRED
+            or operation.tenant_id != execution.tenant_id
+            or operation.resource_kind is not ResourceKind.EXECUTION
+            or operation.resource_id != execution.execution_id
+            or operation.execution_id != execution.execution_id
+            or operation.operation_kind is not OperationKind.EXECUTION_CANCEL
+            or operation.status is not OperationStatus.PENDING
+        ):
+            raise ValueError("recovery cancel intent is invalid")
+        stores = _dedupe_stores(
+            (
+                self._execution.state_store,
+                self._execution_operations.state_store,
+            )
+        )
+        if any(store.storage_group is not stores[0].storage_group for store in stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        key = self._execution._key("execution", execution.execution_id)
+        stream = stream_digest(
+            self._execution._namespace,
+            execution.tenant_id,
+            self._execution._domain.value,
+            "execution",
+            execution.execution_id,
+        )
+
+        async def durable_operation() -> OperationLedgerRecord:
+            async def mutate(group: StateGroupTransaction) -> OperationLedgerRecord:
+                execution_tx = group.transaction(self._execution.state_store)
+                operation_tx = group.transaction(self._execution_operations.state_store)
+                current_operation = await self._execution_operations.get_in_transaction(
+                    operation_tx,
+                    operation.operation_id,
+                    tenant_id=operation.tenant_id,
+                )
+                if current_operation is not None:
+                    if not _same_operation_identity(current_operation, operation):
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    return current_operation
+                stored = await execution_tx.get_record(key)
+                if stored is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                current = await self._execution._decode(stored, ExecutionRecord)
+                if (
+                    current.status is not ExecutionStatus.RECOVERY_REQUIRED
+                    or current.revision != execution.revision
+                    or current.event_sequence != execution.event_sequence
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                admitted, replayed = await _append_operation(
+                    operation_tx,
+                    self._execution_operations,
+                    operation,
+                )
+                if replayed:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                updated = replace(
+                    current,
+                    revision=current.revision + 1,
+                    event_sequence=current.event_sequence + 1,
+                    updated_at=await execution_tx.now(),
+                )
+                await _replace_checked(
+                    execution_tx,
+                    _projected_record(self._execution, stored, updated),
+                    stored.storage_version,
+                )
+                await execution_tx.insert_facts(
+                    (
+                        StoredFact(
+                            stream,
+                            updated.event_sequence,
+                            key,
+                            ExecutionEventType.CANCEL_REQUESTED.value,
+                            None,
+                            None,
+                            {"operation_id": operation.operation_id},
+                        ),
+                    )
+                )
+                return admitted
+
+            return await stores[0].storage_group.mutate(stores, mutate)
+
+        async def readback() -> CommitObservation[OperationLedgerRecord]:
+            try:
+                current_operation = await self._execution_operations.get(
+                    operation.operation_id,
+                    tenant_id=operation.tenant_id,
+                )
+                current_execution = await self._execution.get(
+                    execution.execution_id,
+                    tenant_id=execution.tenant_id,
+                )
+                if current_operation is not None:
+                    if not _same_operation_identity(current_operation, operation):
+                        return _partial()
+                    if (
+                        current_execution is None
+                        or current_execution.revision < execution.revision + 1
+                        or current_execution.event_sequence
+                        < execution.event_sequence + 1
+                    ):
+                        return _partial()
+                    return CommitObservation(
+                        DurableCommitState.COMMITTED,
+                        value=current_operation,
+                    )
+                if current_execution == execution:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                return _partial()
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                    return _partial(error)
+                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
+
+        outcome = await run_durable_commit(
+            durable_operation,
+            readback,
+            background_tasks=self._background_tasks,
+        )
+        return _require_committed(outcome)
 
     async def _commit_execution_transition(
         self,
@@ -378,7 +509,7 @@ class RuntimeRecoveryCommands:
         return _require_committed(outcome)
 
 
-def _same_resolution_operation(
+def _same_operation_identity(
     current: OperationLedgerRecord,
     candidate: OperationLedgerInput,
 ) -> bool:
@@ -389,12 +520,21 @@ def _same_resolution_operation(
         and current.resource_id == candidate.resource_id
         and current.execution_id == candidate.execution_id
         and current.operation_kind is candidate.operation_kind
-        and current.status is candidate.status
         and current.request_digest == candidate.request_digest
+        and current.compactable == candidate.compactable
+    )
+
+
+def _same_resolution_operation(
+    current: OperationLedgerRecord,
+    candidate: OperationLedgerInput,
+) -> bool:
+    return (
+        _same_operation_identity(current, candidate)
+        and current.status is candidate.status
         and current.result_ref == candidate.result_ref
         and current.result_digest == candidate.result_digest
         and current.error_code == candidate.error_code
-        and current.compactable == candidate.compactable
     )
 
 
