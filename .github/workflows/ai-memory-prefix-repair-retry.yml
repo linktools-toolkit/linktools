@@ -1,0 +1,111 @@
+name: Retry AI memory prefix repair
+
+on:
+  push:
+    branches:
+      - refactor/ai-harness-capabilities
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-harness-capabilities
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply corrected memory prefix repair
+        shell: bash
+        run: |
+          python - <<'RUNNER'
+          from __future__ import annotations
+
+          import subprocess
+          import textwrap
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/ai-memory-prefix-repair.yml').read_text(encoding='utf-8')
+          start_marker = "          python - <<'PY'\n"
+          end_marker = "\n          PY\n"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          repair = Path('/tmp/memory-prefix-repair.py')
+          repair.write_text(textwrap.dedent(workflow[start:end]), encoding='utf-8')
+          subprocess.run(['python', str(repair)], check=True)
+
+          subprocess.run(
+              ['git', 'checkout', '--', 'linktools-ai/src/linktools/ai/runtime/state/_repositories.py'],
+              check=True,
+          )
+
+          fs_path = Path('linktools-ai/src/linktools/ai/runtime/state/_filesystem.py')
+          fs = fs_path.read_text(encoding='utf-8')
+          start = fs.index('def _record_query_indexable(query: RecordQuery) -> bool:\n')
+          end = fs.index('\ndef _record_index_identity(', start)
+          fs = fs[:start] + '''def _record_query_indexable(query: RecordQuery) -> bool:\n    after_valid = (\n        query.after_sort_key is None\n        and query.after_key_digest is None\n        or query.after_sort_key is not None\n        and query.after_key_digest is not None\n        and _record_sort_token(query.after_sort_key) is not None\n    )\n    prefix_valid = (\n        query.sort_key_prefix is None\n        or _record_sort_token(query.sort_key_prefix) is not None\n    )\n    return (\n        query.kind == "memory"\n        and query.scope_digest is not None\n        and query.partition_digest is None\n        and query.parent_digest is None\n        and query.states is None\n        and query.limit is not None\n        and prefix_valid\n        and after_valid\n    )\n\n''' + fs[end + 1:]
+
+          start = fs.index('def _record_index_select(\n')
+          end = fs.index('\ndef _build_record_index_nodes(', start)
+          fs = fs[:start] + '''def _record_index_select(\n    root: Path,\n    query: RecordQuery,\n) -> tuple[tuple[str, bytes], ...]:\n    if query.kind != "memory" or query.scope_digest is None or query.limit is None:\n        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n    prefix = (\n        ""\n        if query.sort_key_prefix is None\n        else _record_sort_token(query.sort_key_prefix)\n    )\n    after = _record_sort_token(query.after_sort_key)\n    if prefix is None or query.after_sort_key is not None and after is None:\n        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n    heap = [prefix]\n    selected: list[tuple[str, bytes]] = []\n    while heap and len(selected) < query.limit:\n        token = heapq.heappop(heap)\n        node = _read_record_index_node(root, query.kind, query.scope_digest, token)\n        if node is None:\n            if token == prefix:\n                return ()\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        if node.key_digest is not None and (\n            after is None\n            or query.after_key_digest is not None\n            and (token, node.key_digest) > (after, query.after_key_digest)\n        ):\n            selected.append((token, node.key_digest))\n            if len(selected) == query.limit:\n                break\n        for child in node.children:\n            child_token = token + child\n            if (\n                after is not None\n                and child_token < after\n                and not after.startswith(child_token)\n            ):\n                continue\n            heapq.heappush(heap, child_token)\n    return tuple(selected)\n\n''' + fs[end + 1:]
+          fs_path.write_text(fs, encoding='utf-8')
+
+          test_path = Path('tests/ai/test_memory_bounded_listing.py')
+          test = test_path.read_text(encoding='utf-8')
+          old = '            "prefix": "memory/",\n'
+          if old not in test:
+              raise SystemExit('old prefix expectation missing')
+          test = test.replace(old, '            "prefix": "memory",\n', 1)
+          marker_old = 'assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "1"'
+          if marker_old not in test:
+              raise SystemExit('old record index marker expectation missing')
+          test = test.replace(marker_old, 'assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "2"', 1)
+          test_path.write_text(test, encoding='utf-8')
+
+          for path in (
+              Path('linktools-ai/src/linktools/ai/runtime/_memory.py'),
+              fs_path,
+              test_path,
+          ):
+              compile(path.read_text(encoding='utf-8'), str(path), 'exec')
+          RUNNER
+      - name: Install project
+        shell: bash
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Format changed Python
+        shell: bash
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=ACM -- '*.py')
+          if ((${#files[@]})); then
+            python -m ruff format "${files[@]}"
+          fi
+      - name: Run focused regressions
+        shell: bash
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/ai/test_memory_bounded_listing.py \
+            tests/ai/test_review_contract_cleanup.py \
+            tests/ai/test_persistence_compatibility.py \
+            tests/ai/test_runtime_storage_contracts.py
+      - name: Run package gate
+        shell: bash
+        run: |
+          python manage.py check linktools-ai
+          git diff --check
+      - name: Commit repair
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/ai-memory-prefix-repair.yml .github/workflows/ai-memory-prefix-repair-retry.yml
+          git add -A
+          git commit -m 'fix(ai): bound memory prefix listing'
+          git push origin HEAD:refactor/ai-harness-capabilities
