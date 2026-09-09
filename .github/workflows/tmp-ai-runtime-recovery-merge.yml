@@ -8,14 +8,25 @@ on:
 permissions:
   contents: write
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
 jobs:
   finalize-merge:
-    if: "${{ github.event.head_commit.message == 'chore(ai): finalize master merge' }}"
+    if: "${{ github.event.head_commit.message == 'chore(ai): retry master merge' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
       - name: Merge latest master and validate
         shell: bash
         run: |
@@ -125,6 +136,7 @@ jobs:
           fi
 
           grep -q 'ToolEffectNotAppliedError' linktools-ai/src/linktools/ai/capability/__init__.py
+          grep -q 'SUBAGENT_CAPABILITY_ID' linktools-ai/src/linktools/ai/capability/__init__.py
           grep -q 'from ._input import validate_user_input' linktools-ai/src/linktools/ai/runtime/_agent.py
           ! grep -q 'prepare_user_prompt' linktools-ai/src/linktools/ai/runtime/_agent.py
           grep -q 'RecoveryExecutionService' linktools-ai/src/linktools/ai/runtime/_factory.py
@@ -134,7 +146,7 @@ jobs:
           grep -q 'release_terminal=release_execution_handoff' linktools-ai/src/linktools/ai/runtime/_factory.py
 
           git diff --cached --check
-          python manage.py install --editable
+          python manage.py install --editable --quiet
           python manage.py check linktools-ai
 
           git status --short
