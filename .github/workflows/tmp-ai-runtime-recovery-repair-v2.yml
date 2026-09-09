@@ -1,4 +1,4 @@
-name: Temporary AI Runtime Recovery Repair V2
+name: Temporary AI Runtime Recovery Repair V3
 
 on:
   push:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   repair:
-    if: "${{ github.event.head_commit.message == 'ci(ai): run recovery repair v2' }}"
+    if: "${{ github.event.head_commit.message == 'ci(ai): run recovery repair v3' }}"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -42,10 +42,16 @@ jobs:
           end = helper.index("          PY\n", start)
           script = textwrap.dedent(helper[start:end])
           exec(compile(script, 'recovery-repair.py', 'exec'))
+
+          path = Path('tests/ai/test_tool_unknown_execution_boundary.py')
+          text = path.read_text()
+          old = '''async def test_committed_unknown_effect_beats_caller_cancellation(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    async def committed(*args: Any, **kwargs: Any) -> DurableCommitResult[object]:\n        del args, kwargs\n        return DurableCommitResult(DurableCommitState.COMMITTED, cancelled=True)\n'''
+          new = '''async def test_committed_unknown_effect_raises_boundary_error(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    async def committed(*args: Any, **kwargs: Any) -> DurableCommitResult[object]:\n        del args, kwargs\n        return DurableCommitResult(DurableCommitState.COMMITTED)\n'''
+          if text.count(old) != 1:
+              raise RuntimeError('tool unknown boundary fixture changed')
+          path.write_text(text.replace(old, new, 1))
           PY
 
-          # Durable EFFECT_UNKNOWN is authoritative even when the caller is cancelled.
-          git checkout -- linktools-ai/src/linktools/ai/runtime/_tool.py
           git diff --check
           python -m pytest -q \
             tests/ai/test_execution_recovery_commands.py \
@@ -67,9 +73,11 @@ jobs:
             linktools-ai/src/linktools/ai/runtime/state/_recovery_commands.py \
             linktools-ai/src/linktools/ai/runtime/_metric_capability.py \
             linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            linktools-ai/src/linktools/ai/runtime/_tool.py \
             linktools-ai/src/linktools/ai/runtime/_capabilities.py \
             tests/ai/test_model_metric_trace_link.py \
             tests/ai/test_task_event_codec_contract.py \
-            tests/ai/test_tool_effect_semantics.py
+            tests/ai/test_tool_effect_semantics.py \
+            tests/ai/test_tool_unknown_execution_boundary.py
           git commit -m 'fix(ai): preserve recovery state and retry lineage'
           git push origin HEAD:feat/ai-runtime-durable-recovery
