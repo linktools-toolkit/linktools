@@ -41,6 +41,11 @@ from ..task import (
     TaskGraphView,
 )
 from ._snapshot import RunSnapshot
+from .recovery import (
+    ExecutionRecoveryEffect,
+    ResolveToolEffectRequest,
+    ToolEffectResolutionResult,
+)
 
 
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
@@ -707,6 +712,23 @@ class ExecutionService(Protocol):
     async def cancel(
         self, execution_id: str, request: CancelExecutionRequest
     ) -> CancelExecutionResult: ...
+    async def recovery_effects(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> tuple[ExecutionRecoveryEffect, ...]: ...
+    async def resolve_tool_effect(
+        self,
+        execution_id: str,
+        request: ResolveToolEffectRequest,
+    ) -> ToolEffectResolutionResult: ...
+    async def recover(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionHandle: ...
     async def trace(
         self,
         execution_id: str,
