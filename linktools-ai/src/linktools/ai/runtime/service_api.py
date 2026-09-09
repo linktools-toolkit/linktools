@@ -759,9 +759,6 @@ class ExecutionService(Protocol):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
-    async def list_children(
-        self, execution_id: str, *, principal: Principal
-    ) -> tuple[ExecutionView, ...]: ...
     def stream_tree(
         self,
         execution_id: str,
