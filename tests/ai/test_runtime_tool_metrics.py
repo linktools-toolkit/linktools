@@ -8,7 +8,11 @@ from typing import Any
 
 import pytest
 from linktools.ai.observe import Observation
-from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capabilities import (
+    ToolOperationDecision,
+    _RuntimeStepPersistence,
+)
 from linktools.ai.runtime._tool_metrics import _ToolMetricContext
 from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.messages import ToolCallPart
@@ -38,6 +42,10 @@ class _Bridge:
         self.decision = decision
         self.calls: list[str] = []
 
+    async def effective_args(self, ctx, call, tool_def, args):
+        del ctx, call, tool_def
+        return args
+
     async def begin(
         self,
         ctx: RunContext[None],
@@ -64,7 +72,9 @@ class _Bridge:
         self.calls.append("fail")
         return False
 
-    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None:
+    async def unknown(
+        self, decision: ToolOperationDecision, error: BaseException
+    ) -> None:
         del decision, error
         self.calls.append("unknown")
 
@@ -92,11 +102,13 @@ def _metric_context(recorder: _Recorder) -> _ToolMetricContext:
 async def _capability(
     decision: ToolOperationDecision,
     recorder: _Recorder,
-) -> tuple[_RuntimeStepPersistence, _Bridge, RunContext[None], ToolCallPart, ToolDefinition]:
+) -> tuple[
+    _RuntimeStepPersistence, _Bridge, RunContext[None], ToolCallPart, ToolDefinition
+]:
     bridge = _Bridge(decision)
     capability = _RuntimeStepPersistence(
         tool_operations=bridge,
-        store=_StepStore(),
+        store=HarnessStepStoreAdapter(_StepStore(), execution_id=None),
         agent_name="agent",
         run_id="run",
         tool_metrics=_metric_context(recorder),
@@ -191,7 +203,9 @@ async def test_actual_tool_handler_emits_one_execution_metric() -> None:
     assert observation.measurements[0].value >= 0
 
 
-async def test_skip_tool_execution_emits_success_metric_and_durable_completion() -> None:
+async def test_skip_tool_execution_emits_success_metric_and_durable_completion() -> (
+    None
+):
     recorder = _Recorder()
     capability, bridge, context, call, definition = await _capability(
         ToolOperationDecision("operation", "owner", 1, True),

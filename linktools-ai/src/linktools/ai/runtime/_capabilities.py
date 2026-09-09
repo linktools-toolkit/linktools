@@ -36,7 +36,7 @@ from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from ._platform_capabilities import (
+from ._tool_policy import (
     MEMORY_READ_TOOL_NAMES,
     MEMORY_TOOL_NAMES,
     PLANNING_TOOL_NAMES,
@@ -47,7 +47,6 @@ from ._platform_capabilities import (
     WORKSPACE_SHELL_TOOL_NAMES,
     ToolOperationBridge,
     ToolOperationDecision,
-    _CompactionCapability,
     _DURATION_NS_METADATA_KEY,
     _MEMORY_CAPABILITY_ID,
     _MODEL_EFFECT_UNKNOWN_MESSAGE,
@@ -55,14 +54,11 @@ from ._platform_capabilities import (
     _OBSERVATION_ID_METADATA_KEY,
     _PLANNING_CAPABILITY_ID,
     _ToolCallState,
-    _WorkspaceToolGate,
     _bypasses_tool_error_hook,
     _durable_failure_error,
     _model_tool_error,
     _model_usage_metadata,
-    _repository_instruction_marker,
     _tool_execution_policy,
-    _validate_compaction_target,
     _validate_trusted_mcp_selectors,
     _validate_trusted_tool_classes,
     select_runtime_tool_names,
@@ -70,8 +66,9 @@ from ._platform_capabilities import (
     tool_is_control,
     tool_name_allowed,
 )
+from ._workspace_gate import _WorkspaceToolGate
 from ._metric_id import _tool_observation_id
-from ._compaction import ExternalModelRequestObserver
+from ._compaction import ExternalModelRequestObserver, RuntimeCompaction
 from ._harness import (
     HarnessPlanStoreAdapter,
     HarnessStepStoreAdapter,
@@ -93,7 +90,6 @@ _logger = environ.get_logger("ai.runtime.capabilities")
 class _RuntimeStepPersistence(StepPersistence[None]):
     """Use Harness for graph persistence while LinkTools owns durable tool effects."""
 
-    execution_id: str | None = field(default=None, repr=False, compare=False)
     tool_operations: ToolOperationBridge = field(repr=False, compare=False)
     plan_mode: bool = False
     trusted_tool_classes: tuple[tuple[str, str], ...] = ()
@@ -145,13 +141,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     def __post_init__(self) -> None:
         if not isinstance(self.plan_mode, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        _validate_trusted_tool_classes(self.trusted_tool_classes)
-        _validate_trusted_mcp_selectors(self.trusted_mcp_selectors)
         if not isinstance(self.store, HarnessStepStoreAdapter):
-            self.store = HarnessStepStoreAdapter(
-                cast(StepStore, self.store),
-                execution_id=self.execution_id,
-            )
+            raise TypeError("store must be HarnessStepStoreAdapter")
         if self.model_journal is None and self.tool_metrics is not None:
             self.model_journal = ModelRequestJournal(
                 source_namespace=self.tool_metrics.source_namespace,
@@ -466,10 +457,6 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
     ) -> dict[str, Any]:
         del ctx, call
-        _tool_execution_policy(
-            tool_def,
-            trusted_tool_classes=self.trusted_tool_classes,
-        )
         if self.plan_mode and not tool_allowed_in_planning(
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
@@ -494,11 +481,8 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             tool_def,
             trusted_tool_classes=self.trusted_tool_classes,
         )
-        effective_args_method = getattr(self.tool_operations, "effective_args", None)
-        effective_args = (
-            args
-            if effective_args_method is None
-            else await effective_args_method(ctx, call, tool_def, args)
+        effective_args = await self.tool_operations.effective_args(
+            ctx, call, tool_def, args
         )
         try:
             decision = await self.tool_operations.begin(
@@ -598,7 +582,9 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                     if state.handler_entered and not state.policy.replay_safe:
                         await self._mark_unknown(state, heartbeat_error)
                         keep_call_state = False
-                        raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from heartbeat_error
+                        raise ToolFailed(
+                            _MODEL_EFFECT_UNKNOWN_MESSAGE
+                        ) from heartbeat_error
                     state.preserve_started = True
                     raise heartbeat_error
             try:
@@ -675,7 +661,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 raise
             raise AssertionError("known failure tool hook must raise")
         except (CallDeferred, ApprovalRequired) as signal:
-            if state.handler_entered and not state.policy.replay_safe and not state.policy.effect_free:
+            if (
+                state.handler_entered
+                and not state.policy.replay_safe
+                and not state.policy.effect_free
+            ):
                 await self._mark_unknown(state, signal)
                 keep_call_state = False
                 raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from signal
@@ -746,7 +736,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> dict[str, str]:
         metadata = dict(self.metadata)
         metrics = self.tool_metrics
-        if metrics is None or not state.handler_entered or state.metric_started_ns is None:
+        if (
+            metrics is None
+            or not state.handler_entered
+            or state.metric_started_ns is None
+        ):
             return metadata
         metadata[_OBSERVATION_ID_METADATA_KEY] = _tool_observation_id(
             metrics.source_namespace,
@@ -819,7 +813,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         state = self._calls.get(key)
         if state is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if state.preserve_started or not state.operation_terminalized or state.cached_failure:
+        if (
+            state.preserve_started
+            or not state.operation_terminalized
+            or state.cached_failure
+        ):
             self._calls.pop(key, None)
             raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
         try:
@@ -848,11 +846,21 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         if state is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
         try:
-            if state.operation_terminalized or state.cached_failure or state.preserve_started:
+            if (
+                state.operation_terminalized
+                or state.cached_failure
+                or state.preserve_started
+            ):
                 raise error
             if isinstance(
                 error,
-                (ValidationError, ModelRetry, ToolRetryError, ToolFailed, ToolFailedError),
+                (
+                    ValidationError,
+                    ModelRetry,
+                    ToolRetryError,
+                    ToolFailed,
+                    ToolFailedError,
+                ),
             ):
                 if (
                     isinstance(error, ValidationError)
@@ -1083,7 +1091,6 @@ def _external_observer(
 async def compose_platform_capabilities(
     *,
     agent_name: str,
-    conversation_id: str | None,
     step_run_id: str,
     execution_id: str | None = None,
     segment_sequence: int | None,
@@ -1105,13 +1112,11 @@ async def compose_platform_capabilities(
     model_journal: ModelRequestJournal | None = None,
     external_model_request_observer: ExternalModelRequestObserver | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
-    _validate_compaction_target(context_target_tokens)
     _validate_trusted_tool_classes(trusted_tool_classes)
     _validate_trusted_mcp_selectors(trusted_mcp_selectors)
     capabilities: list[AbstractCapability[None]] = []
     persistence = _RuntimeStepPersistence(
-        store=cast(Any, step_store),
-        execution_id=execution_id,
+        store=HarnessStepStoreAdapter(step_store, execution_id=execution_id),
         agent_name=agent_name,
         run_id=step_run_id,
         parent_run_id=parent_step_run_id,
@@ -1166,7 +1171,7 @@ async def compose_platform_capabilities(
             )
         )
     capabilities.append(
-        _CompactionCapability(
+        RuntimeCompaction(
             context_target_tokens,
             trusted_workspace_read=(
                 dict(trusted_tool_classes).get("read_file") == "filesystem.read"

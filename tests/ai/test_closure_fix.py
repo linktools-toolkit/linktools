@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from linktools.ai.core import Principal, TaskStatus, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
@@ -19,7 +20,13 @@ from linktools.ai.runtime._capabilities import (
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
 from linktools.ai.runtime.state import ToolOperationAdmission
 from linktools.ai.storage import PayloadPolicy, StoredPayload
-from linktools.ai.task._graph import TaskGraph, TaskGraphLaunch, TaskGraphRequest, TaskGraphView, TaskNode
+from linktools.ai.task._graph import (
+    TaskGraph,
+    TaskGraphLaunch,
+    TaskGraphRequest,
+    TaskGraphView,
+    TaskNode,
+)
 from linktools.ai.task._local import LocalTaskGraphLauncher, TaskNodeRunResult
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
@@ -42,6 +49,10 @@ class _ToolBridge:
     def __init__(self, decision: ToolOperationDecision) -> None:
         self.decision = decision
         self.calls: list[str] = []
+
+    async def effective_args(self, ctx, call, tool_def, args):
+        del ctx, call, tool_def
+        return args
 
     async def begin(self, ctx, call, tool_def, args, replay_safe):
         del ctx, call, tool_def, args
@@ -99,7 +110,9 @@ def _context() -> RunContext[None]:
 
 
 def _definition(replay_safe: bool) -> ToolDefinition:
-    return ToolDefinition(name="tool", metadata={"linktools.ai.replay_safe": replay_safe})
+    return ToolDefinition(
+        name="tool", metadata={"linktools.ai.replay_safe": replay_safe}
+    )
 
 
 async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -> None:
@@ -239,7 +252,9 @@ async def test_custom_tool_replay_metadata_remains_explicit_opt_in() -> None:
         ToolDefinition(name="custom", metadata={"linktools.ai.replay_safe": True}),
         trusted_tool_classes=(),
     )
-    unsafe = _tool_execution_policy(ToolDefinition(name="custom"), trusted_tool_classes=())
+    unsafe = _tool_execution_policy(
+        ToolDefinition(name="custom"), trusted_tool_classes=()
+    )
     assert (safe.replay_safe, safe.effect_free) == (True, False)
     assert (unsafe.replay_safe, unsafe.effect_free) == (False, False)
 
@@ -249,20 +264,26 @@ async def _capability(replay_safe: bool):
     store = _StepStore()
     capability = _RuntimeStepPersistence(
         tool_operations=bridge,
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id="run",
     )
     context = _context()
     call = ToolCallPart("tool", {}, tool_call_id="call")
     definition = _definition(replay_safe)
-    await capability.before_tool_execute(context, call=call, tool_def=definition, args={})
+    await capability.before_tool_execute(
+        context, call=call, tool_def=definition, args={}
+    )
     return capability, bridge, store, context, call, definition
 
 
 @pytest.mark.parametrize("replay_safe", [True, False])
-async def test_model_retry_is_known_failure_regardless_of_replay_safety(replay_safe: bool) -> None:
-    capability, bridge, store, context, call, definition = await _capability(replay_safe)
+async def test_model_retry_is_known_failure_regardless_of_replay_safety(
+    replay_safe: bool,
+) -> None:
+    capability, bridge, store, context, call, definition = await _capability(
+        replay_safe
+    )
 
     async def handler(_args: dict[str, Any]) -> None:
         raise ModelRetry("retry")
@@ -360,7 +381,9 @@ async def test_local_scheduler_terminal_exit_wakes_waiter_and_cleans_entry() -> 
         owner="launcher",
     )
     await launcher.start(_task_request())
-    waiter = asyncio.create_task(launcher.wait_graph_activity("graph", tenant_id="tenant"))
+    waiter = asyncio.create_task(
+        launcher.wait_graph_activity("graph", tenant_id="tenant")
+    )
     await asyncio.wait_for(waiter, timeout=1)
     await asyncio.sleep(0)
     assert not launcher._graphs
@@ -388,7 +411,9 @@ async def test_launcher_cancel_clears_retained_failure() -> None:
     repository.failure = RuntimeError("scheduler failure")
     launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
     request = _task_request()
-    launch = TaskGraphLaunch(request.graph, request.principal, request.limits, request.correlation)
+    launch = TaskGraphLaunch(
+        request.graph, request.principal, request.limits, request.correlation
+    )
     await launcher.start(launch)
     await asyncio.sleep(0)
     await asyncio.sleep(0)

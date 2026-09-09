@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import os
-from bisect import bisect_right
 from collections.abc import (
     AsyncIterator,
     Iterator,
@@ -76,16 +75,6 @@ class _FactStreamInfo:
     subjects_loaded: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class _RecordQueryIndexKey:
-    kind: str | None
-    partition_digest: bytes | None
-    scope_digest: bytes | None
-    parent_digest: bytes | None
-    states: frozenset[str] | None
-    sort_key_prefix: str | None
-
-
 class _FilesystemCache:
     def __init__(self, root: Path) -> None:
         self._root = root
@@ -103,11 +92,7 @@ class _FilesystemCache:
         self._cache_misses = 0
         self._record_kind_scans = 0
         self._business_files_read = 0
-        self._record_cache_generation = 0
-        self._record_query_indexes: dict[
-            _RecordQueryIndexKey,
-            tuple[int, tuple[tuple[str, bytes], ...]],
-        ] = {}
+        self._record_index_complete = _record_index_marker_valid(root)
 
     def get_record(self, key: bytes) -> StoredRecord | None:
         if key in self._records:
@@ -134,41 +119,81 @@ class _FilesystemCache:
         return None
 
     def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
+        indexed = self._list_indexed_records(query)
+        if indexed is not None:
+            return indexed
         kinds = (query.kind,) if query.kind is not None else self._record_kind_names()
         for kind in kinds:
             self._load_record_kind(kind)
-        index_key = _RecordQueryIndexKey(
-            query.kind,
-            query.partition_digest,
-            query.scope_digest,
-            query.parent_digest,
-            query.states,
-            query.sort_key_prefix,
+        values = sorted(
+            (
+                value
+                for value in self._records.values()
+                if isinstance(value, StoredRecord)
+                and value.kind in kinds
+                and _matches_record(value, query)
+            ),
+            key=lambda record: (record.sort_key, record.key_digest),
         )
-        cached = self._record_query_indexes.get(index_key)
-        if cached is None or cached[0] != self._record_cache_generation:
-            ordered = tuple(
-                (value.sort_key, value.key_digest)
-                for value in sorted(
-                    (
-                        value
-                        for value in self._records.values()
-                        if isinstance(value, StoredRecord)
-                        and value.kind in kinds
-                        and _matches_record(value, query)
-                    ),
-                    key=lambda record: (record.sort_key, record.key_digest),
-                )
-            )
-            cached = (self._record_cache_generation, ordered)
-            self._record_query_indexes[index_key] = cached
-            self._log_summary("record_query_index_build", len(ordered))
-        ordered = cached[1]
-        start = 0
         if query.after_sort_key is not None and query.after_key_digest is not None:
-            start = bisect_right(ordered, (query.after_sort_key, query.after_key_digest))
-        selected = ordered[start:] if query.limit is None else ordered[start : start + query.limit]
-        return tuple(self._records[key] for _, key in selected if self._records.get(key) is not None)
+            values = [
+                value
+                for value in values
+                if (value.sort_key, value.key_digest)
+                > (query.after_sort_key, query.after_key_digest)
+            ]
+        if query.limit is not None:
+            values = values[: query.limit]
+        return tuple(values)
+
+    def _list_indexed_records(
+        self,
+        query: RecordQuery,
+    ) -> tuple[StoredRecord, ...] | None:
+        if not self._record_index_complete or not _record_query_indexable(query):
+            return None
+        root = self._root / _record_index_directory(query)
+        if not root.is_dir():
+            return ()
+        prefix_token = _record_sort_token(query.sort_key_prefix)
+        if prefix_token is None or query.limit is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        after_token = (
+            None
+            if query.after_sort_key is None
+            else _record_sort_token(query.after_sort_key)
+        )
+        if query.after_sort_key is not None and after_token is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        selected: list[tuple[str, bytes, Path]] = []
+        for path in sorted(root.iterdir(), key=lambda value: value.name):
+            if not path.is_file() or path.suffix != ".ref":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            token, separator, key_hex = path.name[:-4].rpartition("!")
+            if separator != "!" or not token.startswith(prefix_token):
+                continue
+            key = _layout_digest(key_hex)
+            if (
+                after_token is not None
+                and query.after_key_digest is not None
+                and (token, key) <= (after_token, query.after_key_digest)
+            ):
+                continue
+            selected.append((token, key, path))
+            if len(selected) == query.limit:
+                break
+        values: list[StoredRecord] = []
+        for token, key, path in selected:
+            value = self.get_record(key)
+            if (
+                value is None
+                or _record_sort_token(value.sort_key) != token
+                or _record_index_path(value) != path.relative_to(self._root).as_posix()
+                or not _matches_record(value, query)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values.append(value)
+        return tuple(values)
 
     def get_alias(self, alias: bytes) -> bytes | None:
         if alias in self._aliases:
@@ -257,7 +282,9 @@ class _FilesystemCache:
 
     def list_fact_streams(self) -> tuple[_FactStreamInfo, ...]:
         if self._fact_streams_complete:
-            return tuple(value for value in self._fact_streams.values() if value is not None)
+            return tuple(
+                value for value in self._fact_streams.values() if value is not None
+            )
         values: list[_FactStreamInfo] = []
         for path in (self._root / "facts").glob("*/*/meta.json"):
             stream, _owner, _last_sequence = _read_fact_metadata(path)
@@ -285,7 +312,9 @@ class _FilesystemCache:
 
     def list_operations(self) -> tuple[StoredOperation, ...]:
         if self._operations_complete:
-            return tuple(value for value in self._operations.values() if value is not None)
+            return tuple(
+                value for value in self._operations.values() if value is not None
+            )
         values: list[StoredOperation] = []
         for path in (self._root / "operations/by-key").glob("*/*.json"):
             value = decode_operation(_read_json(path))
@@ -301,7 +330,14 @@ class _FilesystemCache:
         sequence: int,
     ) -> StoredOperation | None:
         stream = stream_digest.hex()
-        path = self._root / "operations" / "streams" / stream[:2] / stream / f"{sequence:020d}.ref"
+        path = (
+            self._root
+            / "operations"
+            / "streams"
+            / stream[:2]
+            / stream
+            / f"{sequence:020d}.ref"
+        )
         if not path.is_file():
             return None
         _require_layout_path(
@@ -319,7 +355,9 @@ class _FilesystemCache:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return operation
 
-    def list_operation_stream(self, stream_digest: bytes) -> tuple[StoredOperation, ...]:
+    def list_operation_stream(
+        self, stream_digest: bytes
+    ) -> tuple[StoredOperation, ...]:
         stream = stream_digest.hex()
         root = self._root / "operations" / "streams" / stream[:2] / stream
         values: list[StoredOperation] = []
@@ -399,9 +437,7 @@ class _FilesystemCache:
             return ()
         values: list[StoredFact] = []
         for shard in sorted(path for path in facts_root.iterdir() if path.is_dir()):
-            for stream_dir in sorted(
-                path for path in shard.iterdir() if path.is_dir()
-            ):
+            for stream_dir in sorted(path for path in shard.iterdir() if path.is_dir()):
                 stream = _layout_digest(stream_dir.name)
                 if after is not None and stream < after.stream_digest:
                     continue
@@ -508,6 +544,13 @@ class _FilesystemCache:
         self._loaded_record_kinds.add(kind)
         self._record_kind_scans += 1
 
+    @property
+    def record_index_complete(self) -> bool:
+        return self._record_index_complete
+
+    def disable_record_index(self) -> None:
+        self._record_index_complete = False
+
     def set_record(
         self,
         key: bytes,
@@ -515,14 +558,6 @@ class _FilesystemCache:
         *,
         old_kind: str | None = None,
     ) -> None:
-        affected_kinds = {kind for kind in (old_kind, value.kind if value is not None else None) if kind is not None}
-        if affected_kinds:
-            self._record_query_indexes = {
-                index_key: index
-                for index_key, index in self._record_query_indexes.items()
-                if index_key.kind is not None and index_key.kind not in affected_kinds
-            }
-        self._record_cache_generation += 1
         self._records[key] = value
         if isinstance(value, StoredRecord) and self._record_kinds is not None:
             self._record_kinds = tuple(sorted(set(self._record_kinds) | {value.kind}))
@@ -619,7 +654,9 @@ class _FilesystemGroupTransaction:
         try:
             return self._transactions[store]
         except KeyError as error:
-            raise RuntimeError("store was not enlisted in the StateStorageGroup transaction") from error
+            raise RuntimeError(
+                "store was not enlisted in the StateStorageGroup transaction"
+            ) from error
 
 
 class FilesystemStateStorageGroup:
@@ -673,7 +710,9 @@ class FilesystemStateStorageGroup:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         if store._namespace != self._namespace or store._tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        if any(member._runtime_domain == store._runtime_domain for member in self._members):
+        if any(
+            member._runtime_domain == store._runtime_domain for member in self._members
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if store not in self._members:
             self._members.append(store)
@@ -717,7 +756,9 @@ class FilesystemStateStorageGroup:
             )
 
     async def _initialize_locked(self) -> None:
-        ordered = tuple(sorted(self._members, key=lambda member: member.root.as_posix()))
+        ordered = tuple(
+            sorted(self._members, key=lambda member: member.root.as_posix())
+        )
         acquired: list[FilesystemWriterLock] = []
         try:
             if self._standalone:
@@ -745,7 +786,11 @@ class FilesystemStateStorageGroup:
             raise
 
     async def close(self) -> None:
-        if self._closed or not self._members or not all(member._closed for member in self._members):
+        if (
+            self._closed
+            or not self._members
+            or not all(member._closed for member in self._members)
+        ):
             return
         if any(not task.done() for task in self._maintenance_tasks):
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
@@ -754,27 +799,30 @@ class FilesystemStateStorageGroup:
                 return
             if any(not task.done() for task in self._maintenance_tasks):
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
-            if (
-                any(not task.done() for task in self._pending_physical)
-                or any(
-                    not task.done()
-                    for member in self._members
-                    for task in member._pending_physical
-                )
+            if any(not task.done() for task in self._pending_physical) or any(
+                not task.done()
+                for member in self._members
+                for task in member._pending_physical
             ):
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             self._closed = True
             self._initialized = False
-            locks = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
+            locks = tuple(
+                sorted(self._members, key=lambda value: value.root.as_posix())
+            )
             for member in locks:
                 await member._consistency_lock.acquire()
-            for member in sorted(self._members, key=lambda value: value.root.as_posix(), reverse=True):
+            for member in sorted(
+                self._members, key=lambda value: value.root.as_posix(), reverse=True
+            ):
                 await member._writer_lock.release()
             for member in reversed(locks):
                 member._consistency_lock.release()
             if not self._standalone:
                 await self._group_lock.release()
-        _logger.debug("filesystem StateStorageGroup closed: scope=%s", self._scope_digest)
+        _logger.debug(
+            "filesystem StateStorageGroup closed: scope=%s", self._scope_digest
+        )
 
     @asynccontextmanager
     async def offline_exclusivity(self) -> AsyncIterator[None]:
@@ -794,7 +842,9 @@ class FilesystemStateStorageGroup:
             for lock in reversed(acquired):
                 await lock.release()
 
-    async def read(self, store: "FilesystemStateStore", fn: StateCallback[ValueT]) -> ValueT:
+    async def read(
+        self, store: "FilesystemStateStore", fn: StateCallback[ValueT]
+    ) -> ValueT:
         self._ensure_member(store)
         active = active_state_transaction(store)
         if active is not None:
@@ -831,7 +881,9 @@ class FilesystemStateStorageGroup:
         stores: Sequence["FilesystemStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
-        members = tuple(sorted(dict.fromkeys(stores), key=lambda value: value.root.as_posix()))
+        members = tuple(
+            sorted(dict.fromkeys(stores), key=lambda value: value.root.as_posix())
+        )
         if not members:
             raise ValueError("StateStorageGroup mutation requires a store")
         for store in members:
@@ -860,8 +912,7 @@ class FilesystemStateStorageGroup:
                 await store._consistency_lock.acquire()
                 locked.append(store)
             _logger.debug(
-                "filesystem mutation members locked: scope=%s "
-                "member_lock_wait_ms=%.3f",
+                "filesystem mutation members locked: scope=%s member_lock_wait_ms=%.3f",
                 self._scope_digest,
                 (monotonic() - member_wait_started) * 1000,
             )
@@ -881,7 +932,9 @@ class FilesystemStateStorageGroup:
                     result = await fn(group_transaction)
                 finally:
                     reset_state_transaction(token)
-                if any(transaction.has_changes for transaction in transactions.values()):
+                if any(
+                    transaction.has_changes for transaction in transactions.values()
+                ):
                     await self._commit(transactions)
                 return result
             finally:
@@ -906,7 +959,9 @@ class FilesystemStateStorageGroup:
     async def _validate_integrity_owned(self) -> None:
         async with self._mutation_lock:
             self._ensure_ready()
-            ordered = tuple(sorted(self._members, key=lambda value: value.root.as_posix()))
+            ordered = tuple(
+                sorted(self._members, key=lambda value: value.root.as_posix())
+            )
             for member in ordered:
                 await member._consistency_lock.acquire()
             try:
@@ -955,7 +1010,9 @@ class FilesystemStateStorageGroup:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @staticmethod
-    def _manifest_matches(actual: Mapping[str, object], expected: Mapping[str, object]) -> bool:
+    def _manifest_matches(
+        actual: Mapping[str, object], expected: Mapping[str, object]
+    ) -> bool:
         return isinstance(actual, Mapping) and actual == expected
 
     def _check_foreign_group_journals_sync(self) -> None:
@@ -970,7 +1027,9 @@ class FilesystemStateStorageGroup:
             journals = tuple(
                 path
                 for path in self._transaction_root.iterdir()
-                if path.is_dir() and path.name.startswith(".txn-") and path.name != own_name
+                if path.is_dir()
+                and path.name.startswith(".txn-")
+                and path.name != own_name
             )
             for journal in journals:
                 if not (journal / "commit").is_file():
@@ -981,7 +1040,10 @@ class FilesystemStateStorageGroup:
                     value = item.get("path") if isinstance(item, Mapping) else item
                     if not isinstance(value, str):
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                    if any(value == root or value.startswith(root + "/") for root in member_paths):
+                    if any(
+                        value == root or value.startswith(root + "/")
+                        for root in member_paths
+                    ):
                         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         except AIError:
             raise
@@ -997,7 +1059,9 @@ class FilesystemStateStorageGroup:
             "members": [
                 {
                     "runtime_domain": member._runtime_domain,
-                    "relative_path": member.root.relative_to(self._transaction_root).as_posix(),
+                    "relative_path": member.root.relative_to(
+                        self._transaction_root
+                    ).as_posix(),
                 }
                 for member in sorted(
                     self._members,
@@ -1022,9 +1086,15 @@ class FilesystemStateStorageGroup:
                 relative = path.relative_to(self._transaction_root)
             except ValueError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if not relative.parts or relative.parts[0] == ".state-groups" or relative.parts[0].startswith(".txn-"):
+            if (
+                not relative.parts
+                or relative.parts[0] == ".state-groups"
+                or relative.parts[0].startswith(".txn-")
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if os.path.commonpath((self._transaction_root, path)) != str(self._transaction_root):
+            if os.path.commonpath((self._transaction_root, path)) != str(
+                self._transaction_root
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             path.mkdir(parents=True, exist_ok=True)
             if os.stat(path).st_dev != device:
@@ -1057,7 +1127,9 @@ class FilesystemStateStorageGroup:
         if not self._initialized:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-    async def _commit(self, transactions: Mapping["FilesystemStateStore", "_FilesystemTransaction"]) -> None:
+    async def _commit(
+        self, transactions: Mapping["FilesystemStateStore", "_FilesystemTransaction"]
+    ) -> None:
         if self._standalone:
             member, transaction = next(iter(transactions.items()))
             await member._commit(transaction)
@@ -1069,7 +1141,11 @@ class FilesystemStateStorageGroup:
         writes: dict[str, bytes] = {}
         deletes: set[str] = set()
         for store, transaction in transactions.items():
-            prefix = "" if self._standalone else store.root.relative_to(self._transaction_root).as_posix()
+            prefix = (
+                ""
+                if self._standalone
+                else store.root.relative_to(self._transaction_root).as_posix()
+            )
             if not self._standalone:
                 writes[f"{prefix}/generation"] = str(target).encode("utf-8")
             for relative, value in transaction.writes.items():
@@ -1140,8 +1216,16 @@ class FilesystemStateStorageGroup:
         if cancellation is not None:
             raise cancellation
 
-    def _commit_sync(self, writes: Mapping[str, bytes], deletes: Sequence[str], base: int, target: int) -> None:
-        plan = self._journal.stage(writes, deletes, base_generation=base, target_generation=target)
+    def _commit_sync(
+        self,
+        writes: Mapping[str, bytes],
+        deletes: Sequence[str],
+        base: int,
+        target: int,
+    ) -> None:
+        plan = self._journal.stage(
+            writes, deletes, base_generation=base, target_generation=target
+        )
         self._journal.publish(plan)
         self._write_generation(target)
         sync_directory(self._transaction_root)
@@ -1268,7 +1352,9 @@ class FilesystemStateStore:
         active = active_state_transaction(self, writable=True)
         if active is not None:
             return await fn(active)
-        return await self._storage_group.mutate((self,), lambda group: fn(group.transaction(self)))
+        return await self._storage_group.mutate(
+            (self,), lambda group: fn(group.transaction(self))
+        )
 
     async def validate_integrity(self) -> None:
         await self._storage_group.validate_integrity()
@@ -1311,7 +1397,9 @@ class FilesystemStateStore:
             return 0
         if self._root.is_dir() and not any(self._root.iterdir()):
             return 0
-        if self._root.is_dir() and all(path.name == "state.lock" for path in self._root.iterdir()):
+        if self._root.is_dir() and all(
+            path.name == "state.lock" for path in self._root.iterdir()
+        ):
             return 0
         return _read_generation_value(self._root / "generation")
 
@@ -1348,12 +1436,23 @@ class FilesystemStateStore:
         manifest = self._root / "manifest.json"
         if manifest.exists():
             self._validate_existing_root()
+            marker = self._root / _RECORD_INDEX_MARKER
+            if not marker.exists() and not any(
+                (self._root / "records").glob("*/*/*.json")
+            ):
+                _write_text(marker, "1")
+                sync_directory(marker.parent)
             return
-        unexpected = [path for path in self._root.iterdir() if path.name != "state.lock"]
+        unexpected = [
+            path for path in self._root.iterdir() if path.name != "state.lock"
+        ]
         if unexpected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _write_json(manifest, self._expected_manifest())
         _write_text(self._root / "generation", "0")
+        marker = self._root / _RECORD_INDEX_MARKER
+        _write_text(marker, "1")
+        sync_directory(marker.parent)
         sync_directory(self._root)
 
     def _load_index(self) -> _FilesystemIndex:
@@ -1384,14 +1483,18 @@ class FilesystemStateStore:
                 aliases[value.alias_digest] = value.record_key_digest
             for path in (self._root / "sequences").glob("*/*.json"):
                 key, value = _read_sequence_metadata(path)
-                _require_layout_path(path, self._root, f"sequences/{key.hex()[:2]}/{key.hex()}.json")
+                _require_layout_path(
+                    path, self._root, f"sequences/{key.hex()[:2]}/{key.hex()}.json"
+                )
                 if key in sequences:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 sequences[key] = value
             for path in (self._root / "operations/by-key").glob("*/*.json"):
                 value = decode_operation(_read_json(path))
                 key = value.key_digest.hex()
-                _require_layout_path(path, self._root, f"operations/by-key/{key[:2]}/{key}.json")
+                _require_layout_path(
+                    path, self._root, f"operations/by-key/{key[:2]}/{key}.json"
+                )
                 if value.key_digest in operations:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 operations[value.key_digest] = value
@@ -1399,18 +1502,26 @@ class FilesystemStateStore:
             facts_root = self._root / "facts"
             for path in facts_root.glob("*/*/meta.json"):
                 stream, owner, last_sequence = _read_fact_metadata(path)
-                _require_layout_path(path, self._root, f"facts/{stream.hex()[:2]}/{stream.hex()}/meta.json")
+                _require_layout_path(
+                    path,
+                    self._root,
+                    f"facts/{stream.hex()[:2]}/{stream.hex()}/meta.json",
+                )
                 if stream in streams:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 subjects: dict[bytes, int] = {}
                 for ref in path.parent.joinpath("subjects").glob("*.ref"):
                     subject = _layout_digest(ref.stem)
                     sequence = _read_subject_sequence(ref)
-                    _require_layout_path(ref, self._root, _fact_subject_path(self._root, stream, subject))
+                    _require_layout_path(
+                        ref, self._root, _fact_subject_path(self._root, stream, subject)
+                    )
                     if subject in subjects or not 1 <= sequence <= last_sequence:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     subjects[subject] = sequence
-                streams[stream] = _FactStreamInfo(stream, owner, last_sequence, subjects)
+                streams[stream] = _FactStreamInfo(
+                    stream, owner, last_sequence, subjects
+                )
             references: dict[tuple[bytes, int], bytes] = {}
             for path in (self._root / "operations/streams").glob("*/*/*.ref"):
                 stream = _layout_digest(path.parent.name)
@@ -1423,7 +1534,8 @@ class FilesystemStateStore:
                 )
                 references[(stream, sequence)] = key
             expected = {
-                (value.stream_digest, value.sequence): value.key_digest for value in operations.values()
+                (value.stream_digest, value.sequence): value.key_digest
+                for value in operations.values()
             }
             if references != expected:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1443,6 +1555,20 @@ class FilesystemStateStore:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _validate_index(self, index: _FilesystemIndex, *, decode_items: bool) -> None:
+        if decode_items and _record_index_marker_valid(self._root):
+            expected_record_index = {_RECORD_INDEX_MARKER}
+            for record in index.records.values():
+                path = _record_index_path(record)
+                if path is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                expected_record_index.add(path)
+            actual_record_index = {
+                path.relative_to(self._root).as_posix()
+                for path in (self._root / "record-index").rglob("*")
+                if path.is_file()
+            }
+            if actual_record_index != expected_record_index:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for key in index.aliases.values():
             if key not in index.records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1454,7 +1580,11 @@ class FilesystemStateStore:
             if decode_items:
                 latest: dict[bytes, int] = {}
                 for sequence in range(1, info.last_sequence + 1):
-                    fact = decode_fact(_read_json(_fact_item_path(self._root, info.stream_digest, sequence)))
+                    fact = decode_fact(
+                        _read_json(
+                            _fact_item_path(self._root, info.stream_digest, sequence)
+                        )
+                    )
                     if (
                         fact.stream_digest != info.stream_digest
                         or fact.sequence != sequence
@@ -1471,7 +1601,9 @@ class FilesystemStateStore:
                 for info in index.fact_streams.values()
             }
             expected_fact_files.update(
-                _fact_item_path(self._root, info.stream_digest, sequence).relative_to(self._root).as_posix()
+                _fact_item_path(self._root, info.stream_digest, sequence)
+                .relative_to(self._root)
+                .as_posix()
                 for info in index.fact_streams.values()
                 for sequence in range(1, info.last_sequence + 1)
             )
@@ -1626,7 +1758,8 @@ class FilesystemStateStore:
         index = self._require_index()
         old_record_kinds = {
             key: index.records[key].kind
-            for key in set(transaction.records.changes()) | set(transaction.records.deleted())
+            for key in set(transaction.records.changes())
+            | set(transaction.records.deleted())
             if key in index.records
         }
         transaction.records.apply_to(index.records)
@@ -1654,6 +1787,8 @@ class FilesystemStateStore:
             index.cache.set_operation(key, None)
         for key, value in transaction.operations.changes().items():
             index.cache.set_operation(key, value)
+        if _RECORD_INDEX_MARKER in transaction.deletes:
+            index.cache.disable_record_index()
         if generation is not None:
             self._index_generation = generation
 
@@ -1742,11 +1877,7 @@ class _FilesystemTransaction:
         cached = await asyncio.to_thread(
             lambda: {key: self._cache.get_record(key) for key in unique_keys}
         )
-        values = {
-            key: value
-            for key, value in cached.items()
-            if value is not None
-        }
+        values = {key: value for key, value in cached.items() if value is not None}
         values.update(
             key_value
             for key_value in self.records.changes().items()
@@ -1773,8 +1904,11 @@ class _FilesystemTransaction:
             self.records[record.key_digest] = record
             self.guarded_record_keys.add(record.key_digest)
             self._write(_record_path(record), encode_record(record))
+            self._sync_record_index(None, record)
 
-    async def guard_record(self, key: bytes, *, expected_storage_version: int) -> StoredRecord | None:
+    async def guard_record(
+        self, key: bytes, *, expected_storage_version: int
+    ) -> StoredRecord | None:
         if (
             isinstance(expected_storage_version, bool)
             or not isinstance(expected_storage_version, int)
@@ -1805,9 +1939,13 @@ class _FilesystemTransaction:
         self._write(_record_path(guarded), encode_record(guarded))
         return guarded
 
-    async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
+    async def replace_record(
+        self, record: StoredRecord, *, expected_storage_version: int
+    ) -> bool:
         try:
-            await self.replace_records((RecordReplacement(record, expected_storage_version),))
+            await self.replace_records(
+                (RecordReplacement(record, expected_storage_version),)
+            )
         except AIError as error:
             if error.code is ErrorCode.STORAGE_CONFLICT:
                 return False
@@ -1822,20 +1960,29 @@ class _FilesystemTransaction:
         if not values:
             return
         current_values = await self.get_records(keys)
-        candidates: list[StoredRecord] = []
+        candidates: list[tuple[StoredRecord, StoredRecord]] = []
         for replacement in sorted(values, key=lambda value: value.record.key_digest):
             current = current_values.get(replacement.record.key_digest)
-            if current is None or current.storage_version != replacement.expected_storage_version:
+            if (
+                current is None
+                or current.storage_version != replacement.expected_storage_version
+            ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             validate_record_replacement(current, replacement.record)
             validate_record_identity(replacement.record)
-            if replacement.record.storage_version != replacement.expected_storage_version + 1:
-                raise ValueError("replacement must increment storage_version exactly once")
-            candidates.append(replacement.record)
-        for record in candidates:
+            if (
+                replacement.record.storage_version
+                != replacement.expected_storage_version + 1
+            ):
+                raise ValueError(
+                    "replacement must increment storage_version exactly once"
+                )
+            candidates.append((current, replacement.record))
+        for current, record in candidates:
             self.records[record.key_digest] = record
             self.guarded_record_keys.add(record.key_digest)
             self._write(_record_path(record), encode_record(record))
+            self._sync_record_index(current, record)
 
     async def update_record_lease(
         self,
@@ -1879,17 +2026,25 @@ class _FilesystemTransaction:
         self._write(_record_path(updated), encode_record(updated))
         return True
 
-    async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
+    async def delete_record(
+        self, key: bytes, *, expected_storage_version: int | None = None
+    ) -> bool:
         if expected_storage_version is not None and (
             isinstance(expected_storage_version, bool)
             or not isinstance(expected_storage_version, int)
             or expected_storage_version < 0
         ):
-            raise ValueError("expected_storage_version must be a non-negative integer or None")
+            raise ValueError(
+                "expected_storage_version must be a non-negative integer or None"
+            )
         current = await self.get_record(key)
         if current is None:
             return False
-        expected = current.storage_version if expected_storage_version is None else expected_storage_version
+        expected = (
+            current.storage_version
+            if expected_storage_version is None
+            else expected_storage_version
+        )
         if await self.guard_record(key, expected_storage_version=expected) is None:
             return False
         await self.delete_fact_streams(key)
@@ -1903,6 +2058,7 @@ class _FilesystemTransaction:
         del self.records[key]
         self.guarded_record_keys.discard(key)
         self._delete(_record_path(current))
+        self._sync_record_index(current, None)
         return True
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
@@ -1914,9 +2070,7 @@ class _FilesystemTransaction:
             cache_query = replace(
                 query,
                 limit=(
-                    query.limit + pending
-                    if query.limit + pending <= 1000
-                    else None
+                    query.limit + pending if query.limit + pending <= 1000 else None
                 ),
             )
         values = {
@@ -1929,13 +2083,16 @@ class _FilesystemTransaction:
         values.update(self.records.changes())
         for key in self.records.deleted():
             values.pop(key, None)
-        values = [record for record in values.values() if _matches_record(record, query)]
+        values = [
+            record for record in values.values() if _matches_record(record, query)
+        ]
         values.sort(key=lambda record: (record.sort_key, record.key_digest))
         if query.after_sort_key is not None and query.after_key_digest is not None:
             values = [
                 record
                 for record in values
-                if (record.sort_key, record.key_digest) > (query.after_sort_key, query.after_key_digest)
+                if (record.sort_key, record.key_digest)
+                > (query.after_sort_key, query.after_key_digest)
             ]
         if query.limit is not None:
             values = values[: query.limit]
@@ -1963,7 +2120,9 @@ class _FilesystemTransaction:
                 value
                 for key, value in self.records.changes().items()
                 if key not in self.records.deleted()
-                and (after is None or (value.kind, key) > (after.kind, after.key_digest))
+                and (
+                    after is None or (value.kind, key) > (after.kind, after.key_digest)
+                )
             ),
             key=lambda value: (value.kind, value.key_digest),
         )
@@ -1987,9 +2146,7 @@ class _FilesystemTransaction:
                     last = base_page[-1]
                     base_after = RecordScanCursor(last.kind, last.key_digest)
                     base_done = len(base_page) < limit
-            base_value = (
-                None if base_index >= len(base_page) else base_page[base_index]
-            )
+            base_value = None if base_index >= len(base_page) else base_page[base_index]
             local_value = None if local_index >= len(local) else local[local_index]
             if base_value is None and local_value is None:
                 break
@@ -2003,11 +2160,10 @@ class _FilesystemTransaction:
             else:
                 value = local_value
                 local_index += 1
-                if (
-                    base_value is not None
-                    and (base_value.kind, base_value.key_digest)
-                    == (value.kind, value.key_digest)
-                ):
+                if base_value is not None and (
+                    base_value.kind,
+                    base_value.key_digest,
+                ) == (value.kind, value.key_digest):
                     base_index += 1
             if value is not None and value.key_digest not in self.records.deleted():
                 result.append(value)
@@ -2043,15 +2199,21 @@ class _FilesystemTransaction:
         values = tuple(sorted(aliases, key=lambda value: value.alias_digest))
         if not values:
             return
-        existing = await self.resolve_aliases(tuple(value.alias_digest for value in values))
+        existing = await self.resolve_aliases(
+            tuple(value.alias_digest for value in values)
+        )
         for alias in values:
             current = existing.get(alias.alias_digest)
             if current is not None and current != alias.record_key_digest:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if alias.record_key_digest not in self.guarded_record_keys:
-                raise RuntimeError("alias owner must be guarded in the current transaction")
+                raise RuntimeError(
+                    "alias owner must be guarded in the current transaction"
+                )
             self.aliases[alias.alias_digest] = alias.record_key_digest
-            self._write(_alias_path(self._root, alias.alias_digest), encode_alias(alias))
+            self._write(
+                _alias_path(self._root, alias.alias_digest), encode_alias(alias)
+            )
 
     async def get_sequence(self, key: bytes) -> int:
         if key in self.sequences.deleted():
@@ -2081,7 +2243,9 @@ class _FilesystemTransaction:
     async def reserve_sequence(self, key: bytes, count: int) -> int:
         return (await self.reserve_sequences({key: count}))[key]
 
-    async def reserve_sequences(self, requests: Mapping[bytes, int]) -> Mapping[bytes, int]:
+    async def reserve_sequences(
+        self, requests: Mapping[bytes, int]
+    ) -> Mapping[bytes, int]:
         if any(
             isinstance(count, bool) or not isinstance(count, int) or count < 1
             for count in requests.values()
@@ -2091,7 +2255,9 @@ class _FilesystemTransaction:
         values = {key: current[key] + requests[key] for key in sorted(requests)}
         for key, value in values.items():
             self.sequences[key] = value
-            self._write(_sequence_path(self._root, key), {"key": key.hex(), "value": value})
+            self._write(
+                _sequence_path(self._root, key), {"key": key.hex(), "value": value}
+            )
         return values
 
     async def advance_sequence(self, key: bytes, expected: int) -> int:
@@ -2131,8 +2297,13 @@ class _FilesystemTransaction:
         info.last_sequence = fact.sequence
         self._deleted_facts.discard(key)
         self._facts[key] = fact
-        self._write(_fact_item_path(self._root, fact.stream_digest, fact.sequence), encode_fact(fact))
-        self._sync_fact_stream(info, subject=fact.subject_digest, sequence=fact.sequence)
+        self._write(
+            _fact_item_path(self._root, fact.stream_digest, fact.sequence),
+            encode_fact(fact),
+        )
+        self._sync_fact_stream(
+            info, subject=fact.subject_digest, sequence=fact.sequence
+        )
 
     async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
         for fact in facts:
@@ -2143,7 +2314,9 @@ class _FilesystemTransaction:
             return ()
         info = self.fact_streams.get(query.stream_digest)
         if info is None and query.stream_digest not in self.fact_streams:
-            info = await asyncio.to_thread(self._cache.get_fact_stream, query.stream_digest)
+            info = await asyncio.to_thread(
+                self._cache.get_fact_stream, query.stream_digest
+            )
         if info is None:
             return ()
         if query.latest:
@@ -2152,7 +2325,11 @@ class _FilesystemTransaction:
             else:
                 await self._load_fact_subjects(info)
                 latest = info.subjects.get(query.subject_digest)
-            if latest is None or query.after_sequence is not None and latest <= query.after_sequence:
+            if (
+                latest is None
+                or query.after_sequence is not None
+                and latest <= query.after_sequence
+            ):
                 return ()
             await self._load_facts(info, (latest,))
             value = self._facts.get((info.stream_digest, latest))
@@ -2175,16 +2352,26 @@ class _FilesystemTransaction:
                 values = values[: query.limit]
             return tuple(values)
         start = 1 if query.after_sequence is None else query.after_sequence + 1
-        end = info.last_sequence + 1 if query.limit is None else min(
-            info.last_sequence + 1,
-            start + query.limit,
+        end = (
+            info.last_sequence + 1
+            if query.limit is None
+            else min(
+                info.last_sequence + 1,
+                start + query.limit,
+            )
         )
         sequences = range(start, end)
         await self._load_facts(info, tuple(sequences))
-        values = [self._facts.get((info.stream_digest, sequence)) for sequence in sequences]
+        values = [
+            self._facts.get((info.stream_digest, sequence)) for sequence in sequences
+        ]
         values = [value for value in values if value is not None]
         if query.subject_digest is not None:
-            values = [value for value in values if value.subject_digest == query.subject_digest]
+            values = [
+                value
+                for value in values
+                if value.subject_digest == query.subject_digest
+            ]
         if query.limit is not None:
             values = values[: query.limit]
         return tuple(values)
@@ -2242,9 +2429,7 @@ class _FilesystemTransaction:
                         last.sequence,
                     )
                     base_done = len(base_page) < limit
-            base_value = (
-                None if base_index >= len(base_page) else base_page[base_index]
-            )
+            base_value = None if base_index >= len(base_page) else base_page[base_index]
             local_value = None if local_index >= len(local) else local[local_index]
             if base_value is None and local_value is None:
                 break
@@ -2258,16 +2443,19 @@ class _FilesystemTransaction:
             else:
                 value = local_value
                 local_index += 1
-                if (
-                    base_value is not None
-                    and (base_value.stream_digest, base_value.sequence)
-                    == (value.stream_digest, value.sequence)
-                ):
+                if base_value is not None and (
+                    base_value.stream_digest,
+                    base_value.sequence,
+                ) == (value.stream_digest, value.sequence):
                     base_index += 1
-            if value is not None and (
-                value.stream_digest,
-                value.sequence,
-            ) not in self._deleted_facts:
+            if (
+                value is not None
+                and (
+                    value.stream_digest,
+                    value.sequence,
+                )
+                not in self._deleted_facts
+            ):
                 result.append(value)
         return tuple(result)
 
@@ -2302,7 +2490,9 @@ class _FilesystemTransaction:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self.operations[value.key_digest] = value
         self._write(_operation_path(self._root, value), encode_operation(value))
-        self._write(_operation_ref_path(self._root, value), {"key": value.key_digest.hex()})
+        self._write(
+            _operation_ref_path(self._root, value), {"key": value.key_digest.hex()}
+        )
 
     async def _get_operation_by_stream_sequence(
         self,
@@ -2310,7 +2500,10 @@ class _FilesystemTransaction:
         sequence: int,
     ) -> StoredOperation | None:
         for operation in self.operations.changes().values():
-            if operation.stream_digest == stream_digest and operation.sequence == sequence:
+            if (
+                operation.stream_digest == stream_digest
+                and operation.sequence == sequence
+            ):
                 return operation
         value = await asyncio.to_thread(
             self._cache.get_operation_by_stream_sequence,
@@ -2328,7 +2521,9 @@ class _FilesystemTransaction:
             return self.operations[key]
         return await asyncio.to_thread(self._cache.get_operation, key)
 
-    async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool:
+    async def replace_operation(
+        self, value: StoredOperation, *, expected_state: str
+    ) -> bool:
         current = await self.get_operation(value.key_digest)
         if current is None or current.state != expected_state:
             return False
@@ -2337,7 +2532,9 @@ class _FilesystemTransaction:
         self._write(_operation_path(self._root, value), encode_operation(value))
         return True
 
-    async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+    async def list_operations(
+        self, query: OperationQuery
+    ) -> tuple[StoredOperation, ...]:
         if query.stream_digest is None:
             source = await asyncio.to_thread(self._cache.list_operations)
         else:
@@ -2352,9 +2549,14 @@ class _FilesystemTransaction:
         values = [
             item
             for item in values_by_key.values()
-            if (query.stream_digest is None or item.stream_digest == query.stream_digest)
+            if (
+                query.stream_digest is None or item.stream_digest == query.stream_digest
+            )
             and (query.states is None or item.state in query.states)
-            and (query.through_sequence is None or item.sequence <= query.through_sequence)
+            and (
+                query.through_sequence is None
+                or item.sequence <= query.through_sequence
+            )
             and (query.compactable is None or item.compactable == query.compactable)
         ]
         values.sort(key=lambda item: (item.sequence, item.key_digest))
@@ -2408,9 +2610,7 @@ class _FilesystemTransaction:
                     last = base_page[-1]
                     base_after = OperationScanCursor(last.key_digest)
                     base_done = len(base_page) < limit
-            base_value = (
-                None if base_index >= len(base_page) else base_page[base_index]
-            )
+            base_value = None if base_index >= len(base_page) else base_page[base_index]
             local_value = None if local_index >= len(local) else local[local_index]
             if base_value is None and local_value is None:
                 break
@@ -2423,16 +2623,15 @@ class _FilesystemTransaction:
             else:
                 value = local_value
                 local_index += 1
-                if (
-                    base_value is not None
-                    and base_value.key_digest == value.key_digest
-                ):
+                if base_value is not None and base_value.key_digest == value.key_digest:
                     base_index += 1
             if value is not None and value.key_digest not in self.operations.deleted():
                 result.append(value)
         return tuple(result)
 
-    async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+    async def delete_operations(
+        self, query: OperationQuery
+    ) -> tuple[StoredOperation, ...]:
         values = await self.list_operations(query)
         for value in values:
             self.operations[value.key_digest] = value
@@ -2441,7 +2640,9 @@ class _FilesystemTransaction:
             self._delete(_operation_ref_path(self._root, value))
         return values
 
-    async def _load_facts(self, info: _FactStreamInfo, sequences: Sequence[int]) -> None:
+    async def _load_facts(
+        self, info: _FactStreamInfo, sequences: Sequence[int]
+    ) -> None:
         missing = tuple(
             sequence
             for sequence in sequences
@@ -2450,7 +2651,9 @@ class _FilesystemTransaction:
         )
         if not missing:
             return
-        values = await asyncio.to_thread(_read_fact_batch, self._root, info.stream_digest, missing)
+        values = await asyncio.to_thread(
+            _read_fact_batch, self._root, info.stream_digest, missing
+        )
         self._facts.update(values)
 
     async def _own_fact_stream(self, stream: bytes) -> _FactStreamInfo | None:
@@ -2488,7 +2691,9 @@ class _FilesystemTransaction:
         if info.last_sequence == 0:
             self._delete(_fact_meta_path(self._root, info.stream_digest))
             for subject_digest in tuple(info.subjects):
-                self._delete(_fact_subject_path(self._root, info.stream_digest, subject_digest))
+                self._delete(
+                    _fact_subject_path(self._root, info.stream_digest, subject_digest)
+                )
             info.subjects.clear()
             return
         if sequence is None:
@@ -2509,10 +2714,34 @@ class _FilesystemTransaction:
                 {"sequence": info.subjects[subject]},
             )
 
+    def _sync_record_index(
+        self,
+        previous: StoredRecord | None,
+        current: StoredRecord | None,
+    ) -> None:
+        if (
+            not self._cache.record_index_complete
+            or _RECORD_INDEX_MARKER in self.deletes
+        ):
+            return
+        previous_path = None if previous is None else _record_index_path(previous)
+        current_path = None if current is None else _record_index_path(current)
+        if current is not None and current_path is None:
+            if previous_path is not None:
+                self._delete(previous_path)
+            self._delete(_RECORD_INDEX_MARKER)
+            return
+        if previous_path is not None and previous_path != current_path:
+            self._delete(previous_path)
+        if current_path is not None and previous_path != current_path:
+            self._write(current_path, b"")
+
     def _write(self, relative: str | Path, value: Mapping[str, object] | bytes) -> None:
         relative = _relative_path(self._root, relative)
         self.deletes.discard(relative)
-        self.writes[relative] = value if isinstance(value, bytes) else _json_bytes(value)
+        self.writes[relative] = (
+            value if isinstance(value, bytes) else _json_bytes(value)
+        )
 
     def _delete(self, relative: str | Path) -> None:
         relative = _relative_path(self._root, relative)
@@ -2522,7 +2751,10 @@ class _FilesystemTransaction:
 
 def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
     return (
-        (query.partition_digest is None or record.partition_digest == query.partition_digest)
+        (
+            query.partition_digest is None
+            or record.partition_digest == query.partition_digest
+        )
         and (query.scope_digest is None or record.scope_digest == query.scope_digest)
         and (query.parent_digest is None or record.parent_digest == query.parent_digest)
         and (query.kind is None or record.kind == query.kind)
@@ -2538,6 +2770,71 @@ def _relative_path(root: Path, value: str | Path) -> str:
     if isinstance(value, Path):
         return value.relative_to(root).as_posix()
     return value
+
+
+_RECORD_INDEX_MARKER = "record-index/complete"
+_RECORD_SORT_SOURCE = (
+    "-./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+)
+_RECORD_SORT_TARGET = (
+    "#$%&'()+,-.0123456789;=@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijk"
+)
+_RECORD_SORT_TRANSLATION = str.maketrans(_RECORD_SORT_SOURCE, _RECORD_SORT_TARGET)
+
+
+def _record_sort_token(value: str | None) -> str | None:
+    if value is None or any(
+        character not in _RECORD_SORT_SOURCE for character in value
+    ):
+        return None
+    return value.translate(_RECORD_SORT_TRANSLATION)
+
+
+def _record_index_marker_valid(root: Path) -> bool:
+    marker = root / _RECORD_INDEX_MARKER
+    if not marker.exists():
+        return False
+    try:
+        value = marker.read_text(encoding="utf-8")
+    except OSError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if value != "1":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return True
+
+
+def _record_query_indexable(query: RecordQuery) -> bool:
+    return (
+        query.kind is not None
+        and query.scope_digest is not None
+        and query.parent_digest is None
+        and query.states is None
+        and query.sort_key_prefix is not None
+        and query.limit is not None
+        and _record_sort_token(query.sort_key_prefix) is not None
+        and (
+            query.after_sort_key is None
+            or _record_sort_token(query.after_sort_key) is not None
+        )
+    )
+
+
+def _record_index_directory(query: RecordQuery) -> str:
+    if query.kind is None or query.scope_digest is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return f"record-index/{query.kind}/{query.scope_digest.hex()}"
+
+
+def _record_index_path(record: StoredRecord) -> str | None:
+    if record.scope_digest is None:
+        return None
+    token = _record_sort_token(record.sort_key)
+    if token is None:
+        return None
+    return (
+        f"record-index/{record.kind}/{record.scope_digest.hex()}/"
+        f"{token}!{record.key_digest.hex()}.ref"
+    )
 
 
 def _record_path(record: StoredRecord) -> str:
@@ -2587,7 +2884,9 @@ def _digest(value: str) -> str:
 
 
 def _json_bytes(value: Mapping[str, object]) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
 
 
 def _read_json(path: Path) -> Mapping[str, object]:

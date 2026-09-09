@@ -14,10 +14,8 @@ from linktools.ai.capability import SkillSourceRegistry
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor
-from linktools.ai.runtime._capabilities import (
-    _CompactionCapability,
-    compose_platform_capabilities,
-)
+from linktools.ai.runtime._capabilities import compose_platform_capabilities
+from linktools.ai.runtime._compaction import RuntimeCompaction
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 from linktools.ai.runtime.service_api import CancelExecutionRequest
 from linktools.ai.runtime.state import ExecutionRecord
@@ -54,7 +52,6 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 async def test_default_platform_composition_keeps_file_read_deduplication() -> None:
     capabilities = await compose_platform_capabilities(
         agent_name="agent",
-        conversation_id=None,
         step_run_id="run",
         segment_sequence=1,
         history_id=None,
@@ -71,11 +68,13 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
         background_tasks=set(),
         plan_store_resolver=None,
     )
-    assert any(isinstance(capability, _CompactionCapability) for capability in capabilities)
+    assert any(isinstance(capability, RuntimeCompaction) for capability in capabilities)
 
 
 @pytest.mark.asyncio
-async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure() -> None:
+async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure() -> (
+    None
+):
     executor = AgentExecutor(
         SkillSourceRegistry(),
         instruction_resolver=_EmptyRepositoryInstructionResolver(),
@@ -143,7 +142,9 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         revision=2,
         event_sequence=2,
     )
-    operation = SimpleNamespace(operation_id="operation", status=OperationStatus.PENDING)
+    operation = SimpleNamespace(
+        operation_id="operation", status=OperationStatus.PENDING
+    )
 
     class Operations:
         def __init__(self) -> None:
@@ -163,12 +164,16 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
             return cancelling if operations.created else execution
 
     class Idempotency:
-        async def list_by_resource(self, *args: object, **kwargs: object) -> tuple[object, ...]:
+        async def list_by_resource(
+            self, *args: object, **kwargs: object
+        ) -> tuple[object, ...]:
             del args, kwargs
             return ()
 
     class Backend:
-        async def commit_cancel_checkpoint(self, *args: object, **kwargs: object) -> ExecutionRecord:
+        async def commit_cancel_checkpoint(
+            self, *args: object, **kwargs: object
+        ) -> ExecutionRecord:
             del args, kwargs
             return cancelling
 
@@ -182,7 +187,9 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         def __init__(self) -> None:
             self.commit = None
 
-        async def commit_terminal_checkpoint(self, commit: object, *, session_id: str | None) -> object:
+        async def commit_terminal_checkpoint(
+            self, commit: object, *, session_id: str | None
+        ) -> object:
             del session_id
             self.commit = commit
             return SimpleNamespace()

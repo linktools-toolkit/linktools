@@ -9,6 +9,7 @@ import json
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.wrapper import WrapperModel
@@ -131,7 +132,7 @@ class _ObservedCompactionModel(WrapperModel):
         return response
 
 
-class RuntimeCompaction:
+class RuntimeCompaction(AbstractCapability[None]):
     """Adapt Harness compaction to Runtime context projection ownership."""
 
     def __init__(
@@ -157,9 +158,7 @@ class RuntimeCompaction:
         self._projection_sink = projection_sink
         self._deduplicate = DeduplicateFileReads(
             file_key=(
-                _workspace_file_key
-                if trusted_workspace_read
-                else lambda _call: None
+                _workspace_file_key if trusted_workspace_read else lambda _call: None
             )
         )
 
@@ -233,11 +232,7 @@ def _workspace_file_key(call: ToolCallPart) -> str | None:
         or isinstance(offset, bool)
         or offset < 0
         or limit is not None
-        and (
-            not isinstance(limit, int)
-            or isinstance(limit, bool)
-            or limit <= 0
-        )
+        and (not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0)
     ):
         return None
     return json.dumps(

@@ -112,14 +112,14 @@ from ._capabilities import (
     PLANNING_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     ToolOperationBridge,
-    _WorkspaceToolGate,
-    _tool_execution_policy,
     compose_platform_capabilities,
     select_runtime_tool_names,
     tool_allowed_in_planning,
     tool_is_control,
     tool_name_allowed,
 )
+from ._tool_policy import _tool_execution_policy
+from ._workspace_gate import _WorkspaceToolGate
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._metric_capability import _RuntimeModelMetricCapability
@@ -200,7 +200,9 @@ class _RunScope:
     segment_sequence: int
     history_id: str | None = None
     memory_store: MemoryStore | None = None
-    plan_store_resolver: Callable[[PydanticRunContext[object]], RuntimePlanStore] | None = None
+    plan_store_resolver: (
+        Callable[[PydanticRunContext[object]], RuntimePlanStore] | None
+    ) = None
     sandbox_session: "SandboxSession | None" = None
     skill_resource_paths: Mapping[str, str] = field(default_factory=dict)
     mode: ExecutionMode = "run"
@@ -213,7 +215,9 @@ class _RunScope:
     event_sink: EventSink | None = None
     usage_sink: UsageSink | None = None
     tool_operations: ToolOperationBridge | None = None
-    background_tasks: set[asyncio.Task[object]] = field(default_factory=set, compare=False)
+    background_tasks: set[asyncio.Task[object]] = field(
+        default_factory=set, compare=False
+    )
     replace_history_system_prompt: bool = False
     context_target_tokens: int | None = None
     repository_instructions: RepositoryInstructions | None = None
@@ -226,7 +230,9 @@ class _RunScope:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.mode == "plan" and not self.planning:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not isinstance(self.subagent_available, bool) or not isinstance(self.replace_history_system_prompt, bool):
+        if not isinstance(self.subagent_available, bool) or not isinstance(
+            self.replace_history_system_prompt, bool
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.event_sink is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -270,7 +276,11 @@ class AgentExecutor:
             for part in message.parts:
                 if isinstance(part, ToolCallPart):
                     tool_call_id = part.tool_call_id
-                    if not isinstance(tool_call_id, str) or not tool_call_id or tool_call_id in call_ids:
+                    if (
+                        not isinstance(tool_call_id, str)
+                        or not tool_call_id
+                        or tool_call_id in call_ids
+                    ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     call_ids.add(tool_call_id)
                     calls.append(part)
@@ -319,11 +329,21 @@ class AgentExecutor:
         configured_limits = definition.spec.usage_limits
         usage_limits = UsageLimits(
             cost_limit=None,
-            request_limit=None if configured_limits is None else configured_limits.model_requests,
-            tool_calls_limit=None if configured_limits is None else configured_limits.tool_calls,
-            input_tokens_limit=None if configured_limits is None else configured_limits.input_tokens,
-            output_tokens_limit=None if configured_limits is None else configured_limits.output_tokens,
-            total_tokens_limit=None if configured_limits is None else configured_limits.total_tokens,
+            request_limit=None
+            if configured_limits is None
+            else configured_limits.model_requests,
+            tool_calls_limit=None
+            if configured_limits is None
+            else configured_limits.tool_calls,
+            input_tokens_limit=None
+            if configured_limits is None
+            else configured_limits.input_tokens,
+            output_tokens_limit=None
+            if configured_limits is None
+            else configured_limits.output_tokens,
+            total_tokens_limit=None
+            if configured_limits is None
+            else configured_limits.total_tokens,
         )
         result: AgentExecutionOutcome | None = None
         primary_error: BaseException | None = None
@@ -344,7 +364,9 @@ class AgentExecutor:
                 primary_error = error
                 raise
             except Exception as error:
-                mapped = _execution_error(error, usage_limits=usage_limits, run_usage=run_usage)
+                mapped = _execution_error(
+                    error, usage_limits=usage_limits, run_usage=run_usage
+                )
                 primary_error = mapped
                 raise mapped from error
         finally:
@@ -356,7 +378,9 @@ class AgentExecutor:
                 primary_error=primary_error,
             )
             if scope.usage_sink is not None:
-                usage = result.usage if result is not None else _usage_metrics(run_usage)
+                usage = (
+                    result.usage if result is not None else _usage_metrics(run_usage)
+                )
                 if isinstance(primary_error, asyncio.CancelledError):
                     task = asyncio.create_task(
                         scope.usage_sink(usage),
@@ -392,7 +416,9 @@ class AgentExecutor:
         elif primary_error is not None:
             status = "FAILED"
             error_code = (
-                primary_error.code.value if isinstance(primary_error, AIError) else ErrorCode.INTERNAL_ERROR.value
+                primary_error.code.value
+                if isinstance(primary_error, AIError)
+                else ErrorCode.INTERNAL_ERROR.value
             )
         elif isinstance(result, AgentExecutionPaused):
             status = "PAUSED"
@@ -483,6 +509,7 @@ class AgentExecutor:
                 root=scope.context.workspace.root,
                 resources=resources,
             )
+
             async def close_session() -> None:
                 nonlocal primary_error
                 try:
@@ -555,7 +582,13 @@ class AgentExecutor:
             execution_id=scope.context.execution_id,
             step_run_id=scope.step_run_id,
         )
-        agent, capabilities, runtime_tool_names, trusted_tool_classes, trusted_mcp_selectors = await _materialize_agent(
+        (
+            agent,
+            capabilities,
+            runtime_tool_names,
+            trusted_tool_classes,
+            trusted_mcp_selectors,
+        ) = await _materialize_agent(
             scope,
             model=model,
             skill_sources=self._skill_sources,
@@ -567,7 +600,9 @@ class AgentExecutor:
         )
         presentation = _ToolPresentation(
             definition.ordinary_tool_policy,
-            static_tool_names=tuple(candidate.id for candidate in definition.selected_tools),
+            static_tool_names=tuple(
+                candidate.id for candidate in definition.selected_tools
+            ),
             mcp_policy=definition.mcp_selector_policy,
             plan_mode=scope.mode == "plan",
             trusted_tool_classes=trusted_tool_classes,
@@ -625,7 +660,9 @@ class AgentExecutor:
                 if emission is not None:
                     await cast(EventSink, scope.event_sink)(emission)
         if final_result is None:
-            raise AIError(ErrorCode.INTERNAL_ERROR, safe_details={"phase": "agent_result"})
+            raise AIError(
+                ErrorCode.INTERNAL_ERROR, safe_details={"phase": "agent_result"}
+            )
         output = final_result.output
         if isinstance(output, DeferredToolRequests):
             if not output.approvals or output.calls or output.metadata:
@@ -684,7 +721,12 @@ class AgentExecutor:
             if operation.status
             not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
         )
-        if run is None or snapshot is None or unresolved or run.conversation_id != scope.conversation_id:
+        if (
+            run is None
+            or snapshot is None
+            or unresolved
+            or run.conversation_id != scope.conversation_id
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if binding.output_binding.mode == "text":
             if not isinstance(output, AssistantTextOutput):
@@ -697,9 +739,13 @@ class AgentExecutor:
         try:
             payload = normalize_json_value(output_payload)
         except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False) from error
+            raise AIError(
+                ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
+            ) from error
         usage = _usage_metrics(run_usage)
-        return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages(), usage)
+        return AgentExecutionResult(
+            final_result.run_id, payload, final_result.all_messages(), usage
+        )
 
 
 async def _skill_sandbox_resources(
@@ -789,7 +835,8 @@ async def _materialize_agent(
         ordinary_tool_policy=definition.ordinary_tool_policy,
         memory_scope=scope.context.memory_scope,
         planning=scope.planning,
-        subagent_available=scope.subagent_available and bool(scope.binding.snapshot.subagents),
+        subagent_available=scope.subagent_available
+        and bool(scope.binding.snapshot.subagents),
     )
     trusted_tool_classes = _trusted_tool_classes_for_definition(
         definition,
@@ -810,7 +857,9 @@ async def _materialize_agent(
     for candidate in definition.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capabilities.append(cast("AbstractCapability[AgentContext[object]]", candidate.value))
+        capabilities.append(
+            cast("AbstractCapability[AgentContext[object]]", candidate.value)
+        )
     if definition.skill_definitions:
         capabilities.append(
             _PydanticSkillCapability(
@@ -882,7 +931,6 @@ async def _materialize_agent(
         capabilities.append(model_metric)
     platform = await compose_platform_capabilities(
         agent_name=definition.spec.id,
-        conversation_id=scope.conversation_id,
         step_run_id=scope.step_run_id,
         execution_id=scope.context.execution_id,
         segment_sequence=scope.segment_sequence,
@@ -903,9 +951,7 @@ async def _materialize_agent(
         tool_metrics=tool_metrics,
         model_journal=model_journal,
         external_model_request_observer=(
-            None
-            if model_metric is None
-            else model_metric.record_external_model_request
+            None if model_metric is None else model_metric.record_external_model_request
         ),
     )
     platform = tuple(
@@ -920,7 +966,9 @@ async def _materialize_agent(
         else capability
         for capability in platform
     )
-    capabilities.extend(cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform))
+    capabilities.extend(
+        cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform)
+    )
 
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
@@ -951,7 +999,13 @@ async def _materialize_agent(
             tools=tuple(business_tools),
         ),
     )
-    return agent, tuple(capabilities), runtime_tool_names, trusted_tool_classes, trusted_mcp_selectors
+    return (
+        agent,
+        tuple(capabilities),
+        runtime_tool_names,
+        trusted_tool_classes,
+        trusted_mcp_selectors,
+    )
 
 
 def _render_preloaded_skills(
@@ -1139,7 +1193,6 @@ class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
         return await super().after_node_run(ctx, node=node, result=result)
 
 
-
 class _ToolPresentation(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
@@ -1199,7 +1252,9 @@ class _ToolPresentation(AbstractCapability[AgentContext[object]]):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         selected: list[ToolDefinition] = []
         for tool in tool_defs:
-            if not tool_is_control(tool, trusted_tool_classes=self._trusted_tool_classes):
+            if not tool_is_control(
+                tool, trusted_tool_classes=self._trusted_tool_classes
+            ):
                 if tool.name.startswith("mcp__"):
                     if not _mcp_tool_allowed(tool.name, self._mcp_policy):
                         continue
@@ -1222,7 +1277,8 @@ class _ToolPresentation(AbstractCapability[AgentContext[object]]):
             if (
                 self._instruction_aware
                 and tool.name in WORKSPACE_FILESYSTEM_TOOL_NAMES
-                and trusted_classes.get(tool.name) in {"filesystem.read", "filesystem.write"}
+                and trusted_classes.get(tool.name)
+                in {"filesystem.read", "filesystem.write"}
             ):
                 tool = replace(tool, sequential=True)
             selected.append(tool)
@@ -1298,25 +1354,55 @@ def _mcp_tool_allowed(name: str, selectors: tuple[str, ...]) -> bool:
 
 
 def _map_event(event: object) -> "AgentEmission | None":
-    if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart) and event.part.content:
+    if (
+        isinstance(event, PartStartEvent)
+        and isinstance(event.part, TextPart)
+        and event.part.content
+    ):
         return LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, event.part.content)
-    if isinstance(event, PartStartEvent) and isinstance(event.part, ThinkingPart) and event.part.content:
-        return LiveDelta(ExecutionDeltaType.ASSISTANT_THINKING_DELTA, event.part.content)
-    if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta) and event.delta.content_delta:
-        return LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, event.delta.content_delta)
-    if isinstance(event, PartDeltaEvent) and isinstance(event.delta, ThinkingPartDelta) and event.delta.content_delta:
-        return LiveDelta(ExecutionDeltaType.ASSISTANT_THINKING_DELTA, event.delta.content_delta)
+    if (
+        isinstance(event, PartStartEvent)
+        and isinstance(event.part, ThinkingPart)
+        and event.part.content
+    ):
+        return LiveDelta(
+            ExecutionDeltaType.ASSISTANT_THINKING_DELTA, event.part.content
+        )
+    if (
+        isinstance(event, PartDeltaEvent)
+        and isinstance(event.delta, TextPartDelta)
+        and event.delta.content_delta
+    ):
+        return LiveDelta(
+            ExecutionDeltaType.ASSISTANT_TEXT_DELTA, event.delta.content_delta
+        )
+    if (
+        isinstance(event, PartDeltaEvent)
+        and isinstance(event.delta, ThinkingPartDelta)
+        and event.delta.content_delta
+    ):
+        return LiveDelta(
+            ExecutionDeltaType.ASSISTANT_THINKING_DELTA, event.delta.content_delta
+        )
     if isinstance(event, PartEndEvent) and isinstance(event.part, TextPart):
         text = event.part.content
         return DurableBoundary(
             ExecutionEventType.ASSISTANT_PART_COMPLETED,
-            {"part_type": "text", "digest": canonical_sha256(text), "characters": len(text)},
+            {
+                "part_type": "text",
+                "digest": canonical_sha256(text),
+                "characters": len(text),
+            },
         )
     if isinstance(event, PartEndEvent) and isinstance(event.part, ThinkingPart):
         text = event.part.content
         return DurableBoundary(
             ExecutionEventType.ASSISTANT_PART_COMPLETED,
-            {"part_type": "thinking", "digest": canonical_sha256(text), "characters": len(text)},
+            {
+                "part_type": "thinking",
+                "digest": canonical_sha256(text),
+                "characters": len(text),
+            },
         )
     if isinstance(event, FunctionToolCallEvent):
         part = event.part
@@ -1337,7 +1423,9 @@ def _map_event(event: object) -> "AgentEmission | None":
                 {
                     "call_id": part.tool_call_id,
                     "tool_name": part.tool_name,
-                    "result_digest": canonical_sha256(str(part.content)) if success else None,
+                    "result_digest": canonical_sha256(str(part.content))
+                    if success
+                    else None,
                     "status": "SUCCEEDED" if success else "FAILED",
                 },
             )
@@ -1408,7 +1496,9 @@ def _execution_error(
             "status_code": error.status_code,
         }
         retry_after = error.retry_after
-        if isinstance(retry_after, (int, float, str)) and not isinstance(retry_after, bool):
+        if isinstance(retry_after, (int, float, str)) and not isinstance(
+            retry_after, bool
+        ):
             details["retry_after"] = retry_after
         return AIError(
             _model_http_error_code(error.status_code),

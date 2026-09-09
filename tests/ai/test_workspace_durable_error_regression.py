@@ -7,7 +7,11 @@ from typing import Any
 
 import pytest
 from linktools.ai.capability import workspace_capabilities
-from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capabilities import (
+    ToolOperationDecision,
+    _RuntimeStepPersistence,
+)
 from linktools.ai.runtime.state import StagingStepStore
 from linktools.ai.workspace import LocalSandbox, Workspace
 from pydantic_ai.exceptions import ModelRetry
@@ -21,6 +25,10 @@ class _Bridge:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.decision = ToolOperationDecision("operation", "owner", 1, False)
+
+    async def effective_args(self, ctx, call, tool_def, args):
+        del ctx, call, tool_def
+        return args
 
     async def begin(
         self,
@@ -48,7 +56,9 @@ class _Bridge:
         self.calls.append("fail")
         return False
 
-    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None:
+    async def unknown(
+        self, decision: ToolOperationDecision, error: BaseException
+    ) -> None:
         del decision, error
         self.calls.append("unknown")
 
@@ -80,7 +90,7 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
         )
         bridge = _Bridge()
         persistence = _RuntimeStepPersistence(
-            store=StagingStepStore(),
+            store=HarnessStepStoreAdapter(StagingStepStore(), execution_id=None),
             tool_operations=bridge,  # type: ignore[arg-type]
             agent_name="agent",
             run_id="run",

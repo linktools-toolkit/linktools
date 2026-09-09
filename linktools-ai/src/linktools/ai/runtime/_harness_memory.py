@@ -15,6 +15,7 @@ from pydantic_ai_harness.memory import (
     MemoryStore,
 )
 
+from ..errors import AIError, ErrorCode
 from ._harness import current_tool_operation_id
 
 
@@ -65,7 +66,7 @@ class HarnessMemoryStoreAdapter:
     def _operation(operation: MemoryOperation) -> MemoryOperation:
         stable_id = current_tool_operation_id()
         if stable_id is None:
-            return operation
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return MemoryOperation(id=stable_id, fingerprint=operation.fingerprint)
 
 

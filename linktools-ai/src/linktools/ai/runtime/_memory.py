@@ -18,8 +18,6 @@ from pydantic_ai_harness.memory import (
     MemoryMutation,
     MemoryOperation,
     MemoryOperationConflictError,
-    MemorySearchMatch,
-    MemorySearchResult,
     MemoryStore,
 )
 
@@ -75,7 +73,6 @@ class RuntimeMemoryStore:
         self._object_store = object_store
         self._namespace = namespace
         self._tenant_id = tenant_id
-        self._execution_id = execution_id
         self._payload_policy = payload_policy or PayloadPolicy()
         scope_digest = canonical_sha256(memory_scope)
         self._memory_scope_digest = (
@@ -88,7 +85,11 @@ class RuntimeMemoryStore:
 
     async def read(self, path: str, *, max_chars: int) -> MemoryFile | None:
         logical_path = _normalize_path(path)
-        if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars <= 0:
+        if (
+            not isinstance(max_chars, int)
+            or isinstance(max_chars, bool)
+            or max_chars <= 0
+        ):
             raise ValueError("max_chars must be positive")
         record = await self._record(logical_path)
         if record is None:
@@ -320,8 +321,7 @@ class RuntimeMemoryStore:
             else OperationKind.MEMORY_DELETE
         )
         if (
-            record.resource_id
-            != _memory_id(self._memory_scope_digest, receipt.path)
+            record.resource_id != _memory_id(self._memory_scope_digest, receipt.path)
             or record.operation_kind is not expected_kind
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -373,10 +373,12 @@ class RuntimeMemoryStore:
                 if not isinstance(content, str):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             elif record.content.ref is not None:
-                content = (await read_runtime_object(
-                    self._object_store,
-                    record.content.ref,
-                )).decode("utf-8")
+                content = (
+                    await read_runtime_object(
+                        self._object_store,
+                        record.content.ref,
+                    )
+                ).decode("utf-8")
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         except AIError:
@@ -404,13 +406,16 @@ def _record_paths(records: list[MemoryRecord]) -> list[str]:
 
 
 def _normalize_path(path: str) -> str:
-    if not isinstance(path, str) or not path or path.startswith("/") or "\\" in path or "\x00" in path:
+    if (
+        not isinstance(path, str)
+        or not path
+        or path.startswith("/")
+        or "\\" in path
+        or "\x00" in path
+    ):
         raise ValueError("memory path is invalid")
     parts = path.split("/")
-    if any(
-        not _STORE_SEGMENT.fullmatch(part) or ".." in part
-        for part in parts
-    ):
+    if any(not _STORE_SEGMENT.fullmatch(part) or ".." in part for part in parts):
         raise ValueError("memory path is invalid")
     return "/".join(parts)
 
@@ -422,21 +427,12 @@ def _normalize_prefix(prefix: str) -> str:
     return f"{_normalize_path(normalized)}/"
 
 
-def normalize_memory_file(file: str) -> str:
-    """Normalize a model-facing memory filename for legacy internal callers."""
-    value = file.strip() if isinstance(file, str) else ""
-    if value and not value.endswith(".md"):
-        value = f"{value}.md"
-    if not value or "/" in value or "\\" in value:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    try:
-        return _normalize_path(value)
-    except ValueError as error:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-
-
 def _validate_content(content: str) -> None:
-    if not isinstance(content, str) or len(content) > _MAX_CONTENT_CHARS or "\x00" in content:
+    if (
+        not isinstance(content, str)
+        or len(content) > _MAX_CONTENT_CHARS
+        or "\x00" in content
+    ):
         raise ValueError("memory content is invalid")
     try:
         content.encode("utf-8", errors="strict")
@@ -466,34 +462,15 @@ def _ensure_operation(
         return operation
     return MemoryOperation(
         id=uuid.uuid4().hex,
-        fingerprint=canonical_sha256(
-            {"kind": kind, "path": path, "content": content}
-        ),
-    )
-
-
-def memory_operation_fingerprint(
-    action: str,
-    file: str,
-    content: str | None,
-    old_text: str | None,
-    append: bool,
-) -> str:
-    """Retain the prior fingerprint helper for Runtime-private compatibility."""
-    return canonical_sha256(
-        {
-            "action": action,
-            "file": file,
-            "content": content,
-            "old_text": old_text,
-            "append": append,
-        }
+        fingerprint=canonical_sha256({"kind": kind, "path": path, "content": content}),
     )
 
 
 def _record_version(record: MemoryRecord) -> str | None:
     value = record.metadata.get("version")
-    return value if isinstance(value, str) and _MEMORY_VERSION.fullmatch(value) else None
+    return (
+        value if isinstance(value, str) and _MEMORY_VERSION.fullmatch(value) else None
+    )
 
 
 def _record_storage_version(record: MemoryRecord) -> int:
@@ -605,7 +582,11 @@ def _encode_receipt(receipt: _MutationReceipt) -> str:
 def _decode_receipt(value: str) -> _MutationReceipt:
     try:
         raw = json.loads(value)
-        if not isinstance(raw, dict) or raw.get("version") != 2 or set(raw) != {"version", "result"}:
+        if (
+            not isinstance(raw, dict)
+            or raw.get("version") != 2
+            or set(raw) != {"version", "result"}
+        ):
             raise ValueError("memory receipt is malformed")
         result = raw["result"]
         if not isinstance(result, dict) or set(result) != {"file", "version", "status"}:
@@ -616,7 +597,10 @@ def _decode_receipt(value: str) -> _MutationReceipt:
         if status not in {"created", "appended", "updated", "deleted", "not_found"}:
             raise ValueError("memory receipt status is invalid")
         if status in {"created", "appended", "updated"}:
-            if not isinstance(version, str) or _MEMORY_VERSION.fullmatch(version) is None:
+            if (
+                not isinstance(version, str)
+                or _MEMORY_VERSION.fullmatch(version) is None
+            ):
                 raise ValueError("memory receipt version is invalid")
             kind = "write"
         else:
@@ -637,7 +621,9 @@ def _decode_receipt(value: str) -> _MutationReceipt:
 
 def _require_receipt(receipt: _MutationReceipt, path: str, kind: str) -> None:
     if receipt.path != path or receipt.kind != kind:
-        raise MemoryOperationConflictError("memory operation targets a different mutation")
+        raise MemoryOperationConflictError(
+            "memory operation targets a different mutation"
+        )
 
 
 def _check_version(record: MemoryRecord | None, expected: str | None) -> None:
@@ -663,10 +649,6 @@ __all__ = [
     "MemoryFile",
     "MemoryMutation",
     "MemoryOperation",
-    "MemorySearchMatch",
-    "MemorySearchResult",
     "MemoryStore",
     "RuntimeMemoryStore",
-    "memory_operation_fingerprint",
-    "normalize_memory_file",
 ]

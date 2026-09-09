@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.observe import Observation
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
@@ -75,7 +76,7 @@ def _persistence(
         )
     )
     return _RuntimeStepPersistence(
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id=run_id,
         tool_operations=_ToolOperations(),
@@ -118,13 +119,18 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
     agent = Agent(
         TestModel(custom_output_text="done"),
         deps_type=object,
-        capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
+        capabilities=[
+            _model_metrics(recorder, run_id),
+            _persistence(store, run_id, recorder),
+        ],
     )
 
     await agent.run("hello", deps=SimpleNamespace(correlation={}))
 
     model_observations = [
-        value for value in recorder.observations if value.kind == "linktools.model.request"
+        value
+        for value in recorder.observations
+        if value.kind == "linktools.model.request"
     ]
     assert len(model_observations) == 1
     completed = [
@@ -147,12 +153,18 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
     assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
     trace = _trace(event)
     assert trace.payload["observation_id"] == expected
-    assert trace.payload["duration_ns"] == int(event.metadata["linktools.ai.duration_ns"])
+    assert trace.payload["duration_ns"] == int(
+        event.metadata["linktools.ai.duration_ns"]
+    )
 
 
 @pytest.mark.asyncio
-async def test_failed_model_metric_and_trace_share_observation_id_and_duration() -> None:
-    async def fail_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+async def test_failed_model_metric_and_trace_share_observation_id_and_duration() -> (
+    None
+):
+    async def fail_model(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> ModelResponse:
         del messages, info
         raise RuntimeError("boom")
 
@@ -162,14 +174,19 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
     agent = Agent(
         FunctionModel(fail_model),
         deps_type=object,
-        capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
+        capabilities=[
+            _model_metrics(recorder, run_id),
+            _persistence(store, run_id, recorder),
+        ],
     )
 
     with pytest.raises(RuntimeError, match="boom"):
         await agent.run("hello", deps=SimpleNamespace(correlation={}))
 
     model_observations = [
-        value for value in recorder.observations if value.kind == "linktools.model.request"
+        value
+        for value in recorder.observations
+        if value.kind == "linktools.model.request"
     ]
     assert len(model_observations) == 1
     failed = [
@@ -192,7 +209,9 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
     assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
     trace = _trace(event)
     assert trace.payload["observation_id"] == expected
-    assert trace.payload["duration_ns"] == int(event.metadata["linktools.ai.duration_ns"])
+    assert trace.payload["duration_ns"] == int(
+        event.metadata["linktools.ai.duration_ns"]
+    )
 
 
 @pytest.mark.asyncio

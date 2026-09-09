@@ -8,12 +8,18 @@ from typing import Any
 import pytest
 from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.exceptions import ApprovalRequired
-from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
@@ -56,7 +62,9 @@ class _Bridge:
         self.calls.append("fail")
         return False
 
-    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None:
+    async def unknown(
+        self, decision: ToolOperationDecision, error: BaseException
+    ) -> None:
         del decision, error
         self.calls.append("unknown")
 
@@ -107,16 +115,21 @@ async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once() 
     captured: list[int] = []
     persistence = _RuntimeStepPersistence(
         tool_operations=bridge,
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id="run",
         deferred_pause_sink=captured.append,
     )
     node_result = object()
     ctx = SimpleNamespace(run_step=7, conversation_id=None, messages=[])
-    assert await persistence.after_node_run(
-        ctx, node=object(), result=node_result  # type: ignore[arg-type]
-    ) is node_result
+    assert (
+        await persistence.after_node_run(
+            ctx,
+            node=object(),
+            result=node_result,  # type: ignore[arg-type]
+        )
+        is node_result
+    )
     ctx.run_step = 0
     deferred = DeferredToolRequests(approvals=[_approval_call()])
     result = SimpleNamespace(output=deferred, all_messages=lambda: [])
@@ -134,13 +147,15 @@ async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once() 
 async def test_runtime_step_persistence_rejects_generic_deferred_calls() -> None:
     persistence = _RuntimeStepPersistence(
         tool_operations=_Bridge(),
-        store=_Store(),
+        store=HarnessStepStoreAdapter(_Store(), execution_id=None),
         agent_name="agent",
         run_id="run",
         deferred_pause_sink=lambda _step: None,
     )
     persistence._last_observed_step_index = 3
-    result = SimpleNamespace(output=DeferredToolRequests(calls=[_approval_call("external")]))
+    result = SimpleNamespace(
+        output=DeferredToolRequests(calls=[_approval_call("external")])
+    )
     with pytest.raises(AIError) as error:
         await persistence.after_run(SimpleNamespace(run_step=0), result=result)  # type: ignore[arg-type]
     assert error.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
@@ -152,7 +167,7 @@ async def test_ask_gate_defers_before_runtime_operation(tmp_path) -> None:
     store = _Store()
     persistence = _RuntimeStepPersistence(
         tool_operations=bridge,
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id="run",
         trusted_tool_classes=(("read_file", "filesystem.read"),),

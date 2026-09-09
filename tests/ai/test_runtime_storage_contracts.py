@@ -12,6 +12,7 @@ from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state import (
@@ -62,7 +63,9 @@ def _tool_run(run_id: str) -> RunRecord:
     )
 
 
-async def test_sql_state_group_maps_programming_failure_to_internal(tmp_path: Path) -> None:
+async def test_sql_state_group_maps_programming_failure_to_internal(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
@@ -84,7 +87,9 @@ async def test_sql_state_group_maps_programming_failure_to_internal(tmp_path: Pa
         await engine.dispose()
 
 
-async def test_sql_latest_per_subject_uses_portable_aggregate_query(tmp_path: Path) -> None:
+async def test_sql_latest_per_subject_uses_portable_aggregate_query(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
@@ -208,11 +213,13 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             owner="owner",
             background_tasks=background_tasks,
             payload_policy=PayloadPolicy(),
-            terminal_commands=_runtime_commands(state, "parallel-tools", background_tasks),
+            terminal_commands=_runtime_commands(
+                state, "parallel-tools", background_tasks
+            ),
         )
         persistence = _RuntimeStepPersistence(
             tool_operations=bridge,
-            store=state.steps,
+            store=HarnessStepStoreAdapter(state.steps, execution_id=None),
             agent_name="agent",
             run_id=run_id,
         )
@@ -221,7 +228,9 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
         release = asyncio.Event()
 
         async def execute(call_id: str) -> object:
-            context = RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id)
+            context = RunContext(
+                deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id
+            )
             call = ToolCallPart("tool", {}, tool_call_id=call_id)
             tool_def = ToolDefinition(
                 name="tool",
@@ -289,7 +298,9 @@ async def test_mysql_audit_columns_match_schema_contract() -> None:
         ) in ddl
 
 
-async def test_filesystem_state_store_is_single_writer_and_reopens(tmp_path: Path) -> None:
+async def test_filesystem_state_store_is_single_writer_and_reopens(
+    tmp_path: Path,
+) -> None:
     first = FilesystemStateStore(
         tmp_path / "state",
         namespace="n",
@@ -343,9 +354,7 @@ async def test_filesystem_unknown_commit_poison_is_fail_closed(
             await store.mutate(mutate)
         assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         with pytest.raises(AIError) as read_error:
-            await store.read(
-                lambda transaction: transaction.get_sequence(b"s" * 32)
-            )
+            await store.read(lambda transaction: transaction.get_sequence(b"s" * 32))
         assert read_error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     finally:
         await store.close()

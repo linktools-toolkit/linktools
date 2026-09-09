@@ -7,12 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
-from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    ToolCallPart,
+    ToolReturnPart,
+)
 from pydantic_ai.tools import ToolDefinition
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _ToolPresentation
-from linktools.ai.runtime._capabilities import (
+from linktools.ai.runtime._workspace_gate import (
     _WorkspaceToolGate,
     _repository_instruction_marker,
 )
@@ -76,11 +81,15 @@ def _ctx(*, approved: bool = False) -> SimpleNamespace:
 
 
 def _call(name: str = "read_file", *, call_id: str = "call-1") -> ToolCallPart:
-    return ToolCallPart(tool_name=name, args={"path": "pkg/file.txt"}, tool_call_id=call_id)
+    return ToolCallPart(
+        tool_name=name, args={"path": "pkg/file.txt"}, tool_call_id=call_id
+    )
 
 
 @pytest.mark.asyncio
-async def test_new_scope_exposes_once_then_fences_same_model_step(tmp_path: Path) -> None:
+async def test_new_scope_exposes_once_then_fences_same_model_step(
+    tmp_path: Path,
+) -> None:
     document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "nested-v1")
     resolver = _Resolver(document)
     gate = _gate(tmp_path, resolver)
@@ -193,7 +202,9 @@ def test_marker_without_authority_is_ignored(tmp_path: Path) -> None:
     assert "nested" not in gate.get_instructions()(_ctx())  # type: ignore[arg-type]
 
 
-def test_malformed_authoritative_current_execution_marker_fails_closed(tmp_path: Path) -> None:
+def test_malformed_authoritative_current_execution_marker_fails_closed(
+    tmp_path: Path,
+) -> None:
     document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "nested")
     marker = _repository_instruction_marker(
         "execution", RepositoryInstructions((document,))
@@ -224,7 +235,9 @@ def test_malformed_authoritative_current_execution_marker_fails_closed(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_dynamic_scope_limit_applies_to_total_active_bundle(tmp_path: Path) -> None:
+async def test_dynamic_scope_limit_applies_to_total_active_bundle(
+    tmp_path: Path,
+) -> None:
     document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "x" * 64)
     gate = _gate(
         tmp_path,

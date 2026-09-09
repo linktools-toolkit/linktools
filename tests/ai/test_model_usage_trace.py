@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionTraceItem
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import (
     ToolOperationDecision,
     _RuntimeStepPersistence,
@@ -24,6 +25,10 @@ from linktools.ai.runtime.state import StagingStepStore, StepEvent
 
 
 class _ToolOperations:
+    async def effective_args(self, ctx, call, tool_def, args):
+        del ctx, call, tool_def
+        return args
+
     async def begin(self, ctx, call, tool_def, args, replay_safe):
         del ctx, tool_def, args
         return ToolOperationDecision(
@@ -95,14 +100,16 @@ def _project_usage(usage: RequestUsage) -> dict[str, object] | None:
 
 def _persistence(store: StagingStepStore, run_id: str) -> _RuntimeStepPersistence:
     return _RuntimeStepPersistence(
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="usage-test",
         run_id=run_id,
         tool_operations=_ToolOperations(),
     )
 
 
-async def _completed_usage(store: StagingStepStore, run_id: str) -> list[dict[str, object]]:
+async def _completed_usage(
+    store: StagingStepStore, run_id: str
+) -> list[dict[str, object]]:
     events = await store.list_events(run_id=run_id)
     values = [
         _project_event(event, ordinal)
@@ -138,14 +145,10 @@ async def test_asyncio_model_cancellation_records_failed_request() -> None:
 
     events = await store.list_events(run_id="cancelled-model-run")
     model_events = [
-        event.kind
-        for event in events
-        if event.kind.startswith("model_request_")
+        event.kind for event in events if event.kind.startswith("model_request_")
     ]
     assert model_events == ["model_request_started", "model_request_failed"]
-    failed = next(
-        event for event in events if event.kind == "model_request_failed"
-    )
+    failed = next(event for event in events if event.kind == "model_request_failed")
     assert failed.metadata["linktools.ai.request_sequence"] == "1"
     assert failed.metadata["linktools.ai.request_purpose"] == "agent"
 
@@ -153,8 +156,14 @@ async def test_asyncio_model_cancellation_records_failed_request() -> None:
 def _assert_token_sum(values: list[dict[str, object]], usage: RunUsage) -> None:
     assert sum(int(value["input_tokens"]) for value in values) == usage.input_tokens
     assert sum(int(value["output_tokens"]) for value in values) == usage.output_tokens
-    assert sum(int(value["cache_read_tokens"]) for value in values) == usage.cache_read_tokens
-    assert sum(int(value["cache_write_tokens"]) for value in values) == usage.cache_write_tokens
+    assert (
+        sum(int(value["cache_read_tokens"]) for value in values)
+        == usage.cache_read_tokens
+    )
+    assert (
+        sum(int(value["cache_write_tokens"]) for value in values)
+        == usage.cache_write_tokens
+    )
 
 
 def test_model_response_trace_contains_request_usage() -> None:
@@ -205,10 +214,21 @@ def test_model_response_trace_keeps_each_request_usage_separate() -> None:
     total = RunUsage()
     total.incr(first)
     total.incr(second)
-    assert total.input_tokens == first_trace["input_tokens"] + second_trace["input_tokens"]
-    assert total.output_tokens == first_trace["output_tokens"] + second_trace["output_tokens"]
-    assert total.cache_read_tokens == first_trace["cache_read_tokens"] + second_trace["cache_read_tokens"]
-    assert total.cache_write_tokens == first_trace["cache_write_tokens"] + second_trace["cache_write_tokens"]
+    assert (
+        total.input_tokens == first_trace["input_tokens"] + second_trace["input_tokens"]
+    )
+    assert (
+        total.output_tokens
+        == first_trace["output_tokens"] + second_trace["output_tokens"]
+    )
+    assert (
+        total.cache_read_tokens
+        == first_trace["cache_read_tokens"] + second_trace["cache_read_tokens"]
+    )
+    assert (
+        total.cache_write_tokens
+        == first_trace["cache_write_tokens"] + second_trace["cache_write_tokens"]
+    )
 
 
 def test_successful_model_response_trace_rejects_missing_usage_fact() -> None:
@@ -272,7 +292,9 @@ def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
         },
     ),
 )
-def test_cached_successful_model_response_trace_rejects_invalid_usage(payload: dict[str, object]) -> None:
+def test_cached_successful_model_response_trace_rejects_invalid_usage(
+    payload: dict[str, object],
+) -> None:
     with pytest.raises(AIError) as error:
         ExecutionTraceItem("execution", 1, payload)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

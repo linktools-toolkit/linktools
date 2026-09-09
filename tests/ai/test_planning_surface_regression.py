@@ -13,7 +13,12 @@ from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.planning import InMemoryPlanStore, PlanItem, Planning, TaskStatus
+from pydantic_ai_harness.planning import (
+    InMemoryPlanStore,
+    PlanItem,
+    Planning,
+    TaskStatus,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -21,7 +26,6 @@ pytestmark = pytest.mark.asyncio
 async def test_linktools_planning_registers_only_write_plan() -> None:
     capabilities = await compose_platform_capabilities(
         agent_name="agent",
-        conversation_id=None,
         step_run_id="run",
         segment_sequence=1,
         history_id=None,
@@ -46,9 +50,7 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
 
 async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> None:
     store = InMemoryPlanStore()
-    await store.set_items(
-        [PlanItem(content="ship it", status=TaskStatus.in_progress)]
-    )
+    await store.set_items([PlanItem(content="ship it", status=TaskStatus.in_progress)])
     capability = Planning(
         store=store,
         tools=PLANNING_TOOL_NAMES,

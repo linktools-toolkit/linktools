@@ -14,7 +14,11 @@ from linktools.ai.runtime.state import (
 )
 
 from linktools.ai.runtime._agent_executor import AgentExecutor
-from linktools.ai.runtime._capabilities import _RuntimeStepPersistence, _WorkspaceToolGate
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capabilities import (
+    _RuntimeStepPersistence,
+    _WorkspaceToolGate,
+)
 from linktools.ai.workspace import (
     RepositoryInstructions,
     ToolPermissionRule,
@@ -84,7 +88,7 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
     captured: list[int] = []
     persistence = _RuntimeStepPersistence(
         tool_operations=bridge,
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id=run_id,
         trusted_tool_classes=(("_read_file", "filesystem.read"),),
@@ -135,7 +139,7 @@ async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
     store = _RecordingStepStore()
     persistence = _RuntimeStepPersistence(
         tool_operations=_Bridge(),
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id=run_id,
     )
