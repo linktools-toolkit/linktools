@@ -22,7 +22,7 @@ from linktools.ai.runtime.state import (
     WorkspaceToolCallBindingStore,
 )
 from linktools.ai.storage import StoredPayload
-from linktools.ai.workspace import Workspace
+from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
 
 
 class _Session:
@@ -48,8 +48,14 @@ class _Sandbox:
     def __init__(self, session: _Session) -> None:
         self.session = session
 
-    async def open(self):  # type: ignore[no-untyped-def]
-        return self.session
+    async def open(
+        self,
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> SandboxSession:
+        del root, resources
+        return self.session  # type: ignore[return-value]
 
 
 class _BindingStore:
@@ -94,7 +100,7 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
 
 @pytest.mark.asyncio
 async def test_text_materialization_keeps_text_codec() -> None:
-    access = WorkspaceAccess(_Sandbox(_Session({})))  # type: ignore[arg-type]
+    access = WorkspaceAccess(_Sandbox(_Session({})), root=Path("."))
     materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
     try:
         canonical = await materializer.materialize("plain text", ())
@@ -122,7 +128,7 @@ def test_invalid_user_content_is_rejected_at_request_boundary() -> None:
 
 @pytest.mark.asyncio
 async def test_execution_ingress_discards_untrusted_derived_input_state() -> None:
-    access = WorkspaceAccess(_Sandbox(_Session({})))  # type: ignore[arg-type]
+    access = WorkspaceAccess(_Sandbox(_Session({})), root=Path("."))
     materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]
@@ -146,7 +152,7 @@ async def test_execution_ingress_discards_untrusted_derived_input_state() -> Non
 @pytest.mark.asyncio
 async def test_execution_materialization_consumes_source_files_once() -> None:
     session = _Session({"evidence.txt": b"evidence"})
-    access = WorkspaceAccess(_Sandbox(session))  # type: ignore[arg-type]
+    access = WorkspaceAccess(_Sandbox(session), root=Path("."))
     materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]

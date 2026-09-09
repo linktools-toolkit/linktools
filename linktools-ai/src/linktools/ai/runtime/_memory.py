@@ -37,7 +37,7 @@ from .state import MemoryRecord, MemoryState, RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536
-_MEMORY_VERSION = re.compile(r"m2:[0-9a-f]{64}")
+_MEMORY_VERSION = re.compile(r"m1:[0-9a-f]{64}")
 _STORE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
 
@@ -515,7 +515,7 @@ def _version_token(
     path: str,
     identity: str,
 ) -> str:
-    return "m2:" + canonical_sha256(
+    return "m1:" + canonical_sha256(
         {
             "namespace": namespace,
             "tenant_id": tenant_id,
@@ -573,7 +573,7 @@ def _encode_receipt(receipt: _MutationReceipt) -> str:
     )
     return json.dumps(
         {
-            "version": 2,
+            "version": 1,
             "result": {
                 "file": receipt.path,
                 "version": receipt.version,
@@ -591,7 +591,7 @@ def _decode_receipt(value: str) -> _MutationReceipt:
         raw = json.loads(value)
         if (
             not isinstance(raw, dict)
-            or raw.get("version") != 2
+            or raw.get("version") != 1
             or set(raw) != {"version", "result"}
         ):
             raise ValueError("memory receipt is malformed")

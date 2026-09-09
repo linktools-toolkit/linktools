@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 from pydantic_ai.messages import BinaryContent, UploadedFile
@@ -11,7 +12,7 @@ from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._input import ExecutionInputMaterializer
-from linktools.ai.workspace import SandboxSession, Workspace
+from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
 
 
 class _CountingSession:
@@ -37,14 +38,20 @@ class _CountingSandbox:
     def __init__(self, session: _CountingSession) -> None:
         self.session = session
 
-    async def open(self) -> SandboxSession:
+    async def open(
+        self,
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> SandboxSession:
+        del root, resources
         return self.session  # type: ignore[return-value]
 
 
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
-    access = WorkspaceAccess(_CountingSandbox(session))  # type: ignore[arg-type]
     workspace = Workspace.load(".")
+    access = WorkspaceAccess(_CountingSandbox(session), root=workspace.root)
     return ExecutionInputMaterializer(access, workspace.policy), session
 
 

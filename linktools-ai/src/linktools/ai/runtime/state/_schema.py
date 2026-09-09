@@ -148,10 +148,10 @@ def build_runtime_sql_metadata(
         **sql_table_options(),
     )
     sql_unique(records, "key_digest")
-    sql_query_index(records, "partition_digest", "sort_key")
-    sql_query_index(records, "scope_digest", "sort_key")
-    sql_query_index(records, "scope_digest", "state", "sort_key")
-    sql_query_index(records, "parent_digest", "sort_key")
+    sql_query_index(records, "partition_digest", "sort_key", mysql_length=128)
+    sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
+    sql_query_index(records, "scope_digest", "state", "sort_key", mysql_length=128)
+    sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
     sql_audit_indexes(records)
 
     aliases = Table(

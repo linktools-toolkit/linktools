@@ -2945,8 +2945,8 @@ def _relative_path(root: Path, value: str | Path) -> str:
 
 
 _RECORD_INDEX_MARKER = "record-index/complete"
-_RECORD_INDEX_VERSION = "3"
-_RECORD_INDEX_NODE_VERSION = 2
+_RECORD_INDEX_VERSION = "1"
+_RECORD_INDEX_NODE_VERSION = 1
 
 
 def _record_index_marker_valid(root: Path) -> bool:
@@ -2957,11 +2957,9 @@ def _record_index_marker_valid(root: Path) -> bool:
         value = marker.read_text(encoding="utf-8")
     except OSError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if value == _RECORD_INDEX_VERSION:
-        return True
-    if value in {"1", "2"}:
-        return False
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value != _RECORD_INDEX_VERSION:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return True
 
 
 def _record_query_indexable(query: RecordQuery) -> bool:
@@ -3015,7 +3013,6 @@ def _decode_record_index_node(
         raw["version"] != _RECORD_INDEX_NODE_VERSION
         or token != expected_token
         or not isinstance(token, str)
-        or len(token) > 128
         or not token.isascii()
         or not isinstance(keys, list)
         or not isinstance(children, list)
@@ -3030,7 +3027,6 @@ def _decode_record_index_node(
     for child in children:
         if (
             len(child) <= len(token)
-            or len(child) > 128
             or not child.isascii()
             or not child.startswith(token)
         ):

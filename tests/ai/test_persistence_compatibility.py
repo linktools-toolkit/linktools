@@ -145,7 +145,7 @@ def _decode_custom_wire_values(
 
 
 def test_custom_wire_v1_fixture_and_additive_fields() -> None:
-    value = _load_json("runtime_custom_wire_v2.json")
+    value = _load_json("runtime_custom_wire_v1.json")
     assert isinstance(value, Mapping)
     expected = _custom_wire_values()
     assert value == expected

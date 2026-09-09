@@ -57,6 +57,8 @@ async def main_async(arguments: argparse.Namespace) -> int:
         _reap_children(session, stop_event, failure_event),
         name="sandbox-worker-reaper",
     )
+    result = WORKER_EXIT_OK
+    cleanup_failed = False
     try:
         await _send_frame(
             writer,
@@ -96,11 +98,11 @@ async def main_async(arguments: argparse.Namespace) -> int:
         stop_task.cancel()
         await asyncio.gather(stop_task, return_exceptions=True)
         if failure_event.is_set():
-            return WORKER_EXIT_SESSION_FAILED
+            result = WORKER_EXIT_SESSION_FAILED
     except (BrokenPipeError, ConnectionError, OSError):
-        return WORKER_EXIT_SESSION_FAILED
+        result = WORKER_EXIT_SESSION_FAILED
     except SandboxProtocolError:
-        return WORKER_EXIT_SESSION_FAILED
+        result = WORKER_EXIT_SESSION_FAILED
     finally:
         reaper_task.cancel()
         await asyncio.gather(reaper_task, return_exceptions=True)
@@ -111,13 +113,13 @@ async def main_async(arguments: argparse.Namespace) -> int:
         try:
             await session.close()
         except Exception:
-            return WORKER_EXIT_CLEANUP_FAILED
+            cleanup_failed = True
         writer.close()
         try:
             await writer.wait_closed()
         except (BrokenPipeError, ConnectionError, OSError):
             pass
-    return WORKER_EXIT_OK
+    return WORKER_EXIT_CLEANUP_FAILED if cleanup_failed else result
 
 
 async def _reap_children(

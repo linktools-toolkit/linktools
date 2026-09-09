@@ -80,10 +80,10 @@ async def test_list_paths_pages_for_large_harness_limit() -> None:
 async def test_memory_receipt_rejects_unwritten_appended_status() -> None:
     payload = json.dumps(
         {
-            "version": 2,
+            "version": 1,
             "result": {
                 "file": "memory/a.md",
-                "version": "m2:" + "a" * 64,
+                "version": "m1:" + "a" * 64,
                 "status": "appended",
             },
         }
@@ -127,6 +127,31 @@ async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
     stored = repository._stored("memory", value.memory_id, value)
 
     assert stored.sort_key == "memory/z.md"
+
+
+async def test_memory_repository_accepts_full_harness_path_length() -> None:
+    repository = MemoryRepositoryImpl(
+        MemoryStateStore(MemoryStateStorageGroup()),
+        namespace="memory-long-path",
+        tenant_id="tenant",
+    )
+    now = datetime.now(timezone.utc)
+    logical_path = "memory/" + "x" * 197 + ".md"
+    value = MemoryRecord(
+        "memory-id",
+        "tenant",
+        "scope-digest",
+        StoredPayload.inline_text("content"),
+        {"path": logical_path},
+        1,
+        now,
+        now,
+    )
+
+    stored = repository._stored("memory", value.memory_id, value)
+
+    assert len(logical_path) > 128
+    assert stored.sort_key == logical_path
 
 
 async def test_memory_repository_applies_prefix_before_limit() -> None:
@@ -318,7 +343,7 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
         _range_index=True,
     )
     await reopened.initialize()
-    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "3"
+    assert (root / "record-index" / "complete").read_text(encoding="utf-8") == "1"
     repository = MemoryRepositoryImpl(
         reopened,
         namespace="memory-reindex",

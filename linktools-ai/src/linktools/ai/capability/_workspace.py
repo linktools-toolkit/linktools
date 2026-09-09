@@ -5,7 +5,7 @@
 import asyncio
 from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 
 from linktools.core import environ
 from pydantic_ai import Tool
@@ -102,29 +102,18 @@ _MODEL_ERROR_MESSAGES = {
 _logger = environ.get_logger("ai.capability.workspace")
 
 
-class _WorkspaceAccessBackend(Protocol):
-    async def open(self) -> SandboxSession: ...
-
-
-class _BoundWorkspaceAccessBackend:
-    def __init__(self, sandbox: Sandbox, root: Path) -> None:
-        self._sandbox = sandbox
-        self._root = root
-
-    async def open(self) -> SandboxSession:
-        return await self._sandbox.open(root=self._root)
-
-
 class WorkspaceAccess:
     """Own one lazy SandboxSession for durable path and byte access."""
 
     def __init__(
         self,
-        backend: _WorkspaceAccessBackend,
+        sandbox: Sandbox,
         *,
+        root: Path,
         session: SandboxSession | None = None,
     ) -> None:
-        self._backend = backend
+        self._sandbox = sandbox
+        self._root = root
         self._session = session
         self._lock = asyncio.Lock()
         self._closed = False
@@ -132,14 +121,14 @@ class WorkspaceAccess:
     @classmethod
     def for_workspace(cls, workspace: Workspace) -> "WorkspaceAccess":
         sandbox = workspace.sandbox if workspace.sandbox is not None else LocalSandbox()
-        return cls(_BoundWorkspaceAccessBackend(sandbox, workspace.root))
+        return cls(sandbox, root=workspace.root)
 
     async def _ensure_session(self) -> SandboxSession:
         async with self._lock:
             if self._closed:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if self._session is None:
-                self._session = await self._backend.open()
+                self._session = await self._sandbox.open(root=self._root)
             return self._session
 
     async def canonicalize_path(self, path: str) -> str:
@@ -498,11 +487,6 @@ def workspace_tool_class(tool: Tool[Any]) -> str | None:
         return None
     metadata = tool.tool_def.metadata or {}
     if metadata.get(_WORKSPACE_METADATA_KEY) != expected:
-        return None
-    owner = getattr(tool.function, "__self__", None)
-    if type(owner) is not _WorkspaceToolSurface:
-        return None
-    if getattr(tool.function, "__name__", None) != tool.name:
         return None
     return expected
 

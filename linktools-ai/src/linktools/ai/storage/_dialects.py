@@ -804,15 +804,15 @@ def sql_state() -> "String":
 
 
 def sql_sort_key() -> "String":
-    from sqlalchemy import String
+    from sqlalchemy import Text
     from sqlalchemy.dialects import mysql
 
     return (
-        String(128)
-        .with_variant(String(128, collation="BINARY"), "sqlite")
-        .with_variant(String(128, collation="C"), "postgresql")
+        Text()
+        .with_variant(Text(collation="BINARY"), "sqlite")
+        .with_variant(Text(collation="C"), "postgresql")
         .with_variant(
-            mysql.VARCHAR(128, charset="utf8mb4", collation="utf8mb4_bin"),
+            mysql.LONGTEXT(charset="utf8mb4", collation="utf8mb4_bin"),
             "mysql",
         )
     )

@@ -4064,7 +4064,6 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             not isinstance(path, str)
             or not path
             or not path.isascii()
-            or len(path) > 128
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return replace(

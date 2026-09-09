@@ -61,7 +61,7 @@ def _envelope(
     wire_id: str = "session_record",
 ) -> dict[str, object]:
     return {
-        "v": 2,
+        "v": 1,
         "value": {
             "type": wire_id,
             "payload": payload,
@@ -95,7 +95,7 @@ def test_current_generic_dataclass_round_trip() -> None:
 def test_persisted_generic_writer_uses_current_schema() -> None:
     session = _session()
     payload = _encode_persisted_domain(session)
-    assert payload["schema"] == 2
+    assert payload["schema"] == 1
     assert (
         _decode_enveloped_domain(
             _envelope(payload),
@@ -201,7 +201,7 @@ def test_malformed_generic_schema_is_integrity_error(schema: object) -> None:
 
 def test_positive_unknown_generic_schema_is_unsupported() -> None:
     payload = copy.deepcopy(_encode_persisted_domain(_session()))
-    payload["schema"] = 3
+    payload["schema"] = 2
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(_envelope(payload), SessionRecord)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
@@ -209,7 +209,7 @@ def test_positive_unknown_generic_schema_is_unsupported() -> None:
 
 def test_unknown_outer_version_is_unsupported() -> None:
     value = _envelope(_encode_persisted_domain(_session()))
-    value["v"] = 3
+    value["v"] = 2
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(value, SessionRecord)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
@@ -339,7 +339,7 @@ def test_step_persistence_reads_current_payload() -> None:
     )
     current = _decode_step_envelope(
         {
-            "v": 2,
+            "v": 1,
             "value": {
                 "type": wire_type_id(run),
                 "payload": _encode_persisted_domain(run),
