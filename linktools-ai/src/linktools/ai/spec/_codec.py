@@ -103,7 +103,7 @@ class AgentSpecCodec:
         allow_capabilities = raw.get("allow_capabilities", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
-        tool_retries = raw.get("tool_retries", 10000)
+        tool_retries = raw.get("tool_retries", 3)
         output_retries = raw.get("output_retries", 3)
         description = raw.get("description")
         preload_skills: object = raw.get("preload_skills", [])

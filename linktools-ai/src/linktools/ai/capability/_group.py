@@ -400,7 +400,7 @@ class CapabilityGroup(Generic[AppT]):
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
         thinking: ThinkingValue = False,
-        tool_retries: int = 10000,
+        tool_retries: int = 3,
         output_retries: int = 3,
         description: "str | None" = None,
     ) -> AgentSpec:

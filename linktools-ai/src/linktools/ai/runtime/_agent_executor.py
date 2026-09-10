@@ -26,10 +26,12 @@ from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
     AbstractCapability,
+    CapabilityOrdering,
+    PrepareTools,
     ProcessEventStream,
     ReinjectSystemPrompt,
     Thinking,
-    PrepareTools,
+    WrapModelRequestHandler,
 )
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
@@ -55,7 +57,7 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.models import Model
+from pydantic_ai.models import Model, ModelRequestContext, ModelResponse
 from pydantic_ai.tools import (
     DeferredToolRequests,
     DeferredToolResults,
@@ -64,6 +66,7 @@ from pydantic_ai.tools import (
 )
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
+
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
     AgentContext,
@@ -78,7 +81,6 @@ from ..capability import (
     workspace_capabilities,
     workspace_tool_class,
 )
-from ..workspace import LocalSandbox, SandboxResource, SandboxSession
 from ..core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -94,31 +96,30 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ..workspace import LocalSandbox, SandboxResource, SandboxSession
 
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructions
 
-from ._mcp import materialize_mcp_servers
 from ._capabilities import (
     SUBAGENT_TOOL_NAMES,
     compose_platform_capabilities,
     select_runtime_tool_names,
 )
-from ._tool import ToolOperationBridge
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
-from ._metric_capability import RuntimeModelObservationCapability
-from ._tool_metrics import _ToolMetricContext
+from ._mcp import materialize_mcp_servers
 from ._memory import MemoryStore
+from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
+from ._tool import ToolOperationBridge
 from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
     RuntimeToolBoundaryToolset,
 )
-from .state._step_contracts import (
-    StepStore,
-)
+from ._tool_metrics import _ToolMetricContext
+from .state._step_contracts import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 
@@ -491,15 +492,15 @@ class AgentExecutor:
         )
         capabilities = cast(
             "tuple[AbstractCapability[AgentContext[object]], ...]",
-            (
-                _thinking_capability(model, scope.thinking),
-                *capabilities,
-            ),
+            (*capabilities, _thinking_capability(scope.thinking)),
         )
         if scope.replace_history_system_prompt:
-            capabilities = (*capabilities, ReinjectSystemPrompt(
-                replace_existing=True, id="linktools-reinject-system-prompt"
-            ))
+            capabilities = (
+                *capabilities,
+                ReinjectSystemPrompt(
+                    replace_existing=True, id="linktools-reinject-system-prompt"
+                ),
+            )
         capabilities = (
             *capabilities,
             _event_stream_capability(cast(EventSink, scope.event_sink)),
@@ -868,6 +869,7 @@ async def _materialize_agent(
             if value != ""
         )
     else:
+
         def runtime_instructions(
             _: PydanticRunContext[object],
         ) -> str:
@@ -879,6 +881,7 @@ async def _materialize_agent(
                 )
                 if value != ""
             )
+
     agent = cast(
         "PydanticAgent[AgentContext[object], object]",
         PydanticAgent(
@@ -967,7 +970,12 @@ def _plan_mode_prepare(
             if tool_def.name in SKILL_TOOL_NAMES:
                 selected.append(tool_def)
                 continue
-            if tool_def.name in {"read_memory", "search_memory", "write_plan", "list_subagents"}:
+            if tool_def.name in {
+                "read_memory",
+                "search_memory",
+                "write_plan",
+                "list_subagents",
+            }:
                 selected.append(tool_def)
                 continue
             descriptor = business_descriptors.get(tool_def.name)
@@ -1015,7 +1023,29 @@ def _event_stream_capability(
     return ProcessEventStream(forward)
 
 
-def _thinking_capability(model: Model, thinking: ThinkingValue) -> Thinking:
+class _RuntimeThinking(Thinking):
+    """Validate thinking against the effective model at the final request boundary."""
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="innermost")
+
+    async def wrap_model_request(
+        self,
+        ctx: PydanticRunContext[Any],
+        *,
+        request_context: ModelRequestContext,
+        handler: WrapModelRequestHandler,
+    ) -> ModelResponse:
+        del ctx
+        _validate_thinking_model(request_context.model, cast(ThinkingValue, self.effort))
+        return await handler(request_context)
+
+
+def _thinking_capability(thinking: ThinkingValue) -> Thinking:
+    return _RuntimeThinking(effort=thinking, id="linktools-thinking")
+
+
+def _validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
     profile = model.profile
     supports = bool(profile.get("supports_thinking", False))
     always = bool(profile.get("thinking_always_enabled", False))
@@ -1025,13 +1055,12 @@ def _thinking_capability(model: Model, thinking: ThinkingValue) -> Thinking:
                 ErrorCode.REQUEST_FIELD_INVALID,
                 safe_details={"field": "thinking", "reason": "model_always_enabled"},
             )
-    elif not supports:
+        return
+    if not (supports or always):
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID,
             safe_details={"field": "thinking", "reason": "model_not_supported"},
         )
-    return Thinking(effort=thinking, id="linktools-thinking")
-
 
 
 def _map_event(event: object) -> "AgentEmission | None":

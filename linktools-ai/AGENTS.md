@@ -17,7 +17,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 
 ### Persistence and concurrency
 
-- Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation.
+- Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
 - Persisted or replayed data is a versioned contract. Compatibility must be based on explicit LinkTools semantics, not incidental dependency serialization or schema.
 - Published or explicitly compatibility-committed persistence protocols must remain evolvable and backward-compatible. Pre-release protocols without real compatibility obligations may make incompatible changes when they simplify the contract, provided owners, codecs, schema, fixtures, and tests change atomically. Corrupt or unsupported durable data must still fail closed with typed errors.
 - Stable hashes and idempotency identities must remain stable when non-semantic optional/default fields change; include codec/version/provenance when they change semantics.
