@@ -38,7 +38,7 @@ from ._contracts import (
     TaskState,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from ._maintenance import RuntimeStorageMaintenance
+from ._maintenance import RuntimeStorageInspection
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._plan import (
     RuntimeDomain,
@@ -88,7 +88,7 @@ class _MaterializedRuntimeState:
     objects: "_RuntimeObjectRouter"
     steps: RuntimeStepStore
     retention: RuntimeRetentionController
-    maintenance: RuntimeStorageMaintenance
+    maintenance: RuntimeStorageInspection
     storage_contract: RuntimeStorageContract
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
@@ -309,6 +309,14 @@ async def materialize_runtime_state(
             if group is not None:
                 cleanups.append(group.close)
 
+        execution_store = stores[RuntimeDomain.EXECUTION]
+        recovery_store = stores[RuntimeDomain.RECOVERY]
+        if execution_store.storage_group is not recovery_store.storage_group:
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                "execution and recovery must share a StateStorageGroup",
+            )
+
         bundles = {
             domain: build_repository_bundle(
                 stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
@@ -373,7 +381,7 @@ async def materialize_runtime_state(
             plan=plan,
             namespace=namespace,
         )
-        maintenance = RuntimeStorageMaintenance(
+        maintenance = RuntimeStorageInspection(
             {domain: stores[domain] for domain in RuntimeDomain},
             objects,
             durable_domains=plan.durable_domains,
@@ -620,15 +628,20 @@ def _storage_contract(
         )
         for domain in sorted(RuntimeDomain, key=lambda value: value.value)
     )
-    state_groups: dict[int, list[str]] = {}
+    state_groups: list[tuple[object, list[str]]] = []
     for domain in RuntimeDomain:
-        store = stores[domain]
-        state_groups.setdefault(id(store.storage_group), []).append(domain.value)
+        storage_group = stores[domain].storage_group
+        for existing_group, members in state_groups:
+            if storage_group is existing_group:
+                members.append(domain.value)
+                break
+        else:
+            state_groups.append((storage_group, [domain.value]))
     return RuntimeStorageContract(
         version=1,
         resources=resources,
         state_groups=tuple(
-            sorted(tuple(sorted(members)) for members in state_groups.values())
+            sorted(tuple(sorted(members)) for _, members in state_groups)
         ),
         object_groups=objects.grouped_domains(tuple(RuntimeDomain)),
     )

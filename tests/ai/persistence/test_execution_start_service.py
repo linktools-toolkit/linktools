@@ -19,8 +19,16 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
-from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
-from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.runtime._execution import (
+    CancelEffectOutcome,
+    DefaultExecutionService,
+    _ExecutionRuntimeBridge,
+)
+from linktools.ai.runtime.state._contracts import (
+    ExecutionRecord,
+    RuntimeStorageContract,
+)
 from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -30,7 +38,7 @@ def _binding(digest: str) -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"route_id": "model", "model_identity": "test:model"},
+        base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -119,6 +127,10 @@ class _Launcher:
         del execution_id, tenant_id
         return None
 
+    def worker_installed(self, execution_id: str) -> bool:
+        del execution_id
+        return False
+
 
 def _request(
     prompt: str,
@@ -147,6 +159,9 @@ def _service(
     kwargs: dict[str, object] = {}
     if operation_ids is not None:
         kwargs["operation_ids"] = operation_ids
+    runtime_bridge = _ExecutionRuntimeBridge()
+    if backend is not None:
+        runtime_bridge.bind(backend)
     return DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
@@ -154,8 +169,15 @@ def _service(
         sessions=state.conversation.sessions,
         catalog=_DefinitionCatalog(),
         compiler=object(),
-        backend=backend,
+        runtime_bridge=runtime_bridge,
+        live_broker=LiveExecutionEventBroker(),
         history_reader=_History(),
+        storage_contract_factory=lambda _domains: RuntimeStorageContract(
+            1,
+            (),
+            (),
+            (),
+        ),
         **kwargs,
     )
 
@@ -249,25 +271,15 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_terminal_verifier_can_be_bound_once() -> None:
+async def test_unbound_runtime_bridge_rejects_runtime_access() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="terminal-verifier", tenant_id="tenant")
     try:
         service = _service(state)
 
-        with pytest.raises(ValueError):
-            service.bind_terminal_verifier(None)
-
-        async def verifier(
-            execution: ExecutionRecord,
-            status: ExecutionStatus,
-            required_step_run_id: str | None,
-        ) -> None:
-            del execution, status, required_step_run_id
-
-        service.bind_terminal_verifier(verifier)
-        with pytest.raises(RuntimeError):
-            service.bind_terminal_verifier(verifier)
+        with pytest.raises(AIError) as error:
+            service.runtime_backend()
+        assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     finally:
         await state.close()
 

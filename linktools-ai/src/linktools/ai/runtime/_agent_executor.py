@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import uuid
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
@@ -13,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic_ns
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from linktools.core import environ
 from openai import (
@@ -24,17 +23,13 @@ from openai import (
 )
 from pydantic import ValidationError
 from pydantic_ai import Agent as PydanticAgent
-from pydantic_ai import AgentRunResult
 from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
     AbstractCapability,
-    AgentNode,
-    CapabilityOrdering,
-    NodeResult,
     ProcessEventStream,
     ReinjectSystemPrompt,
     Thinking,
-    WrapperCapability,
+    PrepareTools,
 )
 from pydantic_ai.exceptions import (
     ConcurrencyLimitExceeded,
@@ -55,40 +50,33 @@ from pydantic_ai.messages import (
     PartStartEvent,
     RetryPromptPart,
     TextPart,
-    ToolCallPart,
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.models import Model
 from pydantic_ai.tools import (
     DeferredToolRequests,
     DeferredToolResults,
     RunContext as PydanticRunContext,
     ToolDefinition,
 )
-from pydantic_ai.toolsets import AbstractToolset, PreparedToolset
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
-from pydantic_ai_harness.step_persistence import StepPersistence
-
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
     AgentContext,
+    LinkToolsSkills,
+    LinkToolsSubagents,
+    PLAN_SAFE_METADATA_KEY,
     SKILL_TOOL_NAMES,
-    SkillCapability,
     SkillSourceRegistry,
-    SUBAGENT_CAPABILITY_ID,
-    SubagentCapability,
     SubagentDelegate,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
-    materialize_mcp_servers,
-    mcp_selector_server,
-    mcp_server_selector,
     workspace_capabilities,
     workspace_tool_class,
-    workspace_tool_path_fields_from_metadata,
 )
 from ..workspace import LocalSandbox, SandboxResource, SandboxSession
 from ..core import (
@@ -108,41 +96,31 @@ from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 
 if TYPE_CHECKING:
-    from ..workspace import RepositoryInstructionResolver, RepositoryInstructions
+    from ..workspace import RepositoryInstructions
+
+from ._mcp import materialize_mcp_servers
 from ._capabilities import (
-    MEMORY_READ_TOOL_NAMES,
-    MEMORY_TOOL_NAMES,
-    PLANNING_TOOL_NAMES,
-    PYDANTIC_CONTROL_TOOL_KINDS,
     SUBAGENT_TOOL_NAMES,
-    ToolOperationBridge,
     compose_platform_capabilities,
     select_runtime_tool_names,
-    tool_allowed_in_planning,
-    tool_is_control,
-    tool_name_allowed,
 )
-from ._tool_policy import _tool_execution_policy
-from ._workspace_gate import _WorkspaceToolGate
+from ._tool import ToolOperationBridge
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
-from ._metric_capability import _RuntimeModelMetricCapability
-from ._skill_adapter import _PydanticSkillCapability
-from ._subagent_adapter import _PydanticSubagentCapability
+from ._metric_capability import RuntimeModelObservationCapability
 from ._tool_metrics import _ToolMetricContext
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
-from ._workspace_binding import WorkspaceToolCallBinder
+from ._tool_boundary import (
+    ManagedToolDescriptor,
+    RepositoryInstructionBoundary,
+    RuntimeToolBoundaryToolset,
+)
 from .state._step_contracts import (
     StepStore,
 )
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
-_RUNTIME_RESERVED_TOOL_NAMES = frozenset(
-    (*SKILL_TOOL_NAMES, *MEMORY_TOOL_NAMES, *PLANNING_TOOL_NAMES, *SUBAGENT_TOOL_NAMES)
-)
-_WORKSPACE_CAPABILITY_IDS = frozenset({"workspace-sandbox"})
-_MAX_TOOL_RETRIES = sys.maxsize
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,25 +151,7 @@ class AgentExecutionResult:
     usage: UsageMetrics
 
 
-@dataclass(frozen=True, slots=True)
-class PendingToolApproval:
-    tool_call_id: str
-    tool_name: str
-    arguments: JsonValue
-    args_digest: str
-
-
-@dataclass(frozen=True, slots=True)
-class AgentExecutionPaused:
-    run_id: str
-    step_index: int
-    paused_at: datetime
-    messages: list[ModelMessage]
-    usage: UsageMetrics
-    approvals: tuple[PendingToolApproval, ...]
-
-
-AgentExecutionOutcome = AgentExecutionResult | AgentExecutionPaused
+AgentExecutionOutcome = AgentExecutionResult | DeferredToolRequests
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,8 +187,7 @@ class _RunScope:
     replace_history_system_prompt: bool = False
     context_target_tokens: int | None = None
     repository_instructions: RepositoryInstructions | None = None
-    repository_instruction_history: tuple[ModelMessage, ...] = ()
-    repository_instruction_marker_authority: frozenset[tuple[str, str]] = frozenset()
+    repository_instruction_boundary: RepositoryInstructionBoundary | None = None
     deferred_tool_results: DeferredToolResults | None = None
 
     def __post_init__(self) -> None:
@@ -251,78 +210,13 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
-        instruction_resolver: RepositoryInstructionResolver,
         metrics: MetricRecorder | None = None,
-        workspace_binder: WorkspaceToolCallBinder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
-        self._instruction_resolver = instruction_resolver
         self._metrics = metrics
-        self._workspace_binder = workspace_binder
         self._detached_tasks: set[asyncio.Task[Any]] = set()
-
-    @classmethod
-    def pending_tool_calls(
-        cls,
-        messages: Sequence[ModelMessage],
-        *,
-        run_id: str,
-    ) -> tuple[ToolCallPart, ...]:
-        del cls
-        if not isinstance(run_id, str) or not run_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        calls: list[ToolCallPart] = []
-        call_ids: set[str] = set()
-        terminal_ids: set[str] = set()
-        for message in messages:
-            if message.run_id != run_id:
-                continue
-            for part in message.parts:
-                if isinstance(part, ToolCallPart):
-                    tool_call_id = part.tool_call_id
-                    if (
-                        not isinstance(tool_call_id, str)
-                        or not tool_call_id
-                        or tool_call_id in call_ids
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    call_ids.add(tool_call_id)
-                    calls.append(part)
-                elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
-                    tool_call_id = part.tool_call_id
-                    if tool_call_id is not None:
-                        terminal_ids.add(tool_call_id)
-        if not terminal_ids.issubset(call_ids):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(call for call in calls if call.tool_call_id not in terminal_ids)
-
-    def trusted_tool_class(
-        self,
-        binding: AgentBinding,
-        tool_name: str,
-        *,
-        memory_scope: str | None,
-        planning: bool,
-        subagent_available: bool,
-    ) -> str | None:
-        if not isinstance(tool_name, str) or not tool_name:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        runtime_tool_names = select_runtime_tool_names(
-            ordinary_tool_policy=binding.definition.ordinary_tool_policy,
-            memory_scope=memory_scope,
-            planning=planning,
-            subagent_available=(
-                subagent_available and bool(binding.snapshot.subagents)
-            ),
-        )
-        return dict(
-            _trusted_tool_classes_for_definition(
-                binding.definition,
-                runtime_tool_names,
-            )
-        ).get(tool_name)
 
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
@@ -385,7 +279,9 @@ class AgentExecutor:
             )
             if scope.usage_sink is not None:
                 usage = (
-                    result.usage if result is not None else _usage_metrics(run_usage)
+                    result.usage
+                    if isinstance(result, AgentExecutionResult)
+                    else _usage_metrics(run_usage)
                 )
                 if isinstance(primary_error, asyncio.CancelledError):
                     task = asyncio.create_task(
@@ -426,8 +322,8 @@ class AgentExecutor:
                 if isinstance(primary_error, AIError)
                 else ErrorCode.INTERNAL_ERROR.value
             )
-        elif isinstance(result, AgentExecutionPaused):
-            status = "PAUSED"
+        elif isinstance(result, DeferredToolRequests):
+            status = "DEFERRED"
             error_code = None
         else:
             status = "SUCCEEDED"
@@ -497,7 +393,11 @@ class AgentExecutor:
             for candidate in scope.binding.definition.selected_tools
             if workspace_tool_class(cast(Tool, candidate.value)) is not None
         )
-        if not selected:
+        resources, resource_keys = await _skill_sandbox_resources(
+            scope.binding.definition,
+            self._skill_sources,
+        )
+        if not selected and not resources:
             return await self._execute(
                 scope,
                 run_usage=run_usage,
@@ -506,10 +406,6 @@ class AgentExecutor:
         sandbox = scope.context.workspace.sandbox
         backend = sandbox if sandbox is not None else LocalSandbox()
         primary_error: BaseException | None = None
-        resources, resource_keys = await _skill_sandbox_resources(
-            scope.binding.definition,
-            self._skill_sources,
-        )
         async with AsyncExitStack() as stack:
             session = await backend.open(
                 root=scope.context.workspace.root,
@@ -568,12 +464,6 @@ class AgentExecutor:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         model = definition.model.materialize()
         deferred_step_index: int | None = None
-        presentation: _ToolPresentation | None = None
-
-        def workspace_path_fields() -> Mapping[str, tuple[str, ...]]:
-            if presentation is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return presentation.workspace_path_fields
 
         def capture_deferred_step(step_index: int) -> None:
             nonlocal deferred_step_index
@@ -591,44 +481,17 @@ class AgentExecutor:
             agent,
             capabilities,
             runtime_tool_names,
-            trusted_tool_classes,
-            trusted_mcp_selectors,
         ) = await _materialize_agent(
             scope,
             model=model,
             skill_sources=self._skill_sources,
             deferred_pause_sink=capture_deferred_step,
             metrics=self._metrics,
-            workspace_binder=self._workspace_binder,
-            workspace_path_fields=workspace_path_fields,
             model_journal=model_journal,
-        )
-        presentation = _ToolPresentation(
-            definition.ordinary_tool_policy,
-            static_tool_names=tuple(
-                candidate.id for candidate in definition.selected_tools
-            ),
-            mcp_policy=definition.mcp_selector_policy,
-            plan_mode=scope.mode == "plan",
-            trusted_tool_classes=trusted_tool_classes,
-            trusted_mcp_selectors=trusted_mcp_selectors,
-            instruction_aware=scope.repository_instructions is not None,
-        )
-        gate = _WorkspaceToolGate(
-            execution_id=scope.context.execution_id,
-            workspace_root=scope.context.workspace.root,
-            repository_instruction_history=scope.repository_instruction_history,
-            repository_instruction_marker_authority=scope.repository_instruction_marker_authority,
-            repository_instructions=scope.repository_instructions,
-            instruction_resolver=self._instruction_resolver,
-            policy=scope.context.workspace.policy,
-            trusted_tool_classes=trusted_tool_classes,
         )
         capabilities = cast(
             "tuple[AbstractCapability[AgentContext[object]], ...]",
             (
-                presentation,
-                gate,
                 _thinking_capability(model, scope.thinking),
                 *capabilities,
             ),
@@ -668,49 +531,10 @@ class AgentExecutor:
         )
         output = final_result.output
         if isinstance(output, DeferredToolRequests):
-            if not output.approvals or output.calls or output.metadata:
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             if deferred_step_index is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            messages = final_result.all_messages()
-            pending = self.pending_tool_calls(messages, run_id=scope.step_run_id)
-            if len(pending) != len(output.approvals):
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            if scope.tool_operations is not None:
-                admitted_call_ids = await scope.tool_operations.existing_call_ids(
-                    tuple(call.tool_call_id for call in pending)
-                )
-                if admitted_call_ids:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            approvals: list[PendingToolApproval] = []
-            for call, requested in zip(pending, output.approvals, strict=True):
-                try:
-                    call_arguments = normalize_json_value(call.args_as_dict())
-                    requested_arguments = normalize_json_value(requested.args_as_dict())
-                except (TypeError, ValueError) as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if (
-                    call.tool_call_id != requested.tool_call_id
-                    or call.tool_name != requested.tool_name
-                    or call_arguments != requested_arguments
-                ):
-                    raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-                approvals.append(
-                    PendingToolApproval(
-                        call.tool_call_id,
-                        call.tool_name,
-                        call_arguments,
-                        canonical_sha256(call_arguments),
-                    )
-                )
-            return AgentExecutionPaused(
-                run_id=scope.step_run_id,
-                step_index=deferred_step_index,
-                paused_at=datetime.now(timezone.utc),
-                messages=list(messages),
-                usage=_usage_metrics(run_usage),
-                approvals=tuple(approvals),
-            )
+            _validate_deferred_requests(output)
+            return output
         run = await scope.step_store.get_run(run_id=scope.step_run_id)
         snapshot = await scope.step_store.latest_snapshot(run_id=scope.step_run_id)
         operations = (
@@ -783,29 +607,21 @@ async def _skill_sandbox_resources(
     return ordered, resource_keys
 
 
-def _trusted_tool_classes_for_definition(
-    definition: AgentDefinition,
-    runtime_tool_names: tuple[str, ...],
-) -> tuple[tuple[str, str], ...]:
-    trusted: dict[str, str] = {}
-    for candidate in definition.selected_tools:
-        tool = cast(Tool, candidate.value)
-        tool_class = workspace_tool_class(tool)
-        if tool_class is not None:
-            trusted[candidate.id] = tool_class
-    for name in runtime_tool_names:
-        if name in MEMORY_TOOL_NAMES:
-            trusted[name] = (
-                "memory.read" if name in MEMORY_READ_TOOL_NAMES else "memory.write"
-            )
-        elif name in PLANNING_TOOL_NAMES or name in SUBAGENT_TOOL_NAMES:
-            trusted[name] = "control"
-        else:
-            raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-    if definition.skill_definitions:
-        for name in SKILL_TOOL_NAMES:
-            trusted[name] = "control"
-    return tuple(sorted(trusted.items()))
+def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
+    calls = (*requests.approvals, *requests.calls)
+    ids = tuple(call.tool_call_id for call in calls)
+    if not calls or len(ids) != len(set(ids)) or any(not value for value in ids):
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    if set(requests.metadata) - set(ids):
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+    try:
+        for call in calls:
+            if not call.tool_name or not isinstance(call.args_as_dict(), dict):
+                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
+            normalize_json_value(call.args_as_dict())
+        normalize_json_value(requests.metadata)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT) from error
 
 
 async def _materialize_agent(
@@ -815,23 +631,39 @@ async def _materialize_agent(
     skill_sources: SkillSourceRegistry,
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
-    workspace_binder: WorkspaceToolCallBinder | None,
-    workspace_path_fields: Callable[[], Mapping[str, tuple[str, ...]]],
     model_journal: ModelRequestJournal,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
     tuple[str, ...],
-    tuple[tuple[str, str], ...],
-    tuple[str, ...],
 ]:
     definition = scope.binding.definition
     business_tools: list[Tool[AgentContext[object]]] = []
     workspace_names: list[str] = []
+    business_descriptors: dict[str, ManagedToolDescriptor] = {}
+    business_plan_safe: set[str] = set()
     for candidate in definition.selected_tools:
         tool = cast("Tool[AgentContext[object]]", candidate.value)
-        if workspace_tool_class(tool) is None:
+        tool_class = workspace_tool_class(tool)
+        if tool_class is None:
             business_tools.append(tool)
+            contract = candidate.semantic_contract
+            effect = contract.get("effect", "non_replay_safe")
+            plan_safe = contract.get("plan_safe", False)
+            if effect not in {"none", "replay_safe", "non_replay_safe"}:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            if not isinstance(plan_safe, bool):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            business_descriptors[candidate.id] = ManagedToolDescriptor(
+                effect_owner=("none" if effect == "none" else "tool_operation"),
+                effect=cast(
+                    "Literal['none', 'replay_safe', 'non_replay_safe']",
+                    effect,
+                ),
+                tool_class="business",
+            )
+            if plan_safe:
+                business_plan_safe.add(candidate.id)
         else:
             workspace_names.append(candidate.id)
 
@@ -842,22 +674,8 @@ async def _materialize_agent(
         subagent_available=scope.subagent_available
         and bool(scope.binding.snapshot.subagents),
     )
-    trusted_tool_classes = _trusted_tool_classes_for_definition(
-        definition,
-        runtime_tool_names,
-    )
-    trusted_mcp_selectors = tuple(
-        sorted(mcp_server_selector(server.id) for server in definition.mcp_servers)
-    )
 
     capabilities: list[AbstractCapability[AgentContext[object]]] = []
-    capabilities.extend(
-        workspace_capabilities(
-            scope.context.workspace,
-            workspace_names,
-            session=scope.sandbox_session,
-        )
-    )
     for candidate in definition.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -866,40 +684,34 @@ async def _materialize_agent(
         )
     if definition.skill_definitions:
         capabilities.append(
-            _PydanticSkillCapability(
-                SkillCapability(definition.skill_definitions, skill_sources),
+            LinkToolsSkills(
+                definition.skill_definitions,
+                skill_sources,
                 resource_paths=scope.skill_resource_paths,
+                preloaded_skill_ids=definition.spec.preload_skills,
+                max_preloaded_bytes=(
+                    scope.context.workspace.policy.max_preloaded_skill_bytes
+                ),
             )
         )
     if any(name in SUBAGENT_TOOL_NAMES for name in runtime_tool_names):
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(
-            _PydanticSubagentCapability(
-                SubagentCapability(
-                    scope.binding.snapshot.subagents,
-                    scope.subagent_delegate,
-                    scope.subagent_descriptions,
-                )
+            LinkToolsSubagents(
+                scope.binding.snapshot.subagents,
+                scope.subagent_delegate,
+                scope.subagent_descriptions,
             )
         )
-    if definition.mcp_servers:
-        capabilities.extend(
-            cast(
-                "tuple[AbstractCapability[AgentContext[object]], ...]",
-                await materialize_mcp_servers(
-                    definition.mcp_servers,
-                    definition.mcp_selector_policy,
-                    principal=scope.context.principal,
-                    execution=ResourceRef(
-                        ResourceKind.EXECUTION,
-                        scope.context.execution_id,
-                        scope.context.principal.tenant_id,
-                    ),
-                    execution_root=str(scope.context.workspace.root),
-                ),
-            )
+    if scope.mode == "plan":
+        prepare_tools = _plan_mode_prepare(
+            business_descriptors=business_descriptors,
+            business_plan_safe=frozenset(business_plan_safe),
+            plan_mode=True,
         )
+        capabilities.append(PrepareTools(prepare_tools, id="linktools.plan-mode"))
+
     tool_metrics = (
         None
         if metrics is None
@@ -913,26 +725,90 @@ async def _materialize_agent(
             agent_id=definition.spec.id,
         )
     )
-    model_metric = (
-        None
-        if metrics is None
-        else _RuntimeModelMetricCapability(
-            metrics,
-            source_namespace=scope.context.workspace.workspace_id,
-            tenant_id=scope.context.principal.tenant_id,
-            execution_id=scope.context.execution_id,
-            session_id=scope.context.session_id,
-            step_run_id=scope.step_run_id,
-            agent_id=definition.spec.id,
-            provider=definition.model.provider,
-            model_identity=definition.model.model_identity,
-            route_id=definition.model.route_id,
-            journal=model_journal,
-            external_requests=True,
-        )
+
+    raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
+    workspace_toolsets = workspace_capabilities(
+        scope.context.workspace,
+        workspace_names,
+        session=scope.sandbox_session,
     )
-    if model_metric is not None:
-        capabilities.append(model_metric)
+    workspace_toolset_values = tuple(
+        toolset
+        for capability in workspace_toolsets
+        if (toolset := capability.get_toolset()) is not None
+    )
+    if workspace_toolset_values:
+        workspace_descriptors = _workspace_descriptors(workspace_names)
+        raw_toolsets.append(
+            RuntimeToolBoundaryToolset(
+                workspace_toolset_values,
+                workspace_descriptors,
+                id="linktools.workspace",
+                workspace_policy=scope.context.workspace.policy.tool_permissions,
+                sandbox_session=scope.sandbox_session,
+                tool_operations=scope.tool_operations,
+                tool_metrics=tool_metrics,
+                repository_boundary=scope.repository_instruction_boundary,
+                background_tasks=scope.background_tasks,
+            )
+        )
+    if definition.mcp_servers:
+        mcp_toolsets = await materialize_mcp_servers(
+            definition.mcp_servers,
+            definition.mcp_selector_policy,
+            principal=scope.context.principal,
+            execution=ResourceRef(
+                ResourceKind.EXECUTION,
+                scope.context.execution_id,
+                scope.context.principal.tenant_id,
+            ),
+            execution_root=str(scope.context.workspace.root),
+        )
+        for mcp_toolset in mcp_toolsets:
+            raw_toolsets.append(
+                RuntimeToolBoundaryToolset(
+                    (
+                        cast(
+                            "AbstractToolset[AgentContext[object]]",
+                            mcp_toolset,
+                        ),
+                    ),
+                    {},
+                    id="linktools.mcp",
+                    tool_operations=scope.tool_operations,
+                    tool_metrics=tool_metrics,
+                    background_tasks=scope.background_tasks,
+                    default_descriptor=ManagedToolDescriptor(
+                        effect_owner="tool_operation",
+                        effect="non_replay_safe",
+                        tool_class="mcp",
+                    ),
+                )
+            )
+    if business_tools:
+        raw_business = FunctionToolset(business_tools, id="linktools.business")
+        raw_toolsets.insert(
+            0,
+            RuntimeToolBoundaryToolset(
+                (raw_business,),
+                business_descriptors,
+                id="linktools.business",
+                tool_operations=scope.tool_operations,
+                tool_metrics=tool_metrics,
+                background_tasks=scope.background_tasks,
+            ),
+        )
+    model_observation = RuntimeModelObservationCapability(
+        metrics,
+        source_namespace=scope.context.workspace.workspace_id,
+        tenant_id=scope.context.principal.tenant_id,
+        execution_id=scope.context.execution_id,
+        session_id=scope.context.session_id,
+        step_run_id=scope.step_run_id,
+        agent_id=definition.spec.id,
+        journal=model_journal,
+    )
+    capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
         agent_name=definition.spec.id,
         step_run_id=scope.step_run_id,
@@ -943,32 +819,27 @@ async def _materialize_agent(
         step_store=scope.step_store,
         memory_store=scope.memory_store,
         runtime_tool_names=runtime_tool_names,
-        plan_mode=scope.mode == "plan",
-        trusted_tool_classes=trusted_tool_classes,
-        trusted_mcp_selectors=trusted_mcp_selectors,
         context_target_tokens=scope.context_target_tokens,
+        workspace_read_available=(
+            scope.sandbox_session is not None
+            and any(
+                name
+                in {
+                    "file_info",
+                    "find_files",
+                    "list_directory",
+                    "read_file",
+                    "search_files",
+                }
+                for name in workspace_names
+            )
+        ),
         parent_step_run_id=scope.parent_step_run_id,
-        tool_operations=scope.tool_operations,
-        background_tasks=scope.background_tasks,
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
-        tool_metrics=tool_metrics,
         model_journal=model_journal,
-        external_model_request_observer=(
-            None if model_metric is None else model_metric.record_external_model_request
-        ),
-    )
-    platform = tuple(
-        _RuntimePersistenceBoundary(
-            capability,
-            workspace_binder=workspace_binder,
-            execution_id=scope.context.execution_id,
-            step_run_id=scope.step_run_id,
-            path_fields_provider=workspace_path_fields,
-        )
-        if isinstance(capability, StepPersistence)
-        else capability
-        for capability in platform
+        model_observation_enabled=metrics is not None,
+        model_request_observer=model_observation.record_external_model_request,
     )
     capabilities.extend(
         cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform)
@@ -979,17 +850,35 @@ async def _materialize_agent(
         business_output_type = TextOutput(_assistant_text_output)
     else:
         business_output_type = scope.binding.output_type
-    output_type: object = business_output_type
-    if scope.context.workspace.policy.tool_permissions.requires_approval:
-        output_type = [business_output_type, DeferredToolRequests]
+    output_type: object = [business_output_type, DeferredToolRequests]
     base_instructions = "\n".join(definition.spec.instructions)
-    preload_instructions = _render_preloaded_skills(
-        definition.preloaded_skill_definitions,
-        max_bytes=scope.context.workspace.policy.max_preloaded_skill_bytes,
-    )
-    runtime_instructions = "\n\n".join(
-        value for value in (base_instructions, preload_instructions) if value != ""
-    )
+    repository_boundary = scope.repository_instruction_boundary
+    if repository_boundary is None:
+        repository_instructions = (
+            ""
+            if scope.repository_instructions is None
+            else scope.repository_instructions.render()
+        )
+        runtime_instructions: object = "\n\n".join(
+            value
+            for value in (
+                base_instructions,
+                repository_instructions,
+            )
+            if value != ""
+        )
+    else:
+        def runtime_instructions(
+            _: PydanticRunContext[object],
+        ) -> str:
+            return "\n\n".join(
+                value
+                for value in (
+                    base_instructions,
+                    repository_boundary.render(),
+                )
+                if value != ""
+            )
     agent = cast(
         "PydanticAgent[AgentContext[object], object]",
         PydanticAgent(
@@ -1000,58 +889,111 @@ async def _materialize_agent(
             output_type=output_type,
             deps_type=AgentContext,
             retries={
-                "tools": _MAX_TOOL_RETRIES,
+                "tools": definition.spec.tool_retries,
                 "output": definition.spec.output_retries,
             },
-            tools=tuple(business_tools),
+            toolsets=tuple(raw_toolsets),
         ),
     )
     return (
         agent,
         tuple(capabilities),
         runtime_tool_names,
-        trusted_tool_classes,
-        trusted_mcp_selectors,
     )
 
 
-def _render_preloaded_skills(
-    definitions: Sequence[object],
-    *,
-    max_bytes: int,
-) -> str:
-    ordered = tuple(sorted(definitions, key=lambda value: value.spec.id))
-    ids = tuple(definition.spec.id for definition in ordered)
-    if len(ids) != len(set(ids)):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    for skill_id in ids:
-        if (
-            not isinstance(skill_id, str)
-            or not skill_id
-            or any(character in skill_id for character in "\r\n[]")
-        ):
+def _workspace_descriptors(
+    names: Sequence[str],
+) -> dict[str, ManagedToolDescriptor]:
+    descriptors: dict[str, ManagedToolDescriptor] = {}
+    for name in names:
+        if name in WORKSPACE_FILESYSTEM_TOOL_NAMES:
+            tool_class = (
+                "filesystem.read"
+                if name in {
+                    "file_info",
+                    "find_files",
+                    "list_directory",
+                    "read_file",
+                    "search_files",
+                }
+                else "filesystem.write"
+            )
+            effect = "none" if tool_class == "filesystem.read" else "non_replay_safe"
+            descriptors[name] = ManagedToolDescriptor(
+                effect_owner=("none" if effect == "none" else "tool_operation"),
+                effect=cast(
+                    "Literal['none', 'replay_safe', 'non_replay_safe']",
+                    effect,
+                ),
+                tool_class=cast(
+                    "Literal['filesystem.read', 'filesystem.write']",
+                    tool_class,
+                ),
+                workspace_path_fields=("path",),
+            )
+        elif name in WORKSPACE_SHELL_TOOL_NAMES:
+            effect = "none" if name == "check_command" else "non_replay_safe"
+            descriptors[name] = ManagedToolDescriptor(
+                effect_owner=("none" if effect == "none" else "tool_operation"),
+                effect=cast(
+                    "Literal['none', 'replay_safe', 'non_replay_safe']",
+                    effect,
+                ),
+                tool_class="shell",
+            )
+        else:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        try:
-            skill_id.encode("utf-8", errors="strict")
-        except UnicodeEncodeError as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if not ordered:
-        return ""
-    rendered = (
-        "<preloaded-skills>\n"
-        + "\n\n".join(
-            f"[skill: {definition.spec.id}]\n{definition.spec.content}"
-            for definition in ordered
-        )
-        + "\n</preloaded-skills>"
-    )
-    try:
-        rendered_bytes = rendered.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if len(rendered_bytes) > max_bytes:
-        raise AIError(ErrorCode.PROMPT_TOO_LARGE)
-    return rendered
+    return descriptors
+
+
+def _plan_mode_prepare(
+    *,
+    business_descriptors: Mapping[str, ManagedToolDescriptor],
+    business_plan_safe: frozenset[str],
+    plan_mode: bool,
+) -> Callable[[PydanticRunContext[AgentContext[object]], list[ToolDefinition]], Any]:
+    async def prepare(
+        _ctx: PydanticRunContext[AgentContext[object]],
+        tool_defs: list[ToolDefinition],
+    ) -> list[ToolDefinition]:
+        if not plan_mode:
+            return tool_defs
+        selected: list[ToolDefinition] = []
+        for tool_def in tool_defs:
+            if tool_def.tool_kind in {"capability-load", "tool-search"}:
+                selected.append(tool_def)
+                continue
+            if tool_def.name in SKILL_TOOL_NAMES:
+                selected.append(tool_def)
+                continue
+            if tool_def.name in {"read_memory", "search_memory", "write_plan", "list_subagents"}:
+                selected.append(tool_def)
+                continue
+            descriptor = business_descriptors.get(tool_def.name)
+            if descriptor is not None:
+                if tool_def.name in business_plan_safe:
+                    selected.append(tool_def)
+                continue
+            if tool_def.name in WORKSPACE_FILESYSTEM_TOOL_NAMES:
+                if tool_def.name in {
+                    "file_info",
+                    "find_files",
+                    "list_directory",
+                    "read_file",
+                    "search_files",
+                }:
+                    selected.append(tool_def)
+                continue
+            if tool_def.name == "check_command":
+                selected.append(tool_def)
+                continue
+            metadata = tool_def.metadata or {}
+            if metadata.get(PLAN_SAFE_METADATA_KEY) is True:
+                selected.append(tool_def)
+        return selected
+
+    return prepare
 
 
 def _assistant_text_output(value: str) -> AssistantTextOutput:
@@ -1090,291 +1032,6 @@ def _thinking_capability(model: Model, thinking: ThinkingValue) -> Thinking:
         )
     return Thinking(effort=thinking, id="linktools-thinking")
 
-
-@dataclass(frozen=True, slots=True)
-class _WorkspacePersistenceContext:
-    binder: WorkspaceToolCallBinder
-    execution_id: str
-    step_run_id: str
-    path_fields_provider: Callable[[], Mapping[str, tuple[str, ...]]]
-
-
-class _RuntimePersistenceBoundary(WrapperCapability[AgentContext[object]]):
-    def __init__(
-        self,
-        wrapped: StepPersistence[object],
-        *,
-        workspace_binder: WorkspaceToolCallBinder | None = None,
-        execution_id: str | None = None,
-        step_run_id: str | None = None,
-        path_fields_provider: (
-            Callable[[], Mapping[str, tuple[str, ...]]] | None
-        ) = None,
-    ) -> None:
-        super().__init__(wrapped=wrapped)
-        if workspace_binder is None:
-            self._workspace_context: _WorkspacePersistenceContext | None = None
-        else:
-            if (
-                execution_id is None
-                or step_run_id is None
-                or path_fields_provider is None
-            ):
-                raise TypeError("workspace persistence context is incomplete")
-            self._workspace_context = _WorkspacePersistenceContext(
-                workspace_binder,
-                execution_id,
-                step_run_id,
-                path_fields_provider,
-            )
-        self._workspace_initial_message_ids: frozenset[int] = frozenset()
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(
-            position="outermost",
-            wraps=(AbstractCapability,),
-        )
-
-    async def before_run(
-        self,
-        ctx: PydanticRunContext[AgentContext[object]],
-    ) -> None:
-        self._workspace_initial_message_ids = frozenset(
-            id(message) for message in ctx.messages
-        )
-        await super().before_run(ctx)
-
-    def _workspace_new_messages(
-        self,
-        messages: Sequence[ModelMessage],
-    ) -> tuple[ModelMessage, ...]:
-        return tuple(
-            message
-            for message in messages
-            if id(message) not in self._workspace_initial_message_ids
-        )
-
-    async def before_model_request(
-        self,
-        ctx: PydanticRunContext[AgentContext[object]],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        workspace = self._workspace_context
-        if workspace is not None:
-            await workspace.binder.validate_messages(
-                ctx.messages,
-                execution_id=workspace.execution_id,
-                step_run_id=workspace.step_run_id,
-                path_fields=workspace.path_fields_provider(),
-            )
-        return await super().before_model_request(ctx, request_context)
-
-    async def after_run(
-        self,
-        ctx: PydanticRunContext[AgentContext[object]],
-        *,
-        result: AgentRunResult[object],
-    ) -> AgentRunResult[object]:
-        workspace = self._workspace_context
-        if workspace is not None:
-            path_fields = workspace.path_fields_provider()
-            await workspace.binder.bind_result(
-                result,
-                execution_id=workspace.execution_id,
-                step_run_id=workspace.step_run_id,
-                path_fields=path_fields,
-            )
-            await workspace.binder.validate_messages(
-                result.all_messages(),
-                execution_id=workspace.execution_id,
-                step_run_id=workspace.step_run_id,
-                path_fields=path_fields,
-            )
-        return await super().after_run(ctx, result=result)
-
-    async def after_node_run(
-        self,
-        ctx: PydanticRunContext[AgentContext[object]],
-        *,
-        node: AgentNode[AgentContext[object]],
-        result: NodeResult[AgentContext[object]],
-    ) -> NodeResult[AgentContext[object]]:
-        workspace = self._workspace_context
-        if workspace is not None:
-            path_fields = workspace.path_fields_provider()
-            messages = tuple(ctx.messages)
-            await workspace.binder.bind_messages(
-                self._workspace_new_messages(messages),
-                execution_id=workspace.execution_id,
-                step_run_id=workspace.step_run_id,
-                path_fields=path_fields,
-            )
-            await workspace.binder.validate_messages(
-                messages,
-                execution_id=workspace.execution_id,
-                step_run_id=workspace.step_run_id,
-                path_fields=path_fields,
-            )
-        return await super().after_node_run(ctx, node=node, result=result)
-
-
-class _ToolPresentation(AbstractCapability[AgentContext[object]]):
-    def __init__(
-        self,
-        ordinary_policy: tuple[str, ...],
-        *,
-        static_tool_names: tuple[str, ...],
-        mcp_policy: tuple[str, ...],
-        plan_mode: bool,
-        trusted_tool_classes: tuple[tuple[str, str], ...],
-        trusted_mcp_selectors: tuple[str, ...],
-        instruction_aware: bool,
-    ) -> None:
-        self._ordinary_policy = ordinary_policy
-        self._static_tool_names = static_tool_names
-        self._mcp_policy = mcp_policy
-        self._plan_mode = plan_mode
-        self._trusted_tool_classes = trusted_tool_classes
-        self._trusted_mcp_selectors = trusted_mcp_selectors
-        self._instruction_aware = instruction_aware
-        self._workspace_path_fields: dict[str, tuple[str, ...]] = {}
-
-    @property
-    def workspace_path_fields(self) -> Mapping[str, tuple[str, ...]]:
-        return dict(self._workspace_path_fields)
-
-    def get_ordering(self) -> CapabilityOrdering:
-        return CapabilityOrdering(position="outermost")
-
-    def get_wrapper_toolset(
-        self,
-        toolset: AbstractToolset[AgentContext[object]],
-    ) -> AbstractToolset[AgentContext[object]]:
-        return PreparedToolset(toolset, self._prepare_final_tools)
-
-    async def _prepare_final_tools(
-        self,
-        _ctx: PydanticRunContext[AgentContext[object]],
-        tool_defs: list[ToolDefinition],
-    ) -> list[ToolDefinition]:
-        self._workspace_path_fields = {}
-        names = [tool.name for tool in tool_defs]
-        if len(names) != len(set(names)):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._validate_provenance_and_static_surface(tool_defs)
-        trusted_classes = dict(self._trusted_tool_classes)
-        for selector in self._mcp_policy:
-            if mcp_selector_server(selector) is None:
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-        selected: list[ToolDefinition] = []
-        for tool in tool_defs:
-            if not tool_is_control(
-                tool, trusted_tool_classes=self._trusted_tool_classes
-            ):
-                if tool.name.startswith("mcp__"):
-                    if not _mcp_tool_allowed(tool.name, self._mcp_policy):
-                        continue
-                elif not tool_name_allowed(tool.name, self._ordinary_policy):
-                    continue
-            if self._plan_mode and not tool_allowed_in_planning(
-                tool,
-                trusted_tool_classes=self._trusted_tool_classes,
-                trusted_mcp_selectors=self._trusted_mcp_selectors,
-            ):
-                continue
-            path_fields = workspace_tool_path_fields_from_metadata(tool.metadata)
-            if path_fields:
-                tool_class = trusted_classes.get(tool.name)
-                if tool_class not in {"filesystem.read", "filesystem.write"} and (
-                    tool.capability_id != SUBAGENT_CAPABILITY_ID
-                ):
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                self._workspace_path_fields[tool.name] = path_fields
-            if (
-                self._instruction_aware
-                and tool.name in WORKSPACE_FILESYSTEM_TOOL_NAMES
-                and trusted_classes.get(tool.name)
-                in {"filesystem.read", "filesystem.write"}
-            ):
-                tool = replace(tool, sequential=True)
-            selected.append(tool)
-        return selected
-
-    def _validate_provenance_and_static_surface(
-        self,
-        tool_defs: list[ToolDefinition],
-    ) -> None:
-        trusted_classes = dict(self._trusted_tool_classes)
-        expected_static = frozenset(self._static_tool_names)
-        actual_static: set[str] = set()
-        for tool in tool_defs:
-            tool_class = trusted_classes.get(tool.name)
-            if tool_class is not None:
-                _tool_execution_policy(
-                    tool,
-                    trusted_tool_classes=self._trusted_tool_classes,
-                )
-                if tool_class in {"filesystem.read", "filesystem.write", "shell"}:
-                    actual_static.add(tool.name)
-            elif tool.name in _RUNTIME_RESERVED_TOOL_NAMES:
-                raise AIError(
-                    ErrorCode.CAPABILITY_POLICY_CONFLICT,
-                    safe_details={"tool_name": tool.name},
-                )
-
-            if (
-                tool.capability_id is None
-                and tool.tool_kind not in PYDANTIC_CONTROL_TOOL_KINDS
-            ):
-                actual_static.add(tool.name)
-            elif tool.capability_id in _WORKSPACE_CAPABILITY_IDS:
-                actual_static.add(tool.name)
-                if tool.name not in trusted_classes:
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            elif tool.name in expected_static:
-                raise AIError(
-                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                    safe_details={"tool_name": tool.name},
-                )
-
-            is_mcp_name = tool.name.startswith("mcp__")
-            is_mcp_owner = tool.capability_id in self._trusted_mcp_selectors
-            if is_mcp_name or is_mcp_owner:
-                if (
-                    not is_mcp_owner
-                    or tool.capability_id is None
-                    or not tool.name.startswith(f"{tool.capability_id}__")
-                ):
-                    raise AIError(
-                        ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                        safe_details={"tool_name": tool.name},
-                    )
-
-        if not actual_static.issubset(expected_static):
-            raise AIError(
-                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                safe_details={
-                    "expected_static_tools": sorted(expected_static),
-                    "actual_static_tools": sorted(actual_static),
-                },
-            )
-
-    @classmethod
-    def get_serialization_name(cls) -> str | None:
-        return None
-
-
-def _mcp_tool_allowed(name: str, selectors: tuple[str, ...]) -> bool:
-    if not name.startswith("mcp__"):
-        return False
-    for selector in selectors:
-        if selector.endswith("__*") and name.startswith(selector[:-1]):
-            return True
-        if "__" not in selector[5:] and name.startswith(f"{selector}__"):
-            return True
-        if selector == name:
-            return True
-    return False
 
 
 def _map_event(event: object) -> "AgentEmission | None":
@@ -1622,10 +1279,8 @@ def _usage_details(value: RunUsage) -> dict[str, int]:
 __all__ = [
     "AgentEmission",
     "AgentExecutionOutcome",
-    "AgentExecutionPaused",
     "AgentExecutionResult",
     "AgentExecutor",
-    "PendingToolApproval",
     "DurableBoundary",
     "EventSink",
     "LiveDelta",

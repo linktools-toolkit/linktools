@@ -17,7 +17,7 @@ from linktools.ai.runtime import (
 )
 from linktools.ai.runtime._factory import _restore_recovery_bindings
 from linktools.ai.runtime._session import DefaultSessionService
-from linktools.ai.runtime.state import RecoveryCheckpointState
+from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import trusted_workspace_principal
 
@@ -44,7 +44,7 @@ def test_agent_binding_snapshot_persists_only_final_v1_identity_contract() -> No
     snapshot = AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"version": 1, "id": "model"},
+        base_model={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
         output_mode="structured",
@@ -57,7 +57,7 @@ def test_agent_binding_snapshot_persists_only_final_v1_identity_contract() -> No
     assert set(payload) == {
         "version",
         "agent_spec",
-        "model",
+        "base_model",
         "selected",
         "subagents",
         "output_mode",
@@ -102,7 +102,7 @@ def test_agent_binding_snapshot_rejects_unknown_version() -> None:
     snapshot = AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"version": 1, "id": "model"},
+        base_model={"version": 1, "id": "model"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -248,13 +248,6 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
         SimpleNamespace(
             execution_id=execution_id,
             state=RecoveryCheckpointState.ADMITTED,
-            input=SimpleNamespace(
-                binding_digest=digest,
-                mode="run",
-                planning=False,
-                thinking=False,
-                binding=SimpleNamespace(agent_spec=SimpleNamespace(id=execution_id)),
-            ),
         )
         for execution_id, digest in (
             ("available", "a" * 64),
@@ -267,9 +260,27 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
         del kwargs
         return SimpleNamespace(items=checkpoints, next_cursor=None)
 
-    async def _get_execution(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        return None
+    executions = {
+        execution_id: SimpleNamespace(
+            execution_id=execution_id,
+            binding_digest=digest,
+            binding=SimpleNamespace(
+                agent_spec=SimpleNamespace(id=execution_id),
+            ),
+        )
+        for execution_id, digest in (
+            ("available", "a" * 64),
+            ("unavailable", "b" * 64),
+        )
+    }
+
+    async def _get_execution(
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> object:
+        del tenant_id
+        return executions[execution_id]
 
     def _restore(snapshot: object) -> object:
         execution_id = snapshot.agent_spec.id

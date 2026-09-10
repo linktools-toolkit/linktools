@@ -182,6 +182,31 @@ class RuntimeStatePlan:
         routes = tuple(self.route(domain) for domain in RuntimeDomain)
         if any(not isinstance(route, RuntimeStateRoute) for route in routes):
             raise ValueError("RuntimeStatePlan contains an invalid route")
+        execution = self.execution
+        recovery = self.recovery
+        if execution.retention is not recovery.retention:
+            raise ValueError("execution and recovery retention must match")
+        if execution.kind != recovery.kind:
+            raise ValueError("execution and recovery backends must match")
+        if execution.kind == _RuntimeStateBackendKind.FILESYSTEM.value:
+            if (
+                execution.transaction_root is None
+                or recovery.transaction_root is None
+                or execution.transaction_root != recovery.transaction_root
+            ):
+                raise ValueError(
+                    "execution and recovery filesystem routes must share a transaction_root"
+                )
+        elif execution.kind == _RuntimeStateBackendKind.SQLITE.value:
+            if execution.path != recovery.path:
+                raise ValueError(
+                    "execution and recovery SQLite routes must share a path"
+                )
+        elif execution.kind == _RuntimeStateBackendKind.SQL.value:
+            if execution.engine is not recovery.engine:
+                raise ValueError(
+                    "execution and recovery SQL routes must share an engine"
+                )
         filesystem_roots = [route.path for route in routes if route.kind == _RuntimeStateBackendKind.FILESYSTEM.value]
         if len(filesystem_roots) != len({path for path in filesystem_roots}):
             raise ValueError("filesystem RuntimeStateRoute path must be unique across RuntimeDomain values")

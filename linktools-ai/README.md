@@ -51,7 +51,7 @@ Useful options:
 from linktools.ai import Runtime, Workspace
 from linktools.ai.model import ModelRegistry
 
-workspace = Workspace.discover("/workspace/project")
+workspace = Workspace.initialize("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
 
 async with Runtime.open(workspace, models=models) as runtime:
@@ -69,12 +69,12 @@ async with Runtime.open(workspace, models=models) as runtime:
 Use `CapabilityGroup` for direct application registrations:
 
 ```python
-from linktools.ai import CapabilityGroup, RunContext, Runtime
+from linktools.ai import AgentContext, CapabilityGroup, Runtime
 
 application = CapabilityGroup[None]("application")
 
 @application.tool
-def lookup_ticket(ctx: RunContext[None], ticket_id: str) -> str:
+def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
     return ticket_id
 
 application.agent(
@@ -94,7 +94,9 @@ async with Runtime.open(
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
 
-`CapabilityGroup.tool()` and `CapabilityGroup.capability()` accept a positive semantic `revision`. The revision is an explicit fingerprint input for Python behavior whose semantics cannot be reconstructed from a declaration payload. Generic Pydantic capabilities retain their native Pydantic AI behavior, including model selection, tools, lifecycle hooks, deferred loading, and per-agent/per-run binding. Their implementation identity is always pinned into the Agent binding; `semantic_config` is optional and should be supplied when runtime configuration changes semantics without changing the implementation or revision. LinkTools reserves only its own internal capability identities and revalidates final output against the durable `OutputBinding`. It is not a project-wide version layer.
+`CapabilityGroup.tool()` and `CapabilityGroup.capability()` accept a positive semantic `revision`. The revision is an explicit fingerprint input for Python behavior whose semantics cannot be reconstructed from a declaration payload. Generic Pydantic capabilities retain their native Pydantic AI behavior, including model selection, tools, lifecycle hooks, deferred loading, and per-agent/per-run binding. Their `semantic_id`, `revision`, and optional `semantic_config` are recorded in the Agent binding; `semantic_config` should be supplied when runtime configuration changes semantics without changing the revision. LinkTools reserves only its own internal capability identities and revalidates final output against the durable `OutputBinding`. It is not a project-wide version layer.
+
+Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
 `CapabilityGroup.agent()` creates an `AgentSpec`; declarations themselves use the single v1 wire contract and do not expose a per-declaration revision field.
 
@@ -235,6 +237,8 @@ A Session owns conversation continuity and the stable Agent id. Every new execut
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
+URL and uploaded-file content remains an external reference: Runtime persists its declared metadata and does not implicitly download it. Inline binary content and workspace file inputs are frozen as bytes before execution reservation when their durable contract requires it. Model transport retries use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults to `tool_retries=10000`, and output correction defaults to `output_retries=3`.
+
 Execution file input uses the same durable boundary:
 
 ```python
@@ -323,9 +327,9 @@ The top-level composition API is intentionally small:
 ```python
 from linktools.ai import (
     Agent,
+    AgentContext,
     CapabilityGroup,
     Execution,
-    RunContext,
     Runtime,
     Session,
     Workspace,

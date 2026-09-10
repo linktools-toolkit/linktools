@@ -21,9 +21,18 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeState
-from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
+from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.runtime._execution import (
+    CancelEffectOutcome,
+    DefaultExecutionService,
+    _ExecutionRuntimeBridge,
+)
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
+from linktools.ai.runtime.state._contracts import (
+    ConversationCursor,
+    RuntimeStorageContract,
+    SessionRecord,
+)
 from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -203,7 +212,7 @@ def _binding(digest: str) -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"route_id": "model", "model_identity": "test:model"},
+        base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -257,10 +266,15 @@ class _History:
 
 
 class _RejectingBackend:
-    def __init__(self, repository: object | None = None) -> None:
+    def __init__(
+        self,
+        repository: object | None = None,
+        idempotency: object | None = None,
+    ) -> None:
         self.aborted: list[str] = []
         self.committed: list[str] = []
         self._repository = repository
+        self._idempotency = idempotency
 
     async def commit_terminal_checkpoint(
         self,
@@ -278,6 +292,28 @@ class _RejectingBackend:
                 tenant_id=execution.tenant_id,
                 expected_revision=commit.expected_revision,
                 next_record=execution,
+            )
+        update = commit.idempotency
+        idempotency = self._idempotency
+        if update is not None and idempotency is not None:
+            current = await idempotency.get(
+                update.scope,
+                update.idempotency_key_digest,
+                tenant_id=execution.tenant_id,
+            )
+            assert current is not None
+            await idempotency.compare_and_swap(
+                update.scope,
+                update.idempotency_key_digest,
+                tenant_id=execution.tenant_id,
+                expected_status=update.expected_status,
+                next_record=replace(
+                    current,
+                    status=update.next_status,
+                    result_digest=update.result_digest,
+                    error_code=update.error_code,
+                    updated_at=execution.updated_at,
+                ),
             )
         return SimpleNamespace(execution=execution, result=commit.result)
 
@@ -307,7 +343,12 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
     await state.initialize(namespace="session-admission-rejection", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
-        backend = _RejectingBackend(state.execution.executions)
+        backend = _RejectingBackend(
+            state.execution.executions,
+            state.execution.idempotency,
+        )
+        runtime_bridge = _ExecutionRuntimeBridge()
+        runtime_bridge.bind(backend)  # type: ignore[arg-type]
         service = DefaultExecutionService(
             state.execution,
             state.object_store(RuntimeDomain.EXECUTION),
@@ -315,40 +356,15 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             sessions=state.conversation.sessions,
             catalog=_DefinitionCatalog(),
             compiler=object(),
-            backend=backend,
+            runtime_bridge=runtime_bridge,
+            live_broker=LiveExecutionEventBroker(),
             history_reader=_History(),
-        )
-        from linktools.ai.runtime.state import RuntimeStateCommands
-        from linktools.ai.runtime.state._repositories import (
-            ConversationHistoryRepositoryImpl,
-            EventRepositoryImpl,
-            OperationLedgerRepository,
-        )
-
-        service.bind_terminal_committer(
-            RuntimeStateCommands(
-                state.execution.executions,
-                namespace="session-admission-rejection",
-                events=EventRepositoryImpl(
-                    state.execution.events.state_store,
-                    namespace="session-admission-rejection",
-                    tenant_id="tenant",
-                ),
-                operations=OperationLedgerRepository(
-                    state.execution.operations.state_store,
-                    namespace="session-admission-rejection",
-                    tenant_id="tenant",
-                    domain=RuntimeDomain.EXECUTION,
-                ),
-                conversation=state.conversation.sessions,
-                recovery=state.recovery.checkpoints,
-                conversation_history=ConversationHistoryRepositoryImpl(
-                    state.conversation.histories.state_store,
-                    namespace="session-admission-rejection",
-                    tenant_id="tenant",
-                ),
-                background_tasks=set(),
-            )
+            storage_contract_factory=lambda _domains: RuntimeStorageContract(
+                1,
+                (),
+                (),
+                (),
+            ),
         )
         with pytest.raises(AIError) as error:
             await service.start_for_session(

@@ -7,7 +7,7 @@ from typing import TypeVar
 
 import pytest
 from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime.state import FactQuery
+from linktools.ai.runtime.state._store import FactQuery
 from linktools.ai.runtime.state._readmodel import (
     ExecutionReadModelBuild,
     ExecutionReadModelRepository,

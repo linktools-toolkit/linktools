@@ -103,18 +103,14 @@ class ConversationCursor:
 
 @dataclass(frozen=True, slots=True)
 class ConversationHistorySegmentRef:
-    """Freeze one source history's visible LOCAL prefix at fork time."""
+    """Freeze one source history's visible message prefix at fork time."""
 
     owner_history_id: str
     through_local_message_count: int
-    through_local_history_item_count: int
 
     def __post_init__(self) -> None:
-        if (
-            self.through_local_message_count < 0
-            or self.through_local_history_item_count < 0
-        ):
-            raise ValueError("history segment counts cannot be negative")
+        if self.through_local_message_count < 0:
+            raise ValueError("history segment message count cannot be negative")
         if not self.owner_history_id:
             raise ValueError("history segment owner cannot be empty")
 
@@ -123,15 +119,14 @@ class ConversationHistorySegmentRef:
 class ConversationHistoryIndexNodeRecord:
     """Skew-heap tree node doubling as one forest cell.
 
-    ``tree_*`` counters aggregate the tree rooted here; ``next_forest_id``
-    links forest cells so a weighted resolver walks only touched segments.
+    ``tree_*`` counters aggregate the message tree rooted here;
+    ``next_forest_id`` links forest cells for lazy prefix resolution.
     """
 
     node_id: str
     segment: ConversationHistorySegmentRef
     tree_segment_count: int
     tree_message_count: int
-    tree_history_item_count: int
     left_tree_id: str | None
     right_tree_id: str | None
     next_forest_id: str | None
@@ -139,11 +134,7 @@ class ConversationHistoryIndexNodeRecord:
     def __post_init__(self) -> None:
         if self.tree_segment_count < 1:
             raise ValueError("index node must cover at least one segment")
-        if (
-            self.tree_message_count < self.segment.through_local_message_count
-            or self.tree_history_item_count
-            < self.segment.through_local_history_item_count
-        ):
+        if self.tree_message_count < self.segment.through_local_message_count:
             raise ValueError("index node counters cannot undercut its segment")
         if self.tree_segment_count == 1 and (
             self.left_tree_id is not None or self.right_tree_id is not None
@@ -181,7 +172,7 @@ class StoredUserInput:
     def __post_init__(self) -> None:
         if self.version != 1:
             raise ValueError("stored user input version must be 1")
-        if self.codec not in {"text", "pydantic-user-content-v1"}:
+        if self.codec not in {"text", "user-content-v1"}:
             raise ValueError("stored user input codec is invalid")
         if not isinstance(self.payload, StoredPayload):
             raise TypeError("stored user input payload is invalid")
@@ -196,67 +187,6 @@ class StoredUserInput:
                 "payload_size": self.payload.size,
             }
         )
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspacePathBinding:
-    pointer: str
-    relative: str
-
-    def __post_init__(self) -> None:
-        if (
-            not isinstance(self.pointer, str)
-            or not self.pointer.startswith("/")
-            or self.pointer == "/"
-            or "//" in self.pointer
-        ):
-            raise ValueError("workspace path binding is invalid")
-        try:
-            normalized = normalize_workspace_path(self.relative)
-        except (TypeError, ValueError) as error:
-            raise ValueError("workspace path binding is invalid") from error
-        if normalized != self.relative:
-            raise ValueError("workspace path binding is not canonical")
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceToolCallBinding:
-    version: int
-    execution_id: str
-    step_run_id: str
-    tool_call_id: str
-    tool_name: str
-    arguments_digest: str
-    paths: tuple[WorkspacePathBinding, ...]
-    error_code: str | None
-
-    def __post_init__(self) -> None:
-        if self.version != 1:
-            raise ValueError("workspace tool binding version must be 1")
-        if not all(
-            isinstance(value, str) and value
-            for value in (
-                self.execution_id,
-                self.step_run_id,
-                self.tool_call_id,
-                self.tool_name,
-            )
-        ):
-            raise ValueError("workspace tool binding identity is invalid")
-        if not _is_sha256(self.arguments_digest):
-            raise ValueError("workspace tool binding digest is invalid")
-        paths = tuple(self.paths)
-        if any(not isinstance(path, WorkspacePathBinding) for path in paths):
-            raise TypeError("workspace tool binding paths are invalid")
-        pointers = tuple(path.pointer for path in paths)
-        if len(pointers) != len(set(pointers)):
-            raise ValueError("workspace tool binding pointers are duplicated")
-        if self.error_code is not None:
-            if not isinstance(self.error_code, str) or not self.error_code:
-                raise ValueError("workspace tool binding error is invalid")
-            if paths:
-                raise ValueError("invalid workspace tool binding cannot contain paths")
-        object.__setattr__(self, "paths", paths)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,8 +293,6 @@ class TranscriptSeekDimension(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
     MESSAGE = "message"
-    SESSION_HISTORY_ITEM = "session_history_item"
-    EXECUTION_TRANSCRIPT_ITEM = "execution_transcript_item"
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,10 +306,6 @@ class TranscriptHeadRecord:
     owner_domain: TranscriptOwnerDomain
     owner_id: str
     message_count: int
-    session_history_item_count: int
-    session_history_view_version: int
-    execution_transcript_item_count: int
-    execution_transcript_view_version: int
     chunk_count: int
     quality: HistoryQuality
     revision: int
@@ -391,18 +315,11 @@ class TranscriptHeadRecord:
             value < 0
             for value in (
                 self.message_count,
-                self.session_history_item_count,
-                self.execution_transcript_item_count,
                 self.chunk_count,
                 self.revision,
             )
         ):
             raise ValueError("transcript head counts cannot be negative")
-        if (
-            self.session_history_view_version < 1
-            or self.execution_transcript_view_version < 1
-        ):
-            raise ValueError("transcript head view versions must be positive")
         if not self.owner_id:
             raise ValueError("transcript head owner cannot be empty")
 
@@ -416,16 +333,12 @@ class TranscriptSeekRecord:
     block_start: int
     fact_sequence: int
     chunk_first_message_index: int
-    chunk_first_view_item_index: int
-    view_version: int
 
     def __post_init__(self) -> None:
         if self.block_start < 0 or self.fact_sequence < 1:
             raise ValueError("transcript seek boundary values are invalid")
-        if self.chunk_first_message_index < 0 or self.chunk_first_view_item_index < 0:
+        if self.chunk_first_message_index < 0:
             raise ValueError("transcript seek chunk offsets cannot be negative")
-        if self.view_version < 1:
-            raise ValueError("transcript seek view version must be positive")
         if not self.owner_id:
             raise ValueError("transcript seek owner cannot be empty")
 
@@ -505,7 +418,7 @@ class HistoryQuality(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ConversationHistoryRecord:
-    """Immutable branch descriptor; local counts live on the TranscriptHead."""
+    """Immutable branch descriptor with a message-only inherited prefix."""
 
     history_id: str
     session_id: str
@@ -513,23 +426,19 @@ class ConversationHistoryRecord:
     parent_history_id: str | None
     prefix_index_head_id: str | None
     inherited_message_count: int
-    inherited_history_item_count: int
 
     def __post_init__(self) -> None:
-        if self.inherited_message_count < 0 or self.inherited_history_item_count < 0:
-            raise ValueError("history inherited counts cannot be negative")
+        if self.inherited_message_count < 0:
+            raise ValueError("inherited message count cannot be negative")
         if not self.history_id or not self.session_id or not self.tenant_id:
             raise ValueError("history descriptor identity cannot be empty")
         if self.parent_history_id is None:
             if (
                 self.prefix_index_head_id is not None
                 or self.inherited_message_count != 0
-                or self.inherited_history_item_count != 0
             ):
                 raise ValueError("root history cannot inherit messages")
-        elif self.prefix_index_head_id is None and (
-            self.inherited_message_count != 0 or self.inherited_history_item_count != 0
-        ):
+        elif self.prefix_index_head_id is None and self.inherited_message_count != 0:
             raise ValueError("forked history with content requires a prefix head")
 
 
@@ -604,10 +513,8 @@ class SessionForkResultRecord:
     source_session_revision: int
     source_transcript_revision: int
     source_local_message_count: int
-    source_local_history_item_count: int
     source_prefix_index_head_id: str | None
     inherited_message_count: int
-    inherited_history_item_count: int
     target_session_id: str
     target_history_id: str
     target_prefix_index_head_id: str | None
@@ -621,9 +528,7 @@ class SessionForkResultRecord:
                 self.source_session_revision,
                 self.source_transcript_revision,
                 self.source_local_message_count,
-                self.source_local_history_item_count,
                 self.inherited_message_count,
-                self.inherited_history_item_count,
             )
         ):
             raise ValueError("session fork result counts cannot be negative")
@@ -665,6 +570,10 @@ class ExecutionRecord:
     planning: bool
     thinking: ThinkingValue
     binding: AgentBindingSnapshot
+    principal_id: str
+    principal_kind: str
+    stored_user_input: StoredUserInput
+    storage_contract: RuntimeStorageContract
     parent_invocation_id: str | None = None
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
@@ -700,6 +609,14 @@ class ExecutionRecord:
             or self.binding.binding_digest != self.binding_digest
         ):
             raise ValueError("execution binding snapshot does not match binding digest")
+        if not isinstance(self.principal_id, str) or not self.principal_id:
+            raise TypeError("execution principal id is invalid")
+        if not isinstance(self.principal_kind, str) or not self.principal_kind:
+            raise TypeError("execution principal kind is invalid")
+        if not isinstance(self.stored_user_input, StoredUserInput):
+            raise TypeError("execution stored user input is invalid")
+        if not isinstance(self.storage_contract, RuntimeStorageContract):
+            raise TypeError("execution storage contract is invalid")
         if self.error_diagnostics is not None and not isinstance(
             self.error_diagnostics, ErrorDiagnostics
         ):
@@ -1049,7 +966,6 @@ class ApprovalRecord:
     approval_id: str
     execution_id: str
     tenant_id: str
-    operation_id: str
     status: ApprovalStatus
     idempotency_key_digest: str | None
     decision: ApprovalDecision | None
@@ -1057,32 +973,22 @@ class ApprovalRecord:
     decision_digest: str | None
     created_at: datetime
     decided_at: datetime | None
-
-
-@dataclass(frozen=True, slots=True)
-class PendingApprovalContinuation:
-    batch_id: str
-    source_step_run_id: str
+    decision_message: str | None = None
+    resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not _is_sha256(self.batch_id):
-            raise ValueError("approval continuation batch id must be lowercase SHA-256")
-        if not isinstance(self.source_step_run_id, str) or not self.source_step_run_id:
-            raise ValueError("approval continuation source step run id is required")
-
-
-@dataclass(frozen=True, slots=True)
-class ToolApprovalAdmission:
-    record: ApprovalRecord
-    operation: OperationLedgerInput
-    tool_name: str
-    args_digest: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.tool_name, str) or not self.tool_name:
-            raise ValueError("tool approval name is required")
-        if not _is_sha256(self.args_digest):
-            raise ValueError("tool approval arguments digest must be lowercase SHA-256")
+        if self.decision_message is not None and not isinstance(
+            self.decision_message, str
+        ):
+            raise ValueError("approval decision message is invalid")
+        try:
+            object.__setattr__(
+                self,
+                "resolution_metadata",
+                dict(self.resolution_metadata),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("approval resolution metadata is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1090,136 +996,88 @@ class ExternalCallRecord:
     call_id: str
     execution_id: str
     tenant_id: str
-    operation_id: str
     status: ExternalCallStatus
     idempotency_key_digest: str | None
-    object_ref: ObjectRef | None
-    payload_digest: str | None
     created_at: datetime
     supplied_at: datetime | None
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryCheckpoint:
-    execution_id: str
-    tenant_id: str
-    input: RecoveryExecutionInput
-    step_run_id: str | None
-    agent_run_sequence: int
-    state: RecoveryCheckpointState
-    handoff_phase: RecoveryHandoffPhase
-    terminal_handoff: RecoveryTerminalHandoff | None
-    pending_operation_id: str | None
-    revision: int
-    created_at: datetime
-    updated_at: datetime
-    pending_approval: PendingApprovalContinuation | None = None
+    resolution_kind: str | None = None
+    result_payload: StoredPayload | None = None
+    result_digest: str | None = None
+    resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.agent_run_sequence < 0:
-            raise ValueError("recovery checkpoint sequence must be non-negative")
-        if self.state is RecoveryCheckpointState.ADMITTED and (
-            self.agent_run_sequence != 0
-            or self.step_run_id is not None
-            or self.pending_operation_id is not None
-            or self.pending_approval is not None
-        ):
-            raise ValueError("admitted recovery checkpoint cannot have an attempt")
-        if self.state in {
-            RecoveryCheckpointState.ACTIVE,
-            RecoveryCheckpointState.WAITING,
-        } and (self.agent_run_sequence < 1 or self.step_run_id is None):
-            raise ValueError("active recovery checkpoint requires an attempt")
-        if (
-            self.state is RecoveryCheckpointState.WAITING
-            and self.pending_approval is not None
-        ):
-            if (
-                self.step_run_id != self.pending_approval.source_step_run_id
-                or self.pending_operation_id is not None
-                or self.handoff_phase is not RecoveryHandoffPhase.NONE
-                or self.terminal_handoff is not None
-            ):
-                raise ValueError("approval waiting checkpoint is inconsistent")
-        if (
-            self.state is RecoveryCheckpointState.ACTIVE
-            and self.pending_approval is not None
-        ):
-            if (
-                self.step_run_id is None
-                or self.step_run_id == self.pending_approval.source_step_run_id
-            ):
-                raise ValueError(
-                    "approval continuation active checkpoint is inconsistent"
-                )
-        if (
-            self.state
-            in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED}
-            and self.pending_approval is not None
-        ):
-            raise ValueError(
-                "terminal recovery checkpoint cannot retain approval continuation"
+        if self.resolution_kind not in {None, "succeeded", "retry", "failed"}:
+            raise ValueError("external resolution kind is invalid")
+        if self.status is ExternalCallStatus.SUPPLIED:
+            if self.resolution_kind is None or self.result_digest is None:
+                raise ValueError("supplied external call is incomplete")
+        elif self.resolution_kind is not None or self.result_payload is not None:
+            raise ValueError("pending external call cannot have a resolution")
+        try:
+            object.__setattr__(
+                self,
+                "resolution_metadata",
+                dict(self.resolution_metadata),
             )
-        if self.handoff_phase is RecoveryHandoffPhase.NONE:
-            if self.terminal_handoff is not None:
-                raise ValueError(
-                    "unprepared recovery checkpoint cannot contain a handoff"
-                )
-            if self.state is RecoveryCheckpointState.HANDOFF:
-                raise ValueError(
-                    "unprepared recovery checkpoint cannot be in handoff state"
-                )
-        elif self.handoff_phase is RecoveryHandoffPhase.COMPLETED:
-            if self.state is not RecoveryCheckpointState.COMPLETED:
-                raise ValueError("completed recovery checkpoint must be completed")
-        elif self.terminal_handoff is None:
-            raise ValueError("prepared recovery checkpoint requires a terminal handoff")
-        elif self.state is not RecoveryCheckpointState.HANDOFF:
-            raise ValueError(
-                "active recovery checkpoint handoff must be in handoff state"
-            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("external resolution metadata is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryAdmissionRecord:
-    execution_id: str
-    tenant_id: str
-    input: RecoveryExecutionInput
-    created_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryActiveRecord:
-    execution_id: str
-    tenant_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryIntegrityReport:
-    """Result of the explicit maintenance-only recovery index scan."""
-
-    active_count: int
-    admission_count: int
-    inconsistent_execution_ids: tuple[str, ...]
+class PendingDeferredCall:
+    tool_call_id: str
+    tool_name: str
+    arguments_payload: StoredPayload
+    arguments_digest: str
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.active_count < 0 or self.admission_count < 0:
-            raise ValueError("recovery integrity counts cannot be negative")
+        if not self.tool_call_id or not self.tool_name:
+            raise ValueError("deferred call identity is required")
+        if self.arguments_payload.digest != self.arguments_digest:
+            raise ValueError("deferred call arguments digest does not match payload")
+        try:
+            object.__setattr__(self, "metadata", dict(self.metadata))
+        except (TypeError, ValueError) as error:
+            raise ValueError("deferred call metadata is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryStateRecord:
-    execution_id: str
-    tenant_id: str
-    step_run_id: str | None
-    agent_run_sequence: int
-    state: RecoveryCheckpointState
-    handoff_phase: RecoveryHandoffPhase
-    terminal_handoff: RecoveryTerminalHandoff | None
-    pending_operation_id: str | None
-    revision: int
-    updated_at: datetime
-    pending_approval: PendingApprovalContinuation | None = None
+class PendingToolContinuation:
+    source_step_run_id: str
+    requests_digest: str
+    approvals: tuple[PendingDeferredCall, ...] = ()
+    calls: tuple[PendingDeferredCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.source_step_run_id or not _is_sha256(self.requests_digest):
+            raise ValueError("deferred continuation identity is invalid")
+        values = (*self.approvals, *self.calls)
+        ids = tuple(item.tool_call_id for item in values)
+        if not values or len(ids) != len(set(ids)):
+            raise ValueError("deferred continuation calls must be unique")
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryInstructionBarrier:
+    step_run_id: str
+    tool_call_id: str
+    arguments_digest: str
+    resulting_overlay_digest: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                self.step_run_id,
+                self.tool_call_id,
+                self.arguments_digest,
+                self.resulting_overlay_digest,
+            )
+        ) or not _is_sha256(self.arguments_digest) or not _is_sha256(
+            self.resulting_overlay_digest
+        ):
+            raise ValueError("repository instruction barrier is invalid")
 
 
 class RecoveryCheckpointState(str, Enum):
@@ -1243,68 +1101,79 @@ class RecoveryHandoffPhase(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class RecoveryExecutionInput:
-    user_input: StoredUserInput
-    principal_id: str
-    principal_kind: str
-    session_id: str | None
-    memory_scope: str | None
-    binding_digest: str
-    lineage_kind: str
-    parent_execution_id: str | None
-    root_execution_id: str
-    source_execution_id: str | None
-    base_execution_id: str | None
-    conversation_step_run_id: str | None
-    idempotency: RecoveryIdempotencyInput
-    mode: ExecutionMode
-    planning: bool
-    thinking: ThinkingValue
-    binding: AgentBindingSnapshot
-    storage_contract: RuntimeStorageContract
-    parent_invocation_id: str | None = None
-    repository_instructions: RuntimePayloadRef | None = None
-    correlation: Mapping[str, str | int] = field(default_factory=dict)
+class RecoveryCheckpoint:
+    execution_id: str
+    tenant_id: str
+    step_run_id: str | None
+    agent_run_sequence: int
+    state: RecoveryCheckpointState
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    pending_tools: PendingToolContinuation | None = None
+    repository_instruction_overlay: RuntimePayloadRef | None = None
+    repository_instruction_barriers: tuple[RepositoryInstructionBarrier, ...] = ()
+    handoff_phase: RecoveryHandoffPhase = RecoveryHandoffPhase.NONE
+    terminal_handoff: RecoveryTerminalHandoff | None = None
+    pending_operation_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.user_input, StoredUserInput):
-            raise TypeError("recovery user input is invalid")
-        if not isinstance(self.storage_contract, RuntimeStorageContract):
-            raise TypeError("recovery storage contract is invalid")
-        mode = normalize_execution_mode(self.mode)
-        thinking = normalize_thinking(self.thinking)
-        if not isinstance(self.planning, bool):
-            raise TypeError("recovery planning must be bool")
-        if mode == "plan" and not self.planning:
-            raise ValueError("plan mode requires planning")
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "thinking", thinking)
-        object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
-        if self.lineage_kind == ExecutionLineageKind.SUBAGENT.value:
+        if self.agent_run_sequence < 0:
+            raise ValueError("recovery checkpoint sequence must be non-negative")
+        if self.state is RecoveryCheckpointState.ADMITTED and (
+            self.agent_run_sequence != 0
+            or self.step_run_id is not None
+            or self.pending_operation_id is not None
+            or self.pending_tools is not None
+        ):
+            raise ValueError("admitted recovery checkpoint cannot have an attempt")
+        if self.state in {
+            RecoveryCheckpointState.ACTIVE,
+            RecoveryCheckpointState.WAITING,
+        } and (self.agent_run_sequence < 1 or self.step_run_id is None):
+            raise ValueError("active recovery checkpoint requires an attempt")
+        if self.state is RecoveryCheckpointState.WAITING:
             if (
-                not isinstance(self.parent_execution_id, str)
-                or not self.parent_execution_id
-                or not isinstance(self.parent_invocation_id, str)
-                or not self.parent_invocation_id
-                or self.source_execution_id is not None
-                or self.base_execution_id is not None
+                self.pending_tools is None
+                or self.step_run_id != self.pending_tools.source_step_run_id
+                or self.pending_operation_id is not None
+                or self.handoff_phase is not RecoveryHandoffPhase.NONE
+                or self.terminal_handoff is not None
             ):
-                raise ValueError("subagent recovery lineage is invalid")
-        elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
-            raise ValueError("non-subagent recovery cannot carry parent lineage")
+                raise ValueError("deferred waiting checkpoint is inconsistent")
         if (
-            not isinstance(self.binding, AgentBindingSnapshot)
-            or self.binding.binding_digest != self.binding_digest
+            self.state
+            in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED}
+            and self.pending_tools is not None
         ):
             raise ValueError(
-                "recovery binding snapshot does not match execution identity"
+                "terminal recovery checkpoint cannot retain deferred continuation"
             )
-
-@dataclass(frozen=True, slots=True)
-class RecoveryIdempotencyInput:
-    scope: str
-    idempotency_key_digest: str
-    request_digest: str
+        if self.state is RecoveryCheckpointState.ACTIVE and self.pending_tools is not None:
+            raise ValueError("active recovery checkpoint cannot retain deferred work")
+        barriers = tuple(self.repository_instruction_barriers)
+        identities = tuple((item.step_run_id, item.tool_call_id) for item in barriers)
+        if len(identities) != len(set(identities)):
+            raise ValueError("repository instruction barriers must be unique")
+        object.__setattr__(self, "repository_instruction_barriers", barriers)
+        if self.handoff_phase is RecoveryHandoffPhase.NONE:
+            if self.terminal_handoff is not None:
+                raise ValueError(
+                    "unprepared recovery checkpoint cannot contain a handoff"
+                )
+            if self.state is RecoveryCheckpointState.HANDOFF:
+                raise ValueError(
+                    "unprepared recovery checkpoint cannot be in handoff state"
+                )
+        elif self.handoff_phase is RecoveryHandoffPhase.COMPLETED:
+            if self.state is not RecoveryCheckpointState.COMPLETED:
+                raise ValueError("completed recovery checkpoint must be completed")
+        elif self.terminal_handoff is None:
+            raise ValueError("prepared recovery checkpoint requires a terminal handoff")
+        elif self.state is not RecoveryCheckpointState.HANDOFF:
+            raise ValueError(
+                "active recovery checkpoint handoff must be in handoff state"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1616,7 +1485,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_revision: int,
         expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
-    async def enter_approval_wait_in_transaction(
+    async def enter_deferred_wait_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
@@ -1626,10 +1495,10 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_event_sequence: int,
         expected_agent_run_sequence: int,
         audit_events: Sequence[ExecutionEventAppend] = (),
-        approval_events: Sequence[ExecutionEventAppend],
+        deferred_events: Sequence[ExecutionEventAppend],
         occurred_at: datetime,
     ) -> ExecutionRecord: ...
-    async def claim_approval_resume_in_transaction(
+    async def claim_deferred_resume_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
@@ -1739,7 +1608,7 @@ class EventRepository(RuntimeRepository, Protocol):
         execution_id: str,
         *,
         tenant_id: str,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: JsonValue,
     ) -> ExecutionEventRecord: ...
 
@@ -1749,7 +1618,7 @@ class EventRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_sequence: int,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: JsonValue,
     ) -> ExecutionEventRecord: ...
 
@@ -1759,7 +1628,7 @@ class EventRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_sequence: int,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: JsonValue,
     ) -> ExecutionEventRecord: ...
     async def list(
@@ -1769,8 +1638,14 @@ class EventRepository(RuntimeRepository, Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ExecutionEventAppend:
-    event_type: ExecutionEventType
+    event_type: str
     payload: Mapping[str, JsonValue]
+
+    def __post_init__(self) -> None:
+        event_type = str(self.event_type)
+        if not isinstance(self.event_type, str) or not event_type:
+            raise ValueError("execution event type is required")
+        object.__setattr__(self, "event_type", event_type)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1803,8 +1678,12 @@ class ExecutionEventRecord:
     execution_id: str
     tenant_id: str
     sequence: int
-    event_type: ExecutionEventType
+    event_type: str
     payload: JsonValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.event_type, str) or not self.event_type:
+            raise ValueError("execution event type is required")
 
 
 class ApprovalRepository(RuntimeRepository, Protocol):
@@ -1812,21 +1691,20 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         self, approval_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...
     async def create(self, record: ApprovalRecord) -> ApprovalRecord: ...
-    async def create_with_operation(
-        self,
-        record: ApprovalRecord,
-        *,
-        operation: OperationLedgerInput,
-    ) -> tuple[ApprovalRecord, bool]: ...
-    async def create_with_operation_in_transaction(
+    async def create_in_transaction(
         self,
         transaction: StateTransaction,
         record: ApprovalRecord,
-        *,
-        operation: OperationLedgerInput,
-    ) -> tuple[ApprovalRecord, bool]: ...
+    ) -> ApprovalRecord: ...
     async def get(
         self, approval_id: str, *, tenant_id: str
+    ) -> ApprovalRecord | None: ...
+    async def get_in_transaction(
+        self,
+        transaction: StateTransaction,
+        approval_id: str,
+        *,
+        tenant_id: str,
     ) -> ApprovalRecord | None: ...
     async def get_approval_in_transaction(
         self,
@@ -1846,6 +1724,8 @@ class ApprovalRepository(RuntimeRepository, Protocol):
         principal_id: str,
         decision_digest: str,
         decided_at: datetime,
+        decision_message: str | None = None,
+        resolution_metadata: Mapping[str, JsonValue] | None = None,
     ) -> ApprovalRecord: ...
     async def cancel_pending_in_transaction(
         self,
@@ -1866,8 +1746,20 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
         self, call_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...
     async def create_call(self, record: ExternalCallRecord) -> ExternalCallRecord: ...
+    async def create_in_transaction(
+        self,
+        transaction: StateTransaction,
+        record: ExternalCallRecord,
+    ) -> ExternalCallRecord: ...
     async def get(
         self, call_id: str, *, tenant_id: str
+    ) -> ExternalCallRecord | None: ...
+    async def get_in_transaction(
+        self,
+        transaction: StateTransaction,
+        call_id: str,
+        *,
+        tenant_id: str,
     ) -> ExternalCallRecord | None: ...
     async def supply(
         self,
@@ -1876,10 +1768,21 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         expected_status: ExternalCallStatus,
         idempotency_key_digest: str,
-        object_ref: ObjectRef,
-        payload_digest: str,
+        resolution_kind: str,
+        result_payload: StoredPayload | None,
+        result_digest: str,
+        resolution_metadata: Mapping[str, JsonValue],
         supplied_at: datetime,
     ) -> ExternalCallRecord: ...
+    async def cancel_pending_in_transaction(
+        self,
+        transaction: StateTransaction,
+        call_ids: Sequence[str],
+        *,
+        execution_id: str,
+        tenant_id: str,
+        cancelled_at: datetime,
+    ) -> tuple[ExternalCallRecord, ...]: ...
     async def list_pending(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ExternalCallRecord, ...]: ...
@@ -1905,11 +1808,6 @@ class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
         cursor: str | None,
         limit: int,
     ) -> Page[RecoveryCheckpoint]: ...
-    async def validate_recovery_active_index(
-        self,
-        *,
-        tenant_id: str,
-    ) -> RecoveryIntegrityReport: ...
     async def compare_and_swap(
         self,
         execution_id: str,
@@ -2208,18 +2106,15 @@ __all__ = [
     "MemoryState",
     "OperationLedgerRepository",
     "OperationTerminalUpdate",
-    "PendingApprovalContinuation",
-    "RecoveryActiveRecord",
-    "RecoveryAdmissionRecord",
+    "PendingDeferredCall",
+    "PendingToolContinuation",
+    "RepositoryInstructionBarrier",
     "RecoveryCheckpoint",
     "RecoveryCheckpointRepository",
     "RecoveryCheckpointState",
     "RecoveryConversationIntent",
-    "RecoveryExecutionInput",
     "RecoveryHandoffPhase",
-    "RecoveryIdempotencyInput",
     "RecoveryState",
-    "RecoveryStateRecord",
     "RecoveryTerminalHandoff",
     "RecoveryTerminalOutcome",
     "ResultRecord",
@@ -2231,7 +2126,6 @@ __all__ = [
     "TaskAdmissionRepository",
     "TaskRepository",
     "TaskState",
-    "ToolApprovalAdmission",
     "ToolOperationAdmission",
     "TranscriptChunk",
     "TranscriptHeadRecord",

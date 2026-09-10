@@ -402,7 +402,6 @@ async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state import _filesystem as filesystem
     from linktools.ai.runtime.state._filesystem import FilesystemStateStore
     from linktools.ai.runtime.state._plan import RuntimeDomain
 

@@ -26,7 +26,6 @@ def _build_chain(
             [nodes[root] for root in roots],
             source_history_id=f"h{index - 1}",
             source_local_message_count=appends[index - 1],
-            source_local_history_item_count=appends[index - 1] * 2,
         )
         if node is None or isinstance(node, str):
             continue
@@ -123,7 +122,6 @@ async def test_zero_message_fork_shares_existing_prefix_head() -> None:
         [nodes[root] for root in roots],
         source_history_id="h1",
         source_local_message_count=0,
-        source_local_history_item_count=0,
     )
     assert shared == roots[0]
 

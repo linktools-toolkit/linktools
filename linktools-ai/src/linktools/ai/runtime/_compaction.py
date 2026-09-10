@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
@@ -51,9 +51,10 @@ _CONTROL_TOOL_NAMES = frozenset(
 class ExternalModelRequestObserver(Protocol):
     async def __call__(
         self,
-        ctx: RunContext[Any],
+        ctx: PydanticRunContext[Any],
         fact: ModelRequestFact,
         phase: str,
+        model: Model,
         response: ModelResponse | None,
         error: BaseException | None,
     ) -> None: ...
@@ -74,7 +75,7 @@ class _ObservedCompactionModel(WrapperModel):
         self,
         wrapped: Model,
         *,
-        ctx: RunContext[Any],
+        ctx: PydanticRunContext[Any],
         journal: ModelRequestJournal,
         observer: ExternalModelRequestObserver,
     ) -> None:
@@ -91,7 +92,14 @@ class _ObservedCompactionModel(WrapperModel):
     ) -> ModelResponse:
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
         request_sequence = fact.request_sequence
-        await self._observer(self._ctx, fact, "started", None, None)
+        await self._observer(
+            self._ctx,
+            fact,
+            "started",
+            self.wrapped,
+            None,
+            None,
+        )
         try:
             response = await self.wrapped.request(
                 messages,
@@ -105,6 +113,7 @@ class _ObservedCompactionModel(WrapperModel):
                 self._ctx,
                 fact,
                 "cancelled",
+                self.wrapped,
                 None,
                 error,
             )
@@ -116,6 +125,7 @@ class _ObservedCompactionModel(WrapperModel):
                 self._ctx,
                 fact,
                 "failed",
+                self.wrapped,
                 None,
                 error,
             )
@@ -126,6 +136,7 @@ class _ObservedCompactionModel(WrapperModel):
             self._ctx,
             fact,
             "completed",
+            self.wrapped,
             response,
             None,
         )
@@ -142,7 +153,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         journal: ModelRequestJournal | None = None,
         observer: ExternalModelRequestObserver | None = None,
         projection_sink: _ContextProjectionSink | None = None,
-        trusted_workspace_read: bool = False,
+        workspace_read_available: bool = False,
     ) -> None:
         if target_tokens is not None and (
             not isinstance(target_tokens, int)
@@ -150,7 +161,7 @@ class RuntimeCompaction(AbstractCapability[None]):
             or target_tokens <= 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not isinstance(trusted_workspace_read, bool):
+        if not isinstance(workspace_read_available, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         self._target_tokens = target_tokens
         self._journal = journal
@@ -158,13 +169,15 @@ class RuntimeCompaction(AbstractCapability[None]):
         self._projection_sink = projection_sink
         self._deduplicate = DeduplicateFileReads(
             file_key=(
-                _workspace_file_key if trusted_workspace_read else lambda _call: None
+                _workspace_file_key
+                if workspace_read_available
+                else lambda _call: None
             )
         )
 
     async def before_model_request(
         self,
-        ctx: RunContext[Any],
+        ctx: PydanticRunContext[Any],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         source = tuple(request_context.messages)

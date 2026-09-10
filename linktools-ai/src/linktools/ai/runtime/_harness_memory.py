@@ -15,12 +15,8 @@ from pydantic_ai_harness.memory import (
     MemoryStore,
 )
 
-from ..errors import AIError, ErrorCode
-from ._harness import current_tool_operation_id
-
-
 class HarnessMemoryStoreAdapter:
-    """Map Harness mutation identity to the stable Runtime tool operation."""
+    """Expose the Runtime memory store through Harness' public contract."""
 
     def __init__(self, store: MemoryStore) -> None:
         self._store = store
@@ -29,7 +25,7 @@ class HarnessMemoryStoreAdapter:
         return await self._store.read(path, max_chars=max_chars)
 
     async def get_operation(self, operation: MemoryOperation) -> MemoryMutation | None:
-        return await self._store.get_operation(self._operation(operation))
+        return await self._store.get_operation(operation)
 
     async def write(
         self,
@@ -43,7 +39,7 @@ class HarnessMemoryStoreAdapter:
             path,
             content,
             expected_version=expected_version,
-            operation=None if operation is None else self._operation(operation),
+            operation=operation,
         )
 
     async def delete(
@@ -56,19 +52,11 @@ class HarnessMemoryStoreAdapter:
         return await self._store.delete(
             path,
             expected_version=expected_version,
-            operation=None if operation is None else self._operation(operation),
+            operation=operation,
         )
 
     async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:
         return await self._store.list_paths(prefix, limit=limit)
-
-    @staticmethod
-    def _operation(operation: MemoryOperation) -> MemoryOperation:
-        stable_id = current_tool_operation_id()
-        if stable_id is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return MemoryOperation(id=stable_id, fingerprint=operation.fingerprint)
-
 
 @dataclass
 class HarnessSelectedMemory(Memory[None]):

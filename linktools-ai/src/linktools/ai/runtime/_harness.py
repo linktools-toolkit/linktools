@@ -5,8 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
-from contextvars import ContextVar, Token
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import cast
 
@@ -24,37 +23,13 @@ from pydantic_ai_harness.step_persistence import (
 
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
-from ._plan import PlanItem, PlanOperation, RuntimePlanStore
+from ._plan import PlanItem, RuntimePlanStore
 from .state._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
     StepStore,
 )
-
-_CURRENT_TOOL_OPERATION_ID: ContextVar[str | None] = ContextVar(
-    "linktools.ai.harness_tool_operation_id",
-    default=None,
-)
-_EVENT_INDEX_STRIDE = 1_000_000
-
-
-def bind_tool_operation_id(operation_id: str) -> Token[str | None]:
-    """Bind the stable LinkTools tool-operation identity for one SDK handler call."""
-    if not isinstance(operation_id, str) or not operation_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _CURRENT_TOOL_OPERATION_ID.set(operation_id)
-
-
-def reset_tool_operation_id(token: Token[str | None]) -> None:
-    """Restore the previous tool-operation identity."""
-    _CURRENT_TOOL_OPERATION_ID.reset(token)
-
-
-def current_tool_operation_id() -> str | None:
-    """Return the stable LinkTools tool-operation identity visible to adapters."""
-    return _CURRENT_TOOL_OPERATION_ID.get()
-
 
 class HarnessPlanStoreAdapter:
     """Expose the Runtime plan store through Harness' public PlanStore contract."""
@@ -80,13 +55,7 @@ class HarnessPlanStoreAdapter:
         current = await self._store.get_items()
         if current == values:
             return
-        operation_id = current_tool_operation_id()
-        operation = (
-            None
-            if operation_id is None
-            else PlanOperation(operation_id, _plan_fingerprint(values))
-        )
-        await self._store.write_plan(values, operation=operation)
+        await self._store.write_plan(values)
 
     async def get_item(self, item_id: str) -> HarnessPlanItem | None:
         return next(
@@ -152,12 +121,6 @@ def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
     return values
 
 
-def _plan_fingerprint(items: Sequence[PlanItem]) -> str:
-    return canonical_sha256(
-        {"items": [{"content": item.content, "status": item.status} for item in items]}
-    )
-
-
 def _plan_item_id(index: int, item: PlanItem) -> str:
     return canonical_sha256(
         {
@@ -179,8 +142,6 @@ class HarnessStepStoreAdapter:
         self._interrupted_runs: set[str] = set()
         self._projection_source: tuple[ModelMessage, ...] | None = None
         self._projection_messages: tuple[ModelMessage, ...] | None = None
-        self._last_harness_event: dict[str, int] = {}
-        self._external_event_offset: dict[str, int] = {}
 
     async def register_run(self, record: HarnessRunRecord) -> None:
         value = RunRecord(
@@ -215,11 +176,6 @@ class HarnessStepStoreAdapter:
 
     async def append_event(self, event: HarnessStepEvent) -> None:
         harness_index = _harness_event_index(event)
-        self._last_harness_event[event.run_id] = max(
-            harness_index,
-            self._last_harness_event.get(event.run_id, -1),
-        )
-        self._external_event_offset[event.run_id] = 0
         kind = (
             "run_interrupted"
             if event.kind == "run_completed" and event.run_id in self._interrupted_runs
@@ -239,7 +195,7 @@ class HarnessStepStoreAdapter:
                 error=event.error,
                 metadata=dict(event.metadata),
                 idempotency_key=event.idempotency_key,
-                event_index=harness_index * _EVENT_INDEX_STRIDE,
+                event_index=harness_index,
             )
         )
 
@@ -352,47 +308,6 @@ class HarnessStepStoreAdapter:
                 state="interrupted",
                 idempotency_key=f"pause:{step_index}:{len(values)}",
                 context_messages=self.snapshot_context_messages(values),
-            )
-        )
-
-    async def append_runtime_event(
-        self,
-        *,
-        run_id: str,
-        kind: str,
-        step_index: int,
-        conversation_id: str | None,
-        parent_run_id: str | None,
-        agent_name: str | None,
-        metadata: Mapping[str, str],
-        error: str | None = None,
-        tool_call_id: str | None = None,
-        tool_name: str | None = None,
-    ) -> None:
-        last = self._last_harness_event.get(run_id, 0)
-        offset = self._external_event_offset.get(run_id, 0) + 1
-        if offset >= _EVENT_INDEX_STRIDE:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._external_event_offset[run_id] = offset
-        request_sequence = metadata.get("linktools.ai.request_sequence", "")
-        request_purpose = metadata.get("linktools.ai.request_purpose", "")
-        await self._append_step_event(
-            StepEvent(
-                run_id=run_id,
-                kind=cast(object, kind),  # type: ignore[arg-type]
-                step_index=step_index,
-                conversation_id=conversation_id,
-                parent_run_id=parent_run_id,
-                agent_name=agent_name,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                error=error,
-                metadata=dict(metadata),
-                idempotency_key=(
-                    f"external:{request_sequence}:{request_purpose}:{kind}:"
-                    f"{tool_call_id or ''}"
-                ),
-                event_index=last * _EVENT_INDEX_STRIDE + offset,
             )
         )
 
@@ -516,7 +431,4 @@ def _message_prefix(
 __all__ = [
     "HarnessPlanStoreAdapter",
     "HarnessStepStoreAdapter",
-    "bind_tool_operation_id",
-    "current_tool_operation_id",
-    "reset_tool_operation_id",
 ]

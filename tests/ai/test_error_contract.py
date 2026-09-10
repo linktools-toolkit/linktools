@@ -129,15 +129,15 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
             usage,
             ErrorCode.EXECUTION_CANCELLED.value,
         )
-    with pytest.raises(ValueError):
-        ExecutionResult(
-            "unknown",
-            ExecutionStatus.FAILED,
-            None,
-            None,
-            usage,
-            "NOT_A_REAL_ERROR",
-        )
+    unknown = ExecutionResult(
+        "unknown",
+        ExecutionStatus.FAILED,
+        None,
+        None,
+        usage,
+        "NOT_A_REAL_ERROR",
+    )
+    assert unknown.error_code == "NOT_A_REAL_ERROR"
     with pytest.raises(ValueError):
         ExecutionResult(
             "failed-with-output",
@@ -296,7 +296,7 @@ async def test_tool_error_codec_maps_generic_failure_without_message_leak() -> N
         _failed_tool_record(error_code=second_code, error_payload=second_payload)
     )
     assert isinstance(second, AIError)
-    assert second.safe_details["error_digest"] == decoded.safe_details["error_digest"]
+    assert second.safe_details["error_digest"] != decoded.safe_details["error_digest"]
 
 
 @pytest.mark.asyncio

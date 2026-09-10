@@ -33,7 +33,8 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .state import MemoryRecord, MemoryState, RuntimeDomain
+from .state import RuntimeDomain
+from .state._contracts import MemoryRecord, MemoryState
 
 _logger = environ.get_logger("ai.runtime.memory")
 _MAX_CONTENT_CHARS = 65_536
@@ -591,12 +592,18 @@ def _decode_receipt(value: str) -> _MutationReceipt:
         raw = json.loads(value)
         if (
             not isinstance(raw, dict)
+            or isinstance(raw.get("version"), bool)
+            or not isinstance(raw.get("version"), int)
             or raw.get("version") != 1
-            or set(raw) != {"version", "result"}
+            or not {"version", "result"}.issubset(raw)
         ):
             raise ValueError("memory receipt is malformed")
         result = raw["result"]
-        if not isinstance(result, dict) or set(result) != {"file", "version", "status"}:
+        if not isinstance(result, dict) or not {
+            "file",
+            "version",
+            "status",
+        }.issubset(result):
             raise ValueError("memory receipt result is malformed")
         path = _normalize_path(result["file"])
         version = result["version"]

@@ -129,8 +129,8 @@ async def test_capability_revision_is_fingerprint_input_only() -> None:
     assert first_candidate.kind == "capability"
     assert first_candidate.id == "test-capability"
     assert not hasattr(first_candidate, "semantic_revision")
-    assert first_candidate.semantic_contract["semantic_revision"] == 1
-    assert second_candidate.semantic_contract["semantic_revision"] == 2
+    assert first_candidate.semantic_contract["revision"] == 1
+    assert second_candidate.semantic_contract["revision"] == 2
     assert first_candidate.fingerprint != second_candidate.fingerprint
     assert "restore_locator" not in first_candidate.semantic_contract
 
@@ -192,23 +192,14 @@ async def test_deferred_generic_capability_keeps_native_semantics() -> None:
     candidate = (await group.freeze())[0]
     assert candidate.value is capability
     assert candidate.value.defer_loading is True
-    assert "config" not in candidate.semantic_contract
+    assert candidate.semantic_contract["config"] == {}
 
 
 @pytest.mark.parametrize(
     "capability_id",
     [
-        "workspace-filesystem",
-        "workspace-shell",
-        "workspace-sandbox",
-        "linktools-skill",
-        "linktools-memory",
-        "linktools-planning",
-        "linktools-subagent",
-        "linktools-thinking",
-        "linktools-reinject-system-prompt",
-        "step_persistence",
-        "mcp__server",
+        "linktools.custom",
+        "linktools.workspace",
     ],
 )
 def test_custom_capability_cannot_claim_runtime_or_mcp_namespace(capability_id: str) -> None:
@@ -231,17 +222,16 @@ async def test_duplicate_capability_identity_is_rejected_when_group_freezes() ->
 
 
 @pytest.mark.asyncio
-async def test_capability_semantic_config_is_optional() -> None:
+async def test_capability_semantic_config_defaults_to_empty() -> None:
     group = CapabilityGroup[None]("group")
     group.capability(_Capability())
 
     candidate = (await group.freeze())[0]
-    assert candidate.semantic_contract["implementation"].endswith(":_Capability")
-    assert "config" not in candidate.semantic_contract
+    assert candidate.semantic_contract["config"] == {}
 
 
 @pytest.mark.asyncio
-async def test_capability_implementation_identity_is_fingerprint_input() -> None:
+async def test_capability_implementation_identity_is_not_fingerprint_input() -> None:
     first = CapabilityGroup[None]("first")
     first.capability(_Capability(), revision=1, semantic_config={})
     second = CapabilityGroup[None]("second")
@@ -250,9 +240,8 @@ async def test_capability_implementation_identity_is_fingerprint_input() -> None
     first_candidate = (await first.freeze())[0]
     second_candidate = (await second.freeze())[0]
 
-    assert first_candidate.semantic_contract["implementation"].endswith(":_Capability")
-    assert second_candidate.semantic_contract["implementation"].endswith(":_OtherCapability")
-    assert first_candidate.fingerprint != second_candidate.fingerprint
+    assert first_candidate.semantic_contract == second_candidate.semantic_contract
+    assert first_candidate.fingerprint == second_candidate.fingerprint
 
 
 @pytest.mark.asyncio
@@ -277,7 +266,7 @@ async def test_external_capability_keeps_native_pydantic_extension_surface(
 
     candidate = (await group.freeze())[0]
     assert candidate.value is capability
-    assert candidate.semantic_contract["implementation"]
+    assert candidate.semantic_contract["revision"] == 1
 
 
 @pytest.mark.asyncio
@@ -310,18 +299,18 @@ def test_output_binding_revalidates_final_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_anonymous_native_capabilities_register_without_adapter_ids() -> None:
+async def test_anonymous_native_capabilities_require_explicit_semantic_ids() -> None:
     select_model = SelectModel(lambda ctx: ctx.model)
     prepare_tools = PrepareTools(lambda _ctx, tool_defs: tool_defs)
     group = CapabilityGroup[None]("group")
 
-    group.capability(select_model)
-    group.capability(prepare_tools)
+    group.capability(select_model, semantic_id="select-model")
+    group.capability(prepare_tools, semantic_id="prepare-tools")
     candidates = await group.freeze()
 
     assert select_model.id is None
     assert prepare_tools.id is None
     assert {candidate.id for candidate in candidates} == {
-        "anonymous:pydantic_ai.capabilities.prepare_tools:PrepareTools",
-        "anonymous:pydantic_ai.capabilities.select_model:SelectModel",
+        "prepare-tools",
+        "select-model",
     }

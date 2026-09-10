@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
+from linktools.ai.model._openai import _RetryingModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -61,7 +62,7 @@ def test_model_registry_restore_requires_exact_semantic_settings() -> None:
             route_id="default",
         )
 
-    assert raised.value.code is ErrorCode.MODEL_CONNECTION_NOT_FOUND
+    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 
 def test_openai_route_materializes_settings_and_retries() -> None:
@@ -75,11 +76,12 @@ def test_openai_route_materializes_settings_and_retries() -> None:
 
     model = binding.materialize()
 
-    assert isinstance(model, OpenAIChatModel)
-    assert model.settings == {"timeout": 30, "max_tokens": 2048}
-    provider = model.provider
+    assert isinstance(model, _RetryingModel)
+    assert isinstance(model.wrapped, OpenAIChatModel)
+    assert model.wrapped.settings == {"timeout": 30, "max_tokens": 2048}
+    provider = model.wrapped.provider
     assert isinstance(provider, OpenAIProvider)
-    assert provider.client.max_retries == 1
+    assert provider.client.max_retries == 0
 
 
 @pytest.mark.parametrize(

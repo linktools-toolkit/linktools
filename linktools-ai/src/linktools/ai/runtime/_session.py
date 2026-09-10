@@ -52,7 +52,7 @@ from .service_api import (
     SessionView,
     UpdateSessionRequest,
 )
-from .state import (
+from .state._contracts import (
     ConversationState,
     ExecutionRecord,
     ExecutionRepository,

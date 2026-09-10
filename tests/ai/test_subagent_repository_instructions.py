@@ -18,12 +18,22 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
 )
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
-from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
+from linktools.ai.runtime._event import LiveExecutionEventBroker
+from linktools.ai.runtime._execution import (
+    CancelEffectOutcome,
+    DefaultExecutionService,
+    _ExecutionRuntimeBridge,
+)
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory
-from linktools.ai.runtime.state import ExecutionRecord, RuntimePayloadRef
+from linktools.ai.runtime.state._contracts import (
+    ExecutionRecord,
+    RuntimePayloadRef,
+    RuntimeStorageContract,
+)
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import PayloadPolicy, StoredPayload
 from linktools.ai.workspace import RepositoryInstructionDocument, RepositoryInstructions
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding(digest: str) -> AgentBindingSnapshot:
@@ -31,7 +41,7 @@ def _binding(digest: str) -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"route_id": "model", "model_identity": "test:model"},
+        base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -151,6 +161,7 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         thinking=False,
         binding=_binding("a" * 64),
         repository_instructions=pin,
+        **execution_owner_fields(),
     )
 
 
@@ -167,6 +178,9 @@ def _service(
             object_key_factory=RuntimeObjectKeyFactory("subagent-instructions"),
             payload_policy=PayloadPolicy(),
         )
+    backend = _Launcher(state.execution.executions)
+    runtime_bridge = _ExecutionRuntimeBridge()
+    runtime_bridge.bind(backend)  # type: ignore[arg-type]
     return DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
@@ -174,9 +188,16 @@ def _service(
         sessions=state.conversation.sessions,
         catalog=_Catalog(),
         compiler=object(),
-        backend=_Launcher(state.execution.executions),
+        runtime_bridge=runtime_bridge,
+        live_broker=LiveExecutionEventBroker(),
         operation_ids=iter(ids).__next__,
         history_reader=_History(),
+        storage_contract_factory=lambda _domains: RuntimeStorageContract(
+            1,
+            (),
+            (),
+            (),
+        ),
         **kwargs,
     )
 

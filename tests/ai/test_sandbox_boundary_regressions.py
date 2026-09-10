@@ -46,7 +46,7 @@ async def test_workspace_capability_adapts_the_caller_owned_session(
 ) -> None:
     session = _FakeSession()
     capability = workspace_capabilities(
-        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, workspace_id="workspace"),
         ("run_command",),
         session=session,  # type: ignore[arg-type]
     )[0]
@@ -87,7 +87,7 @@ async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path
 def test_runtime_compaction_uses_harness_deduplication() -> None:
     compaction = RuntimeCompaction(
         4096,
-        trusted_workspace_read=True,
+        workspace_read_available=True,
         journal=None,
         observer=None,
         projection_sink=None,

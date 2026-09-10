@@ -11,10 +11,8 @@ from linktools.core import environ
 from ..asset import build_asset_sql_metadata
 from ..errors import AIError, ErrorCode
 from ..observe import build_metrics_sql_metadata
-from ..runtime.state import (
-    RuntimeDomain,
-    build_runtime_sql_metadata,
-)
+from ..runtime.state import RuntimeDomain
+from ..runtime.state.schema import build_runtime_sql_metadata
 from ..storage import build_object_sql_metadata, provision_sql
 
 _logger = environ.get_logger("ai.migrate.database")

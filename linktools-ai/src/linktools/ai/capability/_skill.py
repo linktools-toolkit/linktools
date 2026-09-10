@@ -4,11 +4,17 @@
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
+
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
+from pydantic_ai.tools import RunContext as PydanticRunContext
+from pydantic_ai.toolsets import FunctionToolset
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import SkillSpec
-from ._names import SKILL_TOOL_NAMES
+from ._context import AgentContext
 from ._skill_source import (
     SkillResourceView,
     SkillSourceRef,
@@ -84,12 +90,17 @@ class SkillDefinition:
         return cls(specification, source_ref)
 
 
-class SkillCapability:
+class LinkToolsSkills(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         skills: Sequence[SkillDefinition],
         sources: SkillSourceRegistry,
+        *,
+        resource_paths: Mapping[str, str] | None = None,
+        preloaded_skill_ids: Sequence[str] = (),
+        max_preloaded_bytes: int = 256 * 1024,
     ) -> None:
+        self.id = "linktools-skill"
         if not isinstance(sources, SkillSourceRegistry):
             raise TypeError("sources must be SkillSourceRegistry")
         ordered = tuple(sorted(skills, key=lambda item: item.id))
@@ -101,6 +112,68 @@ class SkillCapability:
         self._skills = ordered
         self._by_id = {item.id: item for item in ordered}
         self._sources = sources
+        self._resource_paths = dict(resource_paths or {})
+        preload_ids = tuple(sorted(preloaded_skill_ids))
+        if len(preload_ids) != len(set(preload_ids)):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        if any(skill_id not in self._by_id for skill_id in preload_ids):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if (
+            not isinstance(max_preloaded_bytes, int)
+            or isinstance(max_preloaded_bytes, bool)
+            or max_preloaded_bytes < 0
+        ):
+            raise ValueError("max_preloaded_bytes must be a non-negative integer")
+        self._preloaded = tuple(self._by_id[skill_id] for skill_id in preload_ids)
+        self._max_preloaded_bytes = max_preloaded_bytes
+
+    def get_instructions(self) -> str | None:
+        return self.instructions()
+
+    def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
+        toolset = FunctionToolset[AgentContext[object]](id=self.id)
+
+        @toolset.tool
+        async def list_skills(
+            _ctx: PydanticRunContext[AgentContext[object]],
+        ) -> list[dict[str, str]]:
+            """List skills available for this agent run."""
+            return await self.list_skills()
+
+        @toolset.tool
+        async def load_skill(
+            _ctx: PydanticRunContext[AgentContext[object]],
+            skill_id: str,
+            path: str | None = None,
+        ) -> dict[str, str | list[str]]:
+            """Load skill instructions or one relative text resource."""
+            try:
+                result = cast(
+                    dict[str, str | list[str]],
+                    await self.load_skill(skill_id, path),
+                )
+                if path is None and skill_id in self._resource_paths:
+                    result["location"] = self._resource_paths[skill_id]
+                return result
+            except AIError as error:
+                if error.code in {
+                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                }:
+                    raise ModelRetry("skill id or resource path is invalid") from error
+                if error.code in {
+                    ErrorCode.ASSET_PATH_OUTSIDE_ROOT,
+                    ErrorCode.ASSET_NOT_FOUND,
+                    ErrorCode.ASSET_CODEC_UNKNOWN,
+                }:
+                    raise ToolFailed("skill resource is unavailable") from error
+                raise
+
+        return toolset
+
+    @classmethod
+    def get_serialization_name(cls) -> str | None:
+        return None
 
     def instructions(self) -> "str | None":
         if not self._skills:
@@ -112,6 +185,25 @@ class SkillCapability:
         lines.extend(
             f"- {item.id}: {_skill_description(item.spec)}" for item in self._skills
         )
+        if self._preloaded:
+            lines.extend(
+                (
+                    "The following skill instructions are preloaded for this agent run.",
+                    *(
+                        f"[skill: {item.id}]\n{item.spec.content}"
+                        for item in self._preloaded
+                    ),
+                )
+            )
+            try:
+                preloaded = "\n\n".join(
+                    f"[skill: {item.id}]\n{item.spec.content}"
+                    for item in self._preloaded
+                ).encode("utf-8", errors="strict")
+            except UnicodeEncodeError as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+            if len(preloaded) > self._max_preloaded_bytes:
+                raise AIError(ErrorCode.PROMPT_TOO_LARGE)
         return "\n".join(lines)
 
     async def list_skills(self) -> "list[dict[str, str]]":
@@ -195,4 +287,4 @@ def _usage_hint(view: SkillResourceView) -> str:
     )
 
 
-__all__ = ["SKILL_TOOL_NAMES", "SkillCapability", "SkillDefinition"]
+__all__ = ["LinkToolsSkills", "SkillDefinition"]

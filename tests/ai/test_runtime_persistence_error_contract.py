@@ -351,8 +351,6 @@ async def test_transcript_decoders_preserve_future_schema_unsupported(
             0,
             1,
             0,
-            0,
-            1,
         )
         seek_data = encode_envelope(
             {
@@ -361,13 +359,7 @@ async def test_transcript_decoders_preserve_future_schema_unsupported(
             }
         )
         with pytest.raises(AIError) as raised:
-            history._decode_seek(
-                replace(
-                    head_record,
-                    kind="transcript_seek",
-                    data=_future_schema(seek_data),
-                )
-            )
+            _decode_enveloped_domain(_future_schema(seek_data), TranscriptSeekRecord)
         assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
         fact = StoredFact(

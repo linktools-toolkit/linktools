@@ -12,6 +12,7 @@ from functools import partial
 from typing import TypeVar, cast
 
 from linktools.core import environ
+
 from ..agent import AgentCatalog, AgentCompiler
 from ..asset import (
     AssetKey,
@@ -47,7 +48,8 @@ from ._artifact import DefaultArtifactService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
-from ._execution import DefaultExecutionService
+from ._external import DefaultExternalService
+from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
 from ._input import ExecutionInputMaterializer
@@ -56,24 +58,18 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
-from ._recovery_impl import RecoveryExecutionService, RecoveryLocalExecutionBackend
 from ._recovery_task import RecoveryRuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
-from ._workspace_binding import WorkspaceToolCallBinder
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
-from .state import (
-    ExecutionReadModelRepository,
+from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeState
+from .state._contracts import (
     RecoveryCheckpointState,
-    RuntimeDomain,
-    RuntimeRetentionMode,
-    RuntimeState,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
     RuntimeStorageContract,
-    StateStepArchive,
-    WorkspaceToolCallBindingStore,
 )
+from .state._readmodel import ExecutionReadModelRepository
+from .state import RuntimeStatePlan, RuntimeStateRoute
+from .state._steps import StateStepArchive
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -88,11 +84,13 @@ class _RuntimeComponents:
     task: DefaultTaskService
     evaluation: DefaultEvaluationService
     approval: DefaultApprovalService
+    external: DefaultExternalService
     event: DefaultEventService
     artifact: DefaultArtifactService
     tenant_id: str
     close_callback: Callable[[], Awaitable[None]]
     task_node_runtime: RuntimeTaskNodeRunner[object]
+    tree_streamer: ExecutionTreeStreamer
     metric_control: _RuntimeMetricBuffer | None
 
 
@@ -236,14 +234,9 @@ async def compose_runtime_components(
         input_materializer = ExecutionInputMaterializer(
             workspace_access,
             workspace.policy,
-            object_store=selected_state.object_store(RuntimeDomain.RECOVERY),
+            object_store=selected_state.object_store(RuntimeDomain.EXECUTION),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
-        )
-        workspace_binding_store = WorkspaceToolCallBindingStore(
-            selected_state.recovery.checkpoints.state_store,
-            namespace=workspace.workspace_id,
-            tenant_id=effective_tenant_id,
         )
         session_execution_ready = (
             not workspace.policy.tool_permissions.requires_approval
@@ -283,7 +276,6 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             input_materializer=input_materializer,
-            workspace_binding_store=workspace_binding_store,
             storage_contract=selected_state.storage_contract(
                 {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}
             ),
@@ -474,7 +466,6 @@ async def _build_local_components(
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
     input_materializer: ExecutionInputMaterializer,
-    workspace_binding_store: WorkspaceToolCallBindingStore,
     storage_contract: "RuntimeStorageContract",
     storage_contract_factory: "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract]",
     session_execution_ready: bool,
@@ -486,25 +477,35 @@ async def _build_local_components(
     _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
     metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
     metric_source_namespace = None if metric_buffer is None else namespace
+    backend: LocalExecutionBackend | None = None
 
     async def release_execution_handoff(
         execution_id: str,
         *,
         tenant_id: str,
     ) -> None:
+        if backend is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        await backend.release_runtime_execution(
+            execution_id,
+            tenant_id=tenant_id,
+        )
         await state.retention.release_execution_handoff(
             execution_id,
             tenant_id=tenant_id,
         )
-        await workspace_binding_store.release_execution(execution_id)
 
-    execution = RecoveryExecutionService(
+    runtime_bridge = _ExecutionRuntimeBridge()
+    live_broker = LiveExecutionEventBroker()
+    execution = DefaultExecutionService(
         state.execution,
         state.object_store(RuntimeDomain.EXECUTION),
         authorization,
         sessions=state.conversation.sessions,
         catalog=catalog,
         compiler=compiler,
+        runtime_bridge=runtime_bridge,
+        live_broker=live_broker,
         history_reader=history_reader,
         release_terminal=release_execution_handoff,
         instruction_resolver=instruction_resolver,
@@ -523,12 +524,7 @@ async def _build_local_components(
     )
     executor = AgentExecutor(
         skill_sources,
-        instruction_resolver=instruction_resolver,
         metrics=metric_buffer,
-        workspace_binder=WorkspaceToolCallBinder(
-            workspace_binding_store,
-            input_materializer.access,
-        ),
     )
 
     def build_memory_store(
@@ -556,12 +552,10 @@ async def _build_local_components(
             transient,
         )
 
-    backend: LocalExecutionBackend | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
     task_service: DefaultTaskService | None = None
-    live_broker = LiveExecutionEventBroker()
     try:
-        backend = RecoveryLocalExecutionBackend(
+        backend = LocalExecutionBackend(
             state.conversation,
             state.execution,
             state.recovery,
@@ -573,6 +567,7 @@ async def _build_local_components(
             catalog,
             tenant_id=tenant_id,
             workspace=workspace,
+            instruction_resolver=instruction_resolver,
             app=app,
             step_reads={
                 domain: state.steps.read_store(domain)
@@ -584,13 +579,11 @@ async def _build_local_components(
             },
             step_lifecycle=state.steps,
             memory_store_factory=build_memory_store,
-            recovery_enabled=RuntimeDomain.RECOVERY in state.plan.durable_domains,
             conversation_durable=(
                 state.plan.route(RuntimeDomain.CONVERSATION).retention
                 is RuntimeRetentionMode.DURABLE
             ),
             input_materializer=input_materializer,
-            workspace_binding_store=workspace_binding_store,
             storage_contract=storage_contract,
             storage_contract_factory=storage_contract_factory,
             subagent_dispatcher=dispatcher,
@@ -603,14 +596,7 @@ async def _build_local_components(
             tool_operations=state.recovery.tools,
             metric_recorder=metric_buffer,
         )
-        state.retention.bind_execution_runtime_release(
-            backend.release_runtime_execution
-        )
-        execution.bind_backend(backend)
-        execution.bind_local_waiter(backend)
-        execution.bind_terminal_committer(backend)
-        execution.bind_terminal_verifier(backend.verify_terminal_projection)
-        execution.bind_subagent_cancellation(dispatcher)
+        runtime_bridge.bind(backend)
         session = DefaultSessionService(
             state.conversation,
             state.execution.executions,
@@ -660,8 +646,19 @@ async def _build_local_components(
         approval = DefaultApprovalService(
             state.recovery.approvals,
             state.execution.executions,
+            state.recovery.checkpoints,
             authorization,
-            context_reader=backend,
+            objects=state.object_store(RuntimeDomain.RECOVERY),
+            continuation=backend,
+        )
+        external = DefaultExternalService(
+            state.recovery.external_calls,
+            state.execution.executions,
+            state.recovery.checkpoints,
+            authorization,
+            objects=state.object_store(RuntimeDomain.RECOVERY),
+            object_key_factory=object_key_factory,
+            payload_policy=payload_policy,
             continuation=backend,
         )
         event = DefaultEventService(
@@ -677,17 +674,11 @@ async def _build_local_components(
             grant_key=grant_key,
             cursor_signer=HmacCursorSigner("artifact", grant_key),
         )
-        execution.bind_local_stream(
-            live_broker.prepare_local_producer,
-            live_broker.abandon_prepared_local_producer,
-        )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
-        execution.bind_tree_streamer(
-            ExecutionTreeStreamer(
-                execution,
-                local_coordinator,
-                execution_tree_broker,
-            )
+        tree_streamer = ExecutionTreeStreamer(
+            execution,
+            local_coordinator,
+            execution_tree_broker,
         )
         close_actions: list[Callable[[], Awaitable[None]]] = [
             task_service.drain_owned_finalizers,
@@ -726,11 +717,13 @@ async def _build_local_components(
         task=task_service,
         evaluation=evaluation,
         approval=approval,
+        external=external,
         event=event,
         artifact=artifact,
         tenant_id=tenant_id,
         close_callback=coordinator.close,
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
+        tree_streamer=tree_streamer,
         metric_control=metric_buffer,
     )
 
@@ -752,21 +745,14 @@ async def _restore_recovery_bindings(
         for checkpoint in page.items:
             if checkpoint.state is RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            recovery_input = checkpoint.input
             execution = await state.execution.executions.get(
                 checkpoint.execution_id,
                 tenant_id=tenant_id,
             )
-            if execution is not None and (
-                execution.binding_digest != recovery_input.binding_digest
-                or execution.mode != recovery_input.mode
-                or execution.planning is not recovery_input.planning
-                or execution.thinking != recovery_input.thinking
-                or execution.binding != recovery_input.binding
-            ):
+            if execution is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
-                binding = compiler.restore(recovery_input.binding)
+                binding = compiler.restore(execution.binding)
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                     raise
@@ -777,7 +763,7 @@ async def _restore_recovery_bindings(
                     )
                     continue
                 raise
-            if binding.digest != recovery_input.binding_digest:
+            if binding.digest != execution.binding_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             catalog.register_definition(binding.definition)
             catalog.register_binding(binding)

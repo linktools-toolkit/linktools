@@ -17,7 +17,7 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from ..core import validate_user_prompt
+from ..core import normalize_json_value, validate_user_prompt
 from ..errors import AIError, ErrorCode
 
 UserPromptInput: TypeAlias = str | Sequence[UserContent]
@@ -30,6 +30,7 @@ _USER_CONTENT_TYPES = (
     DocumentUrl,
     VideoUrl,
     BinaryContent,
+    UploadedFile,
     CachePoint,
 )
 
@@ -52,14 +53,6 @@ def validate_user_input(value: UserPromptInput) -> CanonicalUserInput:
 
 def validate_user_content(content: Sequence[UserContent]) -> None:
     for item in content:
-        if isinstance(item, UploadedFile):
-            raise AIError(
-                ErrorCode.REQUEST_FIELD_INVALID,
-                safe_details={
-                    "field": "user_prompt",
-                    "reason": "uploaded_file_not_durable",
-                },
-            )
         if not isinstance(item, _USER_CONTENT_TYPES):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if isinstance(item, BinaryContent) and (
@@ -68,6 +61,27 @@ def validate_user_content(content: Sequence[UserContent]) -> None:
             or not item.media_type
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if isinstance(
+            item,
+            (
+                TextContent,
+                ImageUrl,
+                AudioUrl,
+                DocumentUrl,
+                VideoUrl,
+                BinaryContent,
+                UploadedFile,
+            ),
+        ):
+            metadata = (
+                item.metadata
+                if isinstance(item, TextContent)
+                else item.vendor_metadata
+            )
+            try:
+                normalize_json_value(metadata)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 __all__ = [

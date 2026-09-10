@@ -16,13 +16,24 @@ from linktools.ai.runtime.state import (
 
 
 def test_runtime_state_plan_routes_each_domain_explicitly(tmp_path) -> None:
-    conversation_root = tmp_path / "conversation"
+    transaction_root = tmp_path / "state"
+    conversation_root = transaction_root / "conversation"
     plan = RuntimeStatePlan(
-        conversation=RuntimeStateRoute.filesystem(conversation_root),
-        execution=RuntimeStateRoute.transient(),
+        conversation=RuntimeStateRoute.filesystem(
+            conversation_root,
+            transaction_root=transaction_root,
+        ),
+        execution=RuntimeStateRoute.filesystem(
+            transaction_root / "execution",
+            transaction_root=transaction_root,
+        ),
+        recovery=RuntimeStateRoute.filesystem(
+            transaction_root / "recovery",
+            transaction_root=transaction_root,
+        ),
     )
     assert plan.route(RuntimeDomain.CONVERSATION).path == conversation_root.resolve()
-    assert plan.route(RuntimeDomain.EXECUTION).retention.value == "transient"
+    assert plan.route(RuntimeDomain.EXECUTION).retention.value == "durable"
     assert plan.route(RuntimeDomain.MEMORY).kind == "memory"
 
 
@@ -31,9 +42,18 @@ async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
     root = tmp_path / "runtime"
     state = RuntimeState.from_plan(
         RuntimeStatePlan(
-            conversation=RuntimeStateRoute.filesystem(root / "conversation"),
-            execution=RuntimeStateRoute.filesystem(root / "execution"),
-            recovery=RuntimeStateRoute.filesystem(root / "recovery"),
+            conversation=RuntimeStateRoute.filesystem(
+                root / "conversation",
+                transaction_root=root,
+            ),
+            execution=RuntimeStateRoute.filesystem(
+                root / "execution",
+                transaction_root=root,
+            ),
+            recovery=RuntimeStateRoute.filesystem(
+                root / "recovery",
+                transaction_root=root,
+            ),
         )
     )
     await state.initialize(namespace="selective", tenant_id="tenant")

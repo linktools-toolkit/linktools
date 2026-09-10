@@ -28,8 +28,6 @@ from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
-    RecoveryExecutionInput,
-    RecoveryIdempotencyInput,
     RuntimeStorageContract,
     StoredUserInput,
 )
@@ -91,7 +89,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"route_id": "model", "model_identity": "test:model"},
+        base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -125,32 +123,13 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
         planning=False,
         thinking=False,
         binding=selected,
-    )
-
-
-def _recovery(
-    *,
-    binding: AgentBindingSnapshot | None = None,
-) -> RecoveryExecutionInput:
-    selected = binding or _binding()
-    return RecoveryExecutionInput(
-        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="principal",
         principal_kind="service",
-        session_id=None,
-        memory_scope=None,
-        binding_digest=selected.binding_digest,
-        lineage_kind=ExecutionLineageKind.RUN.value,
-        parent_execution_id=None,
-        root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
-        conversation_step_run_id=None,
-        idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
-        mode="run",
-        planning=False,
-        thinking=False,
-        binding=selected,
+        stored_user_input=StoredUserInput(
+            1,
+            "text",
+            StoredPayload.inline_text("prompt"),
+        ),
         storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
@@ -175,7 +154,7 @@ async def test_runtime_closes_owned_workspace_assets_once(
     monkeypatch.setattr(AssetStore, "close", close_store)
     monkeypatch.setattr(DirectoryAssetBackend, "close", close_backend)
     components = await compose_runtime_components(
-        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, workspace_id="workspace"),
         models=ModelRegistry.openai(model="gpt-test"),
         state=RuntimeState.in_memory(),
     )
@@ -211,7 +190,7 @@ async def test_runtime_open_failure_closes_owned_workspace_assets(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     with pytest.raises(AIError) as error:
-        await compose_runtime_components(Workspace.load(tmp_path))
+        await compose_runtime_components(Workspace.load(tmp_path, workspace_id="workspace"))
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     assert closed == ["store", "backend"]
@@ -224,7 +203,7 @@ async def test_runtime_does_not_close_borrowed_workspace_store(tmp_path: Path) -
     await store.initialize()
     group = CapabilityGroup.from_store("workspace", store)
     components = await compose_runtime_components(
-        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, workspace_id="workspace"),
         models=ModelRegistry.openai(model="gpt-test"),
         state=RuntimeState.in_memory(),
         capabilities=(group,),
@@ -243,7 +222,9 @@ async def test_approval_list_authorizes_before_reading_pending_records() -> None
     service = DefaultApprovalService(
         approvals,
         _ExecutionHeaders(),
+        object(),
         _DenyAuthorization(),
+        objects=object(),
     )
 
     with pytest.raises(AIError) as error:
@@ -275,10 +256,7 @@ def test_output_contract_restores_only_mode_and_schema() -> None:
 
 @pytest.mark.parametrize(
     ("factory", "target"),
-    (
-        (_execution, ExecutionRecord),
-        (_recovery, RecoveryExecutionInput),
-    ),
+    ((_execution, ExecutionRecord),),
 )
 def test_binding_codec_round_trips_mandatory_exact_v1_shape(
     factory: object,
@@ -290,10 +268,7 @@ def test_binding_codec_round_trips_mandatory_exact_v1_shape(
 
 @pytest.mark.parametrize(
     ("factory", "target"),
-    (
-        (_execution, ExecutionRecord),
-        (_recovery, RecoveryExecutionInput),
-    ),
+    ((_execution, ExecutionRecord),),
 )
 def test_binding_codec_rejects_partial_current_v1_shapes(
     factory: object,

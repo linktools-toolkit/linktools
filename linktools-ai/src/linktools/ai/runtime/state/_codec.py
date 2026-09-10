@@ -107,19 +107,15 @@ from ._contracts import (
     LoadedModelContext,
     MemoryRecord,
     OperationTerminalUpdate,
-    PendingApprovalContinuation,
-    RecoveryActiveRecord,
-    RecoveryAdmissionRecord,
+    PendingDeferredCall,
+    PendingToolContinuation,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryConversationIntent,
-    RecoveryExecutionInput,
     RecoveryHandoffPhase,
-    RecoveryIdempotencyInput,
-    RecoveryIntegrityReport,
-    RecoveryStateRecord,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
+    RepositoryInstructionBarrier,
     ResultRecord,
     RuntimePayloadRef,
     RuntimeStorageContract,
@@ -137,8 +133,6 @@ from ._contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
-    WorkspacePathBinding,
-    WorkspaceToolCallBinding,
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._store import (
@@ -184,17 +178,13 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("operation_ledger_input", OperationLedgerInput),
     ("operation_ledger_record", OperationLedgerRecord),
     ("principal", Principal),
-    ("pending_approval_continuation", PendingApprovalContinuation),
+    ("pending_deferred_call", PendingDeferredCall),
+    ("pending_tool_continuation", PendingToolContinuation),
     ("recovery_checkpoint", RecoveryCheckpoint),
-    ("recovery_admission", RecoveryAdmissionRecord),
-    ("recovery_active", RecoveryActiveRecord),
     ("recovery_conversation_intent", RecoveryConversationIntent),
-    ("recovery_execution_input", RecoveryExecutionInput),
-    ("recovery_idempotency_input", RecoveryIdempotencyInput),
-    ("recovery_integrity_report", RecoveryIntegrityReport),
-    ("recovery_state", RecoveryStateRecord),
     ("recovery_terminal_handoff", RecoveryTerminalHandoff),
     ("recovery_terminal_outcome", RecoveryTerminalOutcome),
+    ("repository_instruction_barrier", RepositoryInstructionBarrier),
     ("resource_ref", ResourceRef),
     ("result_record", ResultRecord),
     ("session_record", SessionRecord),
@@ -218,8 +208,6 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("transcript_seek_dimension", TranscriptSeekDimension),
     ("transcript_seek", TranscriptSeekRecord),
     ("transcript_span_ref", TranscriptSpanRef),
-    ("workspace_path_binding", WorkspacePathBinding),
-    ("workspace_tool_call_binding", WorkspaceToolCallBinding),
     ("tool_operation_admission", ToolOperationAdmission),
     ("runtime_domain", RuntimeDomain),
     ("task_graph", TaskGraph),
@@ -395,6 +383,29 @@ def _decode_v1_task_result(
     )
 
 
+def _decode_v1_stored_user_input(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> StoredUserInput:
+    _require_fields(raw_fields, frozenset({"version", "codec", "payload"}))
+    version = _decode_domain(
+        raw_fields["version"], int, codec, persisted=persisted
+    )
+    codec_name = _decode_domain(
+        raw_fields["codec"], str, codec, persisted=persisted
+    )
+    if version != 1 or codec_name not in {"text", "user-content-v1"}:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    payload = _decode_domain(
+        raw_fields["payload"], StoredPayload, codec, persisted=persisted
+    )
+    try:
+        return StoredUserInput(version, codec_name, payload)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 def _encode_v1_optional_error_diagnostics(
     value: object,
     codec: "_VersionCodec",
@@ -427,28 +438,6 @@ def _encode_v1_execution_record(
     if not isinstance(value, ExecutionRecord):
         raise TypeError("V1 execution_record encoder received the wrong type")
     encoded = dict(_encode_v1_optional_error_diagnostics(value, codec, persisted))
-    if not value.correlation:
-        encoded.pop("correlation", None)
-    return encoded
-
-
-def _encode_v1_recovery_execution_input(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, RecoveryExecutionInput):
-        raise TypeError(
-            "V1 recovery_execution_input encoder received the wrong type"
-        )
-    encoded = {
-        field.name: _encode_domain(
-            attrgetter(field.name)(value),
-            codec,
-            persisted=persisted,
-        )
-        for field in fields(value)
-    }
     if not value.correlation:
         encoded.pop("correlation", None)
     return encoded
@@ -487,7 +476,6 @@ def _encode_v1_recovery_terminal_outcome(
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "execution_record": _encode_v1_execution_record,
-        "recovery_execution_input": _encode_v1_recovery_execution_input,
         "recovery_terminal_outcome": _encode_v1_recovery_terminal_outcome,
         "task_graph_admission": _encode_v1_task_graph_admission,
         "task_node": _encode_v1_task_node,
@@ -496,6 +484,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
+        "stored_user_input": _decode_v1_stored_user_input,
         "task_node": _decode_v1_task_node,
         "task_result": _decode_v1_task_result,
     }
@@ -1814,13 +1803,12 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
     custom_encoders = {
         "execution_record",
-        "recovery_execution_input",
         "recovery_terminal_outcome",
         "task_graph_admission",
         "task_node",
         "task_result",
     }
-    custom_decoders = {"task_node", "task_result"}
+    custom_decoders = {"stored_user_input", "task_node", "task_result"}
     if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
         raise RuntimeError("Runtime v1 dataclass encoder mapping is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_decoders:

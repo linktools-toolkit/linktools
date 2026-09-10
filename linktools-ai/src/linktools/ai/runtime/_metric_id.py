@@ -18,7 +18,7 @@ def _model_observation_id(
     purpose: str,
 ) -> str:
     return _stable_observation_id(
-        "linktools.model.request.v2",
+        "linktools.model.request.v1",
         source_namespace,
         tenant_id,
         execution_id,

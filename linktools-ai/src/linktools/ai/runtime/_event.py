@@ -22,18 +22,20 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from .service_api import ExecutionEvent, ExecutionStreamEvent
-from .state import EventRepository, ExecutionRepository
+from .state._contracts import EventRepository, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.event")
 _DEFAULT_BUFFER_BYTES = 1024 * 1024
 _QUEUE_LIMIT = 256
-_TERMINAL_EVENT_TYPES = frozenset({
-    ExecutionEventType.EXECUTION_SUCCEEDED,
-    ExecutionEventType.EXECUTION_FAILED,
-    ExecutionEventType.EXECUTION_CANCELLED,
-})
+_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        ExecutionEventType.EXECUTION_SUCCEEDED.value,
+        ExecutionEventType.EXECUTION_FAILED.value,
+        ExecutionEventType.EXECUTION_CANCELLED.value,
+    }
+)
 _OBSERVATION_BOUNDARY_EVENT_TYPES = _TERMINAL_EVENT_TYPES | frozenset(
-    {ExecutionEventType.EXECUTION_RECOVERY_REQUIRED}
+    {ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value}
 )
 _OBSERVATION_BOUNDARY_STATUSES = frozenset(
     {
@@ -58,7 +60,7 @@ class ExecutionDelta:
 @dataclass(slots=True)
 class _LiveEvent:
     execution_id: str
-    event_type: ExecutionEventType
+    event_type: str
     payload: JsonValue
     durable_sequence: int | None = None
 
@@ -178,7 +180,7 @@ class LiveExecutionEventBroker:
         self._prepared: dict[str, _PreparedStreamLease] = {}
         self._durable_events: dict[
             tuple[str, int],
-            tuple[ExecutionEventType, JsonValue],
+            tuple[str, JsonValue],
         ] = {}
 
     def register_local_producer(self, execution_id: str, base_sequence: int) -> None:
@@ -261,11 +263,14 @@ class LiveExecutionEventBroker:
     def publish_event(
         self,
         execution_id: str,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: JsonValue,
         *,
         durable_sequence: int | None,
     ) -> None:
+        event_name = str(event_type)
+        if not isinstance(event_type, str) or not event_name:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if execution_id not in self._base_sequences:
             return
         if durable_sequence is not None:
@@ -274,7 +279,7 @@ class LiveExecutionEventBroker:
             key = (execution_id, durable_sequence)
             previous = self._durable_events.get(key)
             if previous is not None:
-                if previous != (event_type, payload):
+                if previous != (event_name, payload):
                     raise AIError(
                         ErrorCode.STORAGE_INTEGRITY_ERROR,
                         safe_details={
@@ -284,8 +289,8 @@ class LiveExecutionEventBroker:
                         },
                     )
                 return
-            self._durable_events[key] = (event_type, payload)
-        event = _LiveEvent(execution_id, event_type, payload, durable_sequence)
+            self._durable_events[key] = (event_name, payload)
+        event = _LiveEvent(execution_id, event_name, payload, durable_sequence)
         self._buffers.setdefault(execution_id, deque()).append(event)
         self._buffer_bytes.setdefault(execution_id, 0)
         self._last_type.pop(execution_id, None)
@@ -713,4 +718,4 @@ class DefaultEventService:
         )
 
 
-__all__ = ["DefaultEventService", "ExecutionDelta", "LiveExecutionEventBroker"]
+__all__ = ["DefaultEventService", "ExecutionDelta"]

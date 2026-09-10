@@ -14,7 +14,7 @@ from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import AssetInfo, AssetKey, AssetStore
+from ..asset import AssetKey, AssetStore
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
@@ -35,6 +35,7 @@ from ._skill import SkillDefinition
 from ._skill_source import AssetSkillResourceSource, SkillResourceSource, SkillSourceRef
 
 AppT = TypeVar("AppT")
+PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 
 
 ContributionKind = Literal["tool", "agent", "skill", "mcp", "capability", "task"]
@@ -55,20 +56,6 @@ _RESERVED_TOOL_NAMES = frozenset(
         "read_memory",
         "search_memory",
         "write_memory",
-    }
-)
-_RESERVED_CAPABILITY_IDS = frozenset(
-    {
-        "workspace-filesystem",
-        "workspace-shell",
-        "workspace-sandbox",
-        "linktools-skill",
-        "linktools-memory",
-        "linktools-planning",
-        "linktools-subagent",
-        "linktools-thinking",
-        "linktools-reinject-system-prompt",
-        "step_persistence",
     }
 )
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
@@ -111,10 +98,14 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability":
             capability = cast(AbstractCapability, self.value)
-            capability_id = _capability_registration_id(capability)
-            if capability_id != self.id:
+            capability_id = capability.id
+            if not isinstance(capability.defer_loading, bool):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            _validate_external_capability_id(capability_id)
+            if capability_id is not None and capability_id != self.id:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            if capability_id is None and capability.defer_loading:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            _validate_external_capability_id(self.id)
         if self.kind == "task":
             handler = cast("TaskNodeHandler[object]", self.value)
             task_type, task_version = _task_identity(handler)
@@ -135,6 +126,7 @@ class CapabilityContribution(Generic[AppT]):
         value: "Tool[AgentContext[AppT]] | AbstractCapability[AgentContext[AppT]]",
         *,
         revision: int = 1,
+        semantic_id: "str | None" = None,
         semantic_config: "Mapping[str, JsonValue] | None" = None,
     ) -> "CapabilityContribution[AppT]":
         """Create an opaque Python Tool or Capability from its public semantic inputs."""
@@ -146,6 +138,7 @@ class CapabilityContribution(Generic[AppT]):
             identity,
             value,
             semantic_revision=revision,
+            semantic_id=semantic_id,
             semantic_config=semantic_config,
         )
         return _SemanticContribution(
@@ -182,17 +175,41 @@ class _SemanticContribution(CapabilityContribution[AppT]):
         return dict(self._contract)
 
 
+@dataclass(frozen=True, slots=True)
+class CapabilityLoadEntry:
+    """Declaration-relevant metadata captured at the start of a group freeze."""
+
+    key: AssetKey
+    etag: str
+    size: int
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if len(self.etag) != 64 or any(
+            character not in "0123456789abcdef" for character in self.etag
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self.size < 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            metadata = ImmutableJsonMapping(self.metadata)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        object.__setattr__(self, "metadata", metadata)
+
+
 class CapabilityLoadContext:
     def __init__(
         self,
         group_id: str,
         store: AssetStore,
-        entries: Sequence[AssetInfo],
+        entries: Sequence[CapabilityLoadEntry],
     ) -> None:
         self._group_id = group_id
         self._store = store
         self._entries = tuple(entries)
         self._by_key = {entry.key: entry for entry in self._entries}
+        self._cache: dict[AssetKey, bytes] = {}
         if len(self._by_key) != len(self._entries):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -200,20 +217,42 @@ class CapabilityLoadContext:
     def group_id(self) -> str:
         return self._group_id
 
-    @property
-    def entries(self) -> tuple[AssetInfo, ...]:
-        return self._entries
+    def list(
+        self,
+        *,
+        kind: "str | None" = None,
+        prefix: "str | None" = None,
+    ) -> "tuple[CapabilityLoadEntry, ...]":
+        """List captured declaration metadata without opening the backing store."""
+        return tuple(
+            entry
+            for entry in self._entries
+            if (kind is None or entry.key.kind == kind)
+            and (prefix is None or entry.key.id.startswith(prefix))
+        )
 
     async def read(self, key: AssetKey) -> bytes:
         entry = self._by_key.get(key)
         if entry is None:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        current = await self._store.stat(key)
+        if (
+            current is None
+            or current.etag != entry.etag
+            or current.size != entry.size
+            or current.metadata != entry.metadata
+        ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         value = await self._store.get(key)
         if value is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         data = bytes(value)
         if hashlib.sha256(data).hexdigest() != entry.etag:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._cache[key] = data
         return data
 
 
@@ -278,9 +317,12 @@ class CapabilityGroup(Generic[AppT]):
         *,
         name: "str | None" = None,
         revision: int = 1,
+        effect: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
+        plan_safe: bool = False,
     ) -> "Tool[AgentContext[AppT]]":
         """Register one ordinary model-visible Python tool."""
         _validate_revision(revision)
+        _validate_tool_effect(effect, plan_safe)
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
         adapted = _adapt_tool(function, name=tool_name)
@@ -290,6 +332,7 @@ class CapabilityGroup(Generic[AppT]):
                 tool_name,
                 adapted,
                 revision=revision,
+                semantic_config={"effect": effect, "plan_safe": plan_safe},
             )
         )
         return adapted
@@ -323,12 +366,13 @@ class CapabilityGroup(Generic[AppT]):
         self,
         capability: "AbstractCapability[AgentContext[AppT]]",
         *,
+        semantic_id: "str | None" = None,
         revision: int = 1,
         semantic_config: "Mapping[str, JsonValue] | None" = None,
     ) -> "AbstractCapability[AgentContext[AppT]]":
         """Register one always-selected Pydantic runtime behavior capability."""
         _validate_revision(revision)
-        capability_id = _capability_registration_id(capability)
+        capability_id = _capability_registration_id(capability, semantic_id)
         _validate_external_capability_id(capability_id)
         self._contributions.append(
             CapabilityContribution.from_opaque(
@@ -336,6 +380,7 @@ class CapabilityGroup(Generic[AppT]):
                 capability_id,
                 capability,
                 revision=revision,
+                semantic_id=capability_id,
                 semantic_config=semantic_config,
             )
         )
@@ -351,9 +396,12 @@ class CapabilityGroup(Generic[AppT]):
         allow_tools: Sequence[str] = ("*",),
         allow_skills: Sequence[str] = ("*",),
         allow_subagents: Sequence[str] = ("*",),
+        allow_capabilities: Sequence[str] = ("*",),
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
         thinking: ThinkingValue = False,
+        tool_retries: int = 10000,
+        output_retries: int = 3,
         description: "str | None" = None,
     ) -> AgentSpec:
         """Register one declarative Agent before Runtime.open()."""
@@ -366,9 +414,12 @@ class CapabilityGroup(Generic[AppT]):
             allow_tools=tuple(allow_tools),
             allow_skills=tuple(allow_skills),
             allow_subagents=tuple(allow_subagents),
+            allow_capabilities=tuple(allow_capabilities),
             usage_limits=usage_limits,
             planning=planning,
             thinking=thinking,
+            tool_retries=tool_retries,
+            output_retries=output_retries,
             description=description,
         )
         self._contributions.append(_declaration_contribution("agent", spec))
@@ -392,44 +443,41 @@ class CapabilityGroup(Generic[AppT]):
         if store is not None:
             if not store.ready:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            before = await store.current_revision()
-            entries = tuple(await _list_all(store))
+            metadata = await store.metadata_snapshot()
+            entries = tuple(
+                CapabilityLoadEntry(
+                    info.key,
+                    info.etag,
+                    info.size,
+                    info.metadata,
+                )
+                for info in metadata
+            )
             context = CapabilityLoadContext(self._id, store, entries)
             for loader in loaders:
                 loaded = await loader.load(context)
                 if any(not isinstance(item, CapabilityContribution) for item in loaded):
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 contributions.extend(loaded)
-            after = await store.current_revision()
-            if before != after:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
         _validate_unique(contributions)
-        return tuple(
-            sorted(contributions, key=lambda item: (item.kind, item.id, item.fingerprint))
+        generic = [item for item in contributions if item.kind == "capability"]
+        declarations = sorted(
+            (item for item in contributions if item.kind != "capability"),
+            key=lambda item: (item.kind, item.id, item.fingerprint),
         )
-
-
-async def _list_all(store: AssetStore) -> "tuple[AssetInfo, ...]":
-    values: list[AssetInfo] = []
-    cursor: str | None = None
-    while True:
-        page = await store.list_info(cursor=cursor, limit=200)
-        values.extend(page.items)
-        if page.next_cursor is None:
-            return tuple(values)
-        cursor = page.next_cursor
+        return tuple((*declarations, *generic))
 
 
 class _BuiltinDeclarationLoader:
     @property
     def id(self) -> str:
-        return "linktools-declarations-v2"
+        return "linktools-declarations-v1"
 
     async def load(
         self,
         context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
-        entries = tuple(sorted(context.entries, key=lambda item: (item.key.kind, item.key.id)))
+        entries = context.list()
         directory_roots = tuple(
             sorted(
                 entry.key.id[: -len("/SKILL.md")]
@@ -563,9 +611,10 @@ def contribution_semantic_contract(
     value: ContributionSemanticValue,
     *,
     semantic_revision: "int | None" = None,
+    semantic_id: "str | None" = None,
     semantic_config: "Mapping[str, JsonValue] | None" = None,
 ) -> "dict[str, JsonValue]":
-    if semantic_config is not None and kind != "capability":
+    if semantic_config is not None and kind not in {"tool", "capability"}:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if kind == "tool" and isinstance(value, Tool):
         definition = value.tool_def
@@ -579,6 +628,11 @@ def contribution_semantic_contract(
         }
         if semantic_revision is not None:
             contract["semantic_revision"] = semantic_revision
+        if semantic_config is not None:
+            try:
+                contract.update(dict(ImmutableJsonMapping(semantic_config)))
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
     if kind == "agent" and isinstance(value, AgentSpec):
         return AgentSpecCodec().to_payload(value)
@@ -589,10 +643,10 @@ def contribution_semantic_contract(
     if kind == "capability" and isinstance(value, AbstractCapability):
         contract: dict[str, JsonValue] = {
             "version": 1,
-            "implementation": _capability_implementation(value),
+            "revision": semantic_revision or 1,
+            "defer_loading": value.defer_loading,
+            "config": {},
         }
-        if semantic_revision is not None:
-            contract["semantic_revision"] = semantic_revision
         if semantic_config is not None:
             try:
                 contract["config"] = dict(ImmutableJsonMapping(semantic_config))
@@ -656,33 +710,32 @@ def _validate_business_tool_name(value: str) -> None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
-def _capability_registration_id(value: AbstractCapability[object]) -> str:
+def _capability_registration_id(
+    value: AbstractCapability[object],
+    semantic_id: str | None = None,
+) -> str:
     capability_id = value.id
     if capability_id is None:
-        return f"anonymous:{_capability_implementation(value)}"
+        if value.defer_loading or semantic_id is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        capability_id = semantic_id
+    elif semantic_id is not None and semantic_id != capability_id:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if not isinstance(capability_id, str) or not capability_id.strip():
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return capability_id
 
 
-def _capability_implementation(value: AbstractCapability[object]) -> str:
-    capability_type = type(value)
-    module = capability_type.__module__
-    qualname = capability_type.__qualname__
-    if not module or not qualname or "<locals>" in qualname:
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": value.id,
-                "reason": "unstable_implementation_identity",
-            },
-        )
-    return f"{module}:{qualname}"
-
-
 
 def _validate_external_capability_id(value: str) -> None:
-    if value.startswith("mcp__") or value in _RESERVED_CAPABILITY_IDS:
+    if value.startswith("linktools."):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
+def _validate_tool_effect(effect: str, plan_safe: bool) -> None:
+    if effect not in {"none", "replay_safe", "non_replay_safe"}:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not isinstance(plan_safe, bool):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
@@ -713,7 +766,9 @@ __all__ = [
     "CapabilityContribution",
     "CapabilityGroup",
     "CapabilityLoadContext",
+    "CapabilityLoadEntry",
     "CapabilityLoader",
+    "PLAN_SAFE_METADATA_KEY",
     "capability_fingerprint",
     "contribution_semantic_contract",
 ]

@@ -15,12 +15,12 @@ from linktools.cli import BaseCommand, CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
 
-from ...ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
-from ...ai.errors import AIError
-from ...ai.migrate import provision_runtime_database
-from ...ai.model import ModelRegistry
-from ...ai.runtime import Execution, ExecutionResult, Runtime, RuntimeState
-from ...ai.workspace import Workspace
+from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_runtime_database
+from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import Execution, ExecutionResult, Runtime, RuntimeState
+from linktools.ai.workspace import Workspace
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -46,8 +46,16 @@ class Command(BaseCommand):
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
-        parser.add_argument("--planning", action="store_true", help="enable planning for this execution")
-        parser.add_argument("--thinking", action="store_true", help="enable model thinking for this execution")
+        parser.add_argument(
+            "--planning",
+            action="store_true",
+            help="enable planning for this execution",
+        )
+        parser.add_argument(
+            "--thinking",
+            action="store_true",
+            help="enable model thinking for this execution",
+        )
         parser.add_argument(
             "--json",
             action="store_true",
@@ -55,7 +63,13 @@ class Command(BaseCommand):
         )
 
     def run(self, args: Namespace) -> int:
-        workspace = Workspace.discover(Path.cwd(), root=args.project)
+        workspace_root = Path.cwd() if args.project is None else args.project
+        try:
+            workspace = Workspace.discover(Path.cwd(), root=workspace_root)
+        except AIError as error:
+            if error.code is not ErrorCode.WORKSPACE_CONFIG_INVALID:
+                raise
+            workspace = Workspace.initialize(workspace_root)
         if not isinstance(args.model, str) or not args.model.strip():
             raise CommandError("--model is required")
         session_id = workspace.workspace_id

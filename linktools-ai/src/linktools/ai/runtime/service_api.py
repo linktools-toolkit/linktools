@@ -4,7 +4,7 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from pydantic_ai.messages import UserContent
 
@@ -13,8 +13,6 @@ from ..core import (
     ApprovalStatus,
     CorrelationData,
     EvaluationStatus,
-    ExecutionDeltaType,
-    ExecutionEventType,
     ExecutionLineageKind,
     ExecutionMode,
     ExecutionStatus,
@@ -32,7 +30,6 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..storage import ObjectRef
 from ..task import (
     CancelGraphRequest,
     TaskEvent,
@@ -49,10 +46,6 @@ from .recovery import (
     ResolveToolEffectRequest,
     ToolEffectResolutionResult,
 )
-
-if TYPE_CHECKING:
-    from .state import RuntimeStorageContract, StoredUserInput
-
 
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
     try:
@@ -84,21 +77,6 @@ class ExecutionRequest:
     thinking: ThinkingValue
     correlation: CorrelationData = field(default_factory=dict)
     files: tuple[str, ...] = ()
-    input_intent_digest: "str | None" = field(
-        default=None,
-        compare=False,
-        repr=False,
-    )
-    stored_user_input: "StoredUserInput | None" = field(
-        default=None,
-        compare=False,
-        repr=False,
-    )
-    storage_contract: "RuntimeStorageContract | None" = field(
-        default=None,
-        compare=False,
-        repr=False,
-    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "user_prompt", validate_user_input(self.user_prompt))
@@ -221,13 +199,7 @@ class ExecutionResult:
         if self.status is ExecutionStatus.FAILED:
             if self.error_code is None:
                 raise ValueError("failed execution result requires an error code")
-            try:
-                code = ErrorCode(self.error_code)
-            except ValueError as error:
-                raise ValueError(
-                    "failed execution result contains an unknown error code"
-                ) from error
-            if code is ErrorCode.EXECUTION_CANCELLED:
+            if self.error_code == ErrorCode.EXECUTION_CANCELLED.value:
                 raise ValueError(
                     "failed execution result cannot carry EXECUTION_CANCELLED"
                 )
@@ -303,15 +275,7 @@ class ExecutionHistoryItem:
     tool_call_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if self.sequence < 0 or self.item_kind not in {
-            "system",
-            "user",
-            "assistant",
-            "thinking",
-            "tool_call",
-            "tool_result",
-            "retry",
-        }:
+        if self.sequence < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("execution history item is invalid")
 
 
@@ -324,15 +288,7 @@ class SessionHistoryItem:
     tool_call_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if self.sequence < 1 or self.item_kind not in {
-            "system",
-            "user",
-            "assistant",
-            "thinking",
-            "tool_call",
-            "tool_result",
-            "retry",
-        }:
+        if self.sequence < 1 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("session history item is invalid")
 
 
@@ -566,49 +522,9 @@ class EvaluationComparison:
 class ApprovalView:
     approval_id: str
     status: ApprovalStatus
-    kind: str | None = None
     tool_name: str | None = None
     arguments: JsonValue = None
-
-
-@dataclass(frozen=True, slots=True)
-class ToolApprovalContext:
-    tool_name: str
-    arguments: JsonValue
-    args_digest: str
-    batch_id: str
-
-
-class ApprovalContextReader(Protocol):
-    async def tool_approvals(
-        self,
-        approval_ids: Sequence[str],
-        *,
-        execution_id: str,
-        tenant_id: str,
-    ) -> Mapping[str, ToolApprovalContext]: ...
-
-
-class ApprovalContinuation(Protocol):
-    async def reconcile_approval(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ApprovalCreateRequest:
-    principal: Principal
-    approval_id: str
-    operation_id: str
-    idempotency_key: str
-
-    def __post_init__(self) -> None:
-        validate_resource_id(self.approval_id)
-        validate_resource_id(self.operation_id)
-        validate_idempotency_key(self.idempotency_key)
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,10 +533,18 @@ class ApprovalDecisionRequest:
     approval_id: str
     idempotency_key: str
     decision: ApprovalDecision
+    message: "str | None" = None
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_resource_id(self.approval_id)
         validate_idempotency_key(self.idempotency_key)
+        if self.message is not None and not isinstance(self.message, str):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        try:
+            object.__setattr__(self, "metadata", dict(self.metadata))
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -631,42 +555,88 @@ class ApprovalDecisionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalCallSucceeded:
+    value: JsonValue
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalCallRetry:
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalCallFailed:
+    message: str
+
+
+ExternalResolution = ExternalCallSucceeded | ExternalCallRetry | ExternalCallFailed
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalCallView:
+    call_id: str
+    status: str
+    tool_name: str
+    arguments: JsonValue
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalSupplyRequest:
     principal: Principal
     call_id: str
     idempotency_key: str
-    object_ref: "ObjectRef"
-    payload_digest: str
+    resolution: ExternalResolution
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_resource_id(self.call_id)
         validate_idempotency_key(self.idempotency_key)
-        if len(self.payload_digest) != 64:
+        if not isinstance(
+            self.resolution,
+            (ExternalCallSucceeded, ExternalCallRetry, ExternalCallFailed),
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if isinstance(
+            self.resolution,
+            (ExternalCallRetry, ExternalCallFailed),
+        ) and not self.resolution.message:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        try:
+            object.__setattr__(self, "metadata", dict(self.metadata))
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 @dataclass(frozen=True, slots=True)
 class ExternalSupplyResult:
     call_id: str
     idempotency_key: str
-    object_ref: "ObjectRef"
-    payload_digest: str
+    accepted: bool
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionEvent:
     execution_id: str
     sequence: int
-    event_type: ExecutionEventType
+    event_type: str
     payload: JsonValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.event_type, str) or not self.event_type:
+            raise ValueError("execution event type is required")
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionStreamEvent:
     execution_id: str
     durable_sequence: int | None
-    event_type: "ExecutionEventType | ExecutionDeltaType"
+    event_type: str
     payload: JsonValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.event_type, str) or not self.event_type:
+            raise ValueError("execution stream event type is required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -795,13 +765,6 @@ class ExecutionService(Protocol):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
-    def stream_tree(
-        self,
-        execution_id: str,
-        *,
-        principal: Principal,
-        after_sequences: "Mapping[str, int] | None" = None,
-    ) -> "AsyncIterator[ExecutionTreeEvent]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
@@ -964,9 +927,6 @@ class EvaluationService(Protocol):
 
 
 class ApprovalService(Protocol):
-    async def create(
-        self, execution_id: str, request: ApprovalCreateRequest
-    ) -> ApprovalView: ...
     async def list(
         self, execution_id: str, *, principal: Principal
     ) -> "tuple[ApprovalView, ...]": ...
@@ -976,6 +936,10 @@ class ApprovalService(Protocol):
 
 
 class ExternalService(Protocol):
+    async def list(
+        self, execution_id: str, *, principal: Principal
+    ) -> "tuple[ExternalCallView, ...]": ...
+
     async def supply(
         self, execution_id: str, request: ExternalSupplyRequest
     ) -> ExternalSupplyResult: ...
@@ -1011,9 +975,6 @@ class ArtifactService(Protocol):
 
 
 __all__ = [
-    "ApprovalContextReader",
-    "ApprovalContinuation",
-    "ApprovalCreateRequest",
     "ApprovalDecisionRequest",
     "ApprovalDecisionResult",
     "ApprovalService",
@@ -1032,6 +993,11 @@ __all__ = [
     "EvaluationService",
     "EvaluationView",
     "EventService",
+    "ExternalCallFailed",
+    "ExternalCallRetry",
+    "ExternalCallSucceeded",
+    "ExternalCallView",
+    "ExternalResolution",
     "ExecutionEvent",
     "ExecutionHandle",
     "ExecutionHistoryItem",
@@ -1064,7 +1030,6 @@ __all__ = [
     "TaskEventType",
     "TaskGraphRunEvent",
     "TaskService",
-    "ToolApprovalContext",
     "TranscriptItem",
     "UpdateSessionRequest",
 ]

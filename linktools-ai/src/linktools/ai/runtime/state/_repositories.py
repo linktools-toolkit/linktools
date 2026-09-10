@@ -38,7 +38,7 @@ from ...core import (
     validate_lease_seconds,
 )
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectRef, StoredPayload
+from ...storage import StoredPayload
 from ...task import (
     TaskGraphView,
     TaskNodeView,
@@ -75,12 +75,8 @@ from ._contracts import (
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     MemoryRecord,
-    RecoveryActiveRecord,
-    RecoveryAdmissionRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
-    RecoveryIntegrityReport,
-    RecoveryStateRecord,
     ResultRecord,
     SessionForkResultRecord,
     SessionRecord,
@@ -343,13 +339,11 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         kind: str,
         resource_kind: ResourceKind,
         value_type: type[ValueT],
-        identity_field: str,
     ) -> None:
         super().__init__(store, namespace=namespace, tenant_id=tenant_id, domain=domain)
         self._kind = kind
         self._resource_kind = resource_kind
         self._value_type = value_type
-        self._identity_field = identity_field
 
     async def initialize(self) -> None:
         return None
@@ -384,10 +378,45 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         _logger.debug("created Runtime record: kind=%s id=%s", self._kind, identity)
         return value
 
+    async def create_in_transaction(
+        self,
+        transaction: StateTransaction,
+        value: ValueT,
+    ) -> ValueT:
+        _require_tenant(value, self._tenant_id)
+        identity = self._identity(value)
+        key = self._key(self._kind, identity)
+        current = await transaction.get_record(key)
+        if current is not None:
+            existing = await self._decode(current, self._value_type)
+            if existing != value:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            return existing
+        await transaction.insert_record(
+            self._stored(self._kind, identity, value, state=_record_state(value))
+        )
+        _logger.debug(
+            "created Runtime record in group: kind=%s id=%s",
+            self._kind,
+            identity,
+        )
+        return value
+
     async def get(self, identity: str, *, tenant_id: str) -> ValueT | None:
         if tenant_id != self._tenant_id:
             return None
         record = await self._record(self._key(self._kind, identity))
+        return None if record is None else await self._decode(record, self._value_type)
+
+    async def get_in_transaction(
+        self,
+        transaction: StateTransaction,
+        identity: str,
+        *,
+        tenant_id: str,
+    ) -> ValueT | None:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        record = await transaction.get_record(self._key(self._kind, identity))
         return None if record is None else await self._decode(record, self._value_type)
 
     async def get_header(self, identity: str, *, tenant_id: str) -> ResourceRef | None:
@@ -681,10 +710,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                         record.history_id,
                         0,
                         0,
-                        1,
-                        0,
-                        1,
-                        0,
                         HistoryQuality.COMPLETE,
                         0,
                     ),
@@ -725,13 +750,13 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
         self,
         transaction: StateTransaction,
         history_id: str,
-    ) -> tuple[int, int]:
-        """Read one branch's local message and history-item counts."""
+    ) -> int:
+        """Read one branch's local canonical message count."""
         record = await transaction.get_record(self._key("transcript_head", history_id))
         if record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = await self._decode(record, TranscriptHeadRecord)
-        return head.message_count, head.session_history_item_count
+        return head.message_count
 
     async def get_index_node_in_transaction(
         self,
@@ -835,12 +860,12 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             )
             if source is None:
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-            local_messages, local_items = await self.local_head_in_transaction(
+            local_messages = await self.local_head_in_transaction(
                 transaction,
                 source_history_id,
             )
             prefix_head = source.prefix_index_head_id
-            if local_messages > 0 or local_items > 0:
+            if local_messages > 0:
                 roots = await self.get_forest_roots_in_transaction(
                     transaction,
                     prefix_head,
@@ -850,7 +875,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                     roots,
                     source_history_id=source_history_id,
                     source_local_message_count=local_messages,
-                    source_local_history_item_count=local_items,
                 )
                 if node is None:
                     pass
@@ -860,7 +884,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                     await self.insert_index_node_in_transaction(transaction, node)
                     prefix_head = node.node_id
             inherited_messages = source.inherited_message_count + local_messages
-            inherited_items = source.inherited_history_item_count + local_items
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=session_id,
@@ -868,7 +891,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                 parent_history_id=source_history_id,
                 prefix_index_head_id=prefix_head,
                 inherited_message_count=inherited_messages,
-                inherited_history_item_count=inherited_items,
             )
             key = self._key("conversation_history", child_history_id)
             current = await transaction.get_record(key)
@@ -881,7 +903,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                 existing.session_id == session_id
                 and existing.parent_history_id is None
                 and existing.inherited_message_count == 0
-                and existing.inherited_history_item_count == 0
             ):
                 await _replace_checked(
                     transaction,
@@ -914,7 +935,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             kind="session",
             resource_kind=ResourceKind.SESSION,
             value_type=SessionRecord,
-            identity_field="session_id",
         )
 
     def _list_generation_key(self, owner_principal_id: str | None = None) -> bytes:
@@ -1116,14 +1136,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 TranscriptHeadRecord,
             )
             local_messages = source_head.message_count
-            local_items = source_head.session_history_item_count
             histories = ConversationHistoryRepositoryImpl(
                 self._store,
                 namespace=self._namespace,
                 tenant_id=self._tenant_id,
             )
             prefix_head = source_history.prefix_index_head_id
-            if local_messages > 0 or local_items > 0:
+            if local_messages > 0:
                 roots = await histories.get_forest_roots_in_transaction(
                     transaction,
                     prefix_head,
@@ -1133,7 +1152,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     roots,
                     source_history_id=source.history_id,
                     source_local_message_count=local_messages,
-                    source_local_history_item_count=local_items,
                 )
                 if isinstance(node, str):
                     prefix_head = node
@@ -1144,7 +1162,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     )
                     prefix_head = node.node_id
             inherited = source_history.inherited_message_count + local_messages
-            inherited_items = source_history.inherited_history_item_count + local_items
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=target.session_id,
@@ -1152,7 +1169,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 parent_history_id=source.history_id,
                 prefix_index_head_id=prefix_head,
                 inherited_message_count=inherited,
-                inherited_history_item_count=inherited_items,
             )
             expected_target = replace(
                 target,
@@ -1176,10 +1192,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 source.revision,
                 source_head.revision,
                 local_messages,
-                local_items,
                 source_history.prefix_index_head_id,
                 inherited,
-                inherited_items,
                 expected_target.session_id,
                 child.history_id,
                 child.prefix_index_head_id,
@@ -1280,7 +1294,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             or child.parent_history_id != result.source_history_id
             or child.prefix_index_head_id != result.target_prefix_index_head_id
             or child.inherited_message_count != result.inherited_message_count
-            or child.inherited_history_item_count != result.inherited_history_item_count
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = _decode_enveloped_domain(
@@ -1309,7 +1322,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             namespace=self._namespace,
             tenant_id=self._tenant_id,
         )
-        local_messages, _items = await histories.local_head_in_transaction(
+        local_messages = await histories.local_head_in_transaction(
             transaction,
             record.history_id,
         )
@@ -1787,7 +1800,6 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             if domain is RuntimeDomain.EXECUTION
             else ResourceKind.EVALUATION,
             value_type=IdempotencyRecord,
-            identity_field="idempotency_key_digest",
         )
 
     def _identity_key(self, scope: str, key: str) -> list[str]:
@@ -1877,7 +1889,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             kind="execution",
             resource_kind=ResourceKind.EXECUTION,
             value_type=ExecutionRecord,
-            identity_field="execution_id",
         )
         self._idempotency = IdempotencyRepositoryImpl(
             store,
@@ -2306,7 +2317,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         return next_value
 
-    async def enter_approval_wait_in_transaction(
+    async def enter_deferred_wait_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
@@ -2316,16 +2327,20 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         expected_event_sequence: int,
         expected_agent_run_sequence: int,
         audit_events: Sequence[ExecutionEventAppend] = (),
-        approval_events: Sequence[ExecutionEventAppend],
+        deferred_events: Sequence[ExecutionEventAppend],
         occurred_at: datetime,
     ) -> ExecutionRecord:
-        if not approval_events or any(
-            event.event_type is not ExecutionEventType.APPROVAL_REQUESTED
-            for event in approval_events
+        if not deferred_events or any(
+            event.event_type
+            not in {
+                ExecutionEventType.APPROVAL_REQUESTED,
+                ExecutionEventType.EXTERNAL_REQUESTED,
+            }
+            for event in deferred_events
         ):
-            raise ValueError("approval wait requires approval-requested events")
+            raise ValueError("deferred wait requires deferred events")
         if occurred_at.tzinfo is None:
-            raise ValueError("approval wait timestamp must be timezone-aware")
+            raise ValueError("deferred wait timestamp must be timezone-aware")
         current = await self.get_in_transaction(
             transaction,
             execution_id,
@@ -2339,15 +2354,15 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             or current.agent_run_sequence != expected_agent_run_sequence
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        last = approval_events[-1]
+        last = deferred_events[-1]
         updated = await self._transition_execution(
             execution_id,
             tenant_id=tenant_id,
             expected_revision=expected_revision,
             expected_event_sequence=expected_event_sequence,
             expected_status=ExecutionStatus.STARTED,
-            next_status=ExecutionStatus.WAITING_APPROVAL,
-            pending_events=(*audit_events, *approval_events[:-1]),
+            next_status=ExecutionStatus.WAITING_DEFERRED,
+            pending_events=(*audit_events, *deferred_events[:-1]),
             event_type=last.event_type,
             payload=last.payload,
             updated_at=occurred_at,
@@ -2357,7 +2372,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return updated
 
-    async def claim_approval_resume_in_transaction(
+    async def claim_deferred_resume_in_transaction(
         self,
         transaction: StateTransaction,
         execution_id: str,
@@ -2373,7 +2388,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         current = await self._decode(record, ExecutionRecord)
         if (
-            current.status is not ExecutionStatus.WAITING_APPROVAL
+            current.status is not ExecutionStatus.WAITING_DEFERRED
             or current.revision != expected_revision
             or current.event_sequence != expected_event_sequence
             or current.agent_run_sequence != expected_agent_run_sequence
@@ -2480,7 +2495,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         expected_event_sequence: int,
         next_status: ExecutionStatus,
         expected_status: ExecutionStatus | None = None,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: Mapping[str, object],
         updated_at: datetime,
         pending_events: Sequence[ExecutionEventAppend] = (),
@@ -2488,10 +2503,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
         if any(
-            not isinstance(event.event_type, ExecutionEventType)
+            not isinstance(event.event_type, str)
             for event in pending_events
         ):
-            raise TypeError("pending execution events must use ExecutionEventType")
+            raise TypeError("pending execution events require a string event type")
         key = self._key("execution", execution_id)
         stream = stream_digest(
             self._namespace,
@@ -2529,7 +2544,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     stream,
                     first_sequence + index,
                     key,
-                    event.event_type.value,
+                    event.event_type,
                     None,
                     None,
                     event.payload,
@@ -2541,7 +2556,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     stream,
                     next_value.event_sequence,
                     key,
-                    event_type.value,
+                    str(event_type),
                     None,
                     None,
                     payload,
@@ -2619,10 +2634,10 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             transaction: StateTransaction,
         ) -> ExecutionTerminalCommitResult:
             if any(
-                not isinstance(event.event_type, ExecutionEventType)
+                not isinstance(event.event_type, str)
                 for event in pending_events
             ):
-                raise TypeError("pending execution events must use ExecutionEventType")
+                raise TypeError("pending execution events require a string event type")
             record_keys = [key]
             id_key = None
             if commit.idempotency is not None:
@@ -2715,7 +2730,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     stream,
                     first_sequence + index,
                     key,
-                    event.event_type.value,
+                    event.event_type,
                     None,
                     None,
                     event.payload,
@@ -2727,7 +2742,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     stream,
                     next_execution.event_sequence,
                     key,
-                    commit.terminal_event_type.value,
+                    str(commit.terminal_event_type),
                     None,
                     None,
                     commit.terminal_event_payload,
@@ -3018,9 +3033,9 @@ class EventRepositoryImpl(_RepositoryBase):
         if not events:
             return ()
         if any(
-            not isinstance(event.event_type, ExecutionEventType) for event in events
+            not isinstance(event.event_type, str) for event in events
         ):
-            raise TypeError("event repository accepts durable ExecutionEventType only")
+            raise TypeError("event repository requires a string event type")
         if any(not isinstance(event.payload, Mapping) for event in events):
             raise TypeError("event payload must be a mapping")
         key = self._key("execution", execution_id)
@@ -3059,7 +3074,7 @@ class EventRepositoryImpl(_RepositoryBase):
                 stream,
                 first_sequence + index,
                 key,
-                event.event_type.value,
+                event.event_type,
                 None,
                 None,
                 event.payload,
@@ -3083,7 +3098,7 @@ class EventRepositoryImpl(_RepositoryBase):
         execution_id: str,
         *,
         tenant_id: str,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: object,
     ) -> ExecutionEventRecord:
         values = await self.append_many(
@@ -3100,7 +3115,7 @@ class EventRepositoryImpl(_RepositoryBase):
         *,
         tenant_id: str,
         expected_sequence: int,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: object,
     ) -> ExecutionEventRecord:
         values = await self.append_many(
@@ -3117,7 +3132,7 @@ class EventRepositoryImpl(_RepositoryBase):
         *,
         tenant_id: str,
         expected_sequence: int,
-        event_type: ExecutionEventType,
+        event_type: str,
         payload: object,
     ) -> ExecutionEventRecord:
         return await self.append_expected(
@@ -3167,7 +3182,7 @@ class EventRepositoryImpl(_RepositoryBase):
                 execution_id,
                 tenant_id,
                 value.sequence,
-                ExecutionEventType(value.kind),
+                value.kind,
                 value.data,
             )
             for value in values[:limit]
@@ -3187,7 +3202,6 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             kind="approval",
             resource_kind=ResourceKind.APPROVAL,
             value_type=ApprovalRecord,
-            identity_field="approval_id",
         )
 
     async def decide(
@@ -3201,6 +3215,8 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
         principal_id: str,
         decision_digest: str,
         decided_at: datetime,
+        decision_message: str | None = None,
+        resolution_metadata: Mapping[str, JsonValue] | None = None,
     ) -> ApprovalRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
 
@@ -3221,6 +3237,8 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
                 decided_by=principal_id,
                 decision_digest=decision_digest,
                 decided_at=decided_at,
+                decision_message=decision_message,
+                resolution_metadata=({} if resolution_metadata is None else resolution_metadata),
             )
             await _replace_checked(
                 transaction,
@@ -3230,6 +3248,40 @@ class ApprovalRepositoryImpl(_ResourceRepository[ApprovalRecord]):
             return value
 
         return await self._store.mutate(mutate)
+
+    async def cancel_pending_in_transaction(
+        self,
+        transaction: StateTransaction,
+        approval_ids: Sequence[str],
+        *,
+        execution_id: str,
+        tenant_id: str,
+        decided_at: datetime,
+    ) -> tuple[ApprovalRecord, ...]:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        values: list[ApprovalRecord] = []
+        for approval_id in approval_ids:
+            record = await self.get_in_transaction(
+                transaction,
+                approval_id,
+                tenant_id=tenant_id,
+            )
+            if record is None or record.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            stored = await transaction.get_record(self._key("approval", approval_id))
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if record.status is not ApprovalStatus.PENDING:
+                values.append(record)
+                continue
+            value = replace(record, status=ApprovalStatus.CANCELLED, decided_at=decided_at)
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, value),
+                stored.storage_version,
+            )
+            values.append(value)
+        return tuple(values)
 
     async def list_pending(
         self, execution_id: str, *, tenant_id: str
@@ -3254,7 +3306,6 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             kind="external_call",
             resource_kind=ResourceKind.EXTERNAL_CALL,
             value_type=ExternalCallRecord,
-            identity_field="call_id",
         )
 
     async def create_call(self, record: ExternalCallRecord) -> ExternalCallRecord:
@@ -3267,8 +3318,10 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         tenant_id: str,
         expected_status: ExternalCallStatus,
         idempotency_key_digest: str,
-        object_ref: ObjectRef,
-        payload_digest: str,
+        resolution_kind: str,
+        result_payload: StoredPayload | None,
+        result_digest: str,
+        resolution_metadata: Mapping[str, JsonValue],
         supplied_at: datetime,
     ) -> ExternalCallRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
@@ -3284,8 +3337,10 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
                 current,
                 status=ExternalCallStatus.SUPPLIED,
                 idempotency_key_digest=idempotency_key_digest,
-                object_ref=object_ref,
-                payload_digest=payload_digest,
+                resolution_kind=resolution_kind,
+                result_payload=result_payload,
+                result_digest=result_digest,
+                resolution_metadata=resolution_metadata,
                 supplied_at=supplied_at,
             )
             await _replace_checked(
@@ -3296,6 +3351,40 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
             return value
 
         return await self._store.mutate(mutate)
+
+    async def cancel_pending_in_transaction(
+        self,
+        transaction: StateTransaction,
+        call_ids: Sequence[str],
+        *,
+        execution_id: str,
+        tenant_id: str,
+        cancelled_at: datetime,
+    ) -> tuple[ExternalCallRecord, ...]:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        values: list[ExternalCallRecord] = []
+        for call_id in call_ids:
+            record = await self.get_in_transaction(
+                transaction,
+                call_id,
+                tenant_id=tenant_id,
+            )
+            if record is None or record.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            stored = await transaction.get_record(self._key("external_call", call_id))
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if record.status is not ExternalCallStatus.PENDING:
+                values.append(record)
+                continue
+            value = replace(record, status=ExternalCallStatus.CANCELLED, supplied_at=cancelled_at)
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, value),
+                stored.storage_version,
+            )
+            values.append(value)
+        return tuple(values)
 
     async def list_pending(
         self, execution_id: str, *, tenant_id: str
@@ -3312,50 +3401,29 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         )
 
 
-class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
+class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
+    """Store one immutable recovery frontier per execution."""
+
+    _KIND = "recovery_checkpoint"
+
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(
             store,
             namespace=namespace,
             tenant_id=tenant_id,
             domain=RuntimeDomain.RECOVERY,
-            kind="recovery_state",
+            kind=self._KIND,
             resource_kind=ResourceKind.EXECUTION,
             value_type=RecoveryCheckpoint,
-            identity_field="execution_id",
         )
 
     async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]:
         if tenant_id != self._tenant_id:
             return ()
-
-        async def read(transaction: StateTransaction) -> tuple[RecoveryCheckpoint, ...]:
-            admissions = await transaction.list_records(
-                RecordQuery(
-                    partition_digest=self._partition("recovery_admission"),
-                    kind="recovery_admission",
-                )
-            )
-            decoded_admissions = []
-            for record in admissions:
-                decoded_admissions.append(
-                    (record, await self._decode(record, RecoveryAdmissionRecord))
-                )
-            states = await transaction.get_records(
-                tuple(
-                    self._state_key(admission.execution_id)
-                    for _, admission in decoded_admissions
-                )
-            )
-            values = []
-            for admission_record, admission in decoded_admissions:
-                state_record = states.get(self._state_key(admission.execution_id))
-                if state_record is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                values.append(await self._compose(admission_record, state_record))
-            return tuple(values)
-
-        return await self._store.read(read)
+        records = await self._records(self._KIND)
+        return tuple(
+            [await self._decode(record, RecoveryCheckpoint) for record in records]
+        )
 
     async def list_recoverable_page(
         self,
@@ -3367,461 +3435,33 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         if tenant_id != self._tenant_id:
             return Page(())
         _validate_page_limit(limit)
-
-        async def read(transaction: StateTransaction) -> Page[RecoveryCheckpoint]:
-            after_sort_key, after_key_digest = _decode_record_cursor(cursor)
-            records = await transaction.list_records(
-                RecordQuery(
-                    partition_digest=self._partition("recovery_active"),
-                    kind="recovery_active",
-                    after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
-                    limit=min(limit + 1, 1000),
-                )
-            )
-            if limit == 1000 and len(records) == 1000:
-                last = records[-1]
-                probe = await transaction.list_records(
-                    RecordQuery(
-                        partition_digest=self._partition("recovery_active"),
-                        kind="recovery_active",
-                        after_sort_key=last.sort_key,
-                        after_key_digest=last.key_digest,
-                        limit=1,
-                    )
-                )
-                if probe:
-                    records = (*records, probe[0])
-            has_more = len(records) > limit
-            selected = records[:limit]
-            active_values = []
-            for record in selected:
-                active = await self._decode(record, RecoveryActiveRecord)
-                self._validate_active_record(record, active, active.execution_id)
-                active_values.append(active)
-            keys = tuple(
-                key
-                for value in active_values
-                for key in (
-                    self._admission_key(value.execution_id),
-                    self._state_key(value.execution_id),
-                )
-            )
-            related = await transaction.get_records(keys)
-            values: list[RecoveryCheckpoint] = []
-            for value in active_values:
-                admission = related.get(self._admission_key(value.execution_id))
-                state = related.get(self._state_key(value.execution_id))
-                if admission is None or state is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                checkpoint = await self._compose(admission, state)
-                if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                values.append(checkpoint)
-            next_cursor = (
-                _record_cursor(selected[-1]) if has_more and selected else None
-            )
-            return Page(tuple(values), next_cursor)
-
-        return await self._store.read(read)
-
-    async def validate_recovery_active_index(
-        self,
-        *,
-        tenant_id: str,
-    ) -> RecoveryIntegrityReport:
-        """Validate the recovery indexes against one stable generation."""
-        if tenant_id != self._tenant_id:
-            return RecoveryIntegrityReport(0, 0, ())
-        _logger.info(
-            "recovery active index validation started: tenant=%s",
-            self._tenant_id,
+        records = await self._records(
+            self._KIND,
+            states=frozenset(
+                {
+                    RecoveryCheckpointState.ADMITTED.value,
+                    RecoveryCheckpointState.ACTIVE.value,
+                    RecoveryCheckpointState.WAITING.value,
+                    RecoveryCheckpointState.HANDOFF.value,
+                }
+            ),
+            cursor=cursor,
+            limit=min(limit + 1, 1001),
         )
-
-        g0 = await self._store.read(
-            lambda transaction: transaction.get_sequence(
-                self._integrity_generation_key()
-            )
+        selected = records[:limit]
+        values = tuple(
+            [await self._decode(record, RecoveryCheckpoint) for record in selected]
         )
-        active_ids: set[str] = set()
-        inconsistent: set[str] = set()
-        cursor: tuple[str, bytes] | None = None
-        while True:
-            page_cursor = cursor
-            records = await self._store.read(
-                lambda transaction, cursor_value=page_cursor: transaction.list_records(
-                    RecordQuery(
-                        partition_digest=self._partition("recovery_active"),
-                        kind="recovery_active",
-                        after_sort_key=(
-                            None if cursor_value is None else cursor_value[0]
-                        ),
-                        after_key_digest=(
-                            None if cursor_value is None else cursor_value[1]
-                        ),
-                        limit=_RECOVERY_PAGE_SIZE,
-                    )
-                )
-            )
-            if not records:
-                break
-            for record in records:
-                try:
-                    active = await self._decode(record, RecoveryActiveRecord)
-                    self._validate_active_record(
-                        record,
-                        active,
-                        active.execution_id,
-                    )
-                except (KeyError, TypeError, ValueError):
-                    self._record_invalid_recovery_id(
-                        record,
-                        active_ids,
-                        inconsistent,
-                    )
-                    continue
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
-                        raise
-                    self._record_invalid_recovery_id(
-                        record,
-                        active_ids,
-                        inconsistent,
-                    )
-                    continue
-                active_ids.add(active.execution_id)
-            if len(records) < _RECOVERY_PAGE_SIZE:
-                break
-            last = records[-1]
-            cursor = (last.sort_key, last.key_digest)
-
-        expected_active: set[str] = set()
-        admission_ids: set[str] = set()
-        state_ids: set[str] = set()
-        cursor = None
-        while True:
-            page_cursor = cursor
-
-            async def read_page(
-                transaction: StateTransaction,
-                cursor_value: tuple[str, bytes] | None = page_cursor,
-            ) -> tuple[
-                tuple[tuple[StoredRecord, RecoveryAdmissionRecord], ...],
-                Mapping[bytes, StoredRecord],
-                tuple[str, ...],
-                tuple[str, bytes] | None,
-            ]:
-                admissions = await transaction.list_records(
-                    RecordQuery(
-                        partition_digest=self._partition("recovery_admission"),
-                        kind="recovery_admission",
-                        after_sort_key=(
-                            None if cursor_value is None else cursor_value[0]
-                        ),
-                        after_key_digest=(
-                            None if cursor_value is None else cursor_value[1]
-                        ),
-                        limit=_RECOVERY_PAGE_SIZE,
-                    )
-                )
-                decoded: list[tuple[StoredRecord, RecoveryAdmissionRecord]] = []
-                invalid_ids: list[str] = []
-                for record in admissions:
-                    try:
-                        admission = await self._decode(
-                            record,
-                            RecoveryAdmissionRecord,
-                        )
-                        self._validate_admission_record(
-                            record,
-                            admission,
-                            admission.execution_id,
-                        )
-                    except (KeyError, TypeError, ValueError):
-                        invalid_ids.append(record.sort_key)
-                        continue
-                    except AIError as error:
-                        if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
-                            raise
-                        invalid_ids.append(record.sort_key)
-                        continue
-                    decoded.append((record, admission))
-                states = await transaction.get_records(
-                    tuple(
-                        self._state_key(admission.execution_id)
-                        for _record, admission in decoded
-                    )
-                )
-                last_cursor = None
-                if admissions:
-                    last = admissions[-1]
-                    last_cursor = (last.sort_key, last.key_digest)
-                return tuple(decoded), states, tuple(invalid_ids), last_cursor
-
-            (
-                decoded_admissions,
-                states,
-                invalid_ids,
-                last_cursor,
-            ) = await self._store.read(read_page)
-            admission_ids.update(invalid_ids)
-            inconsistent.update(invalid_ids)
-            if not decoded_admissions:
-                if len(invalid_ids) < _RECOVERY_PAGE_SIZE:
-                    break
-                cursor = last_cursor
-                continue
-            for record, admission in decoded_admissions:
-                admission_ids.add(admission.execution_id)
-                state = states.get(self._state_key(admission.execution_id))
-                if state is None:
-                    inconsistent.add(admission.execution_id)
-                    continue
-                try:
-                    state_value = await self._decode(state, RecoveryStateRecord)
-                    self._validate_state_record(
-                        state,
-                        state_value,
-                        admission.execution_id,
-                    )
-                except (KeyError, TypeError, ValueError):
-                    self._record_invalid_recovery_id(
-                        state,
-                        state_ids,
-                        inconsistent,
-                    )
-                    inconsistent.add(admission.execution_id)
-                    continue
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
-                        raise
-                    self._record_invalid_recovery_id(
-                        state,
-                        state_ids,
-                        inconsistent,
-                    )
-                    inconsistent.add(admission.execution_id)
-                    continue
-                state_ids.add(admission.execution_id)
-                checkpoint = await self._compose(record, state)
-                if checkpoint.state is not RecoveryCheckpointState.COMPLETED:
-                    expected_active.add(admission.execution_id)
-            page_size = len(decoded_admissions) + len(invalid_ids)
-            if page_size < _RECOVERY_PAGE_SIZE:
-                break
-            cursor = last_cursor
-
-        cursor = None
-        while True:
-            page_cursor = cursor
-            states = await self._store.read(
-                lambda transaction, cursor_value=page_cursor: (
-                    self._read_recovery_state_page(
-                        transaction,
-                        cursor_value,
-                    )
-                )
-            )
-            if not states:
-                break
-            for record in states:
-                try:
-                    state = await self._decode(record, RecoveryStateRecord)
-                    self._validate_state_record(
-                        record,
-                        state,
-                        state.execution_id,
-                    )
-                except (KeyError, TypeError, ValueError):
-                    self._record_invalid_recovery_id(
-                        record,
-                        state_ids,
-                        inconsistent,
-                    )
-                    continue
-                except AIError as error:
-                    if error.code is not ErrorCode.STORAGE_INTEGRITY_ERROR:
-                        raise
-                    self._record_invalid_recovery_id(
-                        record,
-                        state_ids,
-                        inconsistent,
-                    )
-                    continue
-                state_ids.add(state.execution_id)
-            if len(states) < _RECOVERY_PAGE_SIZE:
-                break
-            last = states[-1]
-            cursor = (last.sort_key, last.key_digest)
-
-        g1 = await self._store.read(
-            lambda transaction: transaction.get_sequence(
-                self._integrity_generation_key()
-            )
-        )
-        if g0 != g1:
-            raise AIError(
-                ErrorCode.STORAGE_CONFLICT,
-                "recovery integrity validation snapshot changed",
-            )
-        inconsistent.update(active_ids ^ expected_active)
-        inconsistent.update(admission_ids ^ state_ids)
-        report = RecoveryIntegrityReport(
-            len(active_ids),
-            len(admission_ids),
-            tuple(sorted(inconsistent)),
-        )
-        if report.inconsistent_execution_ids:
-            _logger.error(
-                "recovery active index validation failed: tenant=%s inconsistent=%s",
-                self._tenant_id,
-                len(report.inconsistent_execution_ids),
-            )
-        else:
-            _logger.info(
-                "recovery active index validation passed: tenant=%s active=%s",
-                self._tenant_id,
-                report.active_count,
-            )
-        return report
-
-    async def _ensure_active_in_transaction(
-        self,
-        transaction: StateTransaction,
-        checkpoint: RecoveryCheckpoint,
-        *,
-        active_record: StoredRecord | None | object = _ACTIVE_RECORD_UNSET,
-    ) -> bool:
-        key = self._active_key(checkpoint.execution_id)
-        if active_record is _ACTIVE_RECORD_UNSET:
-            current = await transaction.get_record(key)
-        else:
-            current = active_record
-        if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-            if current is None:
-                return False
-            if not await transaction.delete_record(
-                key,
-                expected_storage_version=current.storage_version,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return True
-        if current is None:
-            await transaction.insert_record(
-                self._stored(
-                    "recovery_active",
-                    checkpoint.execution_id,
-                    RecoveryActiveRecord(
-                        checkpoint.execution_id,
-                        checkpoint.tenant_id,
-                    ),
-                    state=checkpoint.state.value,
-                )
-            )
-            return True
-        active = await self._decode(current, RecoveryActiveRecord)
-        self._validate_active_record(current, active, checkpoint.execution_id)
-        return False
-
-    async def _read_recovery_state_page(
-        self,
-        transaction: StateTransaction,
-        cursor: tuple[str, bytes] | None,
-    ) -> tuple[StoredRecord, ...]:
-        return await transaction.list_records(
-            RecordQuery(
-                partition_digest=self._partition("recovery_state"),
-                kind="recovery_state",
-                after_sort_key=None if cursor is None else cursor[0],
-                after_key_digest=None if cursor is None else cursor[1],
-                limit=_RECOVERY_PAGE_SIZE,
-            )
-        )
-
-    async def _bump_integrity_generation_in_transaction(
-        self,
-        transaction: StateTransaction,
-    ) -> None:
-        await transaction.next_sequence(self._integrity_generation_key())
-
-    def _integrity_generation_key(self) -> bytes:
-        return sequence_key(
-            self._namespace,
-            self._tenant_id,
-            RuntimeDomain.RECOVERY.value,
-            "recovery_integrity_generation",
-            "global",
-        )
-
-    def _validate_active_record(
-        self,
-        record: StoredRecord,
-        active: RecoveryActiveRecord,
-        execution_id: str,
-    ) -> None:
-        if (
-            record.key_digest != self._active_key(execution_id)
-            or record.kind != "recovery_active"
-            or active.execution_id != execution_id
-            or active.tenant_id != self._tenant_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_admission_record(
-        self,
-        record: StoredRecord,
-        admission: RecoveryAdmissionRecord,
-        execution_id: str,
-    ) -> None:
-        if (
-            record.key_digest != self._admission_key(execution_id)
-            or record.kind != "recovery_admission"
-            or admission.execution_id != execution_id
-            or admission.tenant_id != self._tenant_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_state_record(
-        self,
-        record: StoredRecord,
-        state: RecoveryStateRecord,
-        execution_id: str,
-    ) -> None:
-        if (
-            record.key_digest != self._state_key(execution_id)
-            or record.kind != "recovery_state"
-            or state.execution_id != execution_id
-            or state.tenant_id != self._tenant_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _record_invalid_recovery_id(
-        self,
-        record: StoredRecord,
-        ids: set[str],
-        inconsistent: set[str],
-    ) -> None:
-        if record.sort_key:
-            ids.add(record.sort_key)
-            inconsistent.add(record.sort_key)
-
-    def _active_key(self, execution_id: str) -> bytes:
-        return self._key("recovery_active", execution_id)
+        next_cursor = _record_cursor(selected[-1]) if len(records) > limit else None
+        return Page(values, next_cursor)
 
     async def get(
         self, execution_id: str, *, tenant_id: str
     ) -> RecoveryCheckpoint | None:
         if tenant_id != self._tenant_id:
             return None
-
-        async def read(transaction: StateTransaction) -> RecoveryCheckpoint | None:
-            return await self.get_in_transaction(
-                transaction,
-                execution_id,
-                tenant_id=tenant_id,
-            )
-
-        return await self._store.read(read)
+        record = await self._record(self._key(self._KIND, execution_id))
+        return None if record is None else await self._decode(record, RecoveryCheckpoint)
 
     async def get_in_transaction(
         self,
@@ -3832,18 +3472,36 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
     ) -> RecoveryCheckpoint | None:
         if tenant_id != self._tenant_id:
             return None
-        keys = (self._admission_key(execution_id), self._state_key(execution_id))
-        records = await transaction.get_records(keys)
-        admission = records.get(keys[0])
-        state = records.get(keys[1])
-        if admission is not None and state is not None:
-            return await self._compose(admission, state)
-        return None
+        record = await transaction.get_record(self._key(self._KIND, execution_id))
+        return None if record is None else await self._decode(record, RecoveryCheckpoint)
 
     async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint:
         return await self._store.mutate(
             lambda transaction: self.admit_in_transaction(transaction, record)
         )
+
+    async def admit_in_transaction(
+        self,
+        transaction: StateTransaction,
+        record: RecoveryCheckpoint,
+    ) -> RecoveryCheckpoint:
+        _require_tenant(record, self._tenant_id)
+        key = self._key(self._KIND, record.execution_id)
+        current = await transaction.get_record(key)
+        if current is not None:
+            existing = await self._decode(current, RecoveryCheckpoint)
+            if existing != record:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            return existing
+        await transaction.insert_record(
+            self._stored(
+                self._KIND,
+                record.execution_id,
+                record,
+                state=_record_state(record),
+            )
+        )
+        return record
 
     async def compare_and_swap(
         self,
@@ -3853,7 +3511,7 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         expected_revision: int,
         next_record: RecoveryCheckpoint,
     ) -> RecoveryCheckpoint:
-        result = await self._store.mutate(
+        return await self._store.mutate(
             lambda transaction: self.compare_and_swap_in_transaction(
                 transaction,
                 execution_id,
@@ -3862,82 +3520,6 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
                 next_record=next_record,
             )
         )
-        _logger.debug(
-            "recovery checkpoint compare-and-swap committed: execution=%s revision=%s",
-            execution_id,
-            next_record.revision,
-        )
-        return result
-
-    async def admit_in_transaction(
-        self,
-        transaction: StateTransaction,
-        record: RecoveryCheckpoint,
-    ) -> RecoveryCheckpoint:
-        _require_tenant(record, self._tenant_id)
-        keys = (
-            self._admission_key(record.execution_id),
-            self._state_key(record.execution_id),
-            self._active_key(record.execution_id),
-        )
-        records = await transaction.get_records(keys)
-        current = records.get(keys[0])
-        if current is not None:
-            if keys[1] not in records:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            existing = await self._compose(current, records[keys[1]])
-            if not _recovery_admission_matches(existing, record):
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            if await self._ensure_active_in_transaction(
-                transaction,
-                existing,
-                active_record=records.get(keys[2]),
-            ):
-                await self._bump_integrity_generation_in_transaction(transaction)
-            return existing
-        if keys[1] in records:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        admission = RecoveryAdmissionRecord(
-            record.execution_id,
-            record.tenant_id,
-            record.input,
-            record.created_at,
-        )
-        state = _recovery_state_record(record)
-        active_record = records.get(keys[2])
-        values = [
-            self._stored("recovery_admission", record.execution_id, admission),
-            self._stored("recovery_state", record.execution_id, state),
-        ]
-        if (
-            active_record is None
-            and record.state is not RecoveryCheckpointState.COMPLETED
-        ):
-            values.append(
-                self._stored(
-                    "recovery_active",
-                    record.execution_id,
-                    RecoveryActiveRecord(
-                        record.execution_id,
-                        record.tenant_id,
-                    ),
-                    state=record.state.value,
-                )
-            )
-        await transaction.insert_records(tuple(values))
-        if active_record is not None:
-            await self._ensure_active_in_transaction(
-                transaction,
-                record,
-                active_record=active_record,
-            )
-        await self._bump_integrity_generation_in_transaction(transaction)
-        _logger.debug(
-            "recovery checkpoint admitted: execution=%s active=%s",
-            record.execution_id,
-            record.state is not RecoveryCheckpointState.COMPLETED,
-        )
-        return record
 
     async def compare_and_swap_in_transaction(
         self,
@@ -3951,58 +3533,24 @@ class RecoveryCheckpointRepositoryImpl(_ResourceRepository[RecoveryCheckpoint]):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
-        keys = (self._admission_key(execution_id), self._state_key(execution_id))
-        records = await transaction.get_records(keys)
-        admission_record = records.get(keys[0])
-        state_record = records.get(keys[1])
-        if admission_record is None or state_record is None:
+        key = self._key(self._KIND, execution_id)
+        current_record = await transaction.get_record(key)
+        if current_record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        current = await self._compose(admission_record, state_record)
+        current = await self._decode(current_record, RecoveryCheckpoint)
         if current.revision != expected_revision:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if not _recovery_admission_matches(current, next_record):
+        if next_record.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        next_state = _recovery_state_record(next_record)
         await _replace_checked(
             transaction,
             replace(
-                self._stored("recovery_state", execution_id, next_state),
-                storage_version=state_record.storage_version + 1,
+                self._stored(self._KIND, execution_id, next_record),
+                storage_version=current_record.storage_version + 1,
             ),
-            state_record.storage_version,
+            current_record.storage_version,
         )
-        await self._ensure_active_in_transaction(transaction, next_record)
-        await self._bump_integrity_generation_in_transaction(transaction)
         return next_record
-
-    def _admission_key(self, execution_id: str) -> bytes:
-        return self._key("recovery_admission", execution_id)
-
-    def _state_key(self, execution_id: str) -> bytes:
-        return self._key("recovery_state", execution_id)
-
-    async def _compose(
-        self,
-        admission_record: StoredRecord,
-        state_record: StoredRecord,
-    ) -> RecoveryCheckpoint:
-        admission = await self._decode(admission_record, RecoveryAdmissionRecord)
-        state = await self._decode(state_record, RecoveryStateRecord)
-        return RecoveryCheckpoint(
-            admission.execution_id,
-            admission.tenant_id,
-            admission.input,
-            state.step_run_id,
-            state.agent_run_sequence,
-            state.state,
-            state.handoff_phase,
-            state.terminal_handoff,
-            state.pending_operation_id,
-            state.revision,
-            admission.created_at,
-            state.updated_at,
-            state.pending_approval,
-        )
 
 
 class EvaluationRepositoryImpl(_ResourceRepository[EvaluationRecord]):
@@ -4015,7 +3563,6 @@ class EvaluationRepositoryImpl(_ResourceRepository[EvaluationRecord]):
             kind="evaluation",
             resource_kind=ResourceKind.EVALUATION,
             value_type=EvaluationRecord,
-            identity_field="evaluation_id",
         )
 
     async def list_by_execution(
@@ -4044,7 +3591,6 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             kind="memory",
             resource_kind=ResourceKind.MEMORY,
             value_type=MemoryRecord,
-            identity_field="memory_id",
         )
 
     def _stored(
@@ -4299,7 +3845,6 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
             kind="artifact",
             resource_kind=ResourceKind.ARTIFACT,
             value_type=ArtifactRecord,
-            identity_field="artifact_id",
         )
 
     async def put_metadata(self, record: ArtifactRecord) -> ArtifactRecord:
@@ -4946,6 +4491,66 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         return await self._retry_storage_conflict(attempt)
 
+    async def defer(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+    ) -> ToolOperationRecord:
+        async def attempt() -> ToolOperationRecord:
+            return await self._store.mutate(
+                lambda transaction: self.defer_in_transaction(
+                    transaction,
+                    tool_operation_id,
+                    tenant_id=tenant_id,
+                    owner=owner,
+                    fence=fence,
+                )
+            )
+
+        return await self._retry_storage_conflict(attempt)
+
+    async def defer_in_transaction(
+        self,
+        transaction: StateTransaction,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+    ) -> ToolOperationRecord:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        validate_lease_owner(owner)
+        record = await transaction.get_record(self._tool_key(tool_operation_id))
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        current = await self._decode(record, ToolOperationRecord)
+        if current.status is ToolOperationStatus.PENDING:
+            if (
+                current.owner is None
+                and current.lease_expires_at is None
+                and current.fence == fence
+            ):
+                return current
+            raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+        now = await transaction.now()
+        _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
+        value = replace(
+            current,
+            status=ToolOperationStatus.PENDING,
+            owner=None,
+            lease_expires_at=None,
+            error_code=None,
+            error_payload=None,
+            result_payload=None,
+            updated_at=now,
+        )
+        await self._replace_tool_in_transaction(transaction, record, value)
+        return value
+
     async def mark_effect_unknown(
         self,
         tool_operation_id: str,
@@ -5170,7 +4775,7 @@ def build_repository_bundle(
             external_calls=ExternalCallRepositoryImpl(
                 store, namespace=namespace, tenant_id=tenant_id
             ),
-            checkpoints=RecoveryCheckpointRepositoryImpl(
+            checkpoints=_RecoveryCheckpointRepository(
                 store, namespace=namespace, tenant_id=tenant_id
             ),
             tools=ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
@@ -5229,7 +4834,6 @@ def _new_session_history(value: SessionRecord) -> ConversationHistoryRecord:
         parent_history_id=None,
         prefix_index_head_id=None,
         inherited_message_count=0,
-        inherited_history_item_count=0,
     )
 
 
@@ -5240,10 +4844,6 @@ def _empty_conversation_transcript_head(
         TranscriptOwnerDomain.CONVERSATION,
         history_id,
         0,
-        0,
-        1,
-        0,
-        1,
         0,
         HistoryQuality.COMPLETE,
         0,
@@ -5306,7 +4906,6 @@ def _require_tenant(value: object, tenant_id: str) -> None:
             ApprovalRecord,
             ExternalCallRecord,
             RecoveryCheckpoint,
-            RecoveryActiveRecord,
             ConversationHistoryRecord,
             ToolOperationRecord,
         ),
@@ -5342,6 +4941,8 @@ def _domain_revision(value: object) -> int:
 
 
 def _status_value(value: object) -> str | None:
+    if isinstance(value, RecoveryCheckpoint):
+        return value.state.value
     if isinstance(
         value,
         (
@@ -5496,19 +5097,19 @@ def _memory_delete_replay_result(operation: OperationLedgerRecord | None) -> boo
         value = json.loads(operation.result_ref)
         if (
             not isinstance(value, dict)
-            or set(value) != {"version", "result"}
+            or not {"version", "result"}.issubset(value)
             or isinstance(value.get("version"), bool)
             or not isinstance(value.get("version"), int)
             or value.get("version") < 1
         ):
             raise ValueError("memory delete receipt is invalid")
-        if value["version"] != 2:
+        if value["version"] != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if not isinstance(value.get("result"), dict):
             raise ValueError("memory delete receipt is invalid")
         result = value["result"]
         if (
-            set(result) != {"file", "version", "status"}
+            not {"file", "version", "status"}.issubset(result)
             or not isinstance(result["file"], str)
             or result["version"] is not None
             or result["status"] not in {"deleted", "not_found"}
@@ -5668,34 +5269,6 @@ def _execution_replay_matches(left: ExecutionRecord, right: ExecutionRecord) -> 
     )
 
 
-def _recovery_admission_matches(
-    left: RecoveryCheckpoint,
-    right: RecoveryCheckpoint,
-) -> bool:
-    return (
-        left.execution_id == right.execution_id
-        and left.tenant_id == right.tenant_id
-        and left.input == right.input
-        and left.created_at == right.created_at
-    )
-
-
-def _recovery_state_record(value: RecoveryCheckpoint) -> RecoveryStateRecord:
-    return RecoveryStateRecord(
-        value.execution_id,
-        value.tenant_id,
-        value.step_run_id,
-        value.agent_run_sequence,
-        value.state,
-        value.handoff_phase,
-        value.terminal_handoff,
-        value.pending_operation_id,
-        value.revision,
-        value.updated_at,
-        value.pending_approval,
-    )
-
-
 def _require_live_tool_lease(
     current: ToolOperationRecord,
     *,
@@ -5762,7 +5335,6 @@ __all__ = [
     "IdempotencyRepositoryImpl",
     "MemoryRepositoryImpl",
     "OperationLedgerRepository",
-    "RecoveryCheckpointRepositoryImpl",
     "SessionRepositoryImpl",
     "ToolRepositoryImpl",
     "RepositoryBase",

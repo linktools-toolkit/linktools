@@ -79,11 +79,6 @@ from ._store import (
     sortable_timestamp,
     stream_digest,
 )
-from ._views import (
-    count_execution_transcript_items,
-    count_session_history_items,
-    project_execution_transcript_message,
-)
 
 _logger = environ.get_logger("ai.runtime.state.steps")
 
@@ -135,8 +130,6 @@ class PreparedStepSnapshot:
     chunks: tuple[TranscriptChunk, ...]
     projection: ContextProjection
     history_quality: HistoryQuality = HistoryQuality.COMPLETE
-    chunk_session_history_item_counts: tuple[int, ...] = ()
-    chunk_execution_transcript_item_counts: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,22 +182,6 @@ class ExecutionTerminalSealPlan:
             if candidate == run_id:
                 return token
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _chunk_message_groups(
-    messages: Sequence[ModelMessage],
-    chunks: Sequence[TranscriptChunk],
-    base_index: int,
-) -> "list[Sequence[ModelMessage]]":
-    """Group source messages back onto prepared chunks for item counting."""
-    groups: list[Sequence[ModelMessage]] = []
-    cursor = 0
-    for chunk in chunks:
-        start = chunk.first_message_index - base_index
-        groups.append(messages[start : start + chunk.message_count])
-        cursor = start + chunk.message_count
-    del cursor
-    return groups
 
 
 class _RunDurabilityKind(str, Enum):
@@ -442,6 +419,26 @@ class StagingStepStore(StepStore):
             include_interrupted=include_interrupted,
         )
 
+    async def load_loaded_model_context(
+        self,
+        *,
+        owner_id: str,
+    ) -> LoadedModelContext:
+        snapshot = await self.latest_snapshot(
+            run_id=owner_id,
+            include_interrupted=True,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        messages = (
+            snapshot.messages
+            if snapshot.context_messages is None
+            else snapshot.context_messages
+        )
+        return LoadedModelContext(
+            tuple(LoadedContextMessage(message, None) for message in messages)
+        )
+
     async def release_run(
         self,
         run_id: str,
@@ -588,37 +585,31 @@ class InMemoryStepArchive(StagingStepStore):
             return ()
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-    async def execution_transcript_item_count(self, run_id: str) -> int:
-        snapshot = self.latest_snapshot_local(run_id, include_interrupted=True)
-        if snapshot is None:
-            return 0
-        return count_execution_transcript_items(snapshot.messages)
-
-    async def iter_execution_transcript_item_range(
-        self,
-        run_id: str,
-        *,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[str]:
-        if start < 0 or end < start:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        snapshot = self.latest_snapshot_local(run_id, include_interrupted=True)
-        messages = () if snapshot is None else snapshot.messages
-        values = tuple(
-            value
-            for message in messages
-            for value in project_execution_transcript_message(message)
-        )
-        if end > len(values):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for value in values[start:end]:
-            yield value
-
     async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]:
         snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
         if snapshot is not None:
             for message in snapshot.messages:
+                yield message
+
+    async def transcript_message_count(self, run_id: str) -> int:
+        snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
+        return 0 if snapshot is None else len(snapshot.messages)
+
+    async def iter_message_range(
+        self,
+        *,
+        run_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[object]:
+        if start < 0 or end < start:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
+        total = 0 if snapshot is None else len(snapshot.messages)
+        if end > total:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if snapshot is not None:
+            for message in snapshot.messages[start:end]:
                 yield message
 
     async def load_model_context(self, *, run_id: str) -> tuple[object, ...]:
@@ -993,16 +984,10 @@ class StateStepArchive(StepStore):
                 ),
                 target_quality,
             )
-            (
-                chunks,
-                chunk_session_history_item_counts,
-                chunk_execution_transcript_item_counts,
-            ) = (
-                await self._prepare_captured_chunks(
-                    owner_id,
-                    capture,
-                    message_index_offset=0,
-                )
+            chunks = await self._prepare_captured_chunks(
+                owner_id,
+                capture,
+                message_index_offset=0,
             )
             sources = self._message_sources(
                 owner_id,
@@ -1057,8 +1042,6 @@ class StateStepArchive(StepStore):
                     chunks,
                     projection,
                     target_quality,
-                    chunk_session_history_item_counts,
-                    chunk_execution_transcript_item_counts,
                 )
             )
             working_messages.extend(delta)
@@ -1083,21 +1066,16 @@ class StateStepArchive(StepStore):
     ) -> tuple[TranscriptMessageRef | None, ...]:
         if len(incoming) != len(incoming_sources):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        by_identity: dict[int, list[int]] = {}
         by_signature: dict[bytes, list[int]] = {}
         for index, message in enumerate(incoming):
-            by_identity.setdefault(id(message), []).append(index)
             signature = _exact_message_signature(message)
             by_signature.setdefault(signature, []).append(index)
         used: set[int] = set()
         result: list[TranscriptMessageRef | None] = []
         for message in projection_messages:
-            candidates = by_identity.get(id(message), [])
+            signature = _exact_message_signature(message)
+            candidates = by_signature.get(signature, [])
             index = next((value for value in candidates if value not in used), None)
-            if index is None:
-                signature = _exact_message_signature(message)
-                candidates = by_signature.get(signature, [])
-                index = next((value for value in candidates if value not in used), None)
             if index is None:
                 result.append(None)
                 continue
@@ -1148,11 +1126,7 @@ class StateStepArchive(StepStore):
         capture: TranscriptCapture,
         *,
         message_index_offset: int = 0,
-    ) -> tuple[
-        tuple[TranscriptChunk, ...],
-        tuple[int, ...],
-        tuple[int, ...],
-    ]:
+    ) -> tuple[TranscriptChunk, ...]:
         messages = capture.messages
         origins = capture.origins
         result: list[TranscriptChunk] = []
@@ -1173,27 +1147,7 @@ class StateStepArchive(StepStore):
             )
             offset += end - start
             start = end
-        session_counts = tuple(
-            count_session_history_items(chunk_messages)
-            for chunk_messages in _chunk_message_groups(
-                messages,
-                result,
-                message_index_offset + capture.first_message_index,
-            )
-        )
-        execution_counts = tuple(
-            count_execution_transcript_items(chunk_messages)
-            for chunk_messages in _chunk_message_groups(
-                messages,
-                result,
-                message_index_offset + capture.first_message_index,
-            )
-        )
-        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
-            session_counts = tuple(0 for _ in result)
-        if self._runtime_domain is RuntimeDomain.CONVERSATION:
-            execution_counts = tuple(0 for _ in result)
-        return tuple(result), session_counts, execution_counts
+        return tuple(result)
 
     def _message_sources(
         self,
@@ -1443,16 +1397,6 @@ class StateStepArchive(StepStore):
                     for snapshot in snapshots
                     for chunk in snapshot.chunks
                 ),
-                tuple(
-                    count
-                    for snapshot in snapshots
-                    for count in snapshot.chunk_session_history_item_counts
-                ),
-                tuple(
-                    count
-                    for snapshot in snapshots
-                    for count in snapshot.chunk_execution_transcript_item_counts
-                ),
                 min(
                     (snapshot.history_quality for snapshot in snapshots),
                     key=lambda value: value is HistoryQuality.COMPLETE,
@@ -1528,8 +1472,6 @@ class StateStepArchive(StepStore):
             transaction,
             snapshot.owner_id,
             snapshot.chunks,
-            snapshot.chunk_session_history_item_counts or None,
-            snapshot.chunk_execution_transcript_item_counts or None,
             snapshot.history_quality,
         )
         await self._history.store_projection(
@@ -1727,6 +1669,25 @@ class StateStepArchive(StepStore):
         async for message in self._history.iter_messages(run_id):
             yield message
 
+    async def transcript_message_count(self, run_id: str) -> int:
+        require_no_run_history_lock(
+            "StateStepArchive.transcript_message_count"
+        )
+        return await self._history.transcript_message_count(run_id)
+
+    def iter_message_range(
+        self,
+        *,
+        run_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[object]:
+        return self._history.iter_message_range(
+            run_id,
+            start=start,
+            end=end,
+        )
+
     async def iter_raw_messages(self, *, run_id: str) -> AsyncIterator[ModelMessage]:
         require_no_run_history_lock("StateStepArchive.iter_raw_messages")
         async for message in self._history.iter_raw_messages(run_id):
@@ -1791,35 +1752,6 @@ class StateStepArchive(StepStore):
         return await self._history.history_message_count(
             history_id,
             tenant_id=tenant_id,
-        )
-
-    async def session_history_item_count(
-        self,
-        history_id: str,
-        *,
-        tenant_id: str,
-    ) -> int:
-        require_no_run_history_lock(
-            "StateStepArchive.session_history_item_count"
-        )
-        return await self._history.session_history_item_total_count(
-            history_id,
-            tenant_id=tenant_id,
-        )
-
-    def iter_session_history_item_range(
-        self,
-        history_id: str,
-        *,
-        tenant_id: str,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]:
-        return self._history.iter_session_history_item_range(
-            history_id,
-            tenant_id=tenant_id,
-            start=start,
-            end=end,
         )
 
     def iter_session_message_range(
@@ -2222,11 +2154,15 @@ class RuntimeStepStore(StepStore):
         owner_id: str,
     ) -> LoadedModelContext:
         archive = self._archives.get(runtime_domain)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        return await archive.load_loaded_model_context(
-            owner_id=owner_id,
-        )
+        if archive is None:
+            archive = self._staging
+        if isinstance(archive, (StateStepArchive, StagingStepStore)):
+            if isinstance(archive, StateStepArchive):
+                return await archive.load_loaded_model_context(
+                    owner_id=owner_id,
+                )
+            return await archive.load_loaded_model_context(owner_id=owner_id)
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     async def resolve_transcript_message_refs(
         self,
@@ -2265,92 +2201,6 @@ class RuntimeStepStore(StepStore):
             history_id,
             tenant_id=tenant_id,
         )
-
-    async def session_history_item_count(
-        self,
-        history_id: str,
-        *,
-        tenant_id: str,
-    ) -> int:
-        archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        return await archive.session_history_item_count(
-            history_id,
-            tenant_id=tenant_id,
-        )
-
-    def iter_session_history_item_range(
-        self,
-        history_id: str,
-        *,
-        tenant_id: str,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]:
-        return self._iter_session_history_item_range(
-            history_id,
-            tenant_id=tenant_id,
-            start=start,
-            end=end,
-        )
-
-    async def _iter_session_history_item_range(
-        self,
-        history_id: str,
-        *,
-        tenant_id: str,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]:
-        archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        async for item in archive.iter_session_history_item_range(
-            history_id,
-            tenant_id=tenant_id,
-            start=start,
-            end=end,
-        ):
-            yield item
-
-    async def execution_transcript_item_count(self, run_id: str) -> int:
-        archive = self._archives.get(RuntimeDomain.EXECUTION)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        return await archive.transcript_repository.execution_transcript_item_count(
-            run_id
-        )
-
-    def iter_execution_transcript_item_range(
-        self,
-        run_id: str,
-        *,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]:
-        return self._iter_execution_transcript_item_range(
-            run_id,
-            start=start,
-            end=end,
-        )
-
-    async def _iter_execution_transcript_item_range(
-        self,
-        run_id: str,
-        *,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]:
-        archive = self._archives.get(RuntimeDomain.EXECUTION)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        async for message in archive.transcript_repository.iter_execution_transcript_item_range(
-            run_id,
-            start=start,
-            end=end,
-        ):
-            yield message
 
     def iter_session_message_range(
         self,

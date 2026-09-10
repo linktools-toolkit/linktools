@@ -5,7 +5,6 @@
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from linktools.ai.capability import (
@@ -18,7 +17,10 @@ from linktools.ai.capability import (
     workspace_tool_contributions,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import _WorkspaceToolGate
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
+)
 from linktools.ai.workspace import (
     DisabledSandbox,
     RepositoryInstructions,
@@ -26,18 +28,22 @@ from linktools.ai.workspace import (
     SandboxSession,
     ToolPermissionRule,
     Workspace,
-    WorkspacePolicy,
     WorkspaceToolPermissionPolicy,
 )
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
-from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 
 
 class _RecordingSession:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
         self.closed = 0
+
+    async def canonicalize_path(self, path: str) -> str:
+        return path
 
     async def _record(self, name: str, *args: object, **kwargs: object) -> str:
         self.calls.append((name, args, kwargs))
@@ -164,7 +170,7 @@ class _UnusedResolver:
 
 
 class _SpoofedSandboxCapability(AbstractCapability[object]):
-    id = "workspace-sandbox"
+    id = "linktools.workspace-sandbox"
 
 
 def _semantic_contract(tool: object) -> dict[str, object]:
@@ -180,7 +186,7 @@ def _semantic_contract(tool: object) -> dict[str, object]:
 
 
 def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     contributions = workspace_tool_contributions(workspace)
 
     assert tuple(item.id for item in contributions) == (
@@ -203,9 +209,9 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
 def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspaces = (
-        Workspace.load(tmp_path),
-        Workspace.load(tmp_path, sandbox=sandbox),
-        Workspace.load(tmp_path, sandbox=DisabledSandbox()),
+        Workspace.load(tmp_path, workspace_id="workspace"),
+        Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox),
+        Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox()),
     )
     projected = tuple(
         tuple((item.id, item.fingerprint, item.semantic_contract) for item in workspace_tool_contributions(workspace))
@@ -216,7 +222,7 @@ def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path
 
 
 def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
 
     with pytest.raises(AIError) as raised:
         workspace_capabilities(workspace, ("read_file", "run_command"))
@@ -226,13 +232,13 @@ def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) ->
 
 def test_workspace_capabilities_with_no_selected_tools_do_not_open_sandbox(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    assert workspace_capabilities(Workspace.load(tmp_path, sandbox=sandbox), ()) == ()
+    assert workspace_capabilities(Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox), ()) == ()
     assert sandbox.sessions == []
 
 
 def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown workspace tools"):
-        workspace_capabilities(Workspace.load(tmp_path), ("missing_tool",))
+        workspace_capabilities(Workspace.load(tmp_path, workspace_id="workspace"), ("missing_tool",))
 
 
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
@@ -245,7 +251,7 @@ def test_workspace_sandbox_capability_id_is_reserved() -> None:
 @pytest.mark.asyncio
 async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
     contributions = workspace_tool_contributions(workspace)
     expected = {item.id: item.semantic_contract for item in contributions}
     capability = workspace_capabilities(
@@ -265,7 +271,7 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
 @pytest.mark.asyncio
 async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
     capability = workspace_capabilities(
         workspace,
         ("read_file", "start_command", "check_command", "stop_command"),
@@ -300,7 +306,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
     expected_error: type[BaseException],
 ) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -308,27 +314,37 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
         session=session,
     )[0]
     run_toolset = capability.get_toolset()
-    gate = _WorkspaceToolGate(
-        execution_id="execution",
-        workspace_root=workspace.root,
-        repository_instruction_history=(),
-        repository_instruction_marker_authority=frozenset(),
-        repository_instructions=None,
-        instruction_resolver=_UnusedResolver(),  # type: ignore[arg-type]
-        policy=WorkspacePolicy(
-            tool_permissions=WorkspaceToolPermissionPolicy(
-                (ToolPermissionRule(decision, tool_name="read_file"),)  # type: ignore[arg-type]
+    boundary = RuntimeToolBoundaryToolset(
+        (run_toolset,),
+        {
+            "read_file": ManagedToolDescriptor(
+                effect_owner="intrinsic",
+                effect="none",
+                tool_class="filesystem.read",
+                workspace_path_fields=("path",),
             )
-        ),
-        trusted_tool_classes=(("read_file", "filesystem.read"),),
+        },
+        id="workspace-boundary",
+            workspace_policy=WorkspaceToolPermissionPolicy(
+                (ToolPermissionRule(decision, tool_name="read_file"),)  # type: ignore[arg-type]
+            ),
+        sandbox_session=session,
     )
+    context = RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
+    )
+    tools = await boundary.get_tools(context)
 
     with pytest.raises(expected_error):
-        await gate.before_tool_execute(
-            SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
-            call=object(),  # type: ignore[arg-type]
-            tool_def=ToolDefinition(name="read_file", capability_id="workspace-sandbox"),
-            args={"path": "sample.txt"},
+        await boundary.call_tool(
+            "read_file",
+            {"path": "sample.txt"},
+            context,
+            tools["read_file"],
         )
     assert sandbox.sessions[0].calls == []
     await run_toolset.__aexit__(None, None, None)
@@ -338,7 +354,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
 @pytest.mark.asyncio
 async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -381,7 +397,7 @@ async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path
 
 @pytest.mark.asyncio
 async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
+    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
 
     with pytest.raises(AIError) as raised:
         await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]

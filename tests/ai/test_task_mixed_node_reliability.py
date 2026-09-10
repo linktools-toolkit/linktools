@@ -151,7 +151,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root)
+    workspace = Workspace.load(workspace_root, workspace_id="workspace")
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler)
@@ -278,7 +278,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root)
+    workspace = Workspace.load(workspace_root, workspace_id="workspace")
     state_root = tmp_path / "state"
     entered = asyncio.Event()
     cancelled = asyncio.Event()

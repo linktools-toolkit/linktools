@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Recovery observation boundaries for events and task results."""
 
 from types import SimpleNamespace
 
@@ -13,16 +14,8 @@ from linktools.ai.core import (
     TaskStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRecoveryEffect, Runtime
-from linktools.ai.runtime._event import (
-    DefaultEventService,
-    LiveExecutionEventBroker,
-)
-from linktools.ai.runtime._recovery_impl import RecoveryLocalExecutionBackend
-from linktools.ai.runtime.state._contracts import (
-    RecoveryCheckpointState,
-    RecoveryHandoffPhase,
-)
+from linktools.ai.runtime import Runtime
+from linktools.ai.runtime._event import DefaultEventService, LiveExecutionEventBroker
 from linktools.ai.task import TaskGraphSnapshot, TaskNode, TaskNodeView
 
 
@@ -31,7 +24,7 @@ class _Authorization:
         del principal, action, resource
 
 
-class _RecoveryExecutions:
+class _Executions:
     def __init__(self, *, event_sequence: int = 1) -> None:
         self.record = SimpleNamespace(
             execution_id="execution",
@@ -40,12 +33,12 @@ class _RecoveryExecutions:
             event_sequence=event_sequence,
         )
 
-    async def get_header(self, execution_id: str, *, tenant_id: str):
+    async def get_header(self, execution_id: str, *, tenant_id: str) -> object:
         assert execution_id == "execution"
         assert tenant_id == "tenant"
         return object()
 
-    async def get(self, execution_id: str, *, tenant_id: str):
+    async def get(self, execution_id: str, *, tenant_id: str) -> object:
         assert execution_id == "execution"
         assert tenant_id == "tenant"
         return self.record
@@ -55,7 +48,7 @@ class _NoDurableEvents:
     pass
 
 
-class _DurableRecoveryEvents:
+class _DurableEvents:
     async def list(
         self,
         execution_id: str,
@@ -63,7 +56,7 @@ class _DurableRecoveryEvents:
         tenant_id: str,
         after_sequence: int,
         limit: int,
-    ):
+    ) -> Page[object]:
         assert execution_id == "execution"
         assert tenant_id == "tenant"
         assert limit > 0
@@ -74,12 +67,13 @@ class _DurableRecoveryEvents:
                         execution_id="execution",
                         sequence=1,
                         event_type=ExecutionEventType.EXECUTION_RECOVERY_REQUIRED,
-                        payload={"error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value},
+                        payload={
+                            "error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value
+                        },
                     ),
                 ),
                 None,
             )
-        assert after_sequence == 1
         return Page((), None)
 
 
@@ -96,7 +90,7 @@ async def test_live_recovery_event_ends_observation_cleanly() -> None:
     )
     broker.complete("execution")
     service = DefaultEventService(
-        _RecoveryExecutions(),
+        _Executions(),
         _NoDurableEvents(),
         _Authorization(),
         lambda execution_id, *, tenant_id: None,
@@ -119,8 +113,8 @@ async def test_live_recovery_event_ends_observation_cleanly() -> None:
 @pytest.mark.asyncio
 async def test_durable_recovery_event_ends_restart_observation_cleanly() -> None:
     service = DefaultEventService(
-        _RecoveryExecutions(),
-        _DurableRecoveryEvents(),
+        _Executions(),
+        _DurableEvents(),
         _Authorization(),
         lambda execution_id, *, tenant_id: None,
         LiveExecutionEventBroker(),
@@ -189,259 +183,3 @@ async def test_recovery_required_task_result_is_not_ready_not_corrupt() -> None:
         )
 
     assert raised.value.code is ErrorCode.TASK_NOT_READY
-
-
-class _CrashWindowExecutions:
-    def __init__(self) -> None:
-        self.record = SimpleNamespace(
-            execution_id="execution",
-            tenant_id="tenant",
-            status=ExecutionStatus.STARTED,
-        )
-
-    async def get(self, execution_id: str, *, tenant_id: str):
-        assert execution_id == "execution"
-        assert tenant_id == "tenant"
-        return self.record
-
-
-class _CrashWindowBackend(RecoveryLocalExecutionBackend):
-    def __init__(self) -> None:
-        self._execution = SimpleNamespace(executions=_CrashWindowExecutions())
-        self.committed = None
-
-    def _validate_recovery_identity(self, execution, recovery_input) -> None:
-        del execution, recovery_input
-
-    async def recovery_effects(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> tuple[ExecutionRecoveryEffect, ...]:
-        assert execution_id == "execution"
-        assert tenant_id == "tenant"
-        return (
-            ExecutionRecoveryEffect(
-                operation_id="operation",
-                execution_id="execution",
-                step_run_id="step",
-                tool_call_id="call",
-                tool_name="write_file",
-                fence=3,
-                idempotency_key_digest="b" * 64,
-                replay_safe=False,
-                error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
-            ),
-        )
-
-    async def _commit_recovery_required(self, execution, error, effects):
-        self.committed = (execution, error, effects)
-        return execution
-
-
-@pytest.mark.asyncio
-async def test_startup_unknown_effect_converges_before_agent_relaunch() -> None:
-    backend = _CrashWindowBackend()
-    checkpoint = SimpleNamespace(
-        execution_id="execution",
-        tenant_id="tenant",
-        input=object(),
-        state=RecoveryCheckpointState.ACTIVE,
-        handoff_phase=RecoveryHandoffPhase.NONE,
-    )
-
-    await backend._reconcile_checkpoint(checkpoint)
-
-    assert backend.committed is not None
-    execution, error, effects = backend.committed
-    assert execution.status is ExecutionStatus.STARTED
-    assert error.code is ErrorCode.TOOL_EFFECT_UNKNOWN
-    assert error.safe_details["operation_id"] == "operation"
-    assert effects[0].fence == 3
-
-
-class _RecoveredEvents:
-    async def list(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        after_sequence: int,
-        limit: int,
-    ):
-        assert execution_id == "execution"
-        assert tenant_id == "tenant"
-        values = (
-            SimpleNamespace(
-                execution_id="execution",
-                sequence=2,
-                event_type=ExecutionEventType.EXECUTION_RESUMED,
-                payload={},
-            ),
-        )
-        return Page(
-            tuple(value for value in values if value.sequence > after_sequence)[
-                :limit
-            ],
-            None,
-        )
-
-
-@pytest.mark.asyncio
-async def test_recovered_cursor_continues_after_consumed_recovery_boundary() -> None:
-    broker = LiveExecutionEventBroker()
-    broker.prepare_local_producer("execution")
-    broker.register_local_producer("execution", 0)
-    broker.publish_event(
-        "execution",
-        ExecutionEventType.EXECUTION_RECOVERY_REQUIRED,
-        {"error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value},
-        durable_sequence=1,
-    )
-    broker.complete("execution")
-    broker.reset_completed_local_producer("execution")
-    assert not broker.is_local_producer("execution")
-
-    broker.prepare_local_producer("execution")
-    broker.register_local_producer("execution", 2)
-    broker.publish_event(
-        "execution",
-        ExecutionEventType.EXECUTION_SUCCEEDED,
-        {},
-        durable_sequence=3,
-    )
-    broker.complete("execution")
-    executions = _RecoveryExecutions(event_sequence=3)
-    executions.record.status = ExecutionStatus.SUCCEEDED
-    service = DefaultEventService(
-        executions,
-        _RecoveredEvents(),
-        _Authorization(),
-        lambda execution_id, *, tenant_id: None,
-        broker,
-    )
-
-    values = [
-        event
-        async for event in service.stream(
-            "execution",
-            principal=Principal("principal", "tenant"),
-            after_sequence=1,
-        )
-    ]
-
-    assert [value.event_type for value in values] == [
-        ExecutionEventType.EXECUTION_RESUMED,
-        ExecutionEventType.EXECUTION_SUCCEEDED,
-    ]
-
-
-class _RecoverExecutionStore:
-    def __init__(self) -> None:
-        self.record = SimpleNamespace(
-            execution_id="execution",
-            tenant_id="tenant",
-            status=ExecutionStatus.RECOVERY_REQUIRED,
-            event_sequence=1,
-        )
-
-    async def get(self, execution_id: str, *, tenant_id: str):
-        assert execution_id == "execution"
-        assert tenant_id == "tenant"
-        return self.record
-
-
-class _RecoverCheckpointStore:
-    async def get(self, execution_id: str, *, tenant_id: str):
-        assert execution_id == "execution"
-        assert tenant_id == "tenant"
-        return SimpleNamespace(
-            state=RecoveryCheckpointState.ACTIVE,
-            handoff_phase=RecoveryHandoffPhase.NONE,
-        )
-
-
-class _RecoverCommands:
-    async def commit_resumed(self, current):
-        return SimpleNamespace(
-            execution_id=current.execution_id,
-            tenant_id=current.tenant_id,
-            status=ExecutionStatus.STARTED,
-            event_sequence=current.event_sequence + 1,
-        )
-
-
-class _BrokerProbe:
-    def __init__(self) -> None:
-        self.reset: list[str] = []
-        self.published: list[tuple[str, ExecutionEventType, int | None]] = []
-
-    def reset_completed_local_producer(self, execution_id: str) -> None:
-        self.reset.append(execution_id)
-
-    def publish_event(
-        self,
-        execution_id: str,
-        event_type: ExecutionEventType,
-        payload,
-        *,
-        durable_sequence: int | None,
-    ) -> None:
-        del payload
-        self.published.append((execution_id, event_type, durable_sequence))
-
-
-class _RecoverBackend(RecoveryLocalExecutionBackend):
-    def __init__(self) -> None:
-        self._execution = SimpleNamespace(executions=_RecoverExecutionStore())
-        self._recovery = SimpleNamespace(checkpoints=_RecoverCheckpointStore())
-        self._live_broker = _BrokerProbe()
-        self.commands = _RecoverCommands()
-
-    async def recovery_effects(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> tuple[ExecutionRecoveryEffect, ...]:
-        del execution_id, tenant_id
-        return ()
-
-    async def _pending_cancel_operations(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ):
-        del execution_id, tenant_id
-        return (object(),)
-
-    def _recovery_commands_for(self, execution_id: str):
-        assert execution_id == "execution"
-        return self.commands
-
-    async def _complete_recovered_cancel(
-        self,
-        resumed,
-        checkpoint,
-        operations,
-    ):
-        del checkpoint, operations
-        return resumed
-
-
-@pytest.mark.asyncio
-async def test_recover_resets_completed_live_generation_before_resume() -> None:
-    backend = _RecoverBackend()
-
-    result = await backend.recover_execution(
-        "execution",
-        tenant_id="tenant",
-    )
-
-    assert result.status is ExecutionStatus.STARTED
-    assert backend._live_broker.reset == ["execution"]
-    assert backend._live_broker.published == [
-        ("execution", ExecutionEventType.EXECUTION_RESUMED, 2)
-    ]

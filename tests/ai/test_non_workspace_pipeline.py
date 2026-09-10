@@ -15,13 +15,12 @@ from linktools.ai.core import (
     service_principal,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._tool import (
-    AllowAllToolPolicy,
-    ToolAuthorization,
-    ToolDescriptor,
-)
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.workspace import DisabledSandbox
+from linktools.ai.workspace import (
+    DisabledSandbox,
+    ToolPermissionRule,
+    WorkspaceToolPermissionPolicy,
+)
 
 
 @pytest.mark.asyncio
@@ -32,24 +31,17 @@ async def test_disabled_sandbox_is_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_allow_all_policy_is_explicit_and_deterministic() -> None:
-    policy = AllowAllToolPolicy()
-    principal = service_principal("tenant-a", "worker-a")
-    execution = ResourceRef(
-        ResourceKind.EXECUTION,
-        "execution-a",
-        "tenant-a",
+async def test_workspace_permission_policy_is_explicit_and_deterministic() -> None:
+    policy = WorkspaceToolPermissionPolicy(
+        (ToolPermissionRule("deny", tool_class="shell"),),
+        default="allow",
     )
-    assert (
-        await policy.authorize_tool(
-            principal,
-            execution,
-            ToolDescriptor("tool", replay_safe=True),
-            "digest",
-        )
-        is ToolAuthorization.ALLOW
+    assert policy.decide(tool_name="read_file", tool_class="filesystem.read") == "allow"
+    assert policy.decide(tool_name="run_command", tool_class="shell") == "deny"
+    assert policy == WorkspaceToolPermissionPolicy(
+        (ToolPermissionRule("deny", tool_class="shell"),),
+        default="allow",
     )
-    assert policy.fingerprint == AllowAllToolPolicy().fingerprint
 
 
 @pytest.mark.asyncio

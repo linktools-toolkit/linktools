@@ -17,7 +17,8 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.runtime import Runtime, RuntimeContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._metrics import _RuntimeMetricBuffer
 from linktools.ai.workspace import Workspace
 
@@ -59,7 +60,7 @@ def test_runtime_context_rejects_unbounded_or_reserved_metric_dimensions(
 async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_queries(
     tmp_path,
 ) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     metrics = Metrics.in_memory(namespace="runtime-context")
     models = ModelRegistry.openai(model="gpt-test")
     context = RuntimeContext(

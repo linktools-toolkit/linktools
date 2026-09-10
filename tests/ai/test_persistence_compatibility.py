@@ -37,7 +37,7 @@ def _binding_fixture_value() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("runtime-persistence-v1"),
-        model={"route_id": "default", "model_identity": "fixture:model"},
+        base_model={"route_id": "default", "model_identity": "fixture:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -189,7 +189,7 @@ def test_generic_v1_envelope_tolerates_additive_dataclass_fields() -> None:
 
 
 def test_workspace_tool_pin_excludes_runtime_capability_provenance(tmp_path: Path) -> None:
-    contribution = workspace_tool_contributions(Workspace.load(tmp_path))[0]
+    contribution = workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))[0]
     pin = SemanticPin(
         "tool",
         contribution.id,
@@ -205,7 +205,7 @@ def test_workspace_tool_pin_excludes_runtime_capability_provenance(tmp_path: Pat
 async def test_workspace_tool_binding_restores_before_disabled_sandbox_materialization(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
+    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
     candidates = workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",

@@ -7,7 +7,10 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import DeferredToolRequests
+from pydantic_ai.exceptions import ApprovalRequired
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
 )
@@ -15,16 +18,13 @@ from linktools.ai.runtime.state._steps import (
     StagingStepStore,
 )
 
-from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime._harness import HarnessStepStoreAdapter
-from linktools.ai.runtime._capabilities import (
-    _RuntimeStepPersistence,
-    _WorkspaceToolGate,
+from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
 )
 from linktools.ai.workspace import (
-    RepositoryInstructions,
-    ToolPermissionRule,
-    WorkspacePolicy,
     WorkspaceToolPermissionPolicy,
 )
 
@@ -67,17 +67,6 @@ class _RecordingStepStore(StagingStepStore):
         await super().save_snapshot(snapshot)
 
 
-class _EmptyResolver:
-    async def resolve(
-        self,
-        path: str | Path = ".",
-        *,
-        exclude_sources: frozenset[str] = frozenset(),
-    ) -> RepositoryInstructions:
-        del path, exclude_sources
-        return RepositoryInstructions(())
-
-
 async def _read_file(path: str) -> str:
     return path
 
@@ -88,51 +77,40 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
     store = _RecordingStepStore()
     bridge = _Bridge()
     captured: list[int] = []
-    persistence = _RuntimeStepPersistence(
-        tool_operations=bridge,
-        store=HarnessStepStoreAdapter(store, execution_id=None),
-        agent_name="agent",
-        run_id=run_id,
-        trusted_tool_classes=(("_read_file", "filesystem.read"),),
-        deferred_pause_sink=captured.append,
-    )
-    gate = _WorkspaceToolGate(
-        execution_id="execution",
-        workspace_root=tmp_path,
-        repository_instruction_history=(),
-        repository_instruction_marker_authority=frozenset(),
-        repository_instructions=RepositoryInstructions(()),
-        instruction_resolver=_EmptyResolver(),
-        policy=WorkspacePolicy(
-            tool_permissions=WorkspaceToolPermissionPolicy(
-                (ToolPermissionRule("ask", tool_name="_read_file"),)
+    del tmp_path
+    boundary = RuntimeToolBoundaryToolset(
+        (FunctionToolset([_read_file]),),
+        {
+            "_read_file": ManagedToolDescriptor(
+                effect_owner="tool_operation",
+                effect="non_replay_safe",
+                tool_class="filesystem.read",
             )
-        ),
-        trusted_tool_classes=(("_read_file", "filesystem.read"),),
-    )
-    agent = Agent(
-        TestModel(call_tools=["_read_file"]),
-        tools=[_read_file],
-        output_type=[str, DeferredToolRequests],
+        },
+        id="workspace",
+            workspace_policy=WorkspaceToolPermissionPolicy(default="ask"),
+        tool_operations=bridge,  # type: ignore[arg-type]
     )
 
-    result = await agent.run(
-        "read it",
+    context = RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
         run_id=run_id,
-        capabilities=(gate, persistence),
+        tool_call_id="call",
     )
+    tools = await boundary.get_tools(context)
+    with pytest.raises(ApprovalRequired):
+        await boundary.call_tool(
+            "_read_file",
+            {"path": "file.txt"},
+            context,
+            tools["_read_file"],
+        )
 
-    assert isinstance(result.output, DeferredToolRequests)
-    assert result.output.approvals
-    assert not result.output.calls
-    assert captured and len(captured) == 1 and captured[0] > 0
     assert bridge.calls == 0
-    assert store.saved_snapshots
-    assert store.saved_snapshots[-1].state == "interrupted"
-    assert AgentExecutor.pending_tool_calls(
-        store.saved_snapshots[-1].messages,
-        run_id=run_id,
-    )
+    assert not captured
+    assert not store.saved_snapshots
 
 
 @pytest.mark.asyncio
@@ -140,7 +118,6 @@ async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
     run_id = "completed-run"
     store = _RecordingStepStore()
     persistence = _RuntimeStepPersistence(
-        tool_operations=_Bridge(),
         store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id=run_id,

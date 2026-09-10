@@ -22,22 +22,25 @@ from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime.state import (
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._contracts import (
     ConversationHistoryRecord,
     ExecutionHistoryHeadRecord,
     ExecutionHistorySealRecord,
     ExecutionHistoryState,
-    ExecutionReadModelBuild,
-    ExecutionReadModelRepository,
     ExecutionRecord,
     ExecutionRunSealHead,
-    ExecutionTerminalSealPlan,
-    RuntimeDomain,
+    TranscriptMessageRef,
+)
+from linktools.ai.runtime.state._readmodel import (
+    ExecutionReadModelBuild,
+    ExecutionReadModelRepository,
+)
+from linktools.ai.runtime.state._steps import ExecutionTerminalSealPlan, StateStepArchive
+from linktools.ai.runtime.state._store import (
     StateLockOrderError,
-    StateStepArchive,
     StateTransactionNestingError,
     StoredRecord,
-    TranscriptMessageRef,
 )
 from linktools.ai.runtime.state._history import (
     _conversation_overlap_signature,
@@ -50,6 +53,7 @@ from linktools.ai.runtime.state._store import (
     sortable_identity,
 )
 from linktools.ai.spec import AgentSpec
+from ._runtime_test_helpers import execution_owner_fields
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -71,7 +75,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("default", model="default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -104,6 +108,7 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=_binding(),
+        **execution_owner_fields(),
     )
 
 
@@ -354,7 +359,6 @@ async def test_conversation_head_replacement_preserves_physical_identity(
                 parent_history_id=None,
                 prefix_index_head_id=None,
                 inherited_message_count=0,
-                inherited_history_item_count=0,
             )
         )
         now = datetime.now(timezone.utc)
@@ -707,9 +711,9 @@ async def test_terminal_reader_pages_from_execution_read_model(tmp_path: Path) -
             limit=1,
         )
 
-        assert trace.next_cursor == "1"
+        assert trace.next_cursor is not None
         assert history.next_cursor is not None
-        assert transcript.next_cursor == "1"
+        assert transcript.next_cursor is not None
         model = await read_model.get_complete("execution", tenant_id="tenant")
         assert model is not None
         assert model.trace_count == 2

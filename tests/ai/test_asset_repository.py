@@ -6,12 +6,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pytest
-from linktools.ai.asset import AssetInfo, AssetKey, AssetStore, InMemoryAssetBackend
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
     CapabilityContribution,
     CapabilityGroup,
     CapabilityLoadContext,
     SkillDefinition,
+)
+from linktools.ai.capability._group import (
     capability_fingerprint,
     contribution_semantic_contract,
 )
@@ -76,7 +78,7 @@ async def test_store_group_requires_initialized_asset_store() -> None:
 class _CapturingLoader:
     def __init__(self) -> None:
         self.calls = 0
-        self.entries: tuple[AssetInfo, ...] = ()
+        self.entries: tuple[object, ...] = ()
         self.read_value: bytes | None = None
 
     @property
@@ -88,7 +90,7 @@ class _CapturingLoader:
         context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
         self.calls += 1
-        self.entries = context.entries
+        self.entries = context.list()
         self.read_value = await context.read(AssetKey("custom", "a"))
         return ()
 
@@ -186,16 +188,15 @@ class _RaceStore(AssetStore):
 
 
 @pytest.mark.asyncio
-async def test_freeze_rejects_store_revision_change_during_snapshot() -> None:
+async def test_freeze_ignores_assets_added_after_the_captured_snapshot() -> None:
     backend = InMemoryAssetBackend()
     store = _RaceStore(backend)
     await store.initialize()
     await store.put(AssetKey("skill", "first"), SkillSpecCodec().encode(SkillSpec("first", "first")))
 
-    with pytest.raises(AIError) as error:
-        await CapabilityGroup.from_store("workspace", store).freeze()
+    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
 
-    assert error.value.code is ErrorCode.STORAGE_CONFLICT
+    assert [item.id for item in frozen] == ["first"]
 
 
 def test_capability_group_does_not_expose_logical_asset_crud() -> None:

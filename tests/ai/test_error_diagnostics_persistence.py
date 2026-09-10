@@ -40,6 +40,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
 from sqlalchemy.ext.asyncio import create_async_engine
+from ._runtime_test_helpers import execution_owner_fields
 
 
 class _DiagnosticModelBinding:
@@ -86,14 +87,14 @@ def _workspace(root: Path) -> Workspace:
             AgentSpec("default", model="default", allow_tools=())
         )
     )
-    return Workspace.load(root)
+    return Workspace.load(root, workspace_id="workspace")
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("default", model="default"),
-        model=dict(_DiagnosticModelBinding.semantic_payload),
+        base_model=dict(_DiagnosticModelBinding.semantic_payload),
         selected=(),
         subagents=(),
         output_mode="text",
@@ -125,6 +126,7 @@ def _started_execution(now: datetime) -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        **execution_owner_fields("diagnostic prompt"),
     )
 
 
@@ -229,7 +231,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
             terminal = next(
                 event
                 for event in events.items
-                if event.event_type is ExecutionEventType.EXECUTION_FAILED
+                if event.event_type == ExecutionEventType.EXECUTION_FAILED
             )
             expected_payload = {
                 "exception_type": diagnostics.exception_type,

@@ -15,12 +15,9 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import (
-    DefaultSessionService,
-    ForkSessionRequest,
-    RuntimeState,
-)
+from linktools.ai.runtime import ForkSessionRequest, RuntimeState
 from linktools.ai.runtime._history import StepSessionHistoryReader
+from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
 from pydantic_ai.messages import (
@@ -309,7 +306,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
         assert page.items[3].tool_call_id == "return-1"
         assert page.items[7].tool_name == "lookup"
         assert page.items[7].tool_call_id == "call-1"
-        assert [item.sequence for item in page.items] == list(range(1, 9))
+        assert [item.sequence for item in page.items] == [1, 1, 1, 1, 1, 2, 2, 2]
     finally:
         await state.close()
 

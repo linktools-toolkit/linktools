@@ -1,46 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Recovery active-index consistency without bootstrap markers."""
+"""Recovery checkpoint integrity and recoverable-frontier regressions."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.agent._output import bind_output
+
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime.state._codec import encode_domain, encode_envelope
 from linktools.ai.runtime.state._contracts import (
-    RecoveryActiveRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
-    RecoveryExecutionInput,
     RecoveryHandoffPhase,
-    RecoveryIdempotencyInput,
-    RuntimeStorageContract,
-    StoredUserInput,
 )
-from linktools.ai.runtime.state._store import (
-    StoredRecord,
-    partition_digest,
-    record_key_digest,
-)
-from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import StoredPayload
-
-
-def _binding() -> AgentBindingSnapshot:
-    output = bind_output()
-    return AgentBindingSnapshot(
-        version=1,
-        agent_spec=AgentSpec("default"),
-        model={"route_id": "default", "model_identity": "test:model"},
-        selected=(),
-        subagents=(),
-        output_mode=output.mode,
-        output_schema=output.schema_definition,
-        binding_digest="a" * 64,
-    )
 
 
 def _checkpoint(
@@ -49,60 +22,28 @@ def _checkpoint(
     revision: int = 0,
 ) -> RecoveryCheckpoint:
     now = datetime.now(timezone.utc)
+    active = state is RecoveryCheckpointState.ACTIVE
     return RecoveryCheckpoint(
-        execution_id,
-        "tenant",
-        RecoveryExecutionInput(
-            user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
-            principal_id="owner",
-            principal_kind="user",
-            session_id=None,
-            memory_scope=None,
-            binding_digest="a" * 64,
-            lineage_kind="run",
-            parent_execution_id=None,
-            root_execution_id=execution_id,
-            source_execution_id=None,
-            base_execution_id=None,
-            conversation_step_run_id=None,
-            idempotency=RecoveryIdempotencyInput("scope", "key", "digest"),
-            mode="run",
-            planning=False,
-            thinking=False,
-            binding=_binding(),
-            storage_contract=RuntimeStorageContract(1, (), (), ()),
-        ),
-        "run-1" if state is RecoveryCheckpointState.ACTIVE else None,
-        1 if state is RecoveryCheckpointState.ACTIVE else 0,
-        state,
-        RecoveryHandoffPhase.NONE,
-        None,
-        None,
-        revision,
-        now,
-        now,
+        execution_id=execution_id,
+        tenant_id="tenant",
+        step_run_id="run-1" if active else None,
+        agent_run_sequence=1 if active else 0,
+        state=state,
+        revision=revision,
+        created_at=now,
+        updated_at=now,
+        handoff_phase=RecoveryHandoffPhase.NONE,
     )
 
 
 @pytest.mark.asyncio
-async def test_active_index_is_consistent_from_first_write() -> None:
+async def test_recoverable_checkpoint_is_visible_from_first_write() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="recovery-integrity", tenant_id="tenant")
     try:
         repository = state.recovery.checkpoints
-        page = await repository.list_recoverable_page(
-            tenant_id="tenant",
-            cursor=None,
-            limit=10,
-        )
-        assert page.items == ()
         await repository.create(_checkpoint("e1", RecoveryCheckpointState.ACTIVE))
         await repository.create(_checkpoint("e2", RecoveryCheckpointState.COMPLETED))
-
-        report = await repository.validate_recovery_active_index(tenant_id="tenant")
-        assert report.active_count == 1
-        assert report.admission_count == 2
-        assert report.inconsistent_execution_ids == ()
 
         page = await repository.list_recoverable_page(
             tenant_id="tenant",
@@ -115,7 +56,7 @@ async def test_active_index_is_consistent_from_first_write() -> None:
 
 
 @pytest.mark.asyncio
-async def test_completed_transition_removes_active_entry() -> None:
+async def test_completed_transition_removes_recoverable_checkpoint() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="recovery-complete", tenant_id="tenant")
     try:
@@ -123,8 +64,6 @@ async def test_completed_transition_removes_active_entry() -> None:
         created = await repository.create(
             _checkpoint("e1", RecoveryCheckpointState.ACTIVE)
         )
-        from dataclasses import replace
-
         await repository.compare_and_swap(
             "e1",
             tenant_id="tenant",
@@ -138,77 +77,21 @@ async def test_completed_transition_removes_active_entry() -> None:
                 updated_at=datetime.now(timezone.utc),
             ),
         )
-        report = await repository.validate_recovery_active_index(tenant_id="tenant")
-        assert report.active_count == 0
-        assert report.inconsistent_execution_ids == ()
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_validator_reports_tampered_active_entry() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="recovery-tamper", tenant_id="tenant")
-    try:
-        repository = state.recovery.checkpoints
-        await repository.create(_checkpoint("e1", RecoveryCheckpointState.COMPLETED))
-        store = repository.state_store
-        key = record_key_digest(
-            "recovery-tamper",
-            "tenant",
-            "recovery",
-            "recovery_active",
-            "e1",
-        )
-
-        async def inject(transaction: object) -> None:
-            await transaction.insert_record(
-                StoredRecord(
-                    key,
-                    partition_digest(
-                        "recovery-tamper",
-                        "tenant",
-                        "recovery",
-                        "recovery_active",
-                    ),
-                    None,
-                    None,
-                    "recovery_active",
-                    "e1",
-                    "completed",
-                    0,
-                    None,
-                    0,
-                    None,
-                    encode_envelope(
-                        {
-                            "type": "recovery_active",
-                            "payload": encode_domain(
-                                RecoveryActiveRecord("e1", "tenant")
-                            ),
-                        }
-                    ),
-                )
-            )
-
-        await store.mutate(inject)
-        report = await repository.validate_recovery_active_index(tenant_id="tenant")
-        assert report.inconsistent_execution_ids == ("e1",)
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_missing_admission_is_not_recoverable() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="recovery-missing", tenant_id="tenant")
-    try:
-        page = await state.recovery.checkpoints.list_recoverable_page(
+        page = await repository.list_recoverable_page(
             tenant_id="tenant",
             cursor=None,
             limit=10,
         )
         assert page.items == ()
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_checkpoint_cannot_be_updated_as_recoverable() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="recovery-missing", tenant_id="tenant")
+    try:
         with pytest.raises(AIError) as raised:
             await state.recovery.checkpoints.compare_and_swap(
                 "missing",

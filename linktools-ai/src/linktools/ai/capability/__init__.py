@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability loading, tool adaptation, and runtime materialization contracts."""
+"""Public capability extension contracts."""
 
 from ._context import AgentContext
-from ._effect import ToolEffectNotAppliedError
 from ._group import (
     CapabilityContribution,
     CapabilityGroup,
     CapabilityLoadContext,
+    CapabilityLoadEntry,
     CapabilityLoader,
-    capability_fingerprint,
-    contribution_semantic_contract,
+    PLAN_SAFE_METADATA_KEY,
 )
 from ._mcp import (
-    materialize_mcp_servers,
     mcp_selector_server,
     mcp_server_namespace,
     mcp_server_selector,
-    mcp_tool_name,
 )
 from ._names import SKILL_TOOL_NAMES, SUBAGENT_TOOL_NAMES
-from ._skill import SkillCapability, SkillDefinition
+from ._skill import LinkToolsSkills, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
     LocalSkillResourceSource,
@@ -29,13 +26,8 @@ from ._skill_source import (
     SkillResourceView,
     SkillSourceRef,
     SkillSourceRegistry,
-    normalize_skill_resource_path,
 )
-from ._subagent import (
-    SUBAGENT_CAPABILITY_ID,
-    SubagentCapability,
-    SubagentDelegate,
-)
+from ._subagent import LinkToolsSubagents, SubagentDelegate
 from ._workspace import (
     WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
@@ -43,48 +35,38 @@ from ._workspace import (
     WorkspaceAccess,
     workspace_capabilities,
     workspace_tool_class,
-    workspace_tool_path_fields,
-    workspace_tool_path_fields_from_metadata,
-    workspace_tool_path_metadata,
     workspace_tool_contributions,
 )
+
 __all__ = [
-    "AssetSkillResourceSource",
+    "AgentContext",
     "CapabilityContribution",
     "CapabilityGroup",
     "CapabilityLoadContext",
+    "CapabilityLoadEntry",
     "CapabilityLoader",
+    "AssetSkillResourceSource",
+    "LinkToolsSkills",
+    "LinkToolsSubagents",
     "LocalSkillResourceSource",
-    "AgentContext",
-    "SKILL_TOOL_NAMES",
-    "SUBAGENT_TOOL_NAMES",
-    "SkillCapability",
+    "PLAN_SAFE_METADATA_KEY",
     "SkillDefinition",
     "SkillLocation",
     "SkillResourceSource",
     "SkillResourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
-    "SubagentCapability",
+    "SKILL_TOOL_NAMES",
+    "SUBAGENT_TOOL_NAMES",
     "SubagentDelegate",
-    "SUBAGENT_CAPABILITY_ID",
-    "ToolEffectNotAppliedError",
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
     "WorkspaceAccess",
-    "capability_fingerprint",
-    "contribution_semantic_contract",
-    "materialize_mcp_servers",
     "mcp_selector_server",
     "mcp_server_namespace",
     "mcp_server_selector",
-    "mcp_tool_name",
-    "normalize_skill_resource_path",
     "workspace_capabilities",
     "workspace_tool_class",
-    "workspace_tool_path_fields",
-    "workspace_tool_path_fields_from_metadata",
-    "workspace_tool_path_metadata",
     "workspace_tool_contributions",
 ]

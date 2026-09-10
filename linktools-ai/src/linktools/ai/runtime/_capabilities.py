@@ -5,128 +5,94 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from time import monotonic_ns
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from linktools.core import environ
-from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
+    CapabilityOrdering,
     NodeResult,
     WrapModelRequestHandler,
-    WrapToolExecuteHandler,
 )
-from pydantic_ai.exceptions import (
-    ApprovalRequired,
-    CallDeferred,
-    ModelRetry,
-    RunCancelled,
-    SkipToolExecution,
-    ToolFailed,
-    ToolFailedError,
-    ToolRetryError,
-)
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
-from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
+from pydantic_ai.tools import DeferredToolRequests, RunContext as PydanticRunContext
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from ._tool_policy import (
-    MEMORY_READ_TOOL_NAMES,
-    MEMORY_TOOL_NAMES,
-    PLANNING_TOOL_NAMES,
-    PYDANTIC_CONTROL_TOOL_KINDS,
-    PLAN_SAFE_METADATA_KEY,
-    SUBAGENT_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_TOOL_NAMES,
-    WORKSPACE_SHELL_TOOL_NAMES,
-    ToolOperationBridge,
-    ToolOperationDecision,
-    _DURATION_NS_METADATA_KEY,
-    _MEMORY_CAPABILITY_ID,
-    _MODEL_EFFECT_UNKNOWN_MESSAGE,
-    _MissingToolOperationBridge,
-    _OBSERVATION_ID_METADATA_KEY,
-    _PLANNING_CAPABILITY_ID,
-    _ToolCallState,
-    _bypasses_tool_error_hook,
-    _durable_failure_error,
-    _model_tool_error,
-    _model_usage_metadata,
-    _tool_execution_policy,
-    _validate_trusted_mcp_selectors,
-    _validate_trusted_tool_classes,
-    select_runtime_tool_names,
-    tool_allowed_in_planning,
-    tool_is_control,
-    tool_name_allowed,
-)
-from ._workspace_gate import _WorkspaceToolGate
-from ._metric_id import _tool_observation_id
+from ..capability import SUBAGENT_TOOL_NAMES
 from ._compaction import ExternalModelRequestObserver, RuntimeCompaction
 from ._harness import (
     HarnessPlanStoreAdapter,
     HarnessStepStoreAdapter,
-    bind_tool_operation_id,
-    reset_tool_operation_id,
 )
 from ._harness_memory import build_harness_memory
-from ._journal import ModelRequestFact, ModelRequestJournal
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
-from ._tool_metrics import _ToolMetricContext
 from .state._step_contracts import (
     StepStore,
 )
 from ..errors import AIError, ErrorCode
 
-_logger = environ.get_logger("ai.runtime.capabilities")
+if TYPE_CHECKING:
+    from ._journal import ModelRequestFact, ModelRequestJournal
 
-_OUTPUT_RETRY_INDEX_METADATA_KEY = "linktools.ai.output_retry_index"
+MEMORY_TOOL_NAMES = (
+    "delete_memory",
+    "read_memory",
+    "search_memory",
+    "write_memory",
+)
+MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
+PLANNING_TOOL_NAMES = ("write_plan",)
+_MEMORY_CAPABILITY_ID = "linktools-memory"
+_PLANNING_CAPABILITY_ID = "linktools-planning"
+
+
+def _tool_name_allowed(name: str, allow_tools: tuple[str, ...]) -> bool:
+    return "*" in allow_tools or name in allow_tools
+
+
+def select_runtime_tool_names(
+    *,
+    ordinary_tool_policy: tuple[str, ...],
+    memory_scope: str | None,
+    subagent_available: bool = False,
+    planning: bool = False,
+) -> tuple[str, ...]:
+    names: set[str] = set()
+    if memory_scope is not None:
+        names.update(
+            name
+            for name in MEMORY_TOOL_NAMES
+            if _tool_name_allowed(name, ordinary_tool_policy)
+        )
+    if planning:
+        names.update(PLANNING_TOOL_NAMES)
+    if subagent_available:
+        names.update(SUBAGENT_TOOL_NAMES)
+    return tuple(sorted(names))
 
 
 @dataclass(kw_only=True, eq=False)
 class _RuntimeStepPersistence(StepPersistence[None]):
-    """Use Harness for graph persistence while LinkTools owns durable tool effects."""
+    """Keep Harness graph persistence and Runtime snapshot integration together."""
 
-    tool_operations: ToolOperationBridge = field(repr=False, compare=False)
-    plan_mode: bool = False
-    trusted_tool_classes: tuple[tuple[str, str], ...] = ()
-    trusted_mcp_selectors: tuple[str, ...] = ()
-    background_tasks: set[asyncio.Task[Any]] = field(
-        default_factory=set,
-        repr=False,
-        compare=False,
-    )
     deferred_pause_sink: Callable[[int], None] | None = field(
         default=None,
         repr=False,
         compare=False,
     )
-    tool_metrics: _ToolMetricContext | None = field(
+    model_journal: "ModelRequestJournal | None" = field(
         default=None,
         repr=False,
         compare=False,
     )
-    model_journal: ModelRequestJournal | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-    model_request_observer: ExternalModelRequestObserver | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-    _calls: dict[tuple[str, str], _ToolCallState] = field(
-        default_factory=dict,
-        init=False,
+    model_observation_enabled: bool = field(
+        default=False,
         repr=False,
         compare=False,
     )
@@ -136,45 +102,96 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         repr=False,
         compare=False,
     )
-    _model_request_tokens: dict[int, int] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-        compare=False,
-    )
-    _model_retry_indices: dict[int, int | None] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-        compare=False,
-    )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.plan_mode, bool):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(self.store, HarnessStepStoreAdapter):
             raise TypeError("store must be HarnessStepStoreAdapter")
-        if self.model_journal is None and self.tool_metrics is not None:
-            self.model_journal = ModelRequestJournal(
-                source_namespace=self.tool_metrics.source_namespace,
-                tenant_id=self.tool_metrics.tenant_id,
-                execution_id=self.tool_metrics.execution_id,
-                step_run_id=self.tool_metrics.step_run_id,
-            )
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="innermost")
 
     @property
     def _runtime_store(self) -> HarnessStepStoreAdapter:
         return cast(HarnessStepStoreAdapter, self.store)
 
-    def _runtime_run_id(self, ctx: RunContext[Any]) -> str:
+    def _runtime_run_id(self, ctx: PydanticRunContext[Any]) -> str:
         value = self.run_id or ctx.run_id
         if not isinstance(value, str) or not value:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
 
+    def _model_metadata(
+        self,
+        fact: "ModelRequestFact",
+        *,
+        response: ModelResponse | None = None,
+    ) -> dict[str, str]:
+        metadata = fact.metadata(
+            include_observation=(
+                self.model_observation_enabled and fact.duration_ns is not None
+            ),
+        )
+        if not self.model_observation_enabled:
+            metadata.pop("linktools.ai.duration_ns", None)
+        if response is not None:
+            usage = response.usage
+            metadata.update(
+                {
+                    "linktools.ai.model_usage.input_tokens": str(
+                        usage.input_tokens
+                    ),
+                    "linktools.ai.model_usage.output_tokens": str(
+                        usage.output_tokens
+                    ),
+                    "linktools.ai.model_usage.cache_read_tokens": str(
+                        usage.cache_read_tokens
+                    ),
+                    "linktools.ai.model_usage.cache_write_tokens": str(
+                        usage.cache_write_tokens
+                    ),
+                }
+            )
+        return metadata
+
+    def _with_model_metadata(
+        self,
+        fact: "ModelRequestFact",
+        *,
+        response: ModelResponse | None = None,
+    ) -> dict[str, str]:
+        original = dict(self.metadata)
+        self.metadata.update(self._model_metadata(fact, response=response))
+        return original
+
+    def _restore_metadata(self, original: dict[str, str]) -> None:
+        self.metadata.clear()
+        self.metadata.update(original)
+
+    def _current_model_fact(
+        self,
+        ctx: PydanticRunContext[Any],
+    ) -> "ModelRequestFact | None":
+        if self.model_journal is None:
+            return None
+        return self.model_journal.latest_for_step(ctx.run_step)
+
+    async def before_model_request(
+        self,
+        ctx: PydanticRunContext[None],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        fact = self._current_model_fact(ctx)
+        if fact is None:
+            return await super().before_model_request(ctx, request_context)
+        original = self._with_model_metadata(fact)
+        try:
+            return await super().before_model_request(ctx, request_context)
+        finally:
+            self._restore_metadata(original)
+
     async def after_node_run(
         self,
-        ctx: RunContext[None],
+        ctx: PydanticRunContext[None],
         *,
         node: AgentNode[None],
         result: NodeResult[None],
@@ -185,15 +202,13 @@ class _RuntimeStepPersistence(StepPersistence[None]):
 
     async def after_run(
         self,
-        ctx: RunContext[None],
+        ctx: PydanticRunContext[None],
         *,
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
         output = result.output
         interrupted = isinstance(output, DeferredToolRequests)
         if interrupted:
-            if not output.approvals or output.calls:
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             if self._last_observed_step_index is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if self.deferred_pause_sink is None:
@@ -219,899 +234,84 @@ class _RuntimeStepPersistence(StepPersistence[None]):
     ) -> None:
         self._runtime_store.remember_context_projection(source, projected)
 
-    async def before_model_request(
-        self,
-        ctx: RunContext[None],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        """Defer Harness start persistence until Runtime request metadata is bound."""
-        return request_context
-
-    async def wrap_model_request(
-        self,
-        ctx: RunContext[None],
-        *,
-        request_context: ModelRequestContext,
-        handler: WrapModelRequestHandler,
-    ) -> ModelResponse:
-        fact = None
-        request_sequence: int | None = None
-        if ctx.run_step in self._model_retry_indices:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        retry_index = None if ctx.retry <= 0 else ctx.retry
-        self._model_retry_indices[ctx.run_step] = retry_index
-        if self.model_journal is not None:
-            if ctx.run_step in self._model_request_tokens:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            fact = self.model_journal.begin(
-                ctx.run_step,
-                purpose="agent",
-                output_retry_index=None if ctx.retry <= 0 else ctx.retry,
-            )
-            request_sequence = fact.request_sequence
-            self._model_request_tokens[ctx.run_step] = request_sequence
-        start_metadata = self._model_retry_metadata(retry_index)
-        if fact is not None:
-            start_metadata.update(
-                fact.metadata(include_observation=self.tool_metrics is not None)
-            )
-        await self._harness_before_model_request(ctx, request_context, start_metadata)
-        try:
-            response = await handler(request_context)
-        except asyncio.CancelledError as error:
-            if self.model_journal is None or request_sequence is None:
-                self._model_retry_indices.pop(ctx.run_step, None)
-                raise
-            self.model_journal.finish(request_sequence, status="CANCELLED")
-            fact = self.model_journal.consume(request_sequence)
-            if self._model_request_tokens.pop(ctx.run_step, None) != request_sequence:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            await self._harness_cancelled_model_request(
-                ctx,
-                request_context,
-                error,
-                fact,
-            )
-            raise AssertionError("Harness cancellation hook must re-raise")
-        except RunCancelled:
-            if self.model_journal is not None and request_sequence is not None:
-                self.model_journal.finish(request_sequence, status="CANCELLED")
-            raise
-        except BaseException:
-            if self.model_journal is not None and request_sequence is not None:
-                self.model_journal.finish(request_sequence, status="FAILED")
-            raise
-        if self.model_journal is not None and request_sequence is not None:
-            self.model_journal.finish(request_sequence, status="SUCCEEDED")
-        return response
-
-    def _model_retry_metadata(self, retry_index: int | None) -> dict[str, str]:
-        metadata: dict[str, str] = {}
-        if retry_index is not None:
-            metadata[_OUTPUT_RETRY_INDEX_METADATA_KEY] = str(retry_index)
-        return metadata
-
-    def _consume_model_retry_metadata(
-        self,
-        ctx: RunContext[None],
-    ) -> dict[str, str]:
-        if ctx.run_step not in self._model_retry_indices:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return self._model_retry_metadata(
-            self._model_retry_indices.pop(ctx.run_step)
-        )
-
-    async def _harness_before_model_request(
-        self,
-        ctx: RunContext[None],
-        request_context: ModelRequestContext,
-        metadata: Mapping[str, str],
-    ) -> None:
-        previous = self.metadata
-        self.metadata = {**previous, **metadata}
-        try:
-            await super().before_model_request(ctx, request_context)
-        finally:
-            self.metadata = previous
-
-    async def _harness_cancelled_model_request(
-        self,
-        ctx: RunContext[None],
-        request_context: ModelRequestContext,
-        error: asyncio.CancelledError,
-        fact: ModelRequestFact,
-    ) -> None:
-        metadata = self._consume_model_retry_metadata(ctx)
-        metadata.update(
-            fact.metadata(include_observation=self.tool_metrics is not None)
-        )
-        previous = self.metadata
-        self.metadata = {**previous, **metadata}
-        try:
-            try:
-                await super().on_model_request_error(
-                    ctx,
-                    request_context=request_context,
-                    error=cast(Exception, error),
-                )
-            except BaseException:
-                if self.model_request_observer is not None:
-                    await self.model_request_observer(
-                        ctx,
-                        fact,
-                        "cancelled",
-                        None,
-                        error,
-                    )
-                raise
-        finally:
-            self.metadata = previous
-
     async def after_model_request(
         self,
-        ctx: RunContext[None],
+        ctx: PydanticRunContext[None],
         *,
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
         self._runtime_store.capture_model_context(request_context.messages)
-        fact = self._consume_model_fact(ctx, status="SUCCEEDED")
-        metadata = _model_usage_metadata(response)
-        metadata.update(self._consume_model_retry_metadata(ctx))
+        fact = self._current_model_fact(ctx)
         if fact is not None:
-            metadata.update(
-                fact.metadata(include_observation=self.tool_metrics is not None)
-            )
-        previous = self.metadata
-        self.metadata = {**previous, **metadata}
+            original = self._with_model_metadata(fact, response=response)
+            try:
+                return await super().after_model_request(
+                    ctx,
+                    request_context=request_context,
+                    response=response,
+                )
+            finally:
+                self._restore_metadata(original)
+        return await super().after_model_request(
+            ctx,
+            request_context=request_context,
+            response=response,
+        )
+
+    async def wrap_model_request(
+        self,
+        ctx: PydanticRunContext[None],
+        *,
+        request_context: ModelRequestContext,
+        handler: WrapModelRequestHandler,
+    ) -> ModelResponse:
         try:
-            observed = await super().after_model_request(
-                ctx,
-                request_context=request_context,
-                response=response,
-            )
-        finally:
-            self.metadata = previous
-        if fact is not None and self.model_request_observer is not None:
-            await self.model_request_observer(
-                ctx,
-                fact,
-                "completed",
-                response,
-                None,
-            )
-        return observed
+            return await handler(request_context)
+        except asyncio.CancelledError as error:
+            fact = self._current_model_fact(ctx)
+            if fact is None:
+                await self._record_event(
+                    ctx,
+                    kind="model_request_failed",
+                    error=repr(error),
+                )
+            else:
+                original = self._with_model_metadata(fact)
+                try:
+                    await self._record_event(
+                        ctx,
+                        kind="model_request_failed",
+                        error=repr(error),
+                    )
+                finally:
+                    self._restore_metadata(original)
+            raise
 
     async def on_model_request_error(
         self,
-        ctx: RunContext[None],
+        ctx: PydanticRunContext[None],
         *,
         request_context: ModelRequestContext,
         error: Exception,
     ) -> ModelResponse:
         self._runtime_store.capture_model_context(request_context.messages)
-        fact = self._consume_model_fact(
-            ctx,
-            status=(
-                "CANCELLED"
-                if isinstance(error, (asyncio.CancelledError, RunCancelled))
-                else "FAILED"
-            ),
-        )
-        metadata = self._consume_model_retry_metadata(ctx)
+        fact = self._current_model_fact(ctx)
         if fact is not None:
-            metadata.update(
-                fact.metadata(include_observation=self.tool_metrics is not None)
-            )
-        previous = self.metadata
-        self.metadata = {**previous, **metadata}
-        try:
+            original = self._with_model_metadata(fact)
             try:
-                await super().on_model_request_error(
+                return await super().on_model_request_error(
                     ctx,
                     request_context=request_context,
                     error=error,
                 )
-            except BaseException:
-                if fact is not None and self.model_request_observer is not None:
-                    await self.model_request_observer(
-                        ctx,
-                        fact,
-                        "cancelled"
-                        if isinstance(error, (asyncio.CancelledError, RunCancelled))
-                        else "failed",
-                        None,
-                        error,
-                    )
-                raise
-        finally:
-            self.metadata = previous
-        raise AssertionError("Harness model error hook must re-raise")
-
-    def _consume_model_fact(
-        self,
-        ctx: RunContext[None],
-        *,
-        status: str,
-    ) -> ModelRequestFact | None:
-        if self.model_journal is None:
-            return None
-        request_sequence = self._model_request_tokens.pop(ctx.run_step, None)
-        if request_sequence is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            fact = self.model_journal.current(request_sequence)
-        except RuntimeError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if fact.duration_ns is None:
-            self.model_journal.finish(request_sequence, status=status)
-        return self.model_journal.consume(request_sequence)
-
-    async def record_external_model_request(
-        self,
-        ctx: RunContext[Any],
-        fact: ModelRequestFact,
-        phase: str,
-        response: ModelResponse | None,
-        error: BaseException | None,
-    ) -> None:
-        if phase not in {"started", "completed", "failed", "cancelled"}:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        metadata = fact.metadata(include_observation=self.tool_metrics is not None)
-        if phase == "completed":
-            if response is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            metadata.update(_model_usage_metadata(response))
-        await self._runtime_store.append_runtime_event(
-            run_id=self._runtime_run_id(ctx),
-            kind=(
-                "model_request_started"
-                if phase == "started"
-                else "model_request_completed"
-                if phase == "completed"
-                else "model_request_failed"
-            ),
-            step_index=ctx.run_step,
-            conversation_id=ctx.conversation_id,
-            parent_run_id=self.parent_run_id,
-            agent_name=self.agent_name,
-            metadata=metadata,
-            error=None if error is None else repr(error),
-        )
-
-    async def before_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-    ) -> dict[str, Any]:
-        del ctx, call
-        if self.plan_mode and not tool_allowed_in_planning(
-            tool_def,
-            trusted_tool_classes=self.trusted_tool_classes,
-            trusted_mcp_selectors=self.trusted_mcp_selectors,
-        ):
-            raise AIError(
-                ErrorCode.CAPABILITY_POLICY_CONFLICT,
-                safe_details={"tool_name": tool_def.name, "mode": "plan"},
-            )
-        return args
-
-    async def wrap_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        handler: WrapToolExecuteHandler,
-    ) -> Any:
-        policy = _tool_execution_policy(
-            tool_def,
-            trusted_tool_classes=self.trusted_tool_classes,
-        )
-        effective_args = await self.tool_operations.effective_args(
-            ctx, call, tool_def, args
-        )
-        decision = await self.tool_operations.begin(
+            finally:
+                self._restore_metadata(original)
+        return await super().on_model_request_error(
             ctx,
-            call,
-            tool_def,
-            args,
-            policy.replay_safe,
-        )
-        if decision.replay_safe is not policy.replay_safe:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        key = self._decision_key(ctx, call)
-        state = _ToolCallState(
-            decision=decision,
-            policy=policy,
-            operation_terminalized=(
-                decision.has_cached_result or decision.cached_error is not None
-            ),
-            cached_failure=decision.cached_error is not None,
-        )
-        self._calls[key] = state
-        try:
-            await super().before_tool_execute(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-            )
-        except BaseException:
-            self._calls.pop(key, None)
-            raise
-        if state.decision.cached_error is not None:
-            error = state.decision.cached_error
-            try:
-                await self._record_failed_tool(
-                    ctx,
-                    call=call,
-                    tool_def=tool_def,
-                    args=args,
-                    error=error,
-                    state=state,
-                )
-            except BaseException as raised:
-                if _bypasses_tool_error_hook(raised):
-                    self._calls.pop(key, None)
-                raise
-            raise AssertionError("cached failure tool hook must raise")
-        if state.decision.has_cached_result:
-            return state.decision.cached_result
-
-        async def tracked_handler(validated_args: dict[str, Any]) -> Any:
-            state.handler_entered = True
-            if self.tool_metrics is not None:
-                state.metric_started_ns = monotonic_ns()
-            token = bind_tool_operation_id(state.decision.operation_id)
-            try:
-                if self.tool_metrics is None:
-                    return await handler(validated_args)
-                return await self.tool_metrics.execute(
-                    call=call,
-                    tool_def=tool_def,
-                    args=validated_args,
-                    handler=handler,
-                    suppress_cancel=lambda: state.suppress_cancel_metric,
-                )
-            finally:
-                reset_tool_operation_id(token)
-
-        handler_task = asyncio.create_task(
-            tracked_handler(effective_args),
-            name=f"tool-handler-{call.tool_call_id}",
-        )
-        heartbeat_task = asyncio.create_task(
-            self._heartbeat(state, handler_task),
-            name=f"tool-heartbeat-{call.tool_call_id}",
-        )
-        state.heartbeat_task = heartbeat_task
-        handler_detached = False
-        keep_call_state = True
-        try:
-            done, _ = await asyncio.wait(
-                (handler_task, heartbeat_task),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if heartbeat_task in done:
-                state.heartbeat_observed = True
-                heartbeat_error = heartbeat_task.exception()
-                if heartbeat_error is not None:
-                    state.suppress_cancel_metric = True
-                    handler_task.cancel()
-                    self._detach_task(handler_task, "tool handler after heartbeat loss")
-                    handler_detached = True
-                    if state.handler_entered and not state.policy.replay_safe:
-                        await self._mark_unknown(state, heartbeat_error)
-                        keep_call_state = False
-                        raise ToolFailed(
-                            _MODEL_EFFECT_UNKNOWN_MESSAGE
-                        ) from heartbeat_error
-                    state.preserve_started = True
-                    raise heartbeat_error
-            try:
-                result = await handler_task
-            finally:
-                state.handler_observed = True
-            try:
-                cancelled = await self.tool_operations.complete(
-                    state.decision,
-                    result,
-                )
-            except BaseException:
-                state.preserve_started = True
-                raise
-            state.operation_terminalized = True
-            if cancelled:
-                state.preserve_started = False
-                keep_call_state = False
-                self._calls.pop(key, None)
-                raise asyncio.CancelledError
-            return result
-        except SkipToolExecution as signal:
-            state.preserve_started = True
-            cancelled = await self.tool_operations.complete(
-                state.decision,
-                signal.result,
-            )
-            state.operation_terminalized = True
-            state.preserve_started = False
-            if cancelled:
-                keep_call_state = False
-                self._calls.pop(key, None)
-                raise asyncio.CancelledError
-            await self._record_completed_tool(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                result=signal.result,
-                state=state,
-            )
-            keep_call_state = False
-            self._calls.pop(key, None)
-            raise
-        except (
-            ValidationError,
-            ModelRetry,
-            ToolRetryError,
-            ToolFailed,
-            ToolFailedError,
-        ) as error:
-            if (
-                isinstance(error, ValidationError)
-                and state.handler_entered
-                and not state.policy.effect_free
-                and not state.policy.replay_safe
-            ):
-                await self._mark_unknown(state, error)
-                keep_call_state = False
-                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-            try:
-                await self._fail_known_tool(
-                    ctx,
-                    call=call,
-                    tool_def=tool_def,
-                    args=args,
-                    error=error,
-                    state=state,
-                )
-            except BaseException as raised:
-                if state.operation_terminalized and _bypasses_tool_error_hook(raised):
-                    keep_call_state = False
-                    self._calls.pop(key, None)
-                raise
-            raise AssertionError("known failure tool hook must raise")
-        except (CallDeferred, ApprovalRequired) as signal:
-            if (
-                state.handler_entered
-                and not state.policy.replay_safe
-                and not state.policy.effect_free
-            ):
-                await self._mark_unknown(state, signal)
-                keep_call_state = False
-                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from signal
-            unsupported = AIError(
-                ErrorCode.CAPABILITY_POLICY_CONFLICT,
-                safe_details={
-                    "tool_name": tool_def.name,
-                    "reason": "dynamic_deferred_unsupported",
-                },
-            )
-            await self._fail_known_tool(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                error=unsupported,
-                state=state,
-            )
-            raise AssertionError("dynamic deferred failure hook must raise")
-        except asyncio.CancelledError as error:
-            if not state.handler_observed:
-                state.suppress_cancel_metric = True
-            if state.operation_terminalized:
-                state.preserve_started = False
-                keep_call_state = False
-                self._calls.pop(key, None)
-                raise
-            state.preserve_started = True
-            if state.handler_entered and not state.policy.replay_safe:
-                await self._mark_unknown(state, error)
-            keep_call_state = False
-            self._calls.pop(key, None)
-            raise
-        except Exception as error:
-            if not state.handler_entered or state.policy.effect_free:
-                raise
-            if isinstance(error, AIError):
-                if state.policy.replay_safe:
-                    state.preserve_started = True
-                else:
-                    await self._mark_unknown(state, error)
-                raise
-            if state.policy.replay_safe:
-                state.preserve_started = True
-                raise AIError(
-                    ErrorCode.TOOL_EFFECT_UNKNOWN,
-                    safe_details={"phase": "tool_effect_replay"},
-                ) from error
-            await self._mark_unknown(state, error)
-            keep_call_state = False
-            raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-        finally:
-            await self._stop_heartbeat(state)
-            if not handler_detached:
-                if not handler_task.done():
-                    state.suppress_cancel_metric = True
-                    handler_task.cancel()
-                    self._detach_task(handler_task, "tool handler cleanup")
-                elif not state.handler_observed:
-                    self._consume_task(handler_task, "tool handler cleanup")
-            if not keep_call_state:
-                self._calls.pop(key, None)
-
-    def _tool_metric_metadata(
-        self,
-        call: ToolCallPart,
-        state: _ToolCallState,
-    ) -> dict[str, str]:
-        metadata = dict(self.metadata)
-        metrics = self.tool_metrics
-        if (
-            metrics is None
-            or not state.handler_entered
-            or state.metric_started_ns is None
-        ):
-            return metadata
-        metadata[_OBSERVATION_ID_METADATA_KEY] = _tool_observation_id(
-            metrics.source_namespace,
-            metrics.tenant_id,
-            metrics.execution_id,
-            metrics.step_run_id,
-            call.tool_call_id,
-        )
-        metadata[_DURATION_NS_METADATA_KEY] = str(
-            monotonic_ns() - state.metric_started_ns
-        )
-        return metadata
-
-    async def _persist_tool_completed(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        result: Any,
-        state: _ToolCallState,
-    ) -> Any:
-        previous = self.metadata
-        self.metadata = self._tool_metric_metadata(call, state)
-        try:
-            return await super().after_tool_execute(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                result=result,
-            )
-        finally:
-            self.metadata = previous
-
-    async def _persist_tool_failed(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        error: BaseException,
-        state: _ToolCallState,
-    ) -> Any:
-        previous = self.metadata
-        self.metadata = self._tool_metric_metadata(call, state)
-        try:
-            return await super().on_tool_execute_error(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                error=cast(Exception, error),
-            )
-        finally:
-            self.metadata = previous
-
-    async def after_tool_execute(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        result: Any,
-    ) -> Any:
-        key = self._decision_key(ctx, call)
-        state = self._calls.get(key)
-        if state is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if (
-            state.preserve_started
-            or not state.operation_terminalized
-            or state.cached_failure
-        ):
-            self._calls.pop(key, None)
-            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
-        try:
-            return await self._persist_tool_completed(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                result=result,
-                state=state,
-            )
-        finally:
-            self._calls.pop(key, None)
-
-    async def on_tool_execute_error(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        error: Exception,
-    ) -> Any:
-        key = self._decision_key(ctx, call)
-        state = self._calls.get(key)
-        if state is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
-        try:
-            if (
-                state.operation_terminalized
-                or state.cached_failure
-                or state.preserve_started
-            ):
-                raise error
-            if isinstance(
-                error,
-                (
-                    ValidationError,
-                    ModelRetry,
-                    ToolRetryError,
-                    ToolFailed,
-                    ToolFailedError,
-                ),
-            ):
-                if (
-                    isinstance(error, ValidationError)
-                    and state.handler_entered
-                    and not state.policy.effect_free
-                    and not state.policy.replay_safe
-                ):
-                    await self._mark_unknown(state, error)
-                    raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-                return await self._fail_known_tool(
-                    ctx,
-                    call=call,
-                    tool_def=tool_def,
-                    args=args,
-                    error=error,
-                    state=state,
-                )
-            if state.handler_entered and not state.policy.effect_free:
-                if state.policy.replay_safe:
-                    state.preserve_started = True
-                    raise AIError(
-                        ErrorCode.TOOL_EFFECT_UNKNOWN,
-                        safe_details={"phase": "tool_effect_replay"},
-                    ) from error
-                await self._mark_unknown(state, error)
-                raise ToolFailed(_MODEL_EFFECT_UNKNOWN_MESSAGE) from error
-            state.preserve_started = True
-            cancelled = await self.tool_operations.fail(state.decision, error)
-            state.operation_terminalized = True
-            state.preserve_started = False
-            if cancelled:
-                self._calls.pop(key, None)
-                raise asyncio.CancelledError
-            return await self._record_failed_tool(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                error=error,
-                state=state,
-            )
-        finally:
-            await self._stop_heartbeat(state)
-            self._calls.pop(key, None)
-
-    async def _heartbeat(
-        self,
-        state: _ToolCallState,
-        handler_task: asyncio.Task[Any],
-    ) -> None:
-        while not handler_task.done():
-            await asyncio.sleep(15)
-            if handler_task.done():
-                return
-            state.decision = await self.tool_operations.renew(state.decision)
-
-    async def _stop_heartbeat(self, state: _ToolCallState) -> None:
-        task = state.heartbeat_task
-        if task is None:
-            return
-        if not task.done():
-            task.cancel()
-            self._detach_task(task, "tool heartbeat cleanup")
-        elif not state.heartbeat_observed:
-            self._consume_task(task, "tool heartbeat cleanup")
-        state.heartbeat_task = None
-
-    def _detach_task(self, task: asyncio.Task[Any], label: str) -> None:
-        if task.done():
-            self._consume_task(task, label)
-            return
-        if task in self.background_tasks:
-            return
-        self.background_tasks.add(task)
-
-        def consume(done: asyncio.Task[Any]) -> None:
-            try:
-                self._consume_task(done, label)
-            finally:
-                self.background_tasks.discard(done)
-
-        task.add_done_callback(consume)
-
-    @staticmethod
-    def _consume_task(task: asyncio.Task[Any], label: str) -> None:
-        if not task.done():
-            return
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:  # noqa: BLE001
-            _logger.exception("detached %s failed", label)
-
-    async def _fail_known_tool(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        error: Exception,
-        state: _ToolCallState,
-    ) -> Any:
-        state.preserve_started = True
-        durable_error = _durable_failure_error(
-            error,
-            call=call,
-            tool_def=tool_def,
-        )
-        cancelled = await self.tool_operations.fail(state.decision, durable_error)
-        state.operation_terminalized = True
-        state.preserve_started = False
-        if cancelled:
-            raise asyncio.CancelledError
-        return await self._record_failed_tool(
-            ctx,
-            call=call,
-            tool_def=tool_def,
-            args=args,
+            request_context=request_context,
             error=error,
-            state=state,
         )
-
-    async def _record_failed_tool(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        error: BaseException,
-        state: _ToolCallState,
-    ) -> Any:
-        if state.terminal_event_recorded:
-            raise error
-        try:
-            result = await self._persist_tool_failed(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                error=error,
-                state=state,
-            )
-        except BaseException as raised:
-            state.terminal_event_recorded = True
-            if raised is error:
-                model_error = _model_tool_error(
-                    error,
-                    call=call,
-                    tool_def=tool_def,
-                )
-                if model_error is not error:
-                    raise model_error from error
-            raise
-        state.terminal_event_recorded = True
-        return result
-
-    async def _record_completed_tool(
-        self,
-        ctx: RunContext[None],
-        *,
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        result: Any,
-        state: _ToolCallState,
-    ) -> Any:
-        if state.terminal_event_recorded:
-            return result
-        try:
-            value = await self._persist_tool_completed(
-                ctx,
-                call=call,
-                tool_def=tool_def,
-                args=args,
-                result=result,
-                state=state,
-            )
-        except BaseException:
-            state.terminal_event_recorded = True
-            raise
-        state.terminal_event_recorded = True
-        return value
-
-    async def _mark_unknown(
-        self,
-        state: _ToolCallState,
-        error: BaseException,
-    ) -> None:
-        state.preserve_started = True
-        state.operation_terminalized = True
-        await self.tool_operations.unknown(state.decision, error)
-
-    def _decision_key(
-        self,
-        ctx: RunContext[None],
-        call: ToolCallPart,
-    ) -> tuple[str, str]:
-        return self._runtime_run_id(ctx), call.tool_call_id
-
-
-def _external_observer(
-    persistence: _RuntimeStepPersistence,
-    observer: ExternalModelRequestObserver | None,
-) -> ExternalModelRequestObserver:
-    async def record(
-        ctx: RunContext[Any],
-        fact: ModelRequestFact,
-        phase: str,
-        response: ModelResponse | None,
-        error: BaseException | None,
-    ) -> None:
-        await persistence.record_external_model_request(
-            ctx,
-            fact,
-            phase,
-            response,
-            error,
-        )
-        if observer is not None:
-            await observer(ctx, fact, phase, response, error)
-
-    return record
 
 
 async def compose_platform_capabilities(
@@ -1125,21 +325,15 @@ async def compose_platform_capabilities(
     step_store: StepStore,
     memory_store: MemoryStore | None,
     runtime_tool_names: tuple[str, ...],
-    plan_mode: bool,
-    trusted_tool_classes: tuple[tuple[str, str], ...],
-    trusted_mcp_selectors: tuple[str, ...],
     context_target_tokens: int | None,
     parent_step_run_id: str | None,
-    tool_operations: ToolOperationBridge | None,
-    background_tasks: set[asyncio.Task[object]],
-    plan_store_resolver: Callable[[RunContext[None]], RuntimePlanStore] | None,
+    plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
-    tool_metrics: _ToolMetricContext | None = None,
-    model_journal: ModelRequestJournal | None = None,
-    external_model_request_observer: ExternalModelRequestObserver | None = None,
+    workspace_read_available: bool = False,
+    model_journal: "ModelRequestJournal | None" = None,
+    model_observation_enabled: bool = False,
+    model_request_observer: "ExternalModelRequestObserver | None" = None,
 ) -> tuple[AbstractCapability[None], ...]:
-    _validate_trusted_tool_classes(trusted_tool_classes)
-    _validate_trusted_mcp_selectors(trusted_mcp_selectors)
     capabilities: list[AbstractCapability[None]] = []
     persistence = _RuntimeStepPersistence(
         store=HarnessStepStoreAdapter(step_store, execution_id=execution_id),
@@ -1156,15 +350,9 @@ async def compose_platform_capabilities(
                 else {"segment_sequence": str(segment_sequence)}
             ),
         },
-        tool_operations=tool_operations or _MissingToolOperationBridge(),
-        plan_mode=plan_mode,
-        trusted_tool_classes=trusted_tool_classes,
-        trusted_mcp_selectors=trusted_mcp_selectors,
-        background_tasks=background_tasks,
         deferred_pause_sink=deferred_pause_sink,
-        tool_metrics=tool_metrics,
         model_journal=model_journal,
-        model_request_observer=external_model_request_observer,
+        model_observation_enabled=model_observation_enabled,
     )
     capabilities.append(persistence)
     selected = frozenset(runtime_tool_names)
@@ -1183,7 +371,9 @@ async def compose_platform_capabilities(
         if plan_store_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-        def resolve_plan_store(ctx: RunContext[None]) -> HarnessPlanStoreAdapter:
+        def resolve_plan_store(
+            ctx: PydanticRunContext[None],
+        ) -> HarnessPlanStoreAdapter:
             store = plan_store_resolver(ctx)
             if store is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -1199,14 +389,9 @@ async def compose_platform_capabilities(
     capabilities.append(
         RuntimeCompaction(
             context_target_tokens,
-            trusted_workspace_read=(
-                dict(trusted_tool_classes).get("read_file") == "filesystem.read"
-            ),
+            workspace_read_available=workspace_read_available,
             journal=model_journal,
-            observer=_external_observer(
-                persistence,
-                external_model_request_observer,
-            ),
+            observer=model_request_observer,
             projection_sink=persistence.remember_context_projection,
         )
     )
@@ -1217,16 +402,7 @@ __all__ = [
     "MEMORY_READ_TOOL_NAMES",
     "MEMORY_TOOL_NAMES",
     "PLANNING_TOOL_NAMES",
-    "PLAN_SAFE_METADATA_KEY",
     "SUBAGENT_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
-    "WORKSPACE_SHELL_TOOL_NAMES",
-    "ToolOperationBridge",
-    "ToolOperationDecision",
     "compose_platform_capabilities",
     "select_runtime_tool_names",
-    "tool_allowed_in_planning",
-    "tool_is_control",
-    "tool_name_allowed",
 ]

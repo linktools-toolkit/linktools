@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.schema import CreateTable
 
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore

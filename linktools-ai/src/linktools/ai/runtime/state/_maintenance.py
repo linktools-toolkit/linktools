@@ -40,14 +40,12 @@ _OBJECT_DOMAINS = frozenset(
     }
 )
 _MAINTENANCE_PAGE_SIZE = 128
-_WORKSPACE_BINDING_KIND = "workspace_tool_binding"
 _ENVELOPED_FACT_KINDS = frozenset(
     {
         "step_effect",
         "step_event",
         "step_snapshot",
         "transcript_chunk",
-        _WORKSPACE_BINDING_KIND,
     }
 )
 _EXECUTION_EVENT_FACT_KINDS = frozenset(value.value for value in ExecutionEventType)
@@ -229,9 +227,6 @@ class RuntimeStorageInspection:
         for record in records:
             if record.kind == _READ_MODEL_RECORD_KIND:
                 _validate_read_model_record(record.data)
-            elif record.kind == _WORKSPACE_BINDING_KIND:
-                if record.data != {"version": 1}:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             else:
                 self._collect_enveloped_references(domain, record.data, references)
         for fact in facts:
@@ -367,11 +362,7 @@ def _validate_read_model_fact(value: Mapping[str, object]) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-RuntimeStorageMaintenance = RuntimeStorageInspection
-
-
 __all__ = [
     "OfflineRuntimeStorageMaintenance",
     "RuntimeStorageInspection",
-    "RuntimeStorageMaintenance",
 ]

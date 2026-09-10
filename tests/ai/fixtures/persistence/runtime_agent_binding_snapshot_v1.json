@@ -15,11 +15,16 @@
     "allow_subagents": [
       "*"
     ],
+    "allow_capabilities": [
+      "*"
+    ],
     "usage_limits": null,
     "planning": false,
-    "thinking": false
+    "thinking": false,
+    "tool_retries": 10000,
+    "output_retries": 3
   },
-  "model": {
+  "base_model": {
     "route_id": "default",
     "model_identity": "fixture:model"
   },
@@ -28,17 +33,14 @@
   "output_mode": "text",
   "output_schema": {
     "additionalProperties": false,
-    "description": "Canonical Runtime representation of plain assistant text.",
     "properties": {
       "text": {
-        "title": "Text",
         "type": "string"
       }
     },
     "required": [
       "text"
     ],
-    "title": "AssistantTextOutput",
     "type": "object"
   },
   "binding_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"

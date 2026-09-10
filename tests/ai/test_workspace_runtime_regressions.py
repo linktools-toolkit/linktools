@@ -10,7 +10,8 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeDomain, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeState
+from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
@@ -192,7 +193,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     models = ModelRegistry.openai(model="gpt-test")
     async with Runtime.open(workspace, models=models) as runtime:
         assert runtime.tenant_id == "default"

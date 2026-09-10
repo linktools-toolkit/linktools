@@ -4,10 +4,10 @@
 
 import pytest
 
-from linktools.ai.capability import SkillDefinition
+from linktools.ai.capability import LinkToolsSkills, SkillDefinition
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import _render_preloaded_skills
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, SkillSpec
+from linktools.ai.capability._skill_source import SkillSourceRegistry
 
 
 def _skill(identity: str, content: str) -> SkillDefinition:
@@ -64,49 +64,49 @@ def test_agent_spec_preload_rejects_unknown_version() -> None:
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_preloaded_skill_renderer_is_canonical_and_uses_pinned_content() -> None:
-    rendered = _render_preloaded_skills(
+def test_preloaded_skills_are_eager_instructions_on_the_skill_capability() -> None:
+    capability = LinkToolsSkills(
         (_skill("z", "z-content"), _skill("a", "a-content")),
-        max_bytes=1024,
+        SkillSourceRegistry(),
+        preloaded_skill_ids=("z", "a"),
+        max_preloaded_bytes=1024,
     )
-    assert rendered == (
-        "<preloaded-skills>\n"
-        "[skill: a]\n"
-        "a-content\n\n"
-        "[skill: z]\n"
-        "z-content\n"
-        "</preloaded-skills>"
+    instructions = capability.instructions()
+    assert instructions is not None
+    assert "<preloaded-skills>" not in instructions
+    assert instructions.index("[skill: a]\na-content") < instructions.index(
+        "[skill: z]\nz-content"
     )
 
 
-def test_preloaded_skill_renderer_rejects_unpaired_surrogates() -> None:
+def test_preloaded_skill_instructions_reject_unpaired_surrogates() -> None:
     for definition in (
         _skill("skill", "bad\ud800content"),
         _skill("bad\ud800id", "content"),
     ):
+        capability = LinkToolsSkills(
+            (definition,),
+            SkillSourceRegistry(),
+            preloaded_skill_ids=(definition.id,),
+        )
         with pytest.raises(AIError) as error:
-            _render_preloaded_skills((definition,), max_bytes=1024)
+            capability.instructions()
         assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
-@pytest.mark.parametrize("identity", ["bad\rid", "bad\nid", "bad[id", "bad]id"])
-def test_preloaded_skill_renderer_rejects_metadata_delimiters(identity: str) -> None:
-    definition = _skill(identity, "content")
-    with pytest.raises(AIError) as error:
-        _render_preloaded_skills((definition,), max_bytes=1024)
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-def test_preloaded_skill_renderer_enforces_total_byte_limit() -> None:
+def test_preloaded_skill_instructions_enforce_total_byte_limit() -> None:
     definition = _skill("skill", "content")
-    rendered = _render_preloaded_skills((definition,), max_bytes=1024)
+    content_size = len("[skill: skill]\ncontent".encode("utf-8"))
+    capability = LinkToolsSkills(
+        (definition,),
+        SkillSourceRegistry(),
+        preloaded_skill_ids=("skill",),
+        max_preloaded_bytes=content_size - 1,
+    )
     with pytest.raises(AIError) as error:
-        _render_preloaded_skills(
-            (definition,),
-            max_bytes=len(rendered.encode("utf-8")) - 1,
-        )
+        capability.instructions()
     assert error.value.code is ErrorCode.PROMPT_TOO_LARGE
 
 
-def test_preloaded_skill_renderer_empty_input_is_empty_string() -> None:
-    assert _render_preloaded_skills((), max_bytes=1) == ""
+def test_skill_capability_without_skills_has_no_instructions() -> None:
+    assert LinkToolsSkills((), SkillSourceRegistry()).instructions() is None

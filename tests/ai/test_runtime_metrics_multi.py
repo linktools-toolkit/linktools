@@ -61,7 +61,7 @@ def _workspace(path: Path) -> Workspace:
             AgentSpec("default", model="default", allow_tools=())
         )
     )
-    return Workspace.load(path)
+    return Workspace.load(path, workspace_id="workspace")
 
 
 @pytest.mark.asyncio

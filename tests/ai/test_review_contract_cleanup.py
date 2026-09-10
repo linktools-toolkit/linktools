@@ -5,9 +5,6 @@
 import inspect
 
 import pytest
-from pydantic_ai_harness.memory import MemoryOperation
-
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import _memory as runtime_memory
 from linktools.ai.runtime._capabilities import (
     _RuntimeStepPersistence,
@@ -32,11 +29,9 @@ def test_runtime_step_persistence_requires_explicit_harness_adapter() -> None:
         _RuntimeStepPersistence(store=StagingStepStore(), tool_operations=object())
 
 
-def test_harness_memory_mutation_requires_outer_operation_identity() -> None:
-    adapter = object.__new__(HarnessMemoryStoreAdapter)
-    with pytest.raises(AIError) as raised:
-        adapter._operation(MemoryOperation(id="operation", fingerprint="0" * 64))
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+def test_harness_memory_adapter_exposes_only_public_memory_operations() -> None:
+    assert not hasattr(HarnessMemoryStoreAdapter, "_operation")
+    assert hasattr(HarnessMemoryStoreAdapter, "get_operation")
 
 
 def test_runtime_memory_has_no_legacy_compatibility_helpers() -> None:

@@ -24,8 +24,9 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
-from linktools.ai.runtime import DefaultSessionService, Runtime, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._agent_executor import AgentExecutor
+from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -45,6 +46,7 @@ from linktools.commands.ai.run import _emit_result
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _session() -> SessionRecord:
@@ -71,7 +73,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"provider": "test", "model": "fixture"},
+        base_model={"provider": "test", "model": "fixture"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -104,6 +106,7 @@ def _execution() -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        **execution_owner_fields(),
     )
 
 
@@ -238,7 +241,7 @@ async def test_terminal_stream_allows_immediate_runtime_close(
 
     try:
         async with Runtime.open(
-            Workspace.load(workspace_root),
+            Workspace.load(workspace_root, workspace_id="workspace"),
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
         ) as runtime:
@@ -286,7 +289,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         raise AssertionError("blocked execution unexpectedly completed")
 
     monkeypatch.setattr(AgentExecutor, "execute", blocking_execute)
-    workspace = Workspace.load(workspace_root)
+    workspace = Workspace.load(workspace_root, workspace_id="workspace")
     state = RuntimeState.sqlite(database)
     try:
         async with Runtime.open(
@@ -344,7 +347,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
 
     try:
         async with Runtime.open(
-            Workspace.load(workspace_root),
+            Workspace.load(workspace_root, workspace_id="workspace"),
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
         ) as runtime:

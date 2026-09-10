@@ -13,7 +13,9 @@ import pytest
 from linktools.ai.core import ApprovalStatus
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime.state import FactQuery, RuntimeDomain, SqlStateStore
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._store import FactQuery
+from linktools.ai.runtime.state._sql import SqlStateStore
 from linktools.ai.runtime.state._approval_repository import (
     ApprovalAdmissionRepositoryImpl,
 )
@@ -244,7 +246,6 @@ async def test_approval_cancel_batches_known_record_sql(
                 approval_id=approval_id,
                 execution_id="execution",
                 tenant_id="tenant",
-                operation_id=f"operation-{approval_id}",
                 status=ApprovalStatus.PENDING,
                 idempotency_key_digest=None,
                 decision=None,

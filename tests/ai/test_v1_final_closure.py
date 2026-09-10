@@ -13,7 +13,8 @@ from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, step_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state import FactQuery, StateStepArchive, stream_digest
+from linktools.ai.runtime.state._steps import StateStepArchive
+from linktools.ai.runtime.state._store import FactQuery, stream_digest
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
@@ -40,6 +41,7 @@ from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
 )
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -47,7 +49,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -422,6 +424,7 @@ async def test_stored_snapshot_is_durable_authority_across_reopen(
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        **execution_owner_fields(),
     )
     run_id = step_run_id(
         namespace="closure-reopen",

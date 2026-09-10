@@ -36,13 +36,8 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         step_store=StagingStepStore(),
         memory_store=None,
         runtime_tool_names=PLANNING_TOOL_NAMES,
-        plan_mode=False,
-        trusted_tool_classes=(("write_plan", "control"),),
-        trusted_mcp_selectors=(),
         context_target_tokens=None,
         parent_step_run_id=None,
-        tool_operations=None,
-        background_tasks=set(),
         plan_store_resolver=lambda _ctx: None,  # type: ignore[return-value]
     )
     planning = next(

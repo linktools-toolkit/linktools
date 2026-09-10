@@ -11,17 +11,36 @@ import pytest
 from linktools.ai.core import (
     ApprovalDecision,
     ApprovalStatus,
+    canonical_sha256,
     ExternalCallStatus,
     Principal,
     ResourceKind,
     ResourceRef,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._approval import DefaultApprovalService
-from linktools.ai.runtime._external import DefaultExternalService
-from linktools.ai.runtime.service_api import ApprovalDecisionRequest, ExternalSupplyRequest
-from linktools.ai.runtime.state._contracts import ApprovalRecord, ExternalCallRecord
-from linktools.ai.storage import ObjectRef
+from linktools.ai.runtime._approval import (
+    DefaultApprovalService,
+    approval_id_for_call,
+)
+from linktools.ai.runtime._external import (
+    DefaultExternalService,
+    external_call_id_for_call,
+)
+from linktools.ai.runtime.service_api import (
+    ApprovalDecisionRequest,
+    ExternalCallSucceeded,
+    ExternalSupplyRequest,
+)
+from linktools.ai.runtime.state._contracts import (
+    ApprovalRecord,
+    ExternalCallRecord,
+    PendingDeferredCall,
+    PendingToolContinuation,
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+)
+from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
+from linktools.ai.runtime._object import RuntimeObjectKeyFactory
 from linktools.ai.workspace import trusted_workspace_principal
 
 
@@ -36,6 +55,9 @@ class _AllowAuthorization:
 
 
 class _Executions:
+    def __init__(self) -> None:
+        self.execution = SimpleNamespace(status=type("Status", (), {"value": "WAITING_DEFERRED"})())
+
     async def get_header(
         self,
         execution_id: str,
@@ -44,6 +66,41 @@ class _Executions:
     ) -> ResourceRef | None:
         if execution_id == "execution" and tenant_id == "tenant":
             return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
+        return None
+
+    async def get(self, execution_id: str, *, tenant_id: str) -> object | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return self.execution
+        return None
+
+
+class _Checkpoints:
+    def __init__(self, pending: PendingDeferredCall, *, approvals: bool) -> None:
+        self.record = RecoveryCheckpoint(
+            execution_id="execution",
+            tenant_id="tenant",
+            step_run_id="step",
+            agent_run_sequence=1,
+            state=RecoveryCheckpointState.WAITING,
+            revision=0,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            pending_tools=PendingToolContinuation(
+                "step",
+                canonical_sha256({"pending": pending.tool_call_id}),
+                approvals=(pending,) if approvals else (),
+                calls=() if approvals else (pending,),
+            ),
+        )
+
+    async def get(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> RecoveryCheckpoint | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return self.record
         return None
 
 
@@ -78,8 +135,10 @@ class _ExternalCalls:
         tenant_id: str,
         expected_status: ExternalCallStatus,
         idempotency_key_digest: str,
-        object_ref: ObjectRef,
-        payload_digest: str,
+        resolution_kind: str,
+        result_payload: StoredPayload | None,
+        result_digest: str,
+        resolution_metadata: dict[str, object],
         supplied_at: datetime,
     ) -> ExternalCallRecord:
         if (
@@ -92,9 +151,11 @@ class _ExternalCalls:
             self.record,
             status=ExternalCallStatus.SUPPLIED,
             idempotency_key_digest=idempotency_key_digest,
-            object_ref=object_ref,
-            payload_digest=payload_digest,
             supplied_at=supplied_at,
+            resolution_kind=resolution_kind,
+            result_payload=result_payload,
+            result_digest=result_digest,
+            resolution_metadata=resolution_metadata,
         )
         return self.record
 
@@ -148,6 +209,8 @@ class _Approvals:
         principal_id: str,
         decision_digest: str,
         decided_at: datetime,
+        decision_message: str | None = None,
+        resolution_metadata: dict[str, object] | None = None,
     ) -> ApprovalRecord:
         if (
             approval_id != self.record.approval_id
@@ -167,6 +230,10 @@ class _Approvals:
             decided_by=principal_id,
             decision_digest=decision_digest,
             decided_at=decided_at,
+            decision_message=decision_message,
+            resolution_metadata=(
+                {} if resolution_metadata is None else resolution_metadata
+            ),
         )
         return self.record
 
@@ -175,48 +242,54 @@ class _Approvals:
 async def test_external_supply_exact_replay_uses_durable_result() -> None:
     principal = trusted_workspace_principal("tenant")
     now = datetime.now(timezone.utc)
+    pending = PendingDeferredCall(
+        "tool-call",
+        "external_tool",
+        StoredPayload.inline_json({"value": 1}),
+        StoredPayload.inline_json({"value": 1}).digest,
+    )
+    call_id = external_call_id_for_call("tenant", "execution", "step", pending.tool_call_id)
     calls = _ExternalCalls(
         ExternalCallRecord(
-            call_id="external",
+            call_id=call_id,
             execution_id="execution",
             tenant_id="tenant",
-            operation_id="operation",
             status=ExternalCallStatus.PENDING,
             idempotency_key_digest=None,
-            object_ref=None,
-            payload_digest=None,
             created_at=now,
             supplied_at=None,
         )
     )
+    executions = _Executions()
+    checkpoints = _Checkpoints(pending, approvals=False)
     service = DefaultExternalService(
-        SimpleNamespace(external_calls=calls),
+        calls,
+        executions,
+        checkpoints,
         _AllowAuthorization(),
+        objects=InMemoryObjectStore(),
+        object_key_factory=object.__new__(RuntimeObjectKeyFactory),
+        payload_policy=PayloadPolicy(),
     )
-    reference = ObjectRef("store", "objects/result", "a" * 64, 17)
     request = ExternalSupplyRequest(
         principal,
-        "external",
+        call_id,
         "supply-key",
-        reference,
-        "b" * 64,
+        ExternalCallSucceeded({"result": "ok"}),
     )
 
     first = await service.supply("execution", request)
     second = await service.supply("execution", request)
 
     assert first == second
-    assert second.object_ref == reference
-    assert second.payload_digest == "b" * 64
-    assert calls.record.object_ref == reference
-    assert calls.record.payload_digest == "b" * 64
+    assert second.accepted is True
+    assert calls.record.result_payload == StoredPayload.inline_json({"result": "ok"})
 
     conflicting = ExternalSupplyRequest(
         principal,
-        "external",
+        call_id,
         "supply-key",
-        ObjectRef("store", "objects/other", "c" * 64, 3),
-        "d" * 64,
+        ExternalCallSucceeded({"result": "different"}),
     )
     with pytest.raises(AIError) as error:
         await service.supply("execution", conflicting)
@@ -228,12 +301,20 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
     first_principal = Principal("approver-1", "tenant", "service")
     other_principal = Principal("approver-2", "tenant", "service")
     now = datetime.now(timezone.utc)
+    pending = PendingDeferredCall(
+        "approval-call",
+        "approval_tool",
+        StoredPayload.inline_json({"value": 1}),
+        StoredPayload.inline_json({"value": 1}).digest,
+    )
+    approval_id = approval_id_for_call(
+        "tenant", "execution", "step", pending.tool_call_id
+    )
     approvals = _Approvals(
         ApprovalRecord(
-            approval_id="approval",
+            approval_id=approval_id,
             execution_id="execution",
             tenant_id="tenant",
-            operation_id="operation",
             status=ApprovalStatus.PENDING,
             idempotency_key_digest=None,
             decision=None,
@@ -243,17 +324,21 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
             decided_at=None,
         )
     )
+    executions = _Executions()
+    checkpoints = _Checkpoints(pending, approvals=True)
     service = DefaultApprovalService(
         approvals,
-        _Executions(),
+        executions,
+        checkpoints,
         _AllowAuthorization(),
+        objects=InMemoryObjectStore(),
     )
 
     first = await service.decide(
         "execution",
         ApprovalDecisionRequest(
             first_principal,
-            "approval",
+            approval_id,
             "approval-key",
             ApprovalDecision.APPROVE,
         ),
@@ -263,7 +348,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
         "execution",
         ApprovalDecisionRequest(
             first_principal,
-            "approval",
+            approval_id,
             "approval-key",
             ApprovalDecision.APPROVE,
         ),
@@ -281,7 +366,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
             "execution",
             ApprovalDecisionRequest(
                 other_principal,
-                "approval",
+                approval_id,
                 "approval-key",
                 ApprovalDecision.APPROVE,
             ),
@@ -292,7 +377,7 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
 
     conflicting = ApprovalDecisionRequest(
         first_principal,
-        "approval",
+        approval_id,
         "approval-key",
         ApprovalDecision.DENY,
     )

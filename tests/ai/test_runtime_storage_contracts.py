@@ -12,14 +12,12 @@ from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
-from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.runtime.state import (
+from linktools.ai.runtime.state._commands import RuntimeStateCommands
+from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+from linktools.ai.runtime.state._sql import SqlStateStore
+from linktools.ai.runtime.state._store import (
     FactQuery,
-    FilesystemStateStore,
-    RuntimeStateCommands,
-    SqlStateStore,
     StateTransaction,
     StoredFact,
     StoredRecord,
@@ -45,7 +43,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"version": 1, "id": "default"},
+        base_model={"version": 1, "id": "default"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -219,12 +217,6 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
                 state, "parallel-tools", background_tasks
             ),
         )
-        persistence = _RuntimeStepPersistence(
-            tool_operations=bridge,
-            store=HarnessStepStoreAdapter(state.steps, execution_id=None),
-            agent_name="agent",
-            run_id=run_id,
-        )
         call_ids = ("call-a", "call-b")
         entered = {call_id: asyncio.Event() for call_id in call_ids}
         release = asyncio.Event()
@@ -238,11 +230,12 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
                 name="tool",
                 metadata={"linktools.ai.replay_safe": True},
             )
-            await persistence.before_tool_execute(
+            decision = await bridge.begin(
                 context,
-                call=call,
-                tool_def=tool_def,
-                args={},
+                call,
+                tool_def,
+                {},
+                True,
             )
 
             async def handler(_args: dict[str, object]) -> dict[str, str]:
@@ -250,20 +243,9 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
                 await release.wait()
                 return {"call_id": call_id}
 
-            result = await persistence.wrap_tool_execute(
-                context,
-                call=call,
-                tool_def=tool_def,
-                args={},
-                handler=handler,
-            )
-            return await persistence.after_tool_execute(
-                context,
-                call=call,
-                tool_def=tool_def,
-                args={},
-                result=result,
-            )
+            result = await handler({})
+            await bridge.complete(decision, result)
+            return result
 
         tasks = [asyncio.create_task(execute(call_id)) for call_id in call_ids]
         await asyncio.gather(*(entered[call_id].wait() for call_id in call_ids))

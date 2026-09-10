@@ -8,15 +8,15 @@ from typing import Any
 
 import pytest
 from linktools.ai.observe import Observation
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
-from linktools.ai.runtime._capabilities import (
-    ToolOperationDecision,
-    _RuntimeStepPersistence,
+from linktools.ai.runtime._tool import ToolOperationDecision
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
 )
 from linktools.ai.runtime._tool_metrics import _ToolMetricContext
 from pydantic_ai.exceptions import SkipToolExecution
-from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 
@@ -32,24 +32,15 @@ class _Recorder:
         return True
 
 
-class _StepStore:
-    async def append_event(self, event: Any) -> None:
-        del event
-
-
 class _Bridge:
     def __init__(self, decision: ToolOperationDecision) -> None:
         self.decision = decision
         self.calls: list[str] = []
 
-    async def effective_args(self, ctx, call, tool_def, args):
-        del ctx, call, tool_def
-        return args
-
     async def begin(
         self,
         ctx: RunContext[None],
-        call: ToolCallPart,
+        call: Any,
         tool_def: ToolDefinition,
         args: dict[str, Any],
         replay_safe: bool,
@@ -58,9 +49,6 @@ class _Bridge:
         assert replay_safe is self.decision.replay_safe
         self.calls.append("begin")
         return self.decision
-
-    async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
-        return decision
 
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:
         del decision, result
@@ -73,18 +61,22 @@ class _Bridge:
         return False
 
     async def unknown(
-        self, decision: ToolOperationDecision, error: BaseException
+        self,
+        decision: ToolOperationDecision,
+        error: BaseException,
     ) -> None:
         del decision, error
         self.calls.append("unknown")
 
-    async def existing_call_ids(self, tool_call_ids: tuple[str, ...]) -> frozenset[str]:
-        del tool_call_ids
-        return frozenset()
-
 
 def _context() -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id="run")
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
+    )
 
 
 def _metric_context(recorder: _Recorder) -> _ToolMetricContext:
@@ -99,38 +91,44 @@ def _metric_context(recorder: _Recorder) -> _ToolMetricContext:
     )
 
 
-async def _capability(
+async def _boundary(
     decision: ToolOperationDecision,
     recorder: _Recorder,
-) -> tuple[
-    _RuntimeStepPersistence, _Bridge, RunContext[None], ToolCallPart, ToolDefinition
-]:
+    handler: Any,
+) -> tuple[RuntimeToolBoundaryToolset, _Bridge, RunContext[None], Any]:
+    async def tool() -> object:
+        return await handler()
+
     bridge = _Bridge(decision)
-    capability = _RuntimeStepPersistence(
+    raw = FunctionToolset([tool])
+    boundary = RuntimeToolBoundaryToolset(
+        (raw,),
+        {
+            "tool": ManagedToolDescriptor(
+                effect_owner="tool_operation",
+                effect="replay_safe",
+                tool_class="business",
+            )
+        },
+        id="boundary",
         tool_operations=bridge,
-        store=HarnessStepStoreAdapter(_StepStore(), execution_id=None),
-        agent_name="agent",
-        run_id="run",
         tool_metrics=_metric_context(recorder),
     )
     context = _context()
-    call = ToolCallPart("tool", {}, tool_call_id="call")
-    definition = ToolDefinition(
-        name="tool",
-        metadata={"linktools.ai.replay_safe": decision.replay_safe},
-    )
-    await capability.before_tool_execute(
-        context,
-        call=call,
-        tool_def=definition,
-        args={},
-    )
-    return capability, bridge, context, call, definition
+    tools = await boundary.get_tools(context)
+    return boundary, bridge, context, tools["tool"]
 
 
 async def test_cached_tool_result_does_not_emit_execution_metric() -> None:
     recorder = _Recorder()
-    capability, bridge, context, call, definition = await _capability(
+    entered = False
+
+    async def handler() -> object:
+        nonlocal entered
+        entered = True
+        return {"live": True}
+
+    boundary, bridge, context, tool = await _boundary(
         ToolOperationDecision(
             "operation",
             "owner",
@@ -140,21 +138,10 @@ async def test_cached_tool_result_does_not_emit_execution_metric() -> None:
             has_cached_result=True,
         ),
         recorder,
+        handler,
     )
-    entered = False
 
-    async def handler(_args: dict[str, Any]) -> object:
-        nonlocal entered
-        entered = True
-        return {"live": True}
-
-    result = await capability.wrap_tool_execute(
-        context,
-        call=call,
-        tool_def=definition,
-        args={},
-        handler=handler,
-    )
+    result = await boundary.call_tool("tool", {}, context, tool)
 
     assert result == {"cached": True}
     assert entered is False
@@ -164,27 +151,19 @@ async def test_cached_tool_result_does_not_emit_execution_metric() -> None:
 
 async def test_actual_tool_handler_emits_one_execution_metric() -> None:
     recorder = _Recorder()
-    capability, bridge, context, call, definition = await _capability(
-        ToolOperationDecision("operation", "owner", 1, True),
-        recorder,
-    )
-    entered = 0
 
-    async def handler(_args: dict[str, Any]) -> object:
-        nonlocal entered
-        entered += 1
+    async def handler() -> object:
         return {"ok": True}
 
-    result = await capability.wrap_tool_execute(
-        context,
-        call=call,
-        tool_def=definition,
-        args={},
-        handler=handler,
+    boundary, bridge, context, tool = await _boundary(
+        ToolOperationDecision("operation", "owner", 1, True),
+        recorder,
+        handler,
     )
 
+    result = await boundary.call_tool("tool", {}, context, tool)
+
     assert result == {"ok": True}
-    assert entered == 1
     assert bridge.calls == ["begin", "complete"]
     assert len(recorder.observations) == 1
     observation = recorder.observations[0]
@@ -203,29 +182,22 @@ async def test_actual_tool_handler_emits_one_execution_metric() -> None:
     assert observation.measurements[0].value >= 0
 
 
-async def test_skip_tool_execution_emits_success_metric_and_durable_completion() -> (
-    None
-):
+async def test_skip_tool_execution_emits_success_metric_and_durable_completion() -> None:
     recorder = _Recorder()
-    capability, bridge, context, call, definition = await _capability(
+
+    async def handler() -> object:
+        raise SkipToolExecution({"skipped": True})
+
+    boundary, bridge, context, tool = await _boundary(
         ToolOperationDecision("operation", "owner", 1, True),
         recorder,
+        handler,
     )
-    skipped = {"skipped": True}
-
-    async def handler(_args: dict[str, Any]) -> object:
-        raise SkipToolExecution(skipped)
 
     with pytest.raises(SkipToolExecution) as raised:
-        await capability.wrap_tool_execute(
-            context,
-            call=call,
-            tool_def=definition,
-            args={},
-            handler=handler,
-        )
+        await boundary.call_tool("tool", {}, context, tool)
 
-    assert raised.value.result == skipped
+    assert raised.value.result == {"skipped": True}
     assert bridge.calls == ["begin", "complete"]
     assert len(recorder.observations) == 1
     observation = recorder.observations[0]

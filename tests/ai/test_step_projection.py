@@ -8,13 +8,9 @@ from pathlib import Path
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import ExecutionDeltaType, ExecutionLineageKind, ExecutionStatus
-from linktools.ai.runtime import (
-    ExecutionDelta,
-    LiveExecutionEventBroker,
-    RuntimeDomain,
-    RuntimeState,
-)
-from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime._event import ExecutionDelta, LiveExecutionEventBroker
+from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from linktools.ai.runtime.state._step_contracts import (
@@ -22,6 +18,7 @@ from linktools.ai.runtime.state._step_contracts import (
     RunRecord,
     StepEvent,
 )
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _run() -> RunRecord:
@@ -39,7 +36,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -72,6 +69,7 @@ def _execution() -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        **execution_owner_fields(),
     )
 
 

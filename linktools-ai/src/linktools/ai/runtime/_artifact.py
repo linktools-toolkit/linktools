@@ -31,7 +31,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from .service_api import ArtifactDownload, ArtifactView
-from .state import ArtifactState
+from .state._contracts import ArtifactState
 
 _logger = environ.get_logger("ai.runtime.artifact")
 

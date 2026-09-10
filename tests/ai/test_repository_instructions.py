@@ -51,9 +51,13 @@ def test_repository_instruction_bundle_is_canonical_and_strict() -> None:
         RepositoryInstructions.from_payload({**payload, "version": 2})
     assert version_error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
-    with pytest.raises(AIError) as extra_error:
-        RepositoryInstructions.from_payload({**payload, "extra": True})
-    assert extra_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert RepositoryInstructions.from_payload({**payload, "extra": True}) == bundle
+
+    document = dict(payload["documents"][0])
+    document["extra"] = True
+    additive_payload = dict(payload)
+    additive_payload["documents"] = [document, *payload["documents"][1:]]
+    assert RepositoryInstructions.from_payload(additive_payload) == bundle
 
     reversed_payload = dict(payload)
     reversed_payload["documents"] = list(reversed(payload["documents"]))

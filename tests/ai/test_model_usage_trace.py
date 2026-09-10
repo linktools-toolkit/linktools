@@ -10,13 +10,13 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionTraceItem
 from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import (
-    ToolOperationDecision,
     _RuntimeStepPersistence,
-    _model_usage_metadata,
 )
 from linktools.ai.runtime._history import _trace_item
 from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
 from pydantic_ai import Agent, ModelRetry
+from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -27,36 +27,6 @@ from linktools.ai.runtime.state._steps import (
 from linktools.ai.runtime.state._step_contracts import (
     StepEvent,
 )
-
-
-class _ToolOperations:
-    async def effective_args(self, ctx, call, tool_def, args):
-        del ctx, call, tool_def
-        return args
-
-    async def begin(self, ctx, call, tool_def, args, replay_safe):
-        del ctx, tool_def, args
-        return ToolOperationDecision(
-            operation_id=f"operation:{call.tool_call_id}",
-            owner="owner",
-            fence=1,
-            replay_safe=replay_safe,
-        )
-
-    async def renew(self, decision):
-        return decision
-
-    async def complete(self, decision, result):
-        del decision, result
-        return False
-
-    async def fail(self, decision, error):
-        del decision, error
-        return False
-
-    async def unknown(self, decision, error):
-        del decision, error
-        raise AssertionError("unexpected unknown tool effect")
 
 
 async def _text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -103,13 +73,47 @@ def _project_usage(usage: RequestUsage) -> dict[str, object] | None:
     )
 
 
-def _persistence(store: StagingStepStore, run_id: str) -> _RuntimeStepPersistence:
-    return _RuntimeStepPersistence(
+def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
+    usage = response.usage
+    return {
+        "linktools.ai.model_usage.input_tokens": str(usage.input_tokens),
+        "linktools.ai.model_usage.output_tokens": str(usage.output_tokens),
+        "linktools.ai.model_usage.cache_read_tokens": str(
+            usage.cache_read_tokens
+        ),
+        "linktools.ai.model_usage.cache_write_tokens": str(
+            usage.cache_write_tokens
+        ),
+    }
+
+
+def _persistence(
+    store: StagingStepStore,
+    run_id: str,
+) -> CombinedCapability[object]:
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id=run_id,
+    )
+    persistence = _RuntimeStepPersistence(
         store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="usage-test",
         run_id=run_id,
-        tool_operations=_ToolOperations(),
+        model_journal=journal,
     )
+    observation = RuntimeModelObservationCapability(
+        None,
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        session_id=None,
+        step_run_id=run_id,
+        agent_id="usage-test",
+        journal=journal,
+    )
+    return CombinedCapability([observation, persistence])
 
 
 async def _completed_usage(
@@ -137,12 +141,6 @@ async def test_asyncio_model_cancellation_records_failed_request() -> None:
         raise asyncio.CancelledError
 
     persistence = _persistence(store, "cancelled-model-run")
-    persistence.model_journal = ModelRequestJournal(
-        source_namespace="workspace",
-        tenant_id="tenant",
-        execution_id="execution",
-        step_run_id="cancelled-model-run",
-    )
     agent = Agent(FunctionModel(cancelled_model), capabilities=[persistence])
 
     with pytest.raises(asyncio.CancelledError):

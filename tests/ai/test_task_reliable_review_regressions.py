@@ -3,7 +3,6 @@
 """Regression tests for TaskGraph lease authority and explicit cancellation."""
 
 import asyncio
-from collections.abc import Mapping
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +13,6 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
-    TaskDependencyResult,
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,

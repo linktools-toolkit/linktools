@@ -27,8 +27,9 @@ from linktools.ai.runtime.service_api import (
     ForkExecutionRequest,
     RetryExecutionRequest,
 )
-from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
@@ -36,7 +37,7 @@ def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=spec,
-        model={},
+        base_model={},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -74,6 +75,7 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
         thinking=False,
         binding=_binding(),
         parent_invocation_id=parent_invocation_id,
+        **execution_owner_fields(),
     )
 
 

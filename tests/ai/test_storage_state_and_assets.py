@@ -13,7 +13,8 @@ from linktools.ai.asset import (
     PrefixAssetPathAdapter,
 )
 from linktools.ai.errors import AIError
-from linktools.ai.runtime.state import FilesystemStateStore, StoredRecord
+from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+from linktools.ai.runtime.state._store import StoredRecord
 
 
 def _record(value: str) -> StoredRecord:

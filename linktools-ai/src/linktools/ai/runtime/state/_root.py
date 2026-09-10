@@ -31,7 +31,7 @@ from ._plan import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from ._maintenance import RuntimeStorageMaintenance
+    from ._maintenance import RuntimeStorageInspection
     from ._materializer import _MaterializedRuntimeState, _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
     from ._steps import RuntimeStepStore
@@ -76,7 +76,7 @@ class RuntimeState:
         self._objects: _RuntimeObjectRouter | None = None
         self._steps: RuntimeStepStore | None = None
         self._retention: RuntimeRetentionController | None = None
-        self._maintenance: RuntimeStorageMaintenance | None = None
+        self._maintenance: RuntimeStorageInspection | None = None
         self._storage_contract: RuntimeStorageContract | None = None
 
     @classmethod
@@ -200,10 +200,6 @@ class RuntimeState:
     @property
     def retention(self) -> "RuntimeRetentionController":
         return self._require_state(self._retention)
-
-    @property
-    def maintenance(self) -> "RuntimeStorageMaintenance":
-        return self._require_state(self._maintenance)
 
     async def initialize(self, *, namespace: str, tenant_id: str) -> None:
         async with self._lock:

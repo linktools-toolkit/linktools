@@ -57,7 +57,7 @@ class Execution(Generic[AppT]):
         *,
         after_sequences: "Mapping[str, int] | None" = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        return self._runtime.execution.stream_tree(
+        return self._runtime.stream_tree(
             self.execution_id,
             principal=self._principal,
             after_sequences=after_sequences,

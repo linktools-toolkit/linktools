@@ -86,7 +86,10 @@ class RepositoryInstructions:
 
     @classmethod
     def from_payload(cls, value: object) -> "RepositoryInstructions":
-        if not isinstance(value, Mapping) or set(value) != {"version", "documents"}:
+        if not isinstance(value, Mapping) or not {
+            "version",
+            "documents",
+        }.issubset(value):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         version = value.get("version")
         if not isinstance(version, int) or isinstance(version, bool):
@@ -99,7 +102,11 @@ class RepositoryInstructions:
         documents: list[RepositoryInstructionDocument] = []
         sources: set[str] = set()
         for raw in raw_documents:
-            if not isinstance(raw, Mapping) or set(raw) != {"source", "scope", "content"}:
+            if not isinstance(raw, Mapping) or not {
+                "source",
+                "scope",
+                "content",
+            }.issubset(raw):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
             source = raw.get("source")
             scope = raw.get("scope")
@@ -532,7 +539,6 @@ def _normalize_target_path(root: Path, value: str | Path) -> Path:
         relative = normalized.relative_to(root)
     except (ValueError, OSError) as error:
         raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT) from error
-    logical = relative.as_posix()
     return relative
 
 
@@ -665,7 +671,7 @@ def _parse_rule_markdown(content: str) -> tuple[str, str]:
         raw = yaml.load(frontmatter, Loader=_StrictSafeLoader)
     except Exception as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-    if not isinstance(raw, Mapping) or set(raw) != {"scope"}:
+    if not isinstance(raw, Mapping) or "scope" not in raw:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     scope = raw.get("scope")
     if not isinstance(scope, str) or not scope:

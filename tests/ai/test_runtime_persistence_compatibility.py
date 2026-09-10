@@ -74,7 +74,7 @@ def _binding_snapshot_payload() -> dict[str, object]:
     snapshot = AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -291,7 +291,7 @@ def test_agent_binding_snapshot_preserves_unknown_ordinary_field() -> None:
     (
         "version",
         "agent_spec",
-        "model",
+        "base_model",
         "selected",
         "subagents",
         "output_mode",

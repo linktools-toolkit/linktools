@@ -17,7 +17,9 @@ from linktools.ai.core import (
     SessionStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import CloseSessionRequest, DefaultSessionService, Runtime, RuntimeContext
+from linktools.ai.runtime import CloseSessionRequest, Runtime
+from linktools.ai.runtime._context import RuntimeContext
+from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.storage import create_sql_storage_context, provision_sql, validate_sql
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -114,6 +116,7 @@ async def test_runtime_close_failure_enters_close_only_and_can_retry() -> None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
     runtime = Runtime(
+        object(),
         object(),
         object(),
         object(),

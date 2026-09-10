@@ -24,11 +24,15 @@ from linktools.ai.observe import (
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.observe._query import _Accumulator
 from linktools.ai.runtime import _metric_capability as metric_capability
-from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
+from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.task._event import TaskEvent, TaskEventType
 from linktools.ai.task._metrics import _TaskMetricProjector
+from pydantic_ai import RunContext
 from pydantic_ai.exceptions import RunCancelled
+from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 
 pytestmark = pytest.mark.asyncio
 
@@ -139,7 +143,7 @@ async def test_percentile_is_rejected_when_resolved_default_is_not_percentile() 
 
 async def test_run_cancelled_records_cancelled_model_observation() -> None:
     recorder = _Recorder()
-    capability = _RuntimeModelMetricCapability(
+    capability = RuntimeModelObservationCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",
@@ -147,18 +151,30 @@ async def test_run_cancelled_records_cancelled_model_observation() -> None:
         session_id=None,
         step_run_id="step-run",
         agent_id="agent",
-        provider="test",
-        model_identity="test:model",
-        route_id="default",
     )
 
     async def handler(_request: object) -> object:
         raise RunCancelled("cancelled by application")
 
+    model = TestModel()
+    context = RunContext(
+        deps=type("Deps", (), {"correlation": {}})(),
+        model=model,
+        usage=RunUsage(),
+        run_id="run",
+        run_step=1,
+    )
+    request_context = ModelRequestContext(
+        model=model,
+        messages=[],
+        model_settings=None,
+        model_request_parameters=ModelRequestParameters(),
+    )
+
     with pytest.raises(RunCancelled):
         await capability.wrap_model_request(
-            None,
-            request_context=object(),  # type: ignore[arg-type]
+            context,
+            request_context=request_context,
             handler=handler,  # type: ignore[arg-type]
         )
 
@@ -173,7 +189,7 @@ async def test_model_metric_rejection_is_logged_without_escaping(
 ) -> None:
     logger = _CaptureLogger()
     monkeypatch.setattr(metric_capability, "_logger", logger)
-    capability = _RuntimeModelMetricCapability(
+    capability = RuntimeModelObservationCapability(
         _FailingRecorder(),
         source_namespace="workspace",
         tenant_id="tenant",
@@ -181,9 +197,6 @@ async def test_model_metric_rejection_is_logged_without_escaping(
         session_id=None,
         step_run_id="step-run",
         agent_id="agent",
-        provider="test",
-        model_identity="test:model",
-        route_id="default",
     )
 
     journal = ModelRequestJournal(
@@ -198,6 +211,8 @@ async def test_model_metric_rejection_is_logged_without_escaping(
     capability._record_model(
         None,
         fact,
+        model=TestModel(),
+        response=None,
         status="SUCCEEDED",
         error_code=None,
         measurements=(),

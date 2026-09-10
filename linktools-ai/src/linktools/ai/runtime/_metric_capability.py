@@ -17,6 +17,7 @@ from openai import (
 from pydantic import ValidationError
 from pydantic_ai.capabilities import (
     AbstractCapability,
+    CapabilityOrdering,
     WrapModelRequestHandler,
 )
 from pydantic_ai.exceptions import (
@@ -29,7 +30,8 @@ from pydantic_ai.exceptions import (
     UserError,
 )
 from pydantic_ai.messages import ModelResponse
-from pydantic_ai.models import ModelRequestContext
+from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import UsageLimitExceeded
 
@@ -45,12 +47,12 @@ from ._journal import ModelRequestFact, ModelRequestJournal
 _logger = environ.get_logger("ai.runtime.model_metrics")
 
 
-class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
-    """Observe actual model request attempts without mutating semantics."""
+class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]):
+    """Observe actual logical model handler invocations without changing them."""
 
     def __init__(
         self,
-        recorder: MetricRecorder,
+        recorder: MetricRecorder | None,
         *,
         source_namespace: str,
         tenant_id: str,
@@ -58,11 +60,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         session_id: str | None,
         step_run_id: str,
         agent_id: str,
-        provider: str,
-        model_identity: str,
-        route_id: str,
         journal: ModelRequestJournal | None = None,
-        external_requests: bool = False,
     ) -> None:
         self._recorder = recorder
         self._source_namespace = source_namespace
@@ -71,12 +69,6 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         self._session_id = session_id
         self._step_run_id = step_run_id
         self._agent_id = agent_id
-        self._provider = provider
-        self._model_identity = model_identity
-        self._route_id = route_id
-        if not isinstance(external_requests, bool):
-            raise TypeError("external_requests must be bool")
-        self._external_requests = external_requests
         self._journal = journal or ModelRequestJournal(
             source_namespace=source_namespace,
             tenant_id=tenant_id,
@@ -84,43 +76,62 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             step_run_id=step_run_id,
         )
 
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="innermost")
+
     async def before_run(
         self,
         ctx: PydanticRunContext[AgentContext[object]],
     ) -> None:
+        if self._recorder is None:
+            return
         _bind_metric_execution_context(
             self._recorder,
             self._execution_id,
             ctx.deps.correlation,
         )
 
+    async def before_model_request(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        self._journal.begin(
+            ctx.run_step,
+            purpose="agent",
+            output_retry_index=None if ctx.retry <= 0 else ctx.retry,
+        )
+        return request_context
+
     async def wrap_model_request(
         self,
-        ctx: PydanticRunContext[AgentContext[object]] | None,
+        ctx: PydanticRunContext[AgentContext[object]],
         *,
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        if self._external_requests:
-            return await handler(request_context)
-        run_context = None if ctx is None else ctx.deps
-        step_index = 0 if ctx is None else ctx.run_step
-        fact = self._journal.begin(
-            step_index,
-            purpose="agent",
-            output_retry_index=(
-                None if ctx is None or ctx.retry <= 0 else ctx.retry
-            ),
-        )
+        selected_model = request_context.model
+        run_context = ctx.deps
+        fact = self._journal.latest_for_step(ctx.run_step)
+        if fact is None or fact.duration_ns is not None:
+            if fact is not None:
+                self._journal.consume(fact.request_sequence)
+            fact = self._journal.begin(
+                ctx.run_step,
+                purpose="agent",
+                output_retry_index=None if ctx.retry <= 0 else ctx.retry,
+            )
+        assert fact is not None
         request_sequence = fact.request_sequence
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:
             fact = self._journal.finish(request_sequence, status="CANCELLED")
-            self._journal.consume(request_sequence)
             self._record_model(
                 run_context,
                 fact,
+                model=selected_model,
+                response=None,
                 status="CANCELLED",
                 error_code=None,
                 measurements=(),
@@ -128,10 +139,11 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             raise
         except RunCancelled as error:
             fact = self._journal.finish(request_sequence, status="CANCELLED")
-            self._journal.consume(request_sequence)
             self._record_model(
                 run_context,
                 fact,
+                model=selected_model,
+                response=None,
                 status="CANCELLED",
                 error_code=_model_error_code(error),
                 measurements=(),
@@ -139,31 +151,70 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             raise
         except Exception as error:
             fact = self._journal.finish(request_sequence, status="FAILED")
-            self._journal.consume(request_sequence)
             self._record_model(
                 run_context,
                 fact,
+                model=selected_model,
+                response=None,
                 status="FAILED",
                 error_code=_model_error_code(error),
                 measurements=(),
             )
             raise
         fact = self._journal.finish(request_sequence, status="SUCCEEDED")
-        self._journal.consume(request_sequence)
         self._record_model(
             run_context,
             fact,
+            model=selected_model,
+            response=response,
             status="SUCCEEDED",
             error_code=None,
             measurements=_provider_usage_measurements(response),
         )
         return response
 
+    async def after_model_request(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        *,
+        request_context: ModelRequestContext,
+        response: ModelResponse,
+    ) -> ModelResponse:
+        del request_context
+        self._consume_current_request(ctx.run_step)
+        return response
+
+    async def on_model_request_error(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        *,
+        request_context: ModelRequestContext,
+        error: Exception,
+    ) -> ModelResponse:
+        del request_context
+        self._consume_current_request(ctx.run_step)
+        raise error
+
+    async def on_run_error(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        *,
+        error: BaseException,
+    ) -> AgentRunResult[object]:
+        self._consume_current_request(ctx.run_step)
+        raise error
+
+    def _consume_current_request(self, step_index: int) -> None:
+        fact = self._journal.latest_for_step(step_index)
+        if fact is not None:
+            self._journal.consume(fact.request_sequence)
+
     async def record_external_model_request(
         self,
         ctx: PydanticRunContext[AgentContext[object]],
         fact: ModelRequestFact,
         phase: str,
+        model: Model,
         response: ModelResponse | None,
         error: BaseException | None,
     ) -> None:
@@ -177,6 +228,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
             self._record_model(
                 ctx.deps,
                 fact,
+                model=model,
+                response=response,
                 status="SUCCEEDED",
                 error_code=None,
                 measurements=_provider_usage_measurements(response),
@@ -186,6 +239,8 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         self._record_model(
             ctx.deps,
             fact,
+            model=model,
+            response=None,
             status="CANCELLED" if phase == "cancelled" else "FAILED",
             error_code=None if exception is None else _model_error_code(exception),
             measurements=(),
@@ -196,11 +251,36 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
         run_context: AgentContext[object] | None,
         fact: ModelRequestFact,
         *,
+        model: Model,
+        response: ModelResponse | None,
         status: str,
         error_code: str | None,
         measurements: tuple[MetricMeasurement, ...],
     ) -> None:
+        if self._recorder is None:
+            return
         try:
+            selected_model_id = str(model.model_id)
+            selected_model_system = str(model.system)
+            selected_model_name = str(model.model_name)
+            response_provider = (
+                "" if response is None or response.provider_name is None
+                else str(response.provider_name)
+            )
+            response_model = "" if response is None else str(response.model_name)
+            dimensions = {
+                "agent_id": self._agent_id,
+                "provider": selected_model_system,
+                "model_identity": selected_model_name,
+                "route_id": selected_model_id,
+                "selected_model_id": selected_model_id,
+                "selected_model_system": selected_model_system,
+                "selected_model_name": selected_model_name,
+            }
+            if response_provider:
+                dimensions["response_provider_name"] = response_provider
+            if response_model:
+                dimensions["response_model_name"] = response_model
             observation = Observation(
                 version=1,
                 observation_id=fact.observation_id,
@@ -219,12 +299,7 @@ class _RuntimeModelMetricCapability(AbstractCapability[AgentContext[object]]):
                     request_purpose=fact.purpose,
                     output_retry_index=fact.output_retry_index,
                 ),
-                dimensions={
-                    "agent_id": self._agent_id,
-                    "provider": self._provider,
-                    "model_identity": self._model_identity,
-                    "route_id": self._route_id,
-                },
+                dimensions=dimensions,
                 measurements=(
                     MetricMeasurement("latency_ns", 1, fact.duration_ns or 0),
                     *measurements,

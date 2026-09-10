@@ -12,7 +12,8 @@ import pytest
 from linktools.ai.core import Page, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
-from linktools.ai.runtime import Runtime, RuntimeContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._execution import _overlay_execution_correlation
 from linktools.ai.runtime._history import _trace_item
@@ -165,6 +166,7 @@ def test_retry_and_fork_correlation_reject_invalid_overlay() -> None:
 @pytest.mark.asyncio
 async def test_disabled_runtime_metric_control_has_stable_public_contract() -> None:
     runtime = Runtime(
+        object(),
         object(),
         object(),
         object(),

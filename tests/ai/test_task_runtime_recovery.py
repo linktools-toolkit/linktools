@@ -40,7 +40,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root)
+    workspace = Workspace.load(workspace_root, workspace_id="workspace")
     capabilities: CapabilityGroup[None] = CapabilityGroup("application")
     handler = TaskFunction[None]("test.recovery", 1, _recover_node)
     capabilities.task(handler)

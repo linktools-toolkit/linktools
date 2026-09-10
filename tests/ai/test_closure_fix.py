@@ -3,7 +3,7 @@
 """Fault coverage for Runtime tool terminal ownership and local task waiters."""
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -11,13 +11,17 @@ from typing import Any
 import pytest
 from linktools.ai.core import Principal, TaskStatus, ToolOperationStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import ToolOperationDecision, _RuntimeStepPersistence
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.runtime._tool_policy import _tool_execution_policy
-from linktools.ai.runtime.state import ToolOperationAdmission
-from linktools.ai.runtime.state._contracts import ToolOperationRecord
-from linktools.ai.storage import PayloadPolicy, StoredPayload
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
+)
+from linktools.ai.runtime.state._contracts import (
+    ToolOperationAdmission,
+    ToolOperationRecord,
+)
+from linktools.ai.storage import PayloadPolicy
 from linktools.ai.task._graph import (
     TaskGraph,
     TaskGraphLaunch,
@@ -34,11 +38,9 @@ from linktools.ai.task._local import (
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
-
-pytestmark = pytest.mark.asyncio
-
 
 class _StepStore:
     def __init__(self) -> None:
@@ -110,7 +112,13 @@ class _OperationRepository:
 
 
 def _context() -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id="run")
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
+    )
 
 
 def _definition(replay_safe: bool) -> ToolDefinition:
@@ -119,6 +127,7 @@ def _definition(replay_safe: bool) -> ToolDefinition:
     )
 
 
+@pytest.mark.asyncio
 async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -> None:
     repository = _OperationRepository()
     bridge = RuntimeToolOperationBridge(
@@ -147,6 +156,7 @@ async def test_tool_operation_admission_uses_runtime_step_and_binding_digest() -
     assert not hasattr(repository.request, "binding_fingerprint")
 
 
+@pytest.mark.asyncio
 async def test_tool_operation_identity_is_scoped_to_step_run() -> None:
     call = ToolCallPart("tool", {}, tool_call_id="call")
     first_repository = _OperationRepository()
@@ -187,6 +197,7 @@ async def test_tool_operation_identity_is_scoped_to_step_run() -> None:
     )
 
 
+@pytest.mark.asyncio
 async def test_tool_operation_cache_rejects_changed_call_fingerprint() -> None:
     repository = _OperationRepository()
     bridge = RuntimeToolOperationBridge(
@@ -213,99 +224,57 @@ async def test_tool_operation_cache_rejects_changed_call_fingerprint() -> None:
     assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
 
 
-@pytest.mark.parametrize(
-    ("name", "capability_id", "tool_class", "replay_safe", "effect_free"),
-    [
-        ("read_file", "workspace-sandbox", "filesystem.read", True, True),
-        ("write_file", "workspace-sandbox", "filesystem.write", False, False),
-        ("check_command", "workspace-sandbox", "shell", True, True),
-        ("run_command", "workspace-sandbox", "shell", False, False),
-        ("read_memory", "linktools-memory", "memory.read", True, True),
-        ("write_memory", "linktools-memory", "memory.write", True, False),
-        ("list_skills", "linktools-skill", "control", True, True),
-        ("write_plan", "linktools-planning", "control", True, False),
-        ("delegate_task", "linktools-subagent", "control", True, False),
-        ("list_subagents", "linktools-subagent", "control", True, True),
-    ],
-)
-async def test_trusted_tool_effect_policy_matrix(
-    name: str,
-    capability_id: str,
-    tool_class: str,
-    replay_safe: bool,
-    effect_free: bool,
-) -> None:
-    policy = _tool_execution_policy(
-        ToolDefinition(name=name, capability_id=capability_id),
-        trusted_tool_classes=((name, tool_class),),
+def test_managed_tool_descriptor_keeps_effect_ownership_explicit() -> None:
+    descriptor = ManagedToolDescriptor(
+        effect_owner="tool_operation",
+        effect="non_replay_safe",
+        tool_class="filesystem.write",
     )
-    assert policy.replay_safe is replay_safe
-    assert policy.effect_free is effect_free
+    assert descriptor.effect_owner == "tool_operation"
+    assert descriptor.effect == "non_replay_safe"
 
 
-async def test_trusted_tool_effect_policy_rejects_spoofed_capability() -> None:
-    with pytest.raises(AIError) as raised:
-        _tool_execution_policy(
-            ToolDefinition(name="read_file", capability_id="custom"),
-            trusted_tool_classes=(("read_file", "filesystem.read"),),
+def test_managed_tool_descriptor_rejects_effect_free_mismatch() -> None:
+    with pytest.raises(ValueError):
+        ManagedToolDescriptor(
+            effect_owner="none",
+            effect="replay_safe",
+            tool_class="business",
         )
-    assert raised.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
-
-
-async def test_custom_tool_replay_metadata_remains_explicit_opt_in() -> None:
-    safe = _tool_execution_policy(
-        ToolDefinition(name="custom", metadata={"linktools.ai.replay_safe": True}),
-        trusted_tool_classes=(),
-    )
-    unsafe = _tool_execution_policy(
-        ToolDefinition(name="custom"), trusted_tool_classes=()
-    )
-    assert (safe.replay_safe, safe.effect_free) == (True, False)
-    assert (unsafe.replay_safe, unsafe.effect_free) == (False, False)
-
-
-async def _capability(replay_safe: bool):
-    bridge = _ToolBridge(ToolOperationDecision("operation", "owner", 1, replay_safe))
-    store = _StepStore()
-    capability = _RuntimeStepPersistence(
-        tool_operations=bridge,
-        store=HarnessStepStoreAdapter(store, execution_id=None),
-        agent_name="agent",
-        run_id="run",
-    )
-    context = _context()
-    call = ToolCallPart("tool", {}, tool_call_id="call")
-    definition = _definition(replay_safe)
-    await capability.before_tool_execute(
-        context, call=call, tool_def=definition, args={}
-    )
-    return capability, bridge, store, context, call, definition
 
 
 @pytest.mark.parametrize("replay_safe", [True, False])
+@pytest.mark.asyncio
 async def test_model_retry_is_known_failure_regardless_of_replay_safety(
     replay_safe: bool,
 ) -> None:
-    capability, bridge, store, context, call, definition = await _capability(
-        replay_safe
-    )
+    bridge = _ToolBridge(ToolOperationDecision("operation", "owner", 1, replay_safe))
 
-    async def handler(_args: dict[str, Any]) -> None:
+    async def retry_tool() -> None:
         raise ModelRetry("retry")
 
+    boundary = RuntimeToolBoundaryToolset(
+        (FunctionToolset([retry_tool]),),
+        {
+            "retry_tool": ManagedToolDescriptor(
+                effect_owner="tool_operation",
+                effect=("replay_safe" if replay_safe else "non_replay_safe"),
+                tool_class="business",
+            )
+        },
+        id="business",
+        tool_operations=bridge,  # type: ignore[arg-type]
+    )
+    context = _context()
+    tools = await boundary.get_tools(context)
     with pytest.raises(ModelRetry):
-        await capability.wrap_tool_execute(
+        await boundary.call_tool(
+            "retry_tool",
+            {},
             context,
-            call=call,
-            tool_def=definition,
-            args={},
-            handler=handler,
+            tools["retry_tool"],
         )
     assert bridge.calls == ["begin", "fail"]
-    assert [event.kind for event in store.events] == [
-        "tool_call_started",
-        "tool_call_failed",
-    ]
 
 
 class _TaskRepository:
@@ -373,6 +342,7 @@ def _task_request() -> TaskGraphRequest:
         ErrorCode.TOOL_EFFECT_UNKNOWN,
     ),
 )
+@pytest.mark.asyncio
 async def test_task_recovery_persists_bounded_original_error_code(code: ErrorCode) -> None:
     repository = _TaskRepository()
     launcher = object.__new__(LocalTaskGraphLauncher)
@@ -417,6 +387,7 @@ async def test_task_recovery_persists_bounded_original_error_code(code: ErrorCod
     }
 
 
+@pytest.mark.asyncio
 async def test_local_scheduler_terminal_exit_wakes_waiter_and_cleans_entry() -> None:
     launcher = LocalTaskGraphLauncher(
         _TaskRepository(TaskStatus.SUCCEEDED),
@@ -433,6 +404,7 @@ async def test_local_scheduler_terminal_exit_wakes_waiter_and_cleans_entry() -> 
     await launcher.shutdown()
 
 
+@pytest.mark.asyncio
 async def test_local_scheduler_failure_wakes_waiter_with_infrastructure_error() -> None:
     repository = _TaskRepository()
     repository.failure = RuntimeError("scheduler failure")
@@ -449,6 +421,7 @@ async def test_local_scheduler_failure_wakes_waiter_with_infrastructure_error() 
     await launcher.shutdown()
 
 
+@pytest.mark.asyncio
 async def test_launcher_cancel_clears_retained_failure() -> None:
     repository = _TaskRepository()
     repository.failure = RuntimeError("scheduler failure")

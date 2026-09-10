@@ -38,11 +38,11 @@ from .service_api import (
     ReplayEvaluationRequest,
     RunEvaluationRequest,
 )
-from .state import (
+from .state._contracts import (
     EvaluationState,
     ExecutionRepository,
-    RuntimeDomain,
 )
+from .state import RuntimeDomain
 from .state._contracts import (
     EvaluationRecord,
     IdempotencyRecord,
@@ -502,8 +502,7 @@ class DefaultEvaluationService:
             ExecutionStatus.START_UNKNOWN: EvaluationStatus.RUNNING,
             ExecutionStatus.STARTED: EvaluationStatus.RUNNING,
             ExecutionStatus.FINALIZING: EvaluationStatus.RUNNING,
-            ExecutionStatus.WAITING_APPROVAL: EvaluationStatus.RUNNING,
-            ExecutionStatus.WAITING_EXTERNAL: EvaluationStatus.RUNNING,
+            ExecutionStatus.WAITING_DEFERRED: EvaluationStatus.RUNNING,
             ExecutionStatus.CANCELLING: EvaluationStatus.RUNNING,
             ExecutionStatus.SUCCEEDED: EvaluationStatus.SUCCEEDED,
             ExecutionStatus.FAILED: EvaluationStatus.FAILED,

@@ -14,12 +14,11 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._local import _RecoveryCoordinator
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime.state import (
+from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
-    RuntimeStorageContract,
 )
 from linktools.ai.task._service_impl import DefaultTaskService
 
@@ -217,37 +216,11 @@ def test_subagent_background_failure_preserves_classified_ai_error() -> None:
 
 @pytest.mark.asyncio
 async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
-    class Executions:
-        async def get(self, execution_id: str, *, tenant_id: str) -> object:
-            return SimpleNamespace(
-                execution_id=execution_id,
-                tenant_id=tenant_id,
-                binding_digest="binding",
-                parent_execution_id=None,
-                root_execution_id=execution_id,
-                parent_invocation_id=None,
-                source_execution_id=None,
-                base_execution_id=None,
-                conversation_step_run_id=None,
-                lineage_kind=ExecutionLineageKind.RUN,
-                planning=False,
-                thinking=False,
-                binding="snapshot",
-                repository_instructions=None,
-                correlation={},
-                session_id=None,
-                status=ExecutionStatus.START_UNKNOWN,
-            )
-
-    backend = object.__new__(LocalExecutionBackend)
-    backend._execution = SimpleNamespace(executions=Executions())
-    backend._catalog = SimpleNamespace(binding=lambda _digest: object())
-    backend._conversation_durable = False
-    backend._storage_contract = RuntimeStorageContract(1, (), (), ())
-    recovery_input = SimpleNamespace(
+    execution = SimpleNamespace(
+        execution_id="execution",
+        tenant_id="tenant",
         principal_id="principal",
         principal_kind="user",
-        session_id=None,
         binding_digest="binding",
         parent_execution_id=None,
         root_execution_id="execution",
@@ -255,21 +228,48 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
         source_execution_id=None,
         base_execution_id=None,
         conversation_step_run_id=None,
-        lineage_kind=ExecutionLineageKind.RUN.value,
+        lineage_kind=ExecutionLineageKind.RUN,
         planning=False,
         thinking=False,
         binding="snapshot",
         repository_instructions=None,
         correlation={},
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
+        session_id=None,
+        status=ExecutionStatus.START_UNKNOWN,
     )
+
+    class Port:
+        async def load_execution(self, execution_id: str, *, tenant_id: str) -> object:
+            assert execution_id == "execution"
+            assert tenant_id == "tenant"
+            return execution
+
+        def _validate_recovery_identity(self, value: object) -> None:
+            assert value is execution
+
+        def validate_binding(self, value: object) -> None:
+            assert value is execution
+
+        async def _reconcile_session_recovery(
+            self,
+            checkpoint: object,
+            value: object,
+        ) -> bool:
+            del checkpoint
+            assert value is execution
+            return True
+
+        async def _recovery_idempotency(self, value: object) -> object:
+            assert value is execution
+            return object()
+
+    coordinator = _RecoveryCoordinator(Port(), None)
     checkpoint = SimpleNamespace(
         execution_id="execution",
         tenant_id="tenant",
-        input=recovery_input,
         handoff_phase=RecoveryHandoffPhase.NONE,
         state=RecoveryCheckpointState.ACTIVE,
     )
     with pytest.raises(AIError) as captured:
-        await backend._reconcile_checkpoint(checkpoint)  # type: ignore[arg-type]
+        await coordinator.reconcile_checkpoint(checkpoint)  # type: ignore[arg-type]
     assert captured.value.code is ErrorCode.EXECUTION_START_UNKNOWN

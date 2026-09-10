@@ -12,7 +12,7 @@ from linktools.ai.observe import (
 )
 
 from .test_metrics_server_read_integrity import (
-    _NAMESPACE, _ServerMetrics, _WINDOW, _observation, _server, server_metrics,
+    _NAMESPACE, _ServerMetrics, _WINDOW, _observation,
 )
 
 

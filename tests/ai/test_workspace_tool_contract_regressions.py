@@ -23,7 +23,7 @@ def _golden_contract() -> dict[str, object]:
 
 
 def test_workspace_tool_semantics_match_frozen_golden(tmp_path: Path) -> None:
-    contributions = workspace_tool_contributions(Workspace.load(tmp_path))
+    contributions = workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))
     actual = {item.id: item.semantic_contract for item in contributions}
     assert actual == _golden_contract()
 
@@ -47,7 +47,7 @@ def test_local_semantic_validation_is_not_limited_by_ipc_frame() -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -64,7 +64,7 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -85,7 +85,7 @@ async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_workspace_denied_shell_command_is_model_retry(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(

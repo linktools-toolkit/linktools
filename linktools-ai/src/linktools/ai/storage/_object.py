@@ -99,7 +99,7 @@ def runtime_object_key(
     """Build the tenant-scoped physical key for immutable Runtime bytes."""
     for value in (namespace_digest, tenant_digest, stored_digest):
         _validate_digest(value)
-    return f"v2/runtime/{namespace_digest}/{tenant_digest}/{stored_digest}"
+    return f"v1/runtime/{namespace_digest}/{tenant_digest}/{stored_digest}"
 
 
 @runtime_checkable

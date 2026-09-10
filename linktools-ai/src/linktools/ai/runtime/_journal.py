@@ -121,6 +121,19 @@ class ModelRequestJournal:
         except KeyError as error:
             raise RuntimeError("model request fact is missing") from error
 
+    def latest_for_step(
+        self,
+        step_index: int,
+        *,
+        purpose: ModelRequestPurpose = "agent",
+    ) -> ModelRequestFact | None:
+        values = tuple(
+            fact
+            for fact in self._facts.values()
+            if fact.step_index == step_index and fact.purpose == purpose
+        )
+        return max(values, key=lambda fact: fact.request_sequence, default=None)
+
     def consume(self, request_sequence: int) -> ModelRequestFact:
         try:
             return self._facts.pop(request_sequence)

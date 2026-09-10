@@ -5,9 +5,17 @@
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
+from pydantic import JsonValue as PydanticJsonValue
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
+from pydantic_ai.tools import RunContext as PydanticRunContext
+from pydantic_ai.toolsets import FunctionToolset
+
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
+from ._context import AgentContext
+from ._workspace import workspace_tool_path_metadata
 
 SUBAGENT_CAPABILITY_ID = "linktools-subagent"
 
@@ -23,13 +31,14 @@ class SubagentDelegate(Protocol):
     ) -> "dict[str, JsonValue]": ...
 
 
-class SubagentCapability:
+class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         refs: "Sequence[SubagentRef]",
         delegate: SubagentDelegate,
         descriptions: "Mapping[str, str | None] | None" = None,
     ) -> None:
+        self.id = SUBAGENT_CAPABILITY_ID
         ordered = tuple(sorted(refs, key=lambda item: item.id))
         ids = tuple(item.id for item in ordered)
         if len(ids) != len(set(ids)):
@@ -46,6 +55,52 @@ class SubagentCapability:
         self._by_id = {item.id: item for item in ordered}
         self._descriptions = metadata
         self._delegate = delegate
+
+    def get_instructions(self) -> str | None:
+        return self.instructions()
+
+    def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
+        toolset = FunctionToolset[AgentContext[object]](id=self.id)
+
+        @toolset.tool
+        async def list_subagents(
+            _ctx: PydanticRunContext[AgentContext[object]],
+        ) -> list[dict[str, str]]:
+            """List subagents available for this agent run."""
+            return await self.list_subagents()
+
+        @toolset.tool(metadata=workspace_tool_path_metadata(("files",)))
+        async def delegate_task(
+            ctx: PydanticRunContext[AgentContext[object]],
+            subagent_id: str,
+            task: str,
+            files: tuple[str, ...] = (),
+        ) -> dict[str, PydanticJsonValue]:
+            """Delegate one task and an explicit file subset to a selected subagent."""
+            if not ctx.tool_call_id:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            try:
+                return await self.delegate_task(
+                    subagent_id,
+                    task,
+                    files=files,
+                    invocation_id=ctx.tool_call_id,
+                )
+            except AIError as error:
+                if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
+                    raise ToolFailed("subagent execution failed; adapt and continue") from error
+                if error.code in {
+                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                }:
+                    raise ModelRetry("requested subagent, task, or files are invalid") from error
+                raise
+
+        return toolset
+
+    @classmethod
+    def get_serialization_name(cls) -> str | None:
+        return None
 
     def instructions(self) -> "str | None":
         if not self._refs:
@@ -116,4 +171,4 @@ class SubagentCapability:
         return result
 
 
-__all__ = ["SUBAGENT_CAPABILITY_ID", "SubagentCapability", "SubagentDelegate"]
+__all__ = ["LinkToolsSubagents", "SUBAGENT_CAPABILITY_ID", "SubagentDelegate"]

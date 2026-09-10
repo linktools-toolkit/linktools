@@ -3,13 +3,15 @@
 """Core JSON, Agent binding, Task, and Recovery boundary contracts."""
 
 from collections.abc import Callable
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import date, datetime, timezone
 from enum import Enum, IntEnum
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import (
+    ExecutionLineageKind,
+    ExecutionStatus,
     JsonValue,
     OperationLedgerRecord,
     Principal,
@@ -24,17 +26,17 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.capability import SubagentCapability
-from linktools.ai.runtime._subagent_adapter import _PydanticSubagentCapability
-from linktools.ai.runtime._tool import ToolOperationRecord
+from linktools.ai.capability import LinkToolsSubagents
+from linktools.ai.runtime.state._contracts import ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeStatePlan
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import (
+    ExecutionRecord,
+    PendingDeferredCall,
+    PendingToolContinuation,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
-    RecoveryExecutionInput,
     RecoveryHandoffPhase,
-    RecoveryIdempotencyInput,
     RuntimeStorageContract,
     StoredUserInput,
 )
@@ -66,7 +68,7 @@ def _binding_snapshot(
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec(agent_id, model="route"),
-        model={"version": 1, "id": "route"},
+        base_model={"version": 1, "id": "route"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -167,48 +169,35 @@ def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
         RuntimeStatePlan(conversation="invalid")  # type: ignore[arg-type]
 
 
-def test_recovery_checkpoint_enforces_v1_execution_identity() -> None:
-    now = datetime.now(timezone.utc)
-    snapshot = _binding_snapshot(digest="c" * 64)
-    recovery_input = RecoveryExecutionInput(
-        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
-        principal_id="principal",
-        principal_kind="user",
-        session_id=None,
-        memory_scope=None,
-        binding_digest=snapshot.binding_digest,
-        lineage_kind="RUN",
-        parent_execution_id=None,
-        root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
-        conversation_step_run_id=None,
-        idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
-        mode="run",
-        planning=False,
-        thinking=False,
-        binding=snapshot,
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
+def _pending_tools() -> PendingToolContinuation:
+    payload = StoredPayload.inline_json({"path": "file.txt"})
+    call = PendingDeferredCall("call", "read_file", payload, payload.digest)
+    return PendingToolContinuation(
+        "step-1",
+        "a" * 64,
+        approvals=(call,),
     )
 
+
+def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
+    now = datetime.now(timezone.utc)
     def checkpoint(
         state: RecoveryCheckpointState,
         sequence: int,
         step_run_id: str | None,
+        pending_tools: PendingToolContinuation | None = None,
     ) -> RecoveryCheckpoint:
         return RecoveryCheckpoint(
             execution_id="execution",
             tenant_id="tenant",
-            input=recovery_input,
             step_run_id=step_run_id,
             agent_run_sequence=sequence,
             state=state,
-            handoff_phase=RecoveryHandoffPhase.NONE,
-            terminal_handoff=None,
-            pending_operation_id=None,
             revision=0,
             created_at=now,
             updated_at=now,
+            pending_tools=pending_tools,
+            handoff_phase=RecoveryHandoffPhase.NONE,
         )
 
     with pytest.raises(ValueError):
@@ -216,52 +205,54 @@ def test_recovery_checkpoint_enforces_v1_execution_identity() -> None:
     with pytest.raises(ValueError):
         checkpoint(RecoveryCheckpointState.ACTIVE, 0, None)
     assert checkpoint(RecoveryCheckpointState.COMPLETED, 0, None).agent_run_sequence == 0
+    waiting = checkpoint(
+        RecoveryCheckpointState.WAITING,
+        1,
+        "step-1",
+        _pending_tools(),
+    )
+    assert waiting.pending_tools is not None
+    assert waiting.pending_tools.source_step_run_id == waiting.step_run_id
 
 
-def test_recovery_input_requires_exact_binding_digest_and_mode_contract() -> None:
+def test_execution_record_owns_binding_and_durable_user_input() -> None:
     snapshot = _binding_snapshot(digest="d" * 64)
+    now = datetime.now(timezone.utc)
+    record = ExecutionRecord(
+        execution_id="execution",
+        tenant_id="tenant",
+        session_id=None,
+        binding_digest=snapshot.binding_digest,
+        parent_execution_id=None,
+        root_execution_id="execution",
+        source_execution_id=None,
+        base_execution_id=None,
+        lineage_kind=ExecutionLineageKind.RUN,
+        status=ExecutionStatus.PENDING_START,
+        revision=0,
+        event_sequence=0,
+        agent_run_sequence=0,
+        error_code=None,
+        safe_error_details={},
+        created_at=now,
+        updated_at=now,
+        mode="run",
+        planning=False,
+        thinking=False,
+        binding=snapshot,
+        principal_id="principal",
+        principal_kind="user",
+        stored_user_input=StoredUserInput(
+            1,
+            "text",
+            StoredPayload.inline_text("prompt"),
+        ),
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
+    )
+    assert record.stored_user_input.payload.decode() == "prompt"
+
     with pytest.raises(ValueError):
-        RecoveryExecutionInput(
-            user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
-            principal_id="principal",
-            principal_kind="user",
-            session_id=None,
-            memory_scope=None,
-            binding_digest="e" * 64,
-            lineage_kind="RUN",
-            parent_execution_id=None,
-            root_execution_id="execution",
-            source_execution_id=None,
-            base_execution_id=None,
-            conversation_step_run_id=None,
-            idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
-            mode="run",
-            planning=False,
-            thinking=False,
-            binding=snapshot,
-            storage_contract=RuntimeStorageContract(1, (), (), ()),
-        )
-    with pytest.raises(ValueError):
-        RecoveryExecutionInput(
-            user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
-            principal_id="principal",
-            principal_kind="user",
-            session_id=None,
-            memory_scope=None,
-            binding_digest=snapshot.binding_digest,
-            lineage_kind="RUN",
-            parent_execution_id=None,
-            root_execution_id="execution",
-            source_execution_id=None,
-            base_execution_id=None,
-            conversation_step_run_id=None,
-            idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
-            mode="plan",
-            planning=False,
-            thinking=False,
-            binding=snapshot,
-            storage_contract=RuntimeStorageContract(1, (), (), ()),
-        )
+        replace(record, binding_digest="e" * 64)
 
 
 def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> None:
@@ -283,9 +274,7 @@ def test_subagent_tool_schema_accepts_json_payload() -> None:
             "output": {"value": True},
         }
 
-    capability = _PydanticSubagentCapability(
-        SubagentCapability((SubagentRef("agent", "child"),), delegate)
-    )
+    capability = LinkToolsSubagents((SubagentRef("agent", "child"),), delegate)
     assert capability.get_toolset() is not None
 
 

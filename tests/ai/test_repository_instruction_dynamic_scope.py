@@ -1,292 +1,189 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Dynamic repository-instruction scope and stale-model-step contracts."""
+"""Repository-instruction checks at the final runtime tool boundary."""
 
-from pathlib import Path
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
-from pydantic_ai.messages import (
-    ModelRequest,
-    ModelResponse,
-    ToolCallPart,
-    ToolReturnPart,
-)
-from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import _ToolPresentation
-from linktools.ai.runtime._workspace_gate import (
-    _WorkspaceToolGate,
-    _repository_instruction_marker,
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RepositoryInstructionBoundary,
+    RuntimeToolBoundaryToolset,
 )
 from linktools.ai.workspace import (
-    RepositoryInstructionDocument,
-    RepositoryInstructions,
-    ToolPermissionRule,
-    WorkspacePolicy,
     WorkspaceToolPermissionPolicy,
 )
 
 
-class _Resolver:
-    def __init__(self, document: RepositoryInstructionDocument | None) -> None:
-        self.document = document
-        self.calls: list[tuple[str, frozenset[str]]] = []
+class _Session:
+    async def canonicalize_path(self, path: str) -> str:
+        return "." if path == "" else path
 
-    async def resolve(
+
+class _Boundary:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[dict[str, Any]] = []
+
+    def render(self) -> str:
+        return "repository instructions"
+
+    async def check(
         self,
-        target: str,
         *,
-        exclude_sources: frozenset[str] = frozenset(),
-    ) -> RepositoryInstructions:
-        self.calls.append((target, exclude_sources))
-        if self.document is None or self.document.source in exclude_sources:
-            return RepositoryInstructions(())
-        return RepositoryInstructions((self.document,))
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        path_fields: tuple[str, ...],
+    ) -> None:
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+                "arguments": arguments,
+                "path_fields": path_fields,
+            }
+        )
+        if self.fail:
+            raise ToolFailed("repository instructions changed")
 
 
-def _gate(
-    root: Path,
-    resolver: _Resolver,
+async def _read_file(path: str) -> str:
+    return path
+
+
+async def _list_directory(path: str = ".") -> str:
+    return path
+
+
+def _context(call_id: str = "call") -> RunContext[None]:
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id=call_id,
+    )
+
+
+def _boundary(
+    toolset: FunctionToolset[None],
+    name: str,
+    repository: RepositoryInstructionBoundary,
     *,
-    policy: WorkspacePolicy | None = None,
-    history: tuple[ModelRequest | ModelResponse, ...] = (),
-    authority: frozenset[tuple[str, str]] = frozenset(),
-) -> _WorkspaceToolGate:
-    return _WorkspaceToolGate(
-        execution_id="execution",
-        workspace_root=root,
-        repository_instruction_history=history,
-        repository_instruction_marker_authority=authority,
-        repository_instructions=RepositoryInstructions(()),
-        instruction_resolver=resolver,
-        policy=WorkspacePolicy() if policy is None else policy,
-        trusted_tool_classes=(
-            ("read_file", "filesystem.read"),
-            ("write_file", "filesystem.write"),
-            ("edit_file", "filesystem.write"),
-            ("file_info", "filesystem.read"),
-            ("create_directory", "filesystem.write"),
-            ("list_directory", "filesystem.read"),
-            ("search_files", "filesystem.read"),
-            ("find_files", "filesystem.read"),
+    policy: WorkspaceToolPermissionPolicy | None = None,
+    path_fields: tuple[str, ...] = ("path",),
+) -> RuntimeToolBoundaryToolset:
+    return RuntimeToolBoundaryToolset(
+        (toolset,),
+        {
+            name: ManagedToolDescriptor(
+                effect_owner="intrinsic",
+                effect="none",
+                tool_class="filesystem.read",
+                workspace_path_fields=path_fields,
+            )
+        },
+        id="workspace",
+        sandbox_session=_Session(),  # type: ignore[arg-type]
+        workspace_policy=(
+            None
+            if policy is None
+            else policy
         ),
-    )
-
-
-def _ctx(*, approved: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(tool_call_approved=approved)
-
-
-def _call(name: str = "read_file", *, call_id: str = "call-1") -> ToolCallPart:
-    return ToolCallPart(
-        tool_name=name, args={"path": "pkg/file.txt"}, tool_call_id=call_id
+        repository_boundary=repository,
     )
 
 
 @pytest.mark.asyncio
-async def test_new_scope_exposes_once_then_fences_same_model_step(
-    tmp_path: Path,
-) -> None:
-    document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "nested-v1")
-    resolver = _Resolver(document)
-    gate = _gate(tmp_path, resolver)
-    call = _call()
-    tool = ToolDefinition(name="read_file")
+async def test_repository_instruction_check_precedes_ask_permission() -> None:
+    repository = _Boundary(fail=True)
+    toolset = _boundary(
+        FunctionToolset([_read_file]),
+        "_read_file",
+        repository,
+        policy=WorkspaceToolPermissionPolicy(default="ask"),
+    )
+    context = _context()
+    tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolFailed) as exposed:
-        await gate.before_tool_execute(
-            _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
+    with pytest.raises(ToolFailed, match="repository instructions changed"):
+        await toolset.call_tool(
+            "_read_file",
+            {"path": "pkg/file.txt"},
+            context,
+            tools["_read_file"],
         )
-    marker = exposed.value.args[0]
-    assert marker == _repository_instruction_marker(
-        "execution", RepositoryInstructions((document,))
-    )
-    assert resolver.calls == [("pkg/file.txt", frozenset())]
 
-    with pytest.raises(ToolFailed) as stale:
-        await gate.before_tool_execute(
-            _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
-        )
-    assert "next model step" in stale.value.args[0]
-    assert len(resolver.calls) == 1
-
-    await gate.before_model_request(_ctx(), None)  # type: ignore[arg-type]
-    result = await gate.before_tool_execute(
-        _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
-    )
-    assert result == {"path": "pkg/file.txt"}
-    assert resolver.calls[-1] == (
-        "pkg/file.txt",
-        frozenset({"agents:pkg/AGENTS.md"}),
-    )
-    assert "nested-v1" in gate.get_instructions()(_ctx())  # type: ignore[arg-type]
+    assert len(repository.calls) == 1
+    assert repository.calls[0]["arguments"] == {"path": "pkg/file.txt"}
 
 
 @pytest.mark.asyncio
-async def test_dynamic_refresh_barrier_precedes_ask_permission(tmp_path: Path) -> None:
-    document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "nested")
-    resolver = _Resolver(document)
-    policy = WorkspacePolicy(
-        tool_permissions=WorkspaceToolPermissionPolicy(
-            (ToolPermissionRule("ask", tool_name="read_file"),)
-        )
-    )
-    gate = _gate(tmp_path, resolver, policy=policy)
-    call = _call()
-    tool = ToolDefinition(name="read_file")
+async def test_repository_instruction_refresh_can_fence_one_model_call() -> None:
+    repository = _Boundary(fail=True)
+    toolset = _boundary(FunctionToolset([_read_file]), "_read_file", repository)
+    context = _context()
+    tools = await toolset.get_tools(context)
 
     with pytest.raises(ToolFailed):
-        await gate.before_tool_execute(
-            _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
+        await toolset.call_tool(
+            "_read_file",
+            {"path": "pkg/file.txt"},
+            context,
+            tools["_read_file"],
         )
-    with pytest.raises(ToolFailed):
-        await gate.before_tool_execute(
-            _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
-        )
-
-    await gate.before_model_request(_ctx(), None)  # type: ignore[arg-type]
-    with pytest.raises(ApprovalRequired):
-        await gate.before_tool_execute(
-            _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
-        )
+    assert repository.calls[0]["tool_call_id"] == "call"
 
 
 @pytest.mark.asyncio
-async def test_same_source_mutation_preserves_first_exposure(tmp_path: Path) -> None:
-    first = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "first")
-    resolver = _Resolver(first)
-    gate = _gate(tmp_path, resolver)
-    call = _call()
-    tool = ToolDefinition(name="read_file")
-
-    with pytest.raises(ToolFailed):
-        await gate.before_tool_execute(
-            _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
-        )
-    resolver.document = RepositoryInstructionDocument(
-        "agents:pkg/AGENTS.md", "pkg", "changed"
+async def test_empty_workspace_path_is_normalized_before_instruction_check() -> None:
+    repository = _Boundary()
+    toolset = _boundary(
+        FunctionToolset([_list_directory]),
+        "_list_directory",
+        repository,
     )
-    await gate.before_model_request(_ctx(), None)  # type: ignore[arg-type]
-    assert await gate.before_tool_execute(
-        _ctx(), call=call, tool_def=tool, args={"path": "pkg/file.txt"}
-    ) == {"path": "pkg/file.txt"}
-    rendered = gate.get_instructions()(_ctx())  # type: ignore[arg-type]
-    assert "first" in rendered
-    assert "changed" not in rendered
+    context = _context()
+    tools = await toolset.get_tools(context)
 
-
-def test_marker_without_authority_is_ignored(tmp_path: Path) -> None:
-    document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "nested")
-    marker = _repository_instruction_marker(
-        "execution", RepositoryInstructions((document,))
+    result = await toolset.call_tool(
+        "_list_directory",
+        {"path": ""},
+        context,
+        tools["_list_directory"],
     )
-    call = _call()
-    history = (
-        ModelResponse(parts=[call], run_id="run-1"),
-        ModelRequest(
-            parts=[
-                ToolReturnPart(
-                    tool_name="read_file",
-                    content=marker,
-                    tool_call_id="call-1",
-                    outcome="failed",
-                )
-            ],
-            run_id="run-1",
-        ),
-    )
-    gate = _gate(tmp_path, _Resolver(None), history=history)
-    assert "nested" not in gate.get_instructions()(_ctx())  # type: ignore[arg-type]
 
-
-def test_malformed_authoritative_current_execution_marker_fails_closed(
-    tmp_path: Path,
-) -> None:
-    document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "nested")
-    marker = _repository_instruction_marker(
-        "execution", RepositoryInstructions((document,))
-    ).replace("action=Apply", "action=Tampered", 1)
-    call = _call()
-    history = (
-        ModelResponse(parts=[call], run_id="run-1"),
-        ModelRequest(
-            parts=[
-                ToolReturnPart(
-                    tool_name="read_file",
-                    content=marker,
-                    tool_call_id="call-1",
-                    outcome="failed",
-                )
-            ],
-            run_id="run-1",
-        ),
-    )
-    with pytest.raises(AIError) as error:
-        _gate(
-            tmp_path,
-            _Resolver(None),
-            history=history,
-            authority=frozenset({("run-1", "call-1")}),
-        )
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert result == "."
+    assert repository.calls[0]["arguments"] == {"path": "."}
 
 
 @pytest.mark.asyncio
-async def test_dynamic_scope_limit_applies_to_total_active_bundle(
-    tmp_path: Path,
-) -> None:
-    document = RepositoryInstructionDocument("agents:pkg/AGENTS.md", "pkg", "x" * 64)
-    gate = _gate(
-        tmp_path,
-        _Resolver(document),
-        policy=WorkspacePolicy(max_repository_instruction_bytes=32),
+async def test_approved_call_reaches_tool_after_instruction_check() -> None:
+    repository = _Boundary()
+    toolset = _boundary(
+        FunctionToolset([_read_file]),
+        "_read_file",
+        repository,
+        policy=WorkspaceToolPermissionPolicy(default="ask"),
     )
-    with pytest.raises(AIError) as error:
-        await gate.before_tool_execute(
-            _ctx(),
-            call=_call(),
-            tool_def=ToolDefinition(name="read_file"),
-            args={"path": "pkg/file.txt"},
-        )
-    assert error.value.code is ErrorCode.PROMPT_TOO_LARGE
+    context = _context()
+    context.tool_call_approved = True
+    tools = await toolset.get_tools(context)
 
-
-@pytest.mark.asyncio
-async def test_instruction_aware_filesystem_tools_are_sequential() -> None:
-    names = (
-        "read_file",
-        "write_file",
-        "edit_file",
-        "file_info",
-        "create_directory",
-        "list_directory",
-        "search_files",
-        "find_files",
-    )
-    classes = tuple(
-        (
-            name,
-            "filesystem.write"
-            if name in {"write_file", "edit_file", "create_directory"}
-            else "filesystem.read",
+    assert (
+        await toolset.call_tool(
+            "_read_file",
+            {"path": "pkg/file.txt"},
+            context,
+            tools["_read_file"],
         )
-        for name in names
+        == "pkg/file.txt"
     )
-    presentation = _ToolPresentation(
-        ("*",),
-        static_tool_names=names,
-        mcp_policy=(),
-        plan_mode=False,
-        trusted_tool_classes=classes,
-        trusted_mcp_selectors=(),
-        instruction_aware=True,
-    )
-    tools = [
-        ToolDefinition(name=name, capability_id="workspace-sandbox") for name in names
-    ]
-    prepared = await presentation._prepare_final_tools(None, tools)  # type: ignore[arg-type]
-    assert [tool.name for tool in prepared] == list(names)
-    assert all(tool.sequential is True for tool in prepared)
+    assert repository.calls

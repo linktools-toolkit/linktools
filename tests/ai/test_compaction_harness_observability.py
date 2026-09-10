@@ -60,6 +60,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         _ctx: RunContext[object],
         fact: ModelRequestFact,
         phase: str,
+        _model: object,
         response: ModelResponse | None,
         error: BaseException | None,
     ) -> None:
@@ -191,7 +192,7 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
 
     await RuntimeCompaction(
         1_000_000,
-        trusted_workspace_read=True,
+        workspace_read_available=True,
     ).before_model_request(ctx, request_context)
 
     assert request_context.messages == messages
@@ -216,7 +217,7 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
 
     await RuntimeCompaction(
         None,
-        trusted_workspace_read=True,
+        workspace_read_available=True,
     ).before_model_request(ctx, request_context)
 
     assert request_context.messages != messages

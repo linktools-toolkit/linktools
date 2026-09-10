@@ -3,18 +3,16 @@
 """Regression coverage for TaskGraph activity notifications."""
 
 import asyncio
-from collections.abc import Mapping
 from types import SimpleNamespace
 
 import pytest
 from ._task_test_helpers import admit_graph
 import linktools.ai.task._local as task_local
-from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
-    TaskDependencyResult,
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,
