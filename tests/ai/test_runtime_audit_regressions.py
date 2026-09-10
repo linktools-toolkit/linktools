@@ -19,7 +19,7 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage
 
-from linktools.ai.agent._output import bind_output
+from linktools.ai.agent._output import bind_output, canonicalize_output_schema_v1
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import _thinking_capability
@@ -48,6 +48,23 @@ def test_output_fingerprint_ignores_schema_title_annotations() -> None:
     assert alpha.fingerprint == beta.fingerprint
     assert alpha.schema_definition == beta.schema_definition
     assert alpha.schema_definition["properties"]["title"] == {"type": "string"}
+
+
+def test_output_schema_literal_ref_is_not_treated_as_schema_ref() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "payload": {
+                "const": {"$ref": "literal-value"},
+            }
+        },
+    }
+
+    normalized = canonicalize_output_schema_v1(schema)
+
+    assert normalized["properties"]["payload"]["const"] == {
+        "$ref": "literal-value"
+    }
 
 
 def test_agent_tool_retry_default_is_finite_and_small() -> None:

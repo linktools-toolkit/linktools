@@ -2,18 +2,7 @@
 # -*- coding: utf-8 -*-
 """Agent stream event mapping and native capability checks."""
 
-from types import SimpleNamespace
-
 import pytest
-
-from linktools.ai.core import ExecutionDeltaType
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import (
-    LiveDelta,
-    _event_stream_capability,
-    _map_event,
-    _thinking_capability,
-)
 from pydantic_ai.capabilities import ProcessEventStream, Thinking
 from pydantic_ai.messages import (
     PartDeltaEvent,
@@ -22,6 +11,17 @@ from pydantic_ai.messages import (
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
+)
+from pydantic_ai.models.test import TestModel
+
+from linktools.ai.core import ExecutionDeltaType
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._agent_executor import (
+    LiveDelta,
+    _event_stream_capability,
+    _map_event,
+    _thinking_capability,
+    _validate_thinking_model,
 )
 
 
@@ -64,31 +64,33 @@ async def test_event_stream_forwarding_uses_native_capability() -> None:
     ]
 
 
-def test_thinking_uses_native_capability_with_existing_validation() -> None:
-    supported = SimpleNamespace(
-        profile={"supports_thinking": True, "thinking_always_enabled": False}
-    )
-    capability = _thinking_capability(supported, "high")  # type: ignore[arg-type]
+def test_thinking_uses_native_capability_with_request_model_validation() -> None:
+    capability = _thinking_capability("high")
     assert isinstance(capability, Thinking)
     assert capability.effort == "high"
     assert capability.get_model_settings() == {"thinking": "high"}
 
-    unsupported = SimpleNamespace(
+    supported = TestModel(
+        profile={"supports_thinking": True, "thinking_always_enabled": False}
+    )
+    _validate_thinking_model(supported, "high")
+
+    unsupported = TestModel(
         profile={"supports_thinking": False, "thinking_always_enabled": False}
     )
     with pytest.raises(AIError) as unsupported_error:
-        _thinking_capability(unsupported, True)  # type: ignore[arg-type]
+        _validate_thinking_model(unsupported, True)
     assert unsupported_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert unsupported_error.value.safe_details == {
         "field": "thinking",
         "reason": "model_not_supported",
     }
 
-    always_on = SimpleNamespace(
+    always_on = TestModel(
         profile={"supports_thinking": True, "thinking_always_enabled": True}
     )
     with pytest.raises(AIError) as always_on_error:
-        _thinking_capability(always_on, False)  # type: ignore[arg-type]
+        _validate_thinking_model(always_on, False)
     assert always_on_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     assert always_on_error.value.safe_details == {
         "field": "thinking",

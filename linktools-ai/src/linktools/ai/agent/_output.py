@@ -252,7 +252,16 @@ def _local_definition_refs(value: object) -> "dict[str, tuple[str, ...]]":
     def collect(node: object, owner: str) -> None:
         if isinstance(node, Mapping):
             for key, child in node.items():
-                if owner == "" and key == "$defs":
+                if key == "$defs":
+                    if owner != "":
+                        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                    continue
+                if key in _LITERAL_SCHEMA_VALUES:
+                    continue
+                if key in _NAMED_SCHEMA_MAPS:
+                    if isinstance(child, Mapping):
+                        for schema in child.values():
+                            collect(schema, owner)
                     continue
                 if key == "$dynamicRef":
                     raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
