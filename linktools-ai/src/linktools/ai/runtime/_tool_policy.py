@@ -42,6 +42,7 @@ from .state._contracts import ToolOperationRecord
 MEMORY_TOOL_NAMES = ("delete_memory", "read_memory", "search_memory", "write_memory")
 MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
 PLANNING_TOOL_NAMES = ("write_plan",)
+PYDANTIC_CONTROL_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 _REPLAY_SAFE_METADATA_KEY = "linktools.ai.replay_safe"
 _MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
@@ -273,6 +274,8 @@ def _tool_execution_policy(
     *,
     trusted_tool_classes: tuple[tuple[str, str], ...],
 ) -> _ToolExecutionPolicy:
+    if tool_def.tool_kind in PYDANTIC_CONTROL_TOOL_KINDS:
+        return _ToolExecutionPolicy(True, True)
     tool_class = dict(trusted_tool_classes).get(tool_def.name)
     if tool_class is not None:
         expected_capability = _trusted_tool_capability(tool_def.name, tool_class)
@@ -430,6 +433,8 @@ def tool_is_control(
     *,
     trusted_tool_classes: tuple[tuple[str, str], ...],
 ) -> bool:
+    if tool_def.tool_kind in PYDANTIC_CONTROL_TOOL_KINDS:
+        return True
     tool_class = dict(trusted_tool_classes).get(tool_def.name)
     if tool_class != "control":
         return False
@@ -446,6 +451,8 @@ def tool_allowed_in_planning(
     trusted_tool_classes: tuple[tuple[str, str], ...],
     trusted_mcp_selectors: tuple[str, ...],
 ) -> bool:
+    if tool_def.tool_kind in PYDANTIC_CONTROL_TOOL_KINDS:
+        return True
     tool_class = dict(trusted_tool_classes).get(tool_def.name)
     if tool_class is not None:
         expected_capability = _trusted_tool_capability(tool_def.name, tool_class)

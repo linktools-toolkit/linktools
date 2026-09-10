@@ -9,7 +9,7 @@ from linktools.ai.agent import OutputBinding
 from linktools.ai.capability import CapabilityContribution, CapabilityGroup, AgentContext
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, PrepareTools, SelectModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
@@ -181,16 +181,18 @@ def test_invalid_capability_revision_is_rejected(revision: object) -> None:
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
-def test_deferred_generic_capability_is_rejected_by_v1_always_on_contract() -> None:
+@pytest.mark.asyncio
+async def test_deferred_generic_capability_keeps_native_semantics() -> None:
     capability = _Capability()
     capability.defer_loading = True
+    capability.description = "load on demand"
     group = CapabilityGroup[None]("group")
+    group.capability(capability)
 
-    with pytest.raises(AIError) as error:
-        group.capability(capability, semantic_config={})
-
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    assert error.value.safe_details["reason"] == "deferred_loading_not_supported"
+    candidate = (await group.freeze())[0]
+    assert candidate.value is capability
+    assert candidate.value.defer_loading is True
+    assert "config" not in candidate.semantic_contract
 
 
 @pytest.mark.parametrize(
@@ -203,9 +205,9 @@ def test_deferred_generic_capability_is_rejected_by_v1_always_on_contract() -> N
         "linktools-memory",
         "linktools-planning",
         "linktools-subagent",
-        "thinking",
+        "linktools-thinking",
+        "linktools-reinject-system-prompt",
         "step_persistence",
-        "reinject_system_prompt",
         "mcp__server",
     ],
 )
@@ -228,12 +230,14 @@ async def test_duplicate_capability_identity_is_rejected_when_group_freezes() ->
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
-def test_capability_semantic_config_is_required() -> None:
+@pytest.mark.asyncio
+async def test_capability_semantic_config_is_optional() -> None:
     group = CapabilityGroup[None]("group")
-    with pytest.raises(AIError) as error:
-        group.capability(_Capability())
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    assert error.value.safe_details["reason"] == "semantic_config_required"
+    group.capability(_Capability())
+
+    candidate = (await group.freeze())[0]
+    assert candidate.semantic_contract["implementation"].endswith(":_Capability")
+    assert "config" not in candidate.semantic_contract
 
 
 @pytest.mark.asyncio
@@ -251,27 +255,29 @@ async def test_capability_implementation_identity_is_fingerprint_input() -> None
     assert first_candidate.fingerprint != second_candidate.fingerprint
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("capability", "reason"),
+    "capability",
     (
-        (_ModelCapability(), "model_contribution_not_supported"),
-        (_ToolsetCapability(), "tool_contribution_not_supported"),
-        (_ToolWrapperCapability(), "tool_contribution_not_supported"),
-        (_PrepareToolsCapability(), "tool_lifecycle_not_supported"),
-        (_ToolExecuteCapability(), "tool_lifecycle_not_supported"),
-        (_ModelRequestCapability(), "model_request_lifecycle_not_supported"),
-        (_DeferredResolverCapability(), "deferred_tool_resolution_not_supported"),
-        (_DynamicCapability(), "dynamic_binding_not_supported"),
+        _ModelCapability(),
+        _ToolsetCapability(),
+        _ToolWrapperCapability(),
+        _PrepareToolsCapability(),
+        _ToolExecuteCapability(),
+        _ModelRequestCapability(),
+        _DeferredResolverCapability(),
+        _DynamicCapability(),
     ),
 )
-def test_external_capability_cannot_compete_with_runtime_ownership(
-    capability: AbstractCapability[AgentContext[None]], reason: str
+async def test_external_capability_keeps_native_pydantic_extension_surface(
+    capability: AbstractCapability[AgentContext[None]],
 ) -> None:
     group = CapabilityGroup[None]("group")
-    with pytest.raises(AIError) as error:
-        group.capability(capability, semantic_config={})
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-    assert error.value.safe_details["reason"] == reason
+    group.capability(capability)
+
+    candidate = (await group.freeze())[0]
+    assert candidate.value is capability
+    assert candidate.semantic_contract["implementation"]
 
 
 @pytest.mark.asyncio
@@ -301,3 +307,21 @@ def test_output_binding_revalidates_final_payload() -> None:
     with pytest.raises(AIError) as error:
         binding.validate_payload({"unexpected": True})
     assert error.value.code is ErrorCode.OUTPUT_VALIDATION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_anonymous_native_capabilities_register_without_adapter_ids() -> None:
+    select_model = SelectModel(lambda ctx: ctx.model)
+    prepare_tools = PrepareTools(lambda _ctx, tool_defs: tool_defs)
+    group = CapabilityGroup[None]("group")
+
+    group.capability(select_model)
+    group.capability(prepare_tools)
+    candidates = await group.freeze()
+
+    assert select_model.id is None
+    assert prepare_tools.id is None
+    assert {candidate.id for candidate in candidates} == {
+        "anonymous:pydantic_ai.capabilities.prepare_tools:PrepareTools",
+        "anonymous:pydantic_ai.capabilities.select_model:SelectModel",
+    }

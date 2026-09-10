@@ -66,9 +66,9 @@ _RESERVED_CAPABILITY_IDS = frozenset(
         "linktools-memory",
         "linktools-planning",
         "linktools-subagent",
-        "thinking",
+        "linktools-thinking",
+        "linktools-reinject-system-prompt",
         "step_persistence",
-        "reinject_system_prompt",
     }
 )
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
@@ -111,11 +111,10 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "capability":
             capability = cast(AbstractCapability, self.value)
-            capability_id = capability.id  # type: ignore[attr-defined]
-            if not isinstance(capability_id, str) or capability_id != self.id:
+            capability_id = _capability_registration_id(capability)
+            if capability_id != self.id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             _validate_external_capability_id(capability_id)
-            _validate_external_capability(capability)
         if self.kind == "task":
             handler = cast("TaskNodeHandler[object]", self.value)
             task_type, task_version = _task_identity(handler)
@@ -329,12 +328,7 @@ class CapabilityGroup(Generic[AppT]):
     ) -> "AbstractCapability[AgentContext[AppT]]":
         """Register one always-selected Pydantic runtime behavior capability."""
         _validate_revision(revision)
-        try:
-            capability_id = capability.id  # type: ignore[attr-defined]
-        except AttributeError as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        if not isinstance(capability_id, str) or not capability_id.strip():
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        capability_id = _capability_registration_id(capability)
         _validate_external_capability_id(capability_id)
         self._contributions.append(
             CapabilityContribution.from_opaque(
@@ -593,22 +587,17 @@ def contribution_semantic_contract(
     if kind == "mcp" and isinstance(value, MCPServerSpec):
         return MCPServerSpecCodec().to_payload(value)
     if kind == "capability" and isinstance(value, AbstractCapability):
-        if semantic_config is None:
-            raise AIError(
-                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                safe_details={"capability_id": identity, "reason": "semantic_config_required"},
-            )
-        try:
-            config = dict(ImmutableJsonMapping(semantic_config))
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         contract: dict[str, JsonValue] = {
             "version": 1,
             "implementation": _capability_implementation(value),
-            "config": config,
         }
         if semantic_revision is not None:
             contract["semantic_revision"] = semantic_revision
+        if semantic_config is not None:
+            try:
+                contract["config"] = dict(ImmutableJsonMapping(semantic_config))
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
     if kind == "task" and isinstance(value, TaskNodeHandler):
         task_type, task_version = _task_identity(value)
@@ -667,6 +656,15 @@ def _validate_business_tool_name(value: str) -> None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
+def _capability_registration_id(value: AbstractCapability[object]) -> str:
+    capability_id = value.id
+    if capability_id is None:
+        return f"anonymous:{_capability_implementation(value)}"
+    if not isinstance(capability_id, str) or not capability_id.strip():
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return capability_id
+
+
 def _capability_implementation(value: AbstractCapability[object]) -> str:
     capability_type = type(value)
     module = capability_type.__module__
@@ -681,99 +679,6 @@ def _capability_implementation(value: AbstractCapability[object]) -> str:
         )
     return f"{module}:{qualname}"
 
-
-def _validate_external_capability(value: AbstractCapability[object]) -> None:
-    capability_id = value.id
-    if value.defer_loading:
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": capability_id,
-                "reason": "deferred_loading_not_supported",
-            },
-        )
-    if (
-        type(value).for_agent is not AbstractCapability.for_agent
-        or type(value).for_run is not AbstractCapability.for_run
-    ):
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": capability_id,
-                "reason": "dynamic_binding_not_supported",
-            },
-        )
-    if value.get_model() is not None or value.has_resolve_model_id:
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": capability_id,
-                "reason": "model_contribution_not_supported",
-            },
-        )
-    if (
-        value.get_toolset() is not None
-        or value.get_native_tools()
-        or type(value).get_wrapper_toolset
-        is not AbstractCapability.get_wrapper_toolset
-    ):
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": capability_id,
-                "reason": "tool_contribution_not_supported",
-            },
-        )
-    tool_hooks = (
-        "prepare_tools",
-        "before_tool_validate",
-        "after_tool_validate",
-        "wrap_tool_validate",
-        "on_tool_validate_error",
-        "before_tool_execute",
-        "after_tool_execute",
-        "wrap_tool_execute",
-        "on_tool_execute_error",
-    )
-    if any(
-        getattr(type(value), name) is not getattr(AbstractCapability, name)
-        for name in tool_hooks
-    ):
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": capability_id,
-                "reason": "tool_lifecycle_not_supported",
-            },
-        )
-    model_hooks = (
-        "before_model_request",
-        "after_model_request",
-        "wrap_model_request",
-        "on_model_request_error",
-    )
-    if any(
-        getattr(type(value), name) is not getattr(AbstractCapability, name)
-        for name in model_hooks
-    ):
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": capability_id,
-                "reason": "model_request_lifecycle_not_supported",
-            },
-        )
-    if (
-        type(value).handle_deferred_tool_calls
-        is not AbstractCapability.handle_deferred_tool_calls
-    ):
-        raise AIError(
-            ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-            safe_details={
-                "capability_id": capability_id,
-                "reason": "deferred_tool_resolution_not_supported",
-            },
-        )
 
 
 def _validate_external_capability_id(value: str) -> None:

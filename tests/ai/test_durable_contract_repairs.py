@@ -120,7 +120,7 @@ def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
 @pytest.mark.asyncio
 async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -> None:
     group = CapabilityGroup[None]("durable")
-    group.capability(_RegisteredCapability(), revision=3, semantic_config={})
+    group.capability(_RegisteredCapability(), revision=3)
     candidates = tuple(await group.freeze())
     compiler = _compiler(candidates=candidates)
     binding = compiler.bind(compiler.compile(_spec()))
@@ -135,7 +135,7 @@ async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -
     assert missing.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
     changed_group = CapabilityGroup[None]("changed")
-    changed_group.capability(_RegisteredCapability(), revision=4, semantic_config={})
+    changed_group.capability(_RegisteredCapability(), revision=4)
     changed_candidates = tuple(await changed_group.freeze())
     with pytest.raises(AIError) as changed:
         _compiler(candidates=changed_candidates).restore(binding.snapshot)

@@ -238,7 +238,7 @@ def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> Non
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
     group = CapabilityGroup[object]("custom")
     with pytest.raises(AIError) as raised:
-        group.capability(_SpoofedSandboxCapability(), semantic_config={})
+        group.capability(_SpoofedSandboxCapability())
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 

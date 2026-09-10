@@ -113,6 +113,7 @@ from ._capabilities import (
     MEMORY_READ_TOOL_NAMES,
     MEMORY_TOOL_NAMES,
     PLANNING_TOOL_NAMES,
+    PYDANTIC_CONTROL_TOOL_KINDS,
     SUBAGENT_TOOL_NAMES,
     ToolOperationBridge,
     compose_platform_capabilities,
@@ -625,13 +626,19 @@ class AgentExecutor:
         )
         capabilities = cast(
             "tuple[AbstractCapability[AgentContext[object]], ...]",
-            (presentation, gate, *capabilities),
+            (
+                presentation,
+                gate,
+                _thinking_capability(model, scope.thinking),
+                *capabilities,
+            ),
         )
         if scope.replace_history_system_prompt:
-            capabilities = (*capabilities, ReinjectSystemPrompt(replace_existing=True))
+            capabilities = (*capabilities, ReinjectSystemPrompt(
+                replace_existing=True, id="linktools-reinject-system-prompt"
+            ))
         capabilities = (
             *capabilities,
-            _thinking_capability(model, scope.thinking),
             _event_stream_capability(cast(EventSink, scope.event_sink)),
         )
         _logger.debug(
@@ -1081,7 +1088,7 @@ def _thinking_capability(model: Model, thinking: ThinkingValue) -> Thinking:
             ErrorCode.REQUEST_FIELD_INVALID,
             safe_details={"field": "thinking", "reason": "model_not_supported"},
         )
-    return Thinking(effort=thinking)
+    return Thinking(effort=thinking, id="linktools-thinking")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1256,18 +1263,9 @@ class _ToolPresentation(AbstractCapability[AgentContext[object]]):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         self._validate_provenance_and_static_surface(tool_defs)
         trusted_classes = dict(self._trusted_tool_classes)
-        mcp_names = {
-            tool.name
-            for tool in tool_defs
-            if tool.capability_id in self._trusted_mcp_selectors
-        }
         for selector in self._mcp_policy:
-            parsed = mcp_selector_server(selector)
-            if parsed is None:
+            if mcp_selector_server(selector) is None:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            _namespace, exact_tool = parsed
-            if exact_tool is not None and selector not in mcp_names:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         selected: list[ToolDefinition] = []
         for tool in tool_defs:
             if not tool_is_control(
@@ -1324,12 +1322,20 @@ class _ToolPresentation(AbstractCapability[AgentContext[object]]):
                     safe_details={"tool_name": tool.name},
                 )
 
-            if tool.capability_id is None:
+            if (
+                tool.capability_id is None
+                and tool.tool_kind not in PYDANTIC_CONTROL_TOOL_KINDS
+            ):
                 actual_static.add(tool.name)
             elif tool.capability_id in _WORKSPACE_CAPABILITY_IDS:
                 actual_static.add(tool.name)
                 if tool.name not in trusted_classes:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            elif tool.name in expected_static:
+                raise AIError(
+                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                    safe_details={"tool_name": tool.name},
+                )
 
             is_mcp_name = tool.name.startswith("mcp__")
             is_mcp_owner = tool.capability_id in self._trusted_mcp_selectors
@@ -1344,7 +1350,7 @@ class _ToolPresentation(AbstractCapability[AgentContext[object]]):
                         safe_details={"tool_name": tool.name},
                     )
 
-        if actual_static != expected_static:
+        if not actual_static.issubset(expected_static):
             raise AIError(
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                 safe_details={

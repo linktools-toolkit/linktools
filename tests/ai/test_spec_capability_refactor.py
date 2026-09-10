@@ -130,9 +130,7 @@ async def test_exact_mcp_selector_requires_matching_trusted_runtime_tool() -> No
     )
     assert await presentation._prepare_final_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
 
-    with pytest.raises(AIError) as missing:
-        await presentation._prepare_final_tools(None, [])  # type: ignore[arg-type]
-    assert missing.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    assert await presentation._prepare_final_tools(None, []) == []  # type: ignore[arg-type]
 
     spoofed = ToolDefinition(
         name="mcp__trusted__read",
@@ -197,9 +195,7 @@ async def test_static_tool_surface_must_match_compiled_exact_set() -> None:
     business = ToolDefinition(name="business")
     assert await presentation._prepare_final_tools(None, [business]) == [business]  # type: ignore[arg-type]
 
-    with pytest.raises(AIError) as missing:
-        await presentation._prepare_final_tools(None, [])  # type: ignore[arg-type]
-    assert missing.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    assert await presentation._prepare_final_tools(None, []) == []  # type: ignore[arg-type]
 
     substituted = ToolDefinition(name="business", capability_id="custom")
     with pytest.raises(AIError) as wrong_owner:
@@ -488,3 +484,22 @@ async def test_skill_capability_sorts_selected_skills_and_rejects_duplicates() -
             SkillSourceRegistry(),
         )
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_pydantic_control_tools_bypass_business_tool_policy() -> None:
+    presentation = _ToolPresentation(
+        (),
+        static_tool_names=(),
+        mcp_policy=(),
+        plan_mode=True,
+        trusted_tool_classes=(),
+        trusted_mcp_selectors=(),
+        instruction_aware=False,
+    )
+    controls = [
+        ToolDefinition(name="load_capability", tool_kind="capability-load"),
+        ToolDefinition(name="search_tools", tool_kind="tool-search"),
+    ]
+
+    assert await presentation._prepare_final_tools(None, controls) == controls  # type: ignore[arg-type]
