@@ -10,11 +10,7 @@ from linktools.ai.agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime.state._contracts import (
-    ExecutionRecord,
-    RuntimeStorageContract,
-    StoredUserInput,
-)
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from pydantic import (
@@ -118,7 +114,6 @@ def _execution(
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 
