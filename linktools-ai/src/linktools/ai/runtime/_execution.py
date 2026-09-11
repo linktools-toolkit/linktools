@@ -1171,7 +1171,6 @@ class DefaultExecutionService:
             execution_id=execution_id,
             tenant_id=request.principal.tenant_id,
             session_id=session_id,
-            binding_digest=binding_digest,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id or execution_id,
             parent_invocation_id=parent_invocation_id,

@@ -52,7 +52,6 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
 
 
@@ -67,7 +66,6 @@ def _execution(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,

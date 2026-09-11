@@ -108,7 +108,6 @@ def _started_execution(now: datetime) -> ExecutionRecord:
         execution_id="execution",
         tenant_id="default",
         session_id=None,
-        binding_digest=binding.binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,

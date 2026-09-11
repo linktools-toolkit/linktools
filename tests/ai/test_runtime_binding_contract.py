@@ -89,7 +89,6 @@ def _execution(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest=snapshot.binding_digest if binding_digest is None else binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,

@@ -54,7 +54,6 @@ def _execution(now: datetime) -> ExecutionRecord:
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest=binding.binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,

@@ -140,7 +140,6 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         execution_id="parent",
         tenant_id="tenant",
         session_id=None,
-        binding_digest=binding.binding_digest,
         parent_execution_id=None,
         root_execution_id="parent",
         source_execution_id=None,

@@ -35,7 +35,6 @@ def _binding() -> AgentBindingSnapshot:
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
 
 
@@ -120,7 +119,6 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,

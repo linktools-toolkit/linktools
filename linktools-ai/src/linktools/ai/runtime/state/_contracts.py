@@ -464,7 +464,6 @@ class ExecutionRecord:
     execution_id: str
     tenant_id: str
     session_id: str | None
-    binding_digest: str
     parent_execution_id: str | None
     root_execution_id: str
     source_execution_id: str | None
@@ -515,11 +514,8 @@ class ExecutionRecord:
                 raise ValueError("subagent execution lineage is invalid")
         elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
             raise ValueError("non-subagent execution cannot carry parent lineage")
-        if (
-            not isinstance(self.binding, AgentBindingSnapshot)
-            or self.binding.binding_digest != self.binding_digest
-        ):
-            raise ValueError("execution binding snapshot does not match binding digest")
+        if not isinstance(self.binding, AgentBindingSnapshot):
+            raise TypeError("execution binding snapshot is invalid")
         if not isinstance(self.principal_id, str) or not self.principal_id:
             raise TypeError("execution principal id is invalid")
         if not isinstance(self.principal_kind, str) or not self.principal_kind:
@@ -535,6 +531,10 @@ class ExecutionRecord:
             and self.error_diagnostics is not None
         ):
             raise ValueError("only failed execution can carry error diagnostics")
+
+    @property
+    def binding_digest(self) -> str:
+        return self.binding.binding_digest
 
 
 @dataclass(frozen=True, slots=True)

@@ -48,7 +48,6 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         subagents=(),
         output_mode="text",
         output_schema={"type": "object", "properties": {"text": {"type": "string"}}},
-        binding_digest="a" * 64,
     )
 
 

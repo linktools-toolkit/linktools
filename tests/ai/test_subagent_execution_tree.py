@@ -42,7 +42,6 @@ def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
         subagents=(),
         output_mode="text",
         output_schema={},
-        binding_digest="a" * 64,
     )
 
 
@@ -52,7 +51,6 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
         execution_id="child" if subagent else "root",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
         parent_execution_id="root" if subagent else None,
         root_execution_id="root",
         source_execution_id=None,
