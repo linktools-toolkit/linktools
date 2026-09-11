@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public runtime contracts and composition entry point."""
 
+from ..task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphService
 from ._agent import Agent, Execution, Session
 from ._runtime_service import Runtime
 from .recovery import (
@@ -23,7 +24,6 @@ from .service_api import (
     ArtifactView,
     CancelExecutionRequest,
     CancelExecutionResult,
-    CancelGraphRequest,
     CloseSessionRequest,
     CompareEvaluationRequest,
     CreateSessionRequest,
@@ -65,10 +65,7 @@ from .service_api import (
     SessionService,
     SessionView,
     StartEvaluationRequest,
-    TaskEvent,
-    TaskEventType,
     TaskGraphRunEvent,
-    TaskService,
     TranscriptItem,
     UpdateSessionRequest,
 )
@@ -146,7 +143,7 @@ __all__ = [
     "TaskEvent",
     "TaskEventType",
     "TaskGraphRunEvent",
-    "TaskService",
+    "TaskGraphService",
     "ToolEffectApplied",
     "ToolEffectFailed",
     "ToolEffectNotApplied",
