@@ -61,7 +61,7 @@ def _toolset(repository: _RepositoryBoundary) -> RuntimeToolBoundaryToolset:
         (FunctionToolset([_list_directory]),),
         {
             "_list_directory": ManagedToolDescriptor(
-                effect_owner="intrinsic",
+                effect_owner="none",
                 effect="none",
                 tool_class="filesystem.read",
                 workspace_path_fields=("path",),
