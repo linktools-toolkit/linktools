@@ -31,6 +31,8 @@ class RecoveryApprovalRepositoryImpl(_ApprovalRepositoryImpl):
     ) -> tuple[ApprovalRecord, ...]:
         _validate_cancel_request(approval_ids, tenant_id, self._tenant_id, decided_at)
         ordered = tuple(dict.fromkeys(approval_ids))
+        if not ordered:
+            return ()
         keys = tuple(self._key("approval", approval_id) for approval_id in ordered)
         stored_records = await transaction.get_records(keys)
         values: list[ApprovalRecord] = []
@@ -82,6 +84,8 @@ class RecoveryExternalCallRepositoryImpl(_ExternalCallRepositoryImpl):
     ) -> tuple[ExternalCallRecord, ...]:
         _validate_cancel_request(call_ids, tenant_id, self._tenant_id, cancelled_at)
         ordered = tuple(dict.fromkeys(call_ids))
+        if not ordered:
+            return ()
         keys = tuple(self._key("external_call", call_id) for call_id in ordered)
         stored_records = await transaction.get_records(keys)
         values: list[ExternalCallRecord] = []
@@ -156,7 +160,7 @@ def _validate_cancel_request(
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     if isinstance(identities, (str, bytes)) or not isinstance(identities, Sequence):
         raise TypeError("identities must be a sequence")
-    if not identities or any(not isinstance(value, str) or not value for value in identities):
+    if any(not isinstance(value, str) or not value for value in identities):
         raise ValueError("identities must contain non-empty strings")
     if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
         raise ValueError("timestamp must be timezone-aware")
