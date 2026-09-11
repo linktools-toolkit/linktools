@@ -68,11 +68,11 @@ class ModelRegistry:
         retry_delay: "int | float" = 1.0,
         max_tokens: "int | None" = None,
     ) -> None:
+        del provider_instance
         self.register(
             _OpenAIModelBinding(
                 route_id=route_id,
                 model=model,
-                provider_instance=provider_instance,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,
