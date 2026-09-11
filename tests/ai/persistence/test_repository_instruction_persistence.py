@@ -78,7 +78,6 @@ def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRe
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),

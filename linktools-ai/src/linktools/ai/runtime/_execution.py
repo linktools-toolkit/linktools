@@ -491,7 +491,6 @@ class DefaultExecutionService:
             canonical = validate_user_input(request.user_prompt)
             if isinstance(canonical, str):
                 stored = StoredUserInput(
-                    1,
                     "text",
                     StoredPayload.inline_text(canonical),
                 )
@@ -499,7 +498,6 @@ class DefaultExecutionService:
                 from ._input import _encode_user_content
 
                 stored = StoredUserInput(
-                    1,
                     "user-content-v1",
                     StoredPayload.inline_json(_encode_user_content(canonical)),
                 )

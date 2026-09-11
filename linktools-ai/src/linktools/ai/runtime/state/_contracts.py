@@ -165,13 +165,10 @@ class RuntimePayloadRef:
 
 @dataclass(frozen=True, slots=True)
 class StoredUserInput:
-    version: int
     codec: str
     payload: StoredPayload
 
     def __post_init__(self) -> None:
-        if self.version != 1:
-            raise ValueError("stored user input version must be 1")
         if self.codec not in {"text", "user-content-v1"}:
             raise ValueError("stored user input codec is invalid")
         if not isinstance(self.payload, StoredPayload):
@@ -181,7 +178,6 @@ class StoredUserInput:
     def digest(self) -> str:
         return canonical_sha256(
             {
-                "version": self.version,
                 "codec": self.codec,
                 "payload_digest": self.payload.digest,
                 "payload_size": self.payload.size,

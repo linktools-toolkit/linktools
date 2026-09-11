@@ -63,14 +63,14 @@ def test_input_intent_ignores_file_body_and_keeps_logical_paths() -> None:
     assert len(first.digest) == 64
 
 
-def test_stored_user_input_has_one_versioned_owner() -> None:
+def test_stored_user_input_uses_codec_as_schema_owner() -> None:
     stored = StoredUserInput(
-        1,
         "text",
         StoredPayload.inline_text("prompt"),
     )
 
-    assert stored.digest == StoredUserInput(1, "text", stored.payload).digest
+    assert stored.digest == StoredUserInput("text", stored.payload).digest
+    assert "version" not in signature(StoredUserInput).parameters
 
 
 def test_execution_record_does_not_persist_runtime_storage_topology() -> None:
@@ -97,4 +97,4 @@ def test_binary_input_intent_contains_metadata_without_body() -> None:
 
 def test_stored_user_input_does_not_accept_unknown_codec() -> None:
     with pytest.raises(ValueError):
-        StoredUserInput(1, "legacy", StoredPayload.inline_text("prompt"))
+        StoredUserInput("legacy", StoredPayload.inline_text("prompt"))

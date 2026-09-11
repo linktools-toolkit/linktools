@@ -58,7 +58,6 @@ def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
         principal_id="user",
         principal_kind="user",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("hello"),
         ),

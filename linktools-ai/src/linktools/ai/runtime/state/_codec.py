@@ -384,20 +384,17 @@ def _decode_v1_stored_user_input(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> StoredUserInput:
-    _require_exact_keys(raw_fields, frozenset({"version", "codec", "payload"}))
-    version = _decode_domain(
-        raw_fields["version"], int, codec, persisted=persisted
-    )
+    _require_exact_keys(raw_fields, frozenset({"codec", "payload"}))
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
     )
-    if version != 1 or codec_name not in {"text", "user-content-v1"}:
+    if codec_name not in {"text", "user-content-v1"}:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     payload = _decode_domain(
         raw_fields["payload"], StoredPayload, codec, persisted=persisted
     )
     try:
-        return StoredUserInput(version, codec_name, payload)
+        return StoredUserInput(codec_name, payload)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 

@@ -237,7 +237,6 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
         principal_id="principal",
         principal_kind="user",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),

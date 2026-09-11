@@ -74,7 +74,6 @@ def _execution(now: datetime) -> ExecutionRecord:
         principal_id="owner",
         principal_kind="user",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),
