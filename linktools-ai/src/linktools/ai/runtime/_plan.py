@@ -83,21 +83,13 @@ class RuntimePlanStore:
         record = await self._store.read(
             lambda transaction: transaction.get_record(self._key)
         )
-        return _decode_payload(
-            record,
-            owner_kind=self._owner_kind,
-            owner_id=self._owner_id,
-        )[0]
+        return _decode_payload(record)[0]
 
     async def get_plan(self) -> dict[str, JsonValue]:
         record = await self._store.read(
             lambda transaction: transaction.get_record(self._key)
         )
-        items, revision = _decode_payload(
-            record,
-            owner_kind=self._owner_kind,
-            owner_id=self._owner_id,
-        )
+        items, revision = _decode_payload(record)
         return {
             "items": [_item_payload(item) for item in items],
             "revision": revision,
@@ -111,16 +103,14 @@ class RuntimePlanStore:
 
         async def mutate(transaction: StateTransaction) -> dict[str, JsonValue]:
             current = await transaction.get_record(self._key)
-            current_items, current_revision = _decode_payload(
-                current, owner_kind=self._owner_kind, owner_id=self._owner_id
-            )
+            current_items, current_revision = _decode_payload(current)
             if current_items == values:
                 return {
                     "items": [_item_payload(item) for item in values],
                     "revision": current_revision,
                 }
-            revision = 1 if current is None else current_revision + 1
-            next_record = self._record(values, revision, current)
+            revision = current_revision + 1
+            next_record = self._record(values, current)
             if current is None:
                 await transaction.insert_record(next_record)
             elif not await transaction.replace_record(
@@ -157,16 +147,8 @@ class RuntimePlanStore:
     def _record(
         self,
         items: list[PlanItem],
-        revision: int,
         current: StoredRecord | None,
     ) -> StoredRecord:
-        payload: dict[str, JsonValue] = {
-            "version": _VERSION,
-            "owner_kind": self._owner_kind,
-            "owner_id": self._owner_id,
-            "revision": revision,
-            "items": [_item_payload(item) for item in items],
-        }
         return StoredRecord(
             key_digest=self._key,
             partition_digest=self._partition,
@@ -179,16 +161,14 @@ class RuntimePlanStore:
             lease_owner=None,
             lease_fence=0,
             lease_expires_at=None,
-            data=payload,
+            data={
+                "version": _VERSION,
+                "items": [_item_payload(item) for item in items],
+            },
         )
 
 
-def _decode_payload(
-    record: StoredRecord | None,
-    *,
-    owner_kind: PlanOwnerKind,
-    owner_id: str,
-) -> tuple[list[PlanItem], int]:
+def _decode_payload(record: StoredRecord | None) -> tuple[list[PlanItem], int]:
     if record is None:
         return [], 0
     if (
@@ -202,37 +182,12 @@ def _decode_payload(
     if not isinstance(data, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     version = data.get("version")
-    if (
-        "version" not in data
-        or isinstance(version, bool)
-        or not isinstance(version, int)
-        or version < 1
-    ):
+    if isinstance(version, bool) or not isinstance(version, int):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if version != _VERSION:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if not {
-        "version",
-        "owner_kind",
-        "owner_id",
-        "revision",
-        "items",
-    }.issubset(data):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if data.get("owner_kind") != owner_kind:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if data.get("owner_id") != owner_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    revision = data.get("revision")
     raw_items = data.get("items")
-    if (
-        isinstance(revision, bool)
-        or not isinstance(revision, int)
-        or revision < 1
-        or not isinstance(raw_items, list)
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if revision != record.storage_version:
+    if not isinstance(raw_items, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         decoded_items: list[PlanItem] = []
@@ -247,7 +202,7 @@ def _decode_payload(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if len(items) != len(raw_items):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return items, revision
+    return items, record.storage_version
 
 
 def _validated_items(items: list[PlanItem]) -> list[PlanItem]:
