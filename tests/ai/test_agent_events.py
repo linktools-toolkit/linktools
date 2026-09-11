@@ -52,6 +52,7 @@ async def test_event_stream_forwarding_uses_native_capability() -> None:
 
     capability = _event_stream_capability(sink)  # type: ignore[arg-type]
     assert isinstance(capability, ProcessEventStream)
+    assert capability.id == "linktools.ai.event-stream"
 
     async def events():  # type: ignore[no-untyped-def]
         yield PartStartEvent(index=0, part=TextPart(content="hello"))
@@ -67,6 +68,7 @@ async def test_event_stream_forwarding_uses_native_capability() -> None:
 def test_thinking_uses_native_capability_with_request_model_validation() -> None:
     capability = _thinking_capability("high")
     assert isinstance(capability, Thinking)
+    assert capability.id == "linktools.ai.thinking"
     assert capability.effort == "high"
     assert capability.get_model_settings() == {"thinking": "high"}
 
