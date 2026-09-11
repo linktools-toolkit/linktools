@@ -507,7 +507,10 @@ class AgentExecutor:
             )
         capabilities = (
             *capabilities,
-            _event_stream_capability(cast(EventSink, scope.event_sink)),
+            _event_stream_capability(
+                cast(EventSink, scope.event_sink),
+                scope.tool_operations,
+            ),
         )
         _logger.debug(
             "agent execution started: agent=%s definition=%s step=%s mode=%s planning=%s thinking=%s runtime_tools=%s",
@@ -1016,13 +1019,14 @@ def _assistant_text_output(value: str) -> AssistantTextOutput:
 
 def _event_stream_capability(
     sink: EventSink,
+    tool_operations: "ToolOperationBridge | None" = None,
 ) -> ProcessEventStream[AgentContext[object]]:
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
         async for event in events:
-            emission = _map_event(event)
+            emission = _map_event(event, tool_operations)
             if emission is None:
                 event_type = type(event)
                 _logger.debug(
@@ -1076,7 +1080,10 @@ def _validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
         )
 
 
-def _map_event(event: object) -> "AgentEmission | None":
+def _map_event(
+    event: object,
+    tool_operations: "ToolOperationBridge | None" = None,
+) -> "AgentEmission | None":
     if (
         isinstance(event, PartStartEvent)
         and isinstance(event.part, TextPart)
@@ -1141,14 +1148,26 @@ def _map_event(event: object) -> "AgentEmission | None":
         part = event.part
         if isinstance(part, ToolReturnPart):
             success = part.outcome == "success"
+            result_digest = None
+            if success:
+                if tool_operations is not None and tool_operations.owns_call(
+                    part.tool_call_id
+                ):
+                    result_digest = tool_operations.result_digest(part.tool_call_id)
+                    if result_digest is None:
+                        _logger.warning(
+                            "tool operation result digest unavailable: call=%s tool=%s",
+                            part.tool_call_id,
+                            part.tool_name,
+                        )
+                else:
+                    result_digest = tool_return_content_digest(part.content)
             return DurableBoundary(
                 ExecutionEventType.TOOL_CALL_FINISHED,
                 {
                     "call_id": part.tool_call_id,
                     "tool_name": part.tool_name,
-                    "result_digest": tool_return_content_digest(part.content)
-                    if success
-                    else None,
+                    "result_digest": result_digest,
                     "status": "SUCCEEDED" if success else "FAILED",
                 },
             )
