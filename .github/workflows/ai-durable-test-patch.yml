@@ -1,0 +1,143 @@
+name: ai-durable-test-patch
+
+on:
+  push:
+    branches:
+      - refactor/ai-durable-contract-convergence
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'chore(ai): patch strict closure tests'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-durable-contract-convergence
+      - name: Patch strict closure tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('tests/ai/test_v1_final_closure.py')
+          text = path.read_text(encoding='utf-8')
+
+          old_snapshot = (
+              '        output_mode=output.mode,\n'
+              '        output_schema=output.schema_definition,\n'
+              '        binding_digest="a" * 64,\n'
+              '    )\n'
+          )
+          new_snapshot = (
+              '        output_mode=output.mode,\n'
+              '        output_schema=output.schema_definition,\n'
+              '    )\n'
+          )
+          if text.count(old_snapshot) != 1:
+              raise RuntimeError('binding snapshot legacy digest shape changed')
+          text = text.replace(old_snapshot, new_snapshot, 1)
+
+          pattern = re.compile(
+              r'def test_v1_dataclass_reader_tolerates_ordinary_shape_changes\(\) -> None:\n.*?'
+              r'(?=\ndef test_current_envelopes_keep_exact_members\(\) -> None:)',
+              re.DOTALL,
+          )
+          replacement = (
+              'def test_v1_dataclass_reader_requires_exact_current_shape() -> None:\n'
+              '    cursor = ConversationCursor("run")\n'
+              '    wire = encode_domain(cursor)\n'
+              '    fields = dict(wire["fields"])\n'
+              '    fields.pop("history_id")\n'
+              '    _assert_integrity(\n'
+              '        lambda: decode_domain(\n'
+              '            {"$dataclass": "conversation_cursor", "fields": fields},\n'
+              '            ConversationCursor,\n'
+              '        )\n'
+              '    )\n'
+              '    fields = dict(wire["fields"])\n'
+              '    fields["unknown"] = None\n'
+              '    _assert_integrity(\n'
+              '        lambda: decode_domain(\n'
+              '            {"$dataclass": "conversation_cursor", "fields": fields},\n'
+              '            ConversationCursor,\n'
+              '        )\n'
+              '    )\n'
+              '    _assert_integrity(\n'
+              '        lambda: decode_domain(\n'
+              '            {\n'
+              '                "$dataclass": "conversation_cursor",\n'
+              '                "fields": wire["fields"],\n'
+              '                "extra": 1,\n'
+              '            },\n'
+              '            ConversationCursor,\n'
+              '        )\n'
+              '    )\n'
+              '\n'
+              '    task = TaskNode("node", ("dependency",), input={"value": 1}, budget_cost=2)\n'
+              '    task_wire = encode_domain(task)\n'
+              '    task_fields = dict(task_wire["fields"])\n'
+              '    task_fields.pop("budget_cost")\n'
+              '    _assert_integrity(\n'
+              '        lambda: decode_domain(\n'
+              '            {"$dataclass": "task_node", "fields": task_fields},\n'
+              '            TaskNode,\n'
+              '        )\n'
+              '    )\n'
+              '    task_fields = dict(task_wire["fields"])\n'
+              '    task_fields["extra"] = None\n'
+              '    _assert_integrity(\n'
+              '        lambda: decode_domain(\n'
+              '            {"$dataclass": "task_node", "fields": task_fields},\n'
+              '            TaskNode,\n'
+              '        )\n'
+              '    )\n'
+              '    _assert_integrity(lambda: decode_domain({"plain": 1}, Any))\n'
+              '    _assert_integrity(lambda: decode_domain({"$tuple": [], "$mapping": []}, Any))\n'
+              '    assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}\n'
+          )
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise RuntimeError('dataclass compatibility test block not found')
+
+          marker = (
+              'async def test_stored_snapshot_is_durable_authority_across_reopen(\n'
+              '    tmp_path: Path,\n'
+              ') -> None:\n'
+              '    now = datetime.now(timezone.utc)\n'
+          )
+          replacement_marker = marker + '    binding = _binding_snapshot()\n'
+          if text.count(marker) != 1:
+              raise RuntimeError('stored snapshot test marker changed')
+          text = text.replace(marker, replacement_marker, 1)
+          execution_digest = '        binding_digest="a" * 64,\n'
+          if text.count(execution_digest) != 1:
+              raise RuntimeError(f'execution legacy digest count={text.count(execution_digest)}')
+          text = text.replace(execution_digest, '        binding_digest=binding.binding_digest,\n', 1)
+          execution_binding = '        binding=_binding_snapshot(),\n'
+          if text.count(execution_binding) != 1:
+              raise RuntimeError('execution binding fixture changed')
+          text = text.replace(execution_binding, '        binding=binding,\n', 1)
+
+          forbidden = (
+              'binding_digest="a" * 64',
+              'test_v1_dataclass_reader_tolerates_ordinary_shape_changes',
+          )
+          leftovers = [item for item in forbidden if item in text]
+          if leftovers:
+              raise RuntimeError(f'closure compatibility residue: {leftovers}')
+          path.write_text(text, encoding='utf-8')
+          PY
+          python -m py_compile tests/ai/test_v1_final_closure.py
+          git diff --check
+      - name: Commit patch
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add tests/ai/test_v1_final_closure.py
+          git commit -m 'test(ai): enforce exact v1 closure shape'
+          git push origin HEAD:refactor/ai-durable-contract-convergence
