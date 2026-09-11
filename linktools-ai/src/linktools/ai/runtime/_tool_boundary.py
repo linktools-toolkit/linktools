@@ -47,7 +47,7 @@ class RepositoryInstructionBoundary(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ManagedToolDescriptor:
-    effect_owner: Literal["none", "intrinsic", "tool_operation"]
+    effect_owner: Literal["none", "tool_operation"]
     effect: Literal["none", "replay_safe", "non_replay_safe"]
     tool_class: Literal[
         "business",
@@ -59,7 +59,7 @@ class ManagedToolDescriptor:
     workspace_path_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.effect_owner not in {"none", "intrinsic", "tool_operation"}:
+        if self.effect_owner not in {"none", "tool_operation"}:
             raise ValueError("effect owner is invalid")
         if self.effect not in {"none", "replay_safe", "non_replay_safe"}:
             raise ValueError("effect is invalid")
@@ -80,8 +80,6 @@ class ManagedToolDescriptor:
             raise ValueError("workspace path fields must be unique")
         if self.effect_owner == "none" and self.effect != "none":
             raise ValueError("effect-free tools must use effect=none")
-        if self.effect_owner == "intrinsic" and self.effect == "none":
-            return
         if self.effect_owner == "tool_operation" and self.effect == "none":
             raise ValueError("tool-operation tools require an effect")
 
@@ -208,7 +206,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             final_args,
             approved=ctx.tool_call_approved,
         )
-        if descriptor.effect_owner != "tool_operation":
+        if descriptor.effect_owner == "none":
             return await self._invoke(
                 call,
                 tool.tool_def,
