@@ -3,7 +3,7 @@
 """RuntimeState lifecycle owner."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,7 +18,6 @@ from ._contracts import (
     ExecutionState,
     MemoryState,
     RecoveryState,
-    RuntimeStorageContract,
     TaskState,
 )
 from ._plan import (
@@ -77,7 +76,6 @@ class RuntimeState:
         self._steps: RuntimeStepStore | None = None
         self._retention: RuntimeRetentionController | None = None
         self._maintenance: RuntimeStorageInspection | None = None
-        self._storage_contract: RuntimeStorageContract | None = None
 
     @classmethod
     def in_memory(cls) -> "RuntimeState":
@@ -260,7 +258,6 @@ class RuntimeState:
         except asyncio.CancelledError:
             pass
         except BaseException:  # noqa: BLE001
-            # A later close() resumes from _close_cursor and retries the failed action.
             pass
 
     async def _run_close_actions(self) -> None:
@@ -288,7 +285,6 @@ class RuntimeState:
         self._retention = value.retention
         self._maintenance = value.maintenance
         self._close_actions = value.close_actions
-        self._storage_contract = value.storage_contract
         self._namespace = namespace
         self._tenant_id = tenant_id
 
@@ -351,45 +347,6 @@ class RuntimeState:
         await self._objects.release_object_scope(
             domain,
             owner_scope=owner_scope,
-        )
-
-    def storage_contract(
-        self,
-        domains: Collection[RuntimeDomain],
-    ) -> RuntimeStorageContract:
-        self._require_ready()
-        if self._storage_contract is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        selected = frozenset(domains)
-        if any(not isinstance(domain, RuntimeDomain) for domain in selected):
-            raise TypeError("domains must contain RuntimeDomain values")
-        selected_names = frozenset(domain.value for domain in selected)
-        resources = tuple(
-            resource
-            for resource in self._storage_contract.resources
-            if resource.domain in selected
-        )
-        state_groups = tuple(
-            group
-            for group in (
-                tuple(domain for domain in group if domain in selected_names)
-                for group in self._storage_contract.state_groups
-            )
-            if group
-        )
-        object_groups = tuple(
-            group
-            for group in (
-                tuple(domain for domain in group if domain in selected_names)
-                for group in self._storage_contract.object_groups
-            )
-            if group
-        )
-        return RuntimeStorageContract(
-            version=1,
-            resources=resources,
-            state_groups=state_groups,
-            object_groups=object_groups,
         )
 
 
