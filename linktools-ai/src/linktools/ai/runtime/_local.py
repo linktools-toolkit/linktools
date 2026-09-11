@@ -148,6 +148,8 @@ from .state._step_contracts import (
 )
 from .state._recovery_commands import RuntimeRecoveryCommands
 from .state._steps import ExecutionTerminalSealPlan, RuntimeStepStore, StateStepArchive
+
+
 class _SubagentDispatcher(Protocol):
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]: ...
@@ -350,7 +352,7 @@ class _AgentSegmentInput:
     subagent_descriptions: Mapping[str, str | None]
     subagent_delegate: SubagentDelegate | None
     event_sink: Callable[[LiveDelta | DurableBoundary], Awaitable[None]]
-    usage_sink: Callable[[UsageMetrics], Awaitable[None]]
+    usage_sink: Callable[[UsageMetrics], None]
     tool_operations: ToolOperationBridge | None
     background_tasks: set[asyncio.Task[object]]
     replace_history_system_prompt: bool
@@ -2314,23 +2316,16 @@ class LocalExecutionBackend:
             return
         self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)
-        self._worker_shutdown_set().discard(execution_id)
+        self._worker_shutdown_requests.discard(execution_id)
         self._captured_usage.pop(execution_id, None)
-        try:
-            event = self._terminal_events.get(execution_id)
-            if event is not None:
-                event.set()
-        except AttributeError:
-            pass
+        event = self._terminal_events.get(execution_id)
+        if event is not None:
+            event.set()
         segment_only = execution_id in self._segment_only_worker_exits
         self._segment_only_worker_exits.discard(execution_id)
-        try:
-            live_broker = self._live_broker
-        except AttributeError:
-            live_broker = None
         if error is None:
-            if live_broker is not None and not segment_only:
-                live_broker.complete(execution_id)
+            if not segment_only:
+                self._live_broker.complete(execution_id)
             return
         if isinstance(error, AIError):
             failure = _WorkerFailure(
@@ -2363,16 +2358,7 @@ class LocalExecutionBackend:
             failure.code.value,
             exc_info=environ.debug,
         )
-        if live_broker is not None:
-            live_broker.complete(execution_id)
-
-    def _worker_shutdown_set(self) -> set[str]:
-        try:
-            return self._worker_shutdown_requests
-        except AttributeError:
-            requests: set[str] = set()
-            self._worker_shutdown_requests = requests
-            return requests
+        self._live_broker.complete(execution_id)
 
     def _request_worker_shutdown(
         self,
@@ -2381,7 +2367,7 @@ class LocalExecutionBackend:
     ) -> None:
         if task.done() or execution_id in self._worker_cancel_requests:
             return
-        self._worker_shutdown_set().add(execution_id)
+        self._worker_shutdown_requests.add(execution_id)
         self._request_worker_cancel(execution_id, task)
 
     def _request_worker_cancel(
@@ -2454,7 +2440,7 @@ class LocalExecutionBackend:
         return self._live_broker
 
     async def cancel(self, execution: ExecutionRecord) -> CancelEffectOutcome:
-        self._worker_shutdown_set().discard(execution.execution_id)
+        self._worker_shutdown_requests.discard(execution.execution_id)
         current = await self._execution.executions.get(
             execution.execution_id,
             tenant_id=execution.tenant_id,
@@ -2796,6 +2782,7 @@ class LocalExecutionBackend:
             return normalize_json_value(value)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
     async def reconcile(self) -> None:
         await self._recovery_coordinator.reconcile()
 
@@ -3224,6 +3211,7 @@ class LocalExecutionBackend:
                 ),
             )
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     async def _resolve_handoff_conversation(
         self, checkpoint: RecoveryCheckpoint, handoff: RecoveryTerminalHandoff
     ) -> None:
@@ -3688,18 +3676,16 @@ class LocalExecutionBackend:
             await self._drain_worker_task(execution_id, task)
 
         while True:
-            background = self._executor.pending_background_tasks
             dispatcher_background = (
                 ()
                 if self._subagent_dispatcher is None
                 else self._subagent_dispatcher.pending_background_tasks
             )
-            owned_background_by_identity = {
-                id(task): task
-                for task in (*background, *dispatcher_background)
+            owned_background = tuple(
+                task
+                for task in dispatcher_background
                 if isinstance(task, asyncio.Task) and not task.done()
-            }
-            owned_background = tuple(owned_background_by_identity.values())
+            )
             if not owned_background:
                 break
             await asyncio.gather(
@@ -3710,7 +3696,6 @@ class LocalExecutionBackend:
         pending_workers = tuple(
             task for task in self._tasks.values() if not task.done()
         )
-        background = self._executor.pending_background_tasks
         dispatcher_background = (
             ()
             if self._subagent_dispatcher is None
@@ -3729,7 +3714,6 @@ class LocalExecutionBackend:
         pending_background_by_identity = {
             id(task): task
             for task in (
-                *background,
                 *dispatcher_background,
                 *checkpoint_background,
                 *execution_background,
@@ -3789,7 +3773,7 @@ class LocalExecutionBackend:
         self._segment_only_worker_exits.clear()
         self._checkpoint_tasks.clear()
         self._worker_cancel_requests.clear()
-        self._worker_shutdown_set().clear()
+        self._worker_shutdown_requests.clear()
         self._execution_task_map().clear()
 
     async def release_runtime_execution(
@@ -3819,7 +3803,7 @@ class LocalExecutionBackend:
         if task is not None:
             self._tasks.pop(execution_id, None)
         self._worker_cancel_requests.discard(execution_id)
-        self._worker_shutdown_set().discard(execution_id)
+        self._worker_shutdown_requests.discard(execution_id)
         self._terminal_events.pop(execution_id, None)
         self._worker_failures.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
@@ -4026,10 +4010,7 @@ class LocalExecutionBackend:
                             unresolved,
                             tenant_id=current.tenant_id,
                         )
-            try:
-                tool_repository = self._tool_operations
-            except AttributeError:
-                tool_repository = None
+            tool_repository = self._tool_operations
             tool_operations = (
                 RuntimeToolOperationBridge(
                     tool_repository,
@@ -4296,7 +4277,15 @@ class LocalExecutionBackend:
             _logger.debug(
                 "local execution completed: execution=%s run=%s", execution_id, run_id
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
+            cleanup_details: dict[str, JsonValue] = {}
+            if (
+                isinstance(error.__cause__, AIError)
+                and error.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
+            ):
+                cleanup_details["secondary_error_code"] = (
+                    ErrorCode.SANDBOX_CLEANUP_FAILED.value
+                )
             current = await self._execution.executions.get(
                 execution_id,
                 tenant_id=original.tenant_id,
@@ -4305,7 +4294,7 @@ class LocalExecutionBackend:
                 metric_status = "CANCELLED"
                 raise
             if current is not None and current.status is ExecutionStatus.CANCELLING:
-                self._worker_shutdown_set().discard(execution_id)
+                self._worker_shutdown_requests.discard(execution_id)
                 current = await self._commit_terminal(
                     current,
                     ExecutionStatus.CANCELLED,
@@ -4313,6 +4302,7 @@ class LocalExecutionBackend:
                     ErrorCode.EXECUTION_CANCELLED.value,
                     StopReason.CANCELLED,
                     run_id=run_id,
+                    safe_error_details=cleanup_details,
                 )
             elif (
                 current is not None
@@ -4330,6 +4320,7 @@ class LocalExecutionBackend:
                     ErrorCode.EXECUTION_CANCELLED.value,
                     StopReason.CANCELLED,
                     run_id=run_id,
+                    safe_error_details=cleanup_details,
                 )
             if current is not None and current.status in {
                 ExecutionStatus.SUCCEEDED,
@@ -4481,8 +4472,6 @@ class LocalExecutionBackend:
             segment_sequence=base.agent_run_sequence,
         )
         try:
-            if execution.lineage_kind is ExecutionLineageKind.FORK:
-                return list(await _step_messages(execution_steps, run_id))
             return list(await _step_messages(execution_steps, run_id))
         except LookupError as error:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
@@ -4512,12 +4501,7 @@ class LocalExecutionBackend:
         )
 
     def _audit_lock(self, execution_id: str) -> asyncio.Lock:
-        try:
-            pending_locks = self._pending_audit_locks
-        except AttributeError:
-            pending_locks = {}
-            self._pending_audit_locks = pending_locks
-        return pending_locks.setdefault(execution_id, asyncio.Lock())
+        return self._pending_audit_locks.setdefault(execution_id, asyncio.Lock())
 
     def _confirm_committed_events(
         self,
@@ -5883,7 +5867,7 @@ class LocalExecutionBackend:
         self._pending_audit_events.pop(current.execution_id, None)
         return committed
 
-    async def _capture_usage(self, execution_id: str, usage: UsageMetrics) -> None:
+    def _capture_usage(self, execution_id: str, usage: UsageMetrics) -> None:
         self._captured_usage[execution_id] = usage
         _logger.debug(
             "execution usage captured: execution=%s requests=%s tool_calls=%s total_tokens=%s",
