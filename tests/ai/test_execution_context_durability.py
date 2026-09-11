@@ -13,15 +13,8 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import ExecutionRequest
-from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-from linktools.ai.runtime.state._contracts import (
-    ExecutionRecord,
-    RuntimeStorageContract,
-    RuntimeStorageResource,
-    StoredUserInput,
-)
-from linktools.ai.runtime.state._plan import RuntimeRetentionMode
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
@@ -35,7 +28,6 @@ def _binding() -> AgentBindingSnapshot:
         subagents=(),
         output_mode="text",
         output_schema={"type": "string"},
-        binding_digest="a" * 64,
     )
 
 
@@ -71,7 +63,6 @@ def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
             "text",
             StoredPayload.inline_text("hello"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
         correlation=correlation,
     )
 
@@ -80,8 +71,6 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     backend = object.__new__(LocalExecutionBackend)
     backend._accepting = True
     backend._tenant_id = execution.tenant_id
-    backend._storage_contract = execution.storage_contract
-    backend._storage_contract_factory = None
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
             snapshot=execution.binding,
@@ -129,29 +118,6 @@ async def test_local_start_rejects_correlation_drift_from_durable_execution() ->
 
     assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     assert dict(execution.correlation) == {"attempt": 1, "trace_id": "durable"}
-
-
-def test_recovery_identity_uses_the_execution_storage_contract() -> None:
-    execution = _execution(correlation={})
-    backend = _backend(execution)
-    backend._storage_contract = RuntimeStorageContract(
-        1,
-        (
-            RuntimeStorageResource(
-                RuntimeDomain.EXECUTION,
-                "memory",
-                RuntimeRetentionMode.VOLATILE,
-                None,
-            ),
-        ),
-        ((RuntimeDomain.EXECUTION.value,),),
-        (),
-    )
-
-    with pytest.raises(AIError) as raised:
-        backend._validate_recovery_identity(execution)
-
-    assert raised.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
 
 
 def test_execution_record_v1_correlation_wire_round_trips() -> None:
