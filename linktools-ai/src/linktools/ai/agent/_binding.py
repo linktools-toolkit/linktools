@@ -249,9 +249,7 @@ class AgentBindingSnapshot:
                 ),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=cast(OutputMode, mode),
-                output_schema=_normalize_output_schema(
-                    cast(OutputMode, mode), value["output_schema"]
-                ),
+                output_schema=_normalize_mapping(value["output_schema"]),
                 binding_digest=_require_digest(value["binding_digest"]),
                 _extensions=_extensions(value, _KNOWN_FIELDS),
             )
@@ -271,8 +269,6 @@ class AgentBinding:
     def __post_init__(self) -> None:
         from ._definition import AgentDefinition
 
-        if self.output_binding.schema_definition != dict(self.snapshot.output_schema):
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         if (
             not isinstance(self.definition, AgentDefinition)
             or not isinstance(self.output_binding, OutputBinding)
@@ -285,6 +281,7 @@ class AgentBinding:
             or self.definition.selected_subagents != self.snapshot.selected_subagents
             or any(item.id not in self.definition.selected_subagents for item in self.snapshot.subagents)
             or self.output_binding.mode != self.snapshot.output_mode
+            or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -321,17 +318,6 @@ def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
     try:
         return dict(ImmutableJsonMapping(cast("Mapping[str, JsonValue]", value)))
     except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _normalize_output_schema(
-    mode: OutputMode,
-    value: object,
-) -> "dict[str, JsonValue]":
-    schema = _normalize_mapping(value)
-    try:
-        return OutputBinding.create(mode, schema).schema_definition
-    except AIError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 

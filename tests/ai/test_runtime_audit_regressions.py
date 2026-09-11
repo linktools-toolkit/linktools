@@ -31,23 +31,37 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 
 
-class _OutputAlpha(BaseModel):
+class _GeneratedOutputAlpha(BaseModel):
+    title: str
+
+
+class _GeneratedOutputBeta(BaseModel):
+    title: str
+
+
+class _ExplicitOutputAlpha(BaseModel):
     model_config = ConfigDict(title="alpha-contract")
-    title: str
+    value: str
 
 
-class _OutputBeta(BaseModel):
+class _ExplicitOutputBeta(BaseModel):
     model_config = ConfigDict(title="beta-contract")
-    title: str
+    value: str
 
 
-def test_output_fingerprint_ignores_schema_title_annotations() -> None:
-    alpha = bind_output(_OutputAlpha)
-    beta = bind_output(_OutputBeta)
+def test_output_fingerprint_ignores_generated_type_titles() -> None:
+    alpha = bind_output(_GeneratedOutputAlpha)
+    beta = bind_output(_GeneratedOutputBeta)
 
     assert alpha.fingerprint == beta.fingerprint
     assert alpha.schema_definition == beta.schema_definition
-    assert alpha.schema_definition["properties"]["title"] == {"type": "string"}
+    assert alpha.schema_definition["properties"]["title"]["type"] == "string"
+
+
+def test_output_fingerprint_preserves_explicit_schema_titles() -> None:
+    assert bind_output(_ExplicitOutputAlpha).fingerprint != bind_output(
+        _ExplicitOutputBeta
+    ).fingerprint
 
 
 def test_output_schema_literal_ref_is_not_treated_as_schema_ref() -> None:

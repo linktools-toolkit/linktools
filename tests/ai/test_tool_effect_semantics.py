@@ -153,26 +153,42 @@ async def test_workspace_approval_precedes_tool_operation_admission() -> None:
     assert bridge.calls == []
 
 
-@pytest.mark.parametrize("replay_safe", (True, False))
 @pytest.mark.asyncio
-async def test_known_tool_failure_is_terminalized_by_tool_operation(
-    replay_safe: bool,
-) -> None:
+async def test_replay_safe_known_tool_failure_is_terminalized() -> None:
     async def retry() -> None:
         raise ModelRetry("retry")
 
-    bridge = _Bridge(replay_safe)
+    bridge = _Bridge(True)
     with pytest.raises(ModelRetry):
         await _call(
             retry,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect=("replay_safe" if replay_safe else "non_replay_safe"),
+                effect="replay_safe",
                 tool_class="business",
             ),
             bridge=bridge,
         )
     assert bridge.calls == ["begin", "fail"]
+
+
+@pytest.mark.asyncio
+async def test_non_replay_safe_known_tool_failure_becomes_effect_unknown() -> None:
+    async def retry() -> None:
+        raise ModelRetry("retry")
+
+    bridge = _Bridge(False)
+    with pytest.raises(ToolFailed, match="TOOL_EFFECT_UNKNOWN"):
+        await _call(
+            retry,
+            ManagedToolDescriptor(
+                effect_owner="tool_operation",
+                effect="non_replay_safe",
+                tool_class="business",
+            ),
+            bridge=bridge,
+        )
+    assert bridge.calls == ["begin", "unknown"]
 
 
 @pytest.mark.asyncio
@@ -215,7 +231,7 @@ async def test_non_replay_safe_unhandled_failure_requires_effect_verification() 
 
 
 @pytest.mark.asyncio
-async def test_native_deferred_call_releases_tool_operation() -> None:
+async def test_replay_safe_native_deferred_call_releases_tool_operation() -> None:
     async def deferred() -> None:
         raise CallDeferred({"reason": "later"})
 
@@ -231,6 +247,25 @@ async def test_native_deferred_call_releases_tool_operation() -> None:
             bridge=bridge,
         )
     assert bridge.calls == ["begin", "defer"]
+
+
+@pytest.mark.asyncio
+async def test_non_replay_safe_deferred_call_becomes_effect_unknown() -> None:
+    async def deferred() -> None:
+        raise CallDeferred({"reason": "later"})
+
+    bridge = _Bridge(False)
+    with pytest.raises(ToolFailed, match="TOOL_EFFECT_UNKNOWN"):
+        await _call(
+            deferred,
+            ManagedToolDescriptor(
+                effect_owner="tool_operation",
+                effect="non_replay_safe",
+                tool_class="business",
+            ),
+            bridge=bridge,
+        )
+    assert bridge.calls == ["begin", "unknown"]
 
 
 @pytest.mark.asyncio

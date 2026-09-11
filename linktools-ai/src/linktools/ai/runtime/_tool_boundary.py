@@ -234,6 +234,14 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         async def invoke(args: dict[str, Any]) -> Any:
             return await raw_toolset.call_tool(name, args, ctx, raw_tool)
 
+        async def unknown_after_leaf(error: BaseException) -> None:
+            await bridge.unknown(decision, error)
+            if replay_safe:
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
+            raise ToolFailed(
+                "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
+            ) from error
+
         try:
             result = await self._invoke(
                 call,
@@ -244,7 +252,9 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         except (
             ApprovalRequired,
             CallDeferred,
-        ):
+        ) as error:
+            if not replay_safe:
+                await unknown_after_leaf(error)
             cancelled = await bridge.defer(decision)
             if cancelled:
                 raise asyncio.CancelledError
@@ -256,11 +266,15 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             ToolFailed,
             ToolFailedError,
         ) as error:
+            if not replay_safe:
+                await unknown_after_leaf(error)
             cancelled = await bridge.fail(decision, error)
             if cancelled:
                 raise asyncio.CancelledError
             raise
         except SkipToolExecution as error:
+            if not replay_safe:
+                await unknown_after_leaf(error)
             cancelled = await bridge.complete(decision, error.result)
             if cancelled:
                 raise asyncio.CancelledError
@@ -269,10 +283,8 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             await bridge.unknown(decision, error)
             raise
         except BaseException as error:
-            await bridge.unknown(decision, error)
-            if replay_safe:
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
-            raise ToolFailed("TOOL_EFFECT_UNKNOWN: verify side effects before retry") from error
+            await unknown_after_leaf(error)
+            raise AssertionError("unreachable")
         cancelled = await bridge.complete(decision, result)
         if cancelled:
             raise asyncio.CancelledError

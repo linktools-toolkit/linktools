@@ -34,8 +34,8 @@ _TEXT_OUTPUT_SCHEMA: dict[str, JsonValue] = {
 
 
 OutputMode = Literal["text", "structured"]
-_NAMED_SCHEMA_MAPS = frozenset({"properties", "patternProperties", "dependentSchemas"})
-_LITERAL_SCHEMA_VALUES = frozenset({"const", "default", "enum", "examples", "dependentRequired"})
+_LITERAL_JSON_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
+_SCHEMA_MAP_KEYWORDS = frozenset({"properties", "patternProperties", "dependentSchemas"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +189,7 @@ def canonicalize_output_schema_v1(
     value: object,
     output_type: "type[BaseModel] | None" = None,
 ) -> "dict[str, JsonValue]":
-    """Canonicalize stable validation semantics for a v1 output schema."""
+    """Canonicalize only stable generated-name noise in a v1 output schema."""
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
@@ -210,8 +210,10 @@ def canonicalize_output_schema_v1(
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     refs = _local_definition_refs(schema)
     if output_type is not None:
+        title = schema.get("title")
         config = getattr(output_type, "model_config", {})
-        if isinstance(config, Mapping) and config.get("title") is None:
+        explicit_title = isinstance(config, Mapping) and config.get("title") is not None
+        if not explicit_title and title == output_type.__name__:
             schema.pop("title", None)
 
     reachable: list[str] = []
@@ -235,10 +237,14 @@ def canonicalize_output_schema_v1(
     for definition_key in refs.get("", ()):
         visit(definition_key)
 
-    rewritten = _canonical_schema_node(schema, reachable)
+    rewritten = _canonical_schema_node(schema, reachable, root=True)
     if reachable:
         rewritten["$defs"] = {
-            f"d{index}": _canonical_schema_node(definitions[key], reachable)
+            f"d{index}": _canonical_schema_node(
+                definitions[key],
+                reachable,
+                original_key=key,
+            )
             for index, key in enumerate(reachable)
         }
     else:
@@ -253,15 +259,14 @@ def _local_definition_refs(value: object) -> "dict[str, tuple[str, ...]]":
         if isinstance(node, Mapping):
             for key, child in node.items():
                 if key == "$defs":
-                    if owner != "":
-                        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
                     continue
-                if key in _LITERAL_SCHEMA_VALUES:
+                if key in _LITERAL_JSON_KEYWORDS or key == "dependentRequired":
                     continue
-                if key in _NAMED_SCHEMA_MAPS:
-                    if isinstance(child, Mapping):
-                        for schema in child.values():
-                            collect(schema, owner)
+                if key in _SCHEMA_MAP_KEYWORDS:
+                    if not isinstance(child, Mapping):
+                        continue
+                    for nested_schema in child.values():
+                        collect(nested_schema, owner)
                     continue
                 if key == "$dynamicRef":
                     raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
@@ -297,24 +302,16 @@ def _decode_definition_pointer(value: str) -> str:
 def _canonical_schema_node(
     value: object,
     reachable: "Sequence[str]",
+    *,
+    root: bool = False,
+    original_key: "str | None" = None,
 ) -> object:
     if isinstance(value, Mapping):
         result: dict[str, object] = {}
         for key, child in value.items():
             if key == "$defs":
                 continue
-            if key == "title":
-                continue
-            if key in _NAMED_SCHEMA_MAPS:
-                if not isinstance(child, Mapping):
-                    result[str(key)] = child
-                    continue
-                result[str(key)] = {
-                    str(name): _canonical_schema_node(schema, reachable)
-                    for name, schema in child.items()
-                }
-                continue
-            if key in _LITERAL_SCHEMA_VALUES:
+            if key in _LITERAL_JSON_KEYWORDS:
                 result[str(key)] = child
                 continue
             if key == "$ref" and isinstance(child, str):
@@ -322,11 +319,21 @@ def _canonical_schema_node(
                 if target not in reachable:
                     raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
                 child = f"#/$defs/d{reachable.index(target)}"
+            if key == "title" and not root and original_key is not None and child == original_key:
+                continue
             result[str(key)] = _canonical_schema_node(child, reachable)
         for key in ("required", "type"):
             current = result.get(key)
             if isinstance(current, list):
                 result[key] = sorted(set(current), key=lambda item: str(item))
+        dependent = result.get("dependentRequired")
+        if isinstance(dependent, dict):
+            result["dependentRequired"] = {
+                name: sorted(set(items), key=lambda item: str(item))
+                if isinstance(items, list)
+                else items
+                for name, items in dependent.items()
+            }
         return result
     if isinstance(value, list):
         return [_canonical_schema_node(child, reachable) for child in value]
