@@ -41,6 +41,13 @@ jobs:
                   raise RuntimeError(f'{label}: expected 1 occurrence, got {count}')
               return text.replace(old, new, 1)
 
+          def remove_method(text: str, name: str) -> str:
+              pattern = rf'^    def {name}\(.*?(?=^    (?:async )?def |^    @|^class |\Z)'
+              text, count = re.subn(pattern, '', text, count=1, flags=re.MULTILINE | re.DOTALL)
+              if count != 1:
+                  raise RuntimeError(f'{name}: expected 1 implementation, got {count}')
+              return text
+
           codec_path = Path('linktools-ai/src/linktools/ai/runtime/state/_codec.py')
           codec = codec_path.read_text(encoding='utf-8')
           codec = replace_once(codec, '    RuntimeStorageContract,\n', '', 'codec RuntimeStorageContract import')
@@ -62,6 +69,12 @@ jobs:
           local = replace_once(local, '    RuntimeStorageContract,\n', '', 'local RuntimeStorageContract import')
           local = replace_once(
               local,
+              '    def _validate_recovery_identity(self, execution: ExecutionRecord) -> None: ...\n\n',
+              '',
+              'recovery coordinator protocol topology method',
+          )
+          local = replace_once(
+              local,
               '        storage_contract: RuntimeStorageContract | None = None,\n'
               '        storage_contract_factory: (\n'
               '            "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract] | None"\n'
@@ -76,19 +89,32 @@ jobs:
               '',
               'local storage contract assignments',
           )
-          for name in ('_require_storage_contract', '_validate_recovery_identity'):
-              pattern = rf'^    def {name}\(.*?(?=^    (?:async )?def |^    @|^class |\Z)'
-              local, count = re.subn(pattern, '', local, count=1, flags=re.MULTILINE | re.DOTALL)
-              if count != 1:
-                  raise RuntimeError(f'local {name}: expected 1 method, got {count}')
+          local = replace_once(
+              local,
+              '        storage_contract = execution.storage_contract\n'
+              '        if storage_contract is None:\n'
+              '            storage_contract = self._require_storage_contract(execution.session_id)\n'
+              '        if storage_contract != self._require_storage_contract(execution.session_id):\n'
+              '            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)\n',
+              '',
+              'start recovery topology validation',
+          )
+          local = remove_method(local, '_require_storage_contract')
+          local = remove_method(local, '_validate_recovery_identity')
           local = re.sub(
-              r'^\s*(?:self\._port\.|self\.)_validate_recovery_identity\(execution\)\n',
+              r'^\s*(?:self\._port\.|self\.)_validate_recovery_identity\((?:execution|current)\)\n',
               '',
               local,
               flags=re.MULTILINE,
           )
-          if 'storage_contract' in local or 'RuntimeStorageContract' in local or '_validate_recovery_identity' in local:
-              leftovers = [line for line in local.splitlines() if 'storage_contract' in line or 'RuntimeStorageContract' in line or '_validate_recovery_identity' in line]
+          leftovers = [
+              line for line in local.splitlines()
+              if 'storage_contract' in line
+              or 'RuntimeStorageContract' in line
+              or '_validate_recovery_identity' in line
+              or '_require_storage_contract' in line
+          ]
+          if leftovers:
               raise RuntimeError(f'local storage topology leftovers: {leftovers[:20]}')
           local_path.write_text(local, encoding='utf-8')
           PY
