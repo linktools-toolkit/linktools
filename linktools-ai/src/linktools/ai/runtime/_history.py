@@ -523,38 +523,39 @@ class StepExecutionHistoryReader:
         return Page(selected, next_cursor)
 
     async def _history_tree(
-        self, root: ExecutionRecord, tenant_id: str
+        self, selected: ExecutionRecord, tenant_id: str
     ) -> list[tuple[ExecutionRecord, int]]:
-        result: list[tuple[ExecutionRecord, int]] = []
-        visited: set[str] = set()
-
-        async def visit(record: ExecutionRecord, depth: int) -> None:
+        if selected.tenant_id != tenant_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if selected.lineage_kind.value == "SUBAGENT":
             if (
-                record.execution_id in visited
-                or depth > 8
-                or record.tenant_id != tenant_id
+                selected.parent_execution_id is None
+                or selected.root_execution_id == selected.execution_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if depth == 0:
-                if (
-                    record.parent_execution_id is not None
-                    or record.lineage_kind.value
-                    not in {"RUN", "RETRY", "FORK", "SESSION_RESUME"}
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            elif (
-                record.lineage_kind.value != "SUBAGENT"
-                or record.root_execution_id != root.root_execution_id
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            visited.add(record.execution_id)
-            result.append((record, depth))
-            for child in await self._executions.list_children(
-                record.execution_id, tenant_id=tenant_id
-            ):
-                await visit(child, depth + 1)
+            return [(selected, 1)]
+        if (
+            selected.parent_execution_id is not None
+            or selected.lineage_kind.value
+            not in {"RUN", "RETRY", "FORK", "SESSION_RESUME"}
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        await visit(root, 0)
+        result = [(selected, 0)]
+        visited = {selected.execution_id}
+        for child in await self._executions.list_children(
+            selected.execution_id, tenant_id=tenant_id
+        ):
+            if (
+                child.execution_id in visited
+                or child.tenant_id != tenant_id
+                or child.lineage_kind.value != "SUBAGENT"
+                or child.parent_execution_id != selected.execution_id
+                or child.root_execution_id != selected.root_execution_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            visited.add(child.execution_id)
+            result.append((child, 1))
         return result
 
     async def _segment_events(

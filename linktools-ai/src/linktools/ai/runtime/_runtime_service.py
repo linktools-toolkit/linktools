@@ -283,7 +283,7 @@ class Runtime(Generic[AppT]):
     def workspace(self) -> Workspace:
         return self._workspace
 
-    def stream_tree(
+    def _watch_execution_tree(
         self,
         execution_id: str,
         *,

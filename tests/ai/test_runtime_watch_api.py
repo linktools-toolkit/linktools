@@ -11,7 +11,7 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.runtime import Execution, TaskGraphRunEvent
+from linktools.ai.runtime import Execution, Runtime, TaskGraphRunEvent
 from linktools.ai.runtime._task import TaskGraphRun
 from linktools.ai.runtime.service_api import (
     ExecutionStreamEvent,
@@ -21,7 +21,7 @@ from linktools.ai.task import TaskEvent, TaskEventType
 
 
 class _ExecutionService:
-    def stream_tree(
+    def stream(
         self,
         execution_id: str,
         *,
@@ -110,8 +110,8 @@ class _Runtime:
         self.execution = _ExecutionService()
         self.task = _TaskService()
 
-    def stream_tree(self, execution_id, *, principal, after_sequences=None):
-        return self.execution.stream_tree(
+    def _watch_execution_tree(self, execution_id, *, principal, after_sequences=None):
+        return self.execution.stream(
             execution_id,
             principal=principal,
             after_sequences=after_sequences,
@@ -144,6 +144,10 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
     assert len(execution) == 1
     assert execution[0].node_id == "node"
     assert execution[0].event.execution_id == "execution"
+
+
+def test_runtime_does_not_expose_stream_tree() -> None:
+    assert not hasattr(Runtime, "stream_tree")
 
 
 def test_task_run_event_rejects_execution_without_node() -> None:

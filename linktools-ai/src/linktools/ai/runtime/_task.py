@@ -123,7 +123,7 @@ class TaskGraphRun(Generic[AppT]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return
             execution_ids[node_id] = execution_id
-            stream = self._runtime.execution.stream_tree(
+            stream = self._runtime._watch_execution_tree(
                 execution_id,
                 principal=self._principal,
                 after_sequences=after_execution_sequences.get(node_id),
