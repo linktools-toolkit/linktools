@@ -47,20 +47,20 @@ class TaskGraphRun(Generic[AppT]):
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult:
-        return await self._runtime.task.wait_graph(
+        return await self._runtime.graph.wait(
             self.graph_id,
             principal=self._principal,
             timeout_seconds=timeout_seconds,
         )
 
     async def inspect(self) -> TaskGraphView:
-        return await self._runtime.task.inspect_graph(
+        return await self._runtime.graph.inspect(
             self.graph_id,
             principal=self._principal,
         )
 
     async def snapshot(self) -> TaskGraphSnapshot:
-        return await self._runtime.task.snapshot_graph(
+        return await self._runtime.graph.snapshot(
             self.graph_id,
             principal=self._principal,
         )
@@ -71,7 +71,7 @@ class TaskGraphRun(Generic[AppT]):
         idempotency_key: "str | None" = None,
         force: bool = False,
     ) -> TaskGraphView:
-        return await self._runtime.task.cancel_graph(
+        return await self._runtime.graph.cancel(
             self.graph_id,
             CancelGraphRequest(
                 self._principal,
@@ -114,7 +114,7 @@ class TaskGraphRun(Generic[AppT]):
         if set(after_execution_sequences) - set(states):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        graph_stream = self._runtime.task.stream_graph_events(
+        graph_stream = self._runtime.graph.stream_events(
             self.graph_id,
             principal=self._principal,
             after_sequence=after_graph_sequence,
