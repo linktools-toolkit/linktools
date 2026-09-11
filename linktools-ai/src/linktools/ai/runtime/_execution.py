@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -95,7 +95,6 @@ from .state._contracts import (
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
     ResultRecord,
-    RuntimeStorageContract,
     SessionRepository,
     StoredUserInput,
     ExecutionTerminalCommitResult,
@@ -243,7 +242,6 @@ class _ExecutionStartContext:
     canonical_files: tuple[str, ...]
     request_intent_digest: str
     stored_user_input: StoredUserInput | None = None
-    storage_contract: RuntimeStorageContract | None = None
 
 
 class ExecutionBackend(Protocol):
@@ -359,9 +357,6 @@ class DefaultExecutionService:
         object_key_factory: "RuntimeObjectKeyFactory | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
         input_materializer: "ExecutionInputMaterializer | None" = None,
-        storage_contract_factory: (
-            "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract] | None"
-        ) = None,
         session_execution_ready: bool = True,
     ) -> None:
         self._state = state
@@ -387,7 +382,6 @@ class DefaultExecutionService:
         self._object_key_factory = object_key_factory
         self._payload_policy = payload_policy
         self._input_materializer = input_materializer
-        self._storage_contract_factory = storage_contract_factory
         self._session_execution_ready = session_execution_ready
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
@@ -491,8 +485,6 @@ class DefaultExecutionService:
     async def _freeze_input(
         self,
         context: _ExecutionStartContext,
-        *,
-        session_id: str | None,
     ) -> _ExecutionStartContext:
         request = context.request
         if self._input_materializer is None:
@@ -524,7 +516,6 @@ class DefaultExecutionService:
             context,
             request=replace(request, user_prompt=canonical, files=()),
             stored_user_input=stored,
-            storage_contract=self._storage_contract(session_id),
         )
 
     async def _request_for_execution(
@@ -545,20 +536,6 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             prompt = decode_user_content_payload(payload)
         return replace(request, user_prompt=prompt, files=())
-
-    def _storage_contract(
-        self,
-        session_id: str | None,
-    ) -> RuntimeStorageContract | None:
-        if self._storage_contract_factory is None:
-            return None
-        domains = {
-            RuntimeDomain.EXECUTION,
-            RuntimeDomain.RECOVERY,
-        }
-        if session_id is not None:
-            domains.add(RuntimeDomain.CONVERSATION)
-        return self._storage_contract_factory(domains)
 
     def _binding(
         self,
@@ -1149,9 +1126,8 @@ class DefaultExecutionService:
         if session_id is not None and not self._session_execution_ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
-        context = await self._freeze_input(context, session_id=session_id)
+        context = await self._freeze_input(context)
         request = context.request
-        storage_contract = context.storage_contract
 
         repository_instructions = None
         if self._instruction_resolver is not None:
@@ -1221,7 +1197,6 @@ class DefaultExecutionService:
             principal_id=request.principal.principal_id,
             principal_kind=request.principal.kind,
             stored_user_input=context.stored_user_input,
-            storage_contract=storage_contract,
         )
         reservation = await self._state.executions.reserve_start(
             ExecutionStartReservation(
