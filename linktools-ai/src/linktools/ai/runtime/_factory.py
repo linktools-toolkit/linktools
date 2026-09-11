@@ -67,7 +67,6 @@ from .state._contracts import (
     RecoveryCheckpointState,
     RuntimeStorageContract,
 )
-from .state._readmodel import ExecutionReadModelRepository
 from .state import RuntimeStatePlan, RuntimeStateRoute
 
 AppT = TypeVar("AppT")
@@ -233,7 +232,6 @@ async def compose_runtime_components(
             history_reader=_execution_history_reader(
                 workspace,
                 selected_state,
-                effective_tenant_id,
             ),
             session_history_reader=StepSessionHistoryReader(
                 store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
@@ -333,6 +331,7 @@ def _build_default_models(workspace: Workspace) -> ModelRegistry:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
     return ModelRegistry.openai(
         model=model,
+        provider_instance=os.getenv("OPENAI_PROVIDER_INSTANCE", "").strip() or None,
         base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
         api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
     )
@@ -365,18 +364,12 @@ def _default_runtime_state(workspace: Workspace) -> RuntimeState:
 def _execution_history_reader(
     workspace: Workspace,
     state: RuntimeState,
-    tenant_id: str,
 ) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace=workspace.workspace_id,
         executions=state.execution.executions,
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("execution-history", _grant_key(workspace)),
-        read_model=ExecutionReadModelRepository(
-            state.execution.executions.state_store,
-            namespace=workspace.workspace_id,
-            tenant_id=tenant_id,
-        ),
     )
 
 
