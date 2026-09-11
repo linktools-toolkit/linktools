@@ -136,7 +136,7 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
         (FunctionToolset([read_file]),),
         {
             "read_file": ManagedToolDescriptor(
-                effect_owner="intrinsic",
+                effect_owner="none",
                 effect="none",
                 tool_class="filesystem.read",
             )
