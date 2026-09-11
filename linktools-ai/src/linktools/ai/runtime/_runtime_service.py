@@ -78,9 +78,9 @@ from .service_api import (
     ReplayEvaluationRequest,
     ResumeSessionRequest,
     RetryExecutionRequest,
-    RunEvaluationRequest,
     SessionService,
     SessionView,
+    StartEvaluationRequest,
     TaskService,
     UpdateSessionRequest,
     ExecutionTreeEvent,
@@ -605,15 +605,15 @@ class Runtime(Generic[AppT]):
             ),
         )
 
-    async def _run_evaluation_for_agent(
+    async def _start_evaluation_for_agent(
         self,
         agent_digest: str,
-        request: RunEvaluationRequest,
+        request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None",
     ) -> EvaluationHandle:
         binding = self._bind_agent(agent_digest, output=output)
-        return await self.evaluation.run(binding.digest, request)
+        return await self.evaluation.start(binding.digest, request)
 
     async def _replay_evaluation_for_agent(
         self,

@@ -25,9 +25,9 @@ from .service_api import (
     ExecutionTraceItem,
     ExecutionTreeEvent,
     ReplayEvaluationRequest,
-    RunEvaluationRequest,
     SessionHistoryItem,
     SessionView,
+    StartEvaluationRequest,
     TranscriptItem,
 )
 
@@ -465,13 +465,13 @@ class Agent(Generic[AppT]):
         )
         return Session(self._runtime, self.id, self._agent_digest, session_id, principal)
 
-    async def run_evaluation(
+    async def start_evaluation(
         self,
-        request: RunEvaluationRequest,
+        request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None" = None,
     ) -> EvaluationHandle:
-        return await self._runtime._run_evaluation_for_agent(
+        return await self._runtime._start_evaluation_for_agent(
             self._agent_digest,
             request,
             output=output,

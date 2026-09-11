@@ -47,6 +47,7 @@ from .recovery import (
     ToolEffectResolutionResult,
 )
 
+
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
     try:
         return normalize_correlation(value)
@@ -439,7 +440,7 @@ class LoadedSession:
 
 
 @dataclass(frozen=True, slots=True)
-class RunEvaluationRequest:
+class StartEvaluationRequest:
     principal: Principal
     dataset_digest: str
     memory_scope: str
@@ -911,8 +912,8 @@ class TaskService(Protocol):
 
 
 class EvaluationService(Protocol):
-    async def run(
-        self, binding_digest: str, request: RunEvaluationRequest
+    async def start(
+        self, binding_digest: str, request: StartEvaluationRequest
     ) -> EvaluationHandle: ...
     async def inspect(
         self, evaluation_id: str, *, principal: Principal
@@ -1023,11 +1024,11 @@ __all__ = [
     "ReplayEvaluationRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
-    "RunEvaluationRequest",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
     "SessionView",
+    "StartEvaluationRequest",
     "TaskEvent",
     "TaskEventType",
     "TaskGraphRunEvent",

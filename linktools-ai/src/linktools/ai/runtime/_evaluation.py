@@ -36,7 +36,7 @@ from .service_api import (
     ExecutionRequest,
     ExecutionService,
     ReplayEvaluationRequest,
-    RunEvaluationRequest,
+    StartEvaluationRequest,
 )
 from .state._contracts import (
     EvaluationState,
@@ -144,8 +144,8 @@ class DefaultEvaluationService:
         self._handoff_states: dict[tuple[str, str], _EvaluationHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
 
-    async def run(
-        self, binding_digest: str, request: RunEvaluationRequest
+    async def start(
+        self, binding_digest: str, request: StartEvaluationRequest
     ) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
