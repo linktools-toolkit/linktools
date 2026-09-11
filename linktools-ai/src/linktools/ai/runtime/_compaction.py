@@ -155,6 +155,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         projection_sink: _ContextProjectionSink | None = None,
         workspace_read_available: bool = False,
     ) -> None:
+        self.id = "linktools.ai.compaction"
         if target_tokens is not None and (
             not isinstance(target_tokens, int)
             or isinstance(target_tokens, bool)
