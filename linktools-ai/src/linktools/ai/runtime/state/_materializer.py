@@ -32,8 +32,6 @@ from ._contracts import (
     ExecutionState,
     MemoryState,
     RecoveryState,
-    RuntimeStorageContract,
-    RuntimeStorageResource,
     TaskState,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
@@ -89,7 +87,6 @@ class _MaterializedRuntimeState:
     steps: RuntimeStepStore
     retention: RuntimeRetentionController
     maintenance: RuntimeStorageInspection
-    storage_contract: RuntimeStorageContract
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
 
@@ -109,25 +106,10 @@ class _RuntimeObjectRouter:
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
 
-    def grouped_domains(
-        self,
-        domains: Sequence[RuntimeDomain],
-    ) -> tuple[tuple[str, ...], ...]:
-        selected = tuple(domains)
-        groups: list[tuple[str, ...]] = []
-        for store in self._stores.values():
-            members = tuple(
-                domain.value for domain in selected if self._stores.get(domain) is store
-            )
-            group = tuple(sorted(members))
-            if group and group not in groups:
-                groups.append(group)
-        return tuple(sorted(groups))
-
     def resolve_object(
         self, domain: RuntimeDomain, reference: ObjectRef
     ) -> ObjectStore:
-        """Resolve an object by its durable runtime domain, never by store id."""
+        """Resolve an object by its durable Runtime domain."""
         store = self.object_store(domain)
         if reference.store_id != store.store_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -387,7 +369,6 @@ async def materialize_runtime_state(
             durable_domains=plan.durable_domains,
             state_validators=(steps.validate_integrity,),
         )
-        storage_contract = _storage_contract(plan, stores, objects)
         actions: list[Callable[[], Awaitable[None]]] = [
             steps.preflight_close,
             objects.preflight_close,
@@ -412,7 +393,6 @@ async def materialize_runtime_state(
             steps=steps,
             retention=retention,
             maintenance=maintenance,
-            storage_contract=storage_contract,
             close_actions=tuple(actions),
         )
     except BaseException:
@@ -608,43 +588,6 @@ def _filesystem_group_scope(
             "members": members,
         }
     )[:32]
-
-
-def _storage_contract(
-    plan: RuntimeStatePlan,
-    stores: Mapping[RuntimeDomain, StateStore],
-    objects: _RuntimeObjectRouter,
-) -> RuntimeStorageContract:
-    resources = tuple(
-        RuntimeStorageResource(
-            domain=domain,
-            backend=plan.route(domain).kind,
-            retention=plan.route(domain).retention,
-            object_store_id=(
-                objects.object_store(domain).store_id
-                if domain in _OBJECT_DOMAINS
-                else None
-            ),
-        )
-        for domain in sorted(RuntimeDomain, key=lambda value: value.value)
-    )
-    state_groups: list[tuple[object, list[str]]] = []
-    for domain in RuntimeDomain:
-        storage_group = stores[domain].storage_group
-        for existing_group, members in state_groups:
-            if storage_group is existing_group:
-                members.append(domain.value)
-                break
-        else:
-            state_groups.append((storage_group, [domain.value]))
-    return RuntimeStorageContract(
-        version=1,
-        resources=resources,
-        state_groups=tuple(
-            sorted(tuple(sorted(members)) for _, members in state_groups)
-        ),
-        object_groups=objects.grouped_domains(tuple(RuntimeDomain)),
-    )
 
 
 __all__ = ["materialize_runtime_state"]
