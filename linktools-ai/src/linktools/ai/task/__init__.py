@@ -37,10 +37,11 @@ from ._local import (
     TaskNodeRunResult,
 )
 from ._service import TaskGraphLauncher, TaskGraphQueryService, TaskGraphService
-from ._service_impl import TaskPersistence
+from ._service_impl import DefaultTaskGraphService, TaskPersistence
 
 __all__ = [
     "CancelGraphRequest",
+    "DefaultTaskGraphService",
     "LocalTaskGraphLauncher",
     "RecoverGraphRequest",
     "TaskCompletionLedger",
