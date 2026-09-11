@@ -120,14 +120,14 @@ async def test_local_start_rejects_correlation_drift_from_durable_execution() ->
     assert dict(execution.correlation) == {"attempt": 1, "trace_id": "durable"}
 
 
-def test_execution_record_v1_correlation_wire_round_trips() -> None:
+def test_execution_record_correlation_wire_round_trips_current_shape() -> None:
     empty = _execution(correlation={})
     payload = encode_domain(empty)
     assert isinstance(payload, dict)
     assert payload["$dataclass"] == "execution_record"
     fields = payload["fields"]
     assert isinstance(fields, dict)
-    assert "correlation" not in fields
+    assert "correlation" in fields
 
     decoded = decode_domain(payload, ExecutionRecord)
     assert decoded == empty
