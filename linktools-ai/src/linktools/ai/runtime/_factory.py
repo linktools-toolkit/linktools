@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import os
 import uuid
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import TypeVar, cast
@@ -63,10 +63,7 @@ from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeState
-from .state._contracts import (
-    RecoveryCheckpointState,
-    RuntimeStorageContract,
-)
+from .state._contracts import RecoveryCheckpointState
 from .state import RuntimeStatePlan, RuntimeStateRoute
 
 AppT = TypeVar("AppT")
@@ -246,10 +243,6 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             input_materializer=input_materializer,
-            storage_contract=selected_state.storage_contract(
-                {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}
-            ),
-            storage_contract_factory=selected_state.storage_contract,
             session_execution_ready=True,
             metrics=metrics,
             owned_workspace_close=owned_workspace_close,
@@ -430,8 +423,6 @@ async def _build_local_components(
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
     input_materializer: ExecutionInputMaterializer,
-    storage_contract: "RuntimeStorageContract",
-    storage_contract_factory: "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract]",
     session_execution_ready: bool,
     metrics: "Metrics | None",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
@@ -476,7 +467,6 @@ async def _build_local_components(
         object_key_factory=object_key_factory,
         payload_policy=payload_policy,
         input_materializer=input_materializer,
-        storage_contract_factory=storage_contract_factory,
         session_execution_ready=session_execution_ready,
     )
     execution_tree_broker = ExecutionTreeBroker()
@@ -548,8 +538,6 @@ async def _build_local_components(
                 is RuntimeRetentionMode.DURABLE
             ),
             input_materializer=input_materializer,
-            storage_contract=storage_contract,
-            storage_contract_factory=storage_contract_factory,
             subagent_dispatcher=dispatcher,
             live_broker=live_broker,
             payload_policy=payload_policy,
