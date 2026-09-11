@@ -12,6 +12,7 @@ from linktools.ai.core import TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
+    DefaultTaskGraphService,
     LocalTaskGraphLauncher,
     TaskGraph,
     TaskGraphLaunch,
@@ -21,7 +22,6 @@ from linktools.ai.task import (
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
-from linktools.ai.task._service_impl import DefaultTaskService
 from linktools.ai.workspace import trusted_workspace_principal
 
 
@@ -226,12 +226,12 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
         await asyncio.wait_for(runner.entered.wait(), 1)
         await asyncio.sleep(0.05)
 
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             SimpleNamespace(tasks=repository),
             _AllowAuthorization(),
             local_waiter=launcher,
         )
-        history = await service.list_graph_events(
+        history = await service.list_events(
             graph.graph_id,
             principal=principal,
             limit=100,
@@ -253,12 +253,12 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
 
         monkeypatch.setattr(repository, "snapshot_graph", counting_snapshot)
         streams = [
-            service.stream_graph_events(
+            service.stream_events(
                 graph.graph_id,
                 principal=principal,
                 after_sequence=after_sequence,
             ),
-            service.stream_graph_events(
+            service.stream_events(
                 graph.graph_id,
                 principal=principal,
                 after_sequence=after_sequence,
@@ -320,18 +320,18 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
         )
         await asyncio.wait_for(runner.entered.wait(), 1)
 
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             SimpleNamespace(tasks=repository),
             _AllowAuthorization(),
             local_waiter=launcher,
         )
-        history = await service.list_graph_events(
+        history = await service.list_events(
             graph.graph_id,
             principal=principal,
             limit=100,
         )
         assert history.items
-        stream = service.stream_graph_events(
+        stream = service.stream_events(
             graph.graph_id,
             principal=principal,
             after_sequence=history.items[-1].sequence,
