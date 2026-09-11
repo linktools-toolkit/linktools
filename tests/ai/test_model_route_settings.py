@@ -129,6 +129,32 @@ def test_model_registry_restore_requires_exact_provider_instance() -> None:
     assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 
+def test_legacy_public_openai_binding_can_restore_without_provider_instance() -> None:
+    registry = ModelRegistry.openai(model="gpt-test")
+    current = registry.snapshot().resolve("default")
+    historical = dict(current.semantic_payload)
+    historical.pop("provider_instance")
+
+    restored = registry.snapshot().restore(historical, route_id="default")
+
+    assert restored is current
+
+
+def test_legacy_openai_binding_cannot_restore_to_custom_endpoint() -> None:
+    public = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
+    historical = dict(public.semantic_payload)
+    historical.pop("provider_instance")
+    registry = ModelRegistry.openai(
+        model="gpt-test",
+        base_url="https://gateway.example/v1",
+    )
+
+    with pytest.raises(AIError) as raised:
+        registry.snapshot().restore(historical, route_id="default")
+
+    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+
+
 def test_openai_route_materializes_settings_and_retries() -> None:
     binding = ModelRegistry.openai(
         model="gpt-test",
