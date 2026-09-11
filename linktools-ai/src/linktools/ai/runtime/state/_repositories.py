@@ -1800,11 +1800,16 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             value_type=IdempotencyRecord,
         )
 
+    def _require_resource_kind(self, record: IdempotencyRecord) -> None:
+        if record.resource_kind is not self._resource_kind:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     def _identity_key(self, scope: str, key: str) -> list[str]:
         return [scope, key]
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         _require_tenant(record, self._tenant_id)
+        self._require_resource_kind(record)
         identity = self._identity_key(record.scope, record.idempotency_key_digest)
         try:
             await self._insert(
@@ -1856,6 +1861,7 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
+        self._require_resource_kind(next_record)
         identity = self._identity_key(scope, idempotency_key_digest)
 
         async def mutate(transaction: StateTransaction) -> IdempotencyRecord:
@@ -2029,6 +2035,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
+        self._idempotency._require_resource_kind(reservation.idempotency)
 
         async def mutate(
             transaction: StateTransaction,
@@ -2152,7 +2159,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if idempotency_record is None:
             idempotency = IdempotencyRecord(
                 tenant_id=claim.tenant_id,
-                runtime_domain=RuntimeDomain.EXECUTION,
                 scope=claim.scope,
                 idempotency_key_digest=claim.idempotency_key_digest,
                 request_digest=claim.request_digest,
@@ -2181,18 +2187,17 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 not _same_idempotency(
                     idempotency,
                     IdempotencyRecord(
-                        claim.tenant_id,
-                        RuntimeDomain.EXECUTION,
-                        claim.scope,
-                        claim.idempotency_key_digest,
-                        claim.request_digest,
-                        ResourceKind.EXECUTION,
-                        claim.execution_id,
-                        idempotency.status,
-                        idempotency.result_digest,
-                        idempotency.error_code,
-                        idempotency.created_at,
-                        idempotency.updated_at,
+                        tenant_id=claim.tenant_id,
+                        scope=claim.scope,
+                        idempotency_key_digest=claim.idempotency_key_digest,
+                        request_digest=claim.request_digest,
+                        resource_kind=ResourceKind.EXECUTION,
+                        resource_id=claim.execution_id,
+                        status=idempotency.status,
+                        result_digest=idempotency.result_digest,
+                        error_code=idempotency.error_code,
+                        created_at=idempotency.created_at,
+                        updated_at=idempotency.updated_at,
                     ),
                 )
                 or idempotency.status is not IdempotencyStatus.RESERVED
@@ -5149,7 +5154,6 @@ def _same_idempotency_identity(
     """Compare only the immutable request identity, never a candidate resource id."""
     return (
         left.tenant_id == right.tenant_id
-        and left.runtime_domain is right.runtime_domain
         and left.scope == right.scope
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.request_digest == right.request_digest

@@ -744,8 +744,7 @@ class DefaultExecutionService:
         if existing.request_digest != request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
-            existing.runtime_domain is not RuntimeDomain.EXECUTION
-            or existing.scope != scope
+            existing.scope != scope
             or existing.idempotency_key_digest != idempotency_key_digest
             or existing.resource_kind is not ResourceKind.EXECUTION
             or existing.tenant_id != request.principal.tenant_id
@@ -1200,7 +1199,6 @@ class DefaultExecutionService:
                 execution,
                 IdempotencyRecord(
                     tenant_id=request.principal.tenant_id,
-                    runtime_domain=RuntimeDomain.EXECUTION,
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
@@ -1358,7 +1356,6 @@ class DefaultExecutionService:
         )
         if (
             idempotency is None
-            or idempotency.runtime_domain is not RuntimeDomain.EXECUTION
             or idempotency.scope != identity.scope
             or idempotency.idempotency_key_digest != identity.idempotency_key_digest
             or idempotency.resource_kind is not ResourceKind.EXECUTION

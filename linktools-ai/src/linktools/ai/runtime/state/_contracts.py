@@ -645,7 +645,6 @@ class AgentAttemptClaim:
 @dataclass(frozen=True, slots=True)
 class IdempotencyRecord:
     tenant_id: str
-    runtime_domain: RuntimeDomain
     scope: str
     idempotency_key_digest: str
     request_digest: str
@@ -658,14 +657,6 @@ class IdempotencyRecord:
     updated_at: datetime
 
     def __post_init__(self) -> None:
-        expected = {
-            RuntimeDomain.EXECUTION: ResourceKind.EXECUTION,
-            RuntimeDomain.EVALUATION: ResourceKind.EVALUATION,
-        }.get(self.runtime_domain)
-        if expected is None or self.resource_kind is not expected:
-            raise ValueError(
-                "idempotency resource identity does not match runtime domain"
-            )
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("idempotency timestamps require timezone awareness")
 

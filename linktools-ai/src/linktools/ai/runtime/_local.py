@@ -3093,8 +3093,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         identity = records[0]
         if (
-            identity.runtime_domain is not RuntimeDomain.EXECUTION
-            or identity.resource_kind is not ResourceKind.EXECUTION
+            identity.resource_kind is not ResourceKind.EXECUTION
             or identity.resource_id != execution.execution_id
             or identity.tenant_id != execution.tenant_id
         ):
@@ -3122,8 +3121,7 @@ class LocalExecutionBackend:
         expected_status: IdempotencyStatus,
     ) -> IdempotencyRecord:
         if (
-            identity.runtime_domain is not RuntimeDomain.EXECUTION
-            or identity.resource_kind is not ResourceKind.EXECUTION
+            identity.resource_kind is not ResourceKind.EXECUTION
             or identity.resource_id != execution.execution_id
             or identity.tenant_id != execution.tenant_id
         ):

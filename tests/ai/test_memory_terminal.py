@@ -17,7 +17,8 @@ from linktools.ai.core import (
     StopReason,
     UsageMetrics,
 )
-from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     ExecutionTerminalCommit,
@@ -41,6 +42,32 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         output_mode=output.mode,
         output_schema=output.schema_definition,
     )
+
+
+@pytest.mark.asyncio
+async def test_execution_idempotency_repository_owns_resource_kind() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="idempotency-owner", tenant_id="tenant")
+    try:
+        now = datetime.now(timezone.utc)
+        record = IdempotencyRecord(
+            tenant_id="tenant",
+            scope="execution.run",
+            idempotency_key_digest="a" * 64,
+            request_digest="b" * 64,
+            resource_kind=ResourceKind.EVALUATION,
+            resource_id="evaluation",
+            status=IdempotencyStatus.RESERVED,
+            result_digest=None,
+            error_code=None,
+            created_at=now,
+            updated_at=now,
+        )
+        with pytest.raises(AIError) as error:
+            await state.execution.idempotency.reserve(record)
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
@@ -76,18 +103,17 @@ async def test_in_memory_terminal_commit_validates_success_result(
             **execution_owner_fields(),
         )
         identity = IdempotencyRecord(
-            "tenant",
-            RuntimeDomain.EXECUTION,
-            "execution.run",
-            "a" * 64,
-            "b" * 64,
-            ResourceKind.EXECUTION,
-            "execution",
-            IdempotencyStatus.STARTED,
-            None,
-            None,
-            now,
-            now,
+            tenant_id="tenant",
+            scope="execution.run",
+            idempotency_key_digest="a" * 64,
+            request_digest="b" * 64,
+            resource_kind=ResourceKind.EXECUTION,
+            resource_id="execution",
+            status=IdempotencyStatus.STARTED,
+            result_digest=None,
+            error_code=None,
+            created_at=now,
+            updated_at=now,
         )
         await state.execution.executions.create(execution)
         await state.execution.idempotency.reserve(identity)
