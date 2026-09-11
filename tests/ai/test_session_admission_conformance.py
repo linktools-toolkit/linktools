@@ -42,7 +42,6 @@ def _session() -> SessionRecord:
         agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
-        resource_generation=0,
         cwd=None,
         metadata={},
         created_at=now,
@@ -82,7 +81,6 @@ async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
         current = await state.conversation.sessions.get("session", tenant_id="tenant")
         assert current is not None
         assert current.revision == 0
-        assert current.resource_generation == 0
         owner = current.active_execution_id
         assert owner is not None
 
@@ -93,7 +91,6 @@ async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
             next_record=replace(
                 current,
                 revision=1,
-                resource_generation=1,
                 metadata={"key": "value"},
                 active_execution_id="stale-caller-value",
             ),

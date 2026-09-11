@@ -1649,7 +1649,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 status=next_status,
                 closed_at=closed_at,
                 revision=current.revision + 1,
-                resource_generation=current.resource_generation + 1,
                 updated_at=now,
             )
             await _replace_checked(
@@ -1747,7 +1746,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if release_execution
             else current.active_execution_id,
             revision=current.revision + 1,
-            resource_generation=current.resource_generation + 1,
             updated_at=now,
         )
         await _replace_checked(
@@ -4975,12 +4973,6 @@ def _projected_record(
     value: object,
 ) -> StoredRecord:
     _require_tenant(value, repository._tenant_id)
-    if isinstance(value, SessionRecord):
-        if value.agent_id is None:
-            current_value = _decode_enveloped_domain(current.data, SessionRecord)
-            value = replace(value, agent_id=current_value.resolved_agent_id())
-        else:
-            value.resolved_agent_id()
     identity = _canonical_record_identity(current.kind, value)
     projected = repository._stored(
         current.kind, identity, value, state=_record_state(value)

@@ -24,7 +24,6 @@ def _session() -> SessionRecord:
         agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
-        resource_generation=0,
         cwd=None,
         metadata={},
         created_at=now,
@@ -49,7 +48,6 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
         )
         assert admitted.active_execution_id == "execution-1"
         assert admitted.revision == original.revision
-        assert admitted.resource_generation == original.resource_generation
         assert admitted.updated_at == original.updated_at
 
         with pytest.raises(AIError) as busy:
@@ -65,7 +63,6 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
             admitted,
             metadata={"key": "value"},
             revision=admitted.revision + 1,
-            resource_generation=admitted.resource_generation + 1,
             updated_at=datetime.now(timezone.utc),
         )
         updated = await state.conversation.sessions.compare_and_swap(

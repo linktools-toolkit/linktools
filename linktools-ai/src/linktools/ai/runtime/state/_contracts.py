@@ -354,9 +354,6 @@ class ConversationHistoryRecord:
             raise ValueError("forked history with content requires a prefix head")
 
 
-SESSION_AGENT_ID_METADATA_KEY = "linktools.ai.agent_id"
-
-
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     session_id: str
@@ -364,19 +361,22 @@ class SessionRecord:
     owner_principal_id: str
     status: SessionStatus
     revision: int
-    resource_generation: int
     cwd: str | None
     metadata: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None
     active_execution_id: str | None
+    agent_id: str
     continuation: ConversationCursor | None = None
     history_quality: str = "complete"
     history_id: str | None = None
-    agent_id: str | None = None
 
     def __post_init__(self) -> None:
+        try:
+            validate_agent_id(self.agent_id)
+        except (AIError, TypeError) as error:
+            raise ValueError("session agent id is invalid") from error
         if (
             self.active_execution_id is not None
             and not self.active_execution_id.strip()
@@ -395,27 +395,6 @@ class SessionRecord:
                 raise ValueError("session cwd must be canonical")
         if self.history_quality not in {"complete", "conservative"}:
             raise ValueError("session history quality summary is invalid")
-
-    def resolved_agent_id(self) -> str:
-        historical = self.metadata.get(SESSION_AGENT_ID_METADATA_KEY)
-        historical_id: str | None = None
-        if isinstance(historical, str):
-            try:
-                historical_id = validate_agent_id(historical)
-            except AIError:
-                historical_id = None
-        if self.agent_id is not None:
-            try:
-                resolved = validate_agent_id(self.agent_id)
-            except (AIError, TypeError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if historical_id is not None and historical_id != resolved:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return resolved
-        if historical_id is not None:
-            return historical_id
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
 
 @dataclass(frozen=True, slots=True)
 class SessionForkResultRecord:

@@ -145,7 +145,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
 
     async def _authorized(session_id: str, principal: object, action: object) -> object:
         del session_id, principal, action
-        return SimpleNamespace(resolved_agent_id=lambda: "agent")
+        return SimpleNamespace(agent_id="agent")
 
     async def _reconcile(record: object) -> object:
         return record

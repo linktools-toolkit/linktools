@@ -1014,7 +1014,7 @@ class DefaultExecutionService:
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
 
-            if session.resolved_agent_id() != session_agent_id:
+            if session.agent_id != session_agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             conversation_run_id = (
                 None
