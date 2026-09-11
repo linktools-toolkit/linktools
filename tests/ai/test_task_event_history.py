@@ -11,6 +11,7 @@ from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
+    DefaultTaskGraphService,
     TaskEventType,
     TaskGraph,
     TaskGraphAdmission,
@@ -18,7 +19,6 @@ from linktools.ai.task import (
     TaskGraphRequest,
     TaskNode,
 )
-from linktools.ai.task._service_impl import DefaultTaskService
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -343,7 +343,7 @@ async def test_task_event_page_reads_latest_only_for_empty_cursor_page(
         repository = state.task.tasks
         graph = TaskGraph("event-page-reads", (TaskNode("node"),))
         await admit_graph(state, graph)
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             SimpleNamespace(tasks=repository),
             _AllowAuthorization(),
         )
@@ -361,14 +361,14 @@ async def test_task_event_page_reads_latest_only_for_empty_cursor_page(
 
         monkeypatch.setattr(repository, "latest_event", _counted_latest_event)
 
-        first = await service.list_graph_events(
+        first = await service.list_events(
             graph.graph_id,
             principal=Principal("tester", "tenant"),
         )
         assert [event.sequence for event in first.items] == [1]
         assert latest_calls == 0
 
-        tail = await service.list_graph_events(
+        tail = await service.list_events(
             graph.graph_id,
             principal=Principal("tester", "tenant"),
             after_sequence=first.items[-1].sequence,
@@ -445,12 +445,12 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
 
         monkeypatch.setattr(repository, "list_events", _counted_list_events)
         monkeypatch.setattr(repository, "latest_event", _counted_latest_event)
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             SimpleNamespace(tasks=repository),
             _AllowAuthorization(),
             local_waiter=_OwnedWaiter(),
         )
-        stream = service.stream_graph_events(
+        stream = service.stream_events(
             graph.graph_id,
             principal=Principal("tester", "tenant"),
             after_sequence=2,
