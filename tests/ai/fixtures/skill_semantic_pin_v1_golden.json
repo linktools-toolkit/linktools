@@ -3,7 +3,6 @@
   "pin": {
     "kind": "skill",
     "id": "legacy",
-    "contract_version": 1,
     "contract": {
       "version": 1,
       "id": "legacy",
