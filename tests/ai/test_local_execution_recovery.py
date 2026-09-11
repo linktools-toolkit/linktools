@@ -154,6 +154,7 @@ def _backend() -> LocalExecutionBackend:
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
     backend._metric_recorder = None
+    backend._live_broker = SimpleNamespace(complete=lambda _execution_id: None)
     return backend
 
 
