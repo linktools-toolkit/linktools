@@ -133,11 +133,13 @@ def _compiler() -> AgentCompiler:
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
     plain = ModelRegistry.openai(
         model="gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://first.example/v1",
         api_key="first-key",
     ).snapshot().resolve("default")
     prefixed = ModelRegistry.openai(
         model="openai:gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://second.example/v1",
         api_key="second-key",
     ).snapshot().resolve("default")
@@ -150,6 +152,7 @@ def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -
 def test_model_registry_replaces_connection_binding_with_same_semantic_identity() -> None:
     registry = ModelRegistry.openai(
         model="gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://first.example/v1",
         api_key="first-key",
     )
@@ -159,6 +162,7 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     registry.register_openai(
         "default",
         model="gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://second.example/v1",
         api_key="second-key",
     )
