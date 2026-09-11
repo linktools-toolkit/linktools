@@ -20,21 +20,21 @@ from ._graph import (
 
 
 class TaskQueryApi(Protocol):
-    async def inspect_graph(
+    async def inspect(
         self,
         graph_id: str,
         *,
         principal: Principal,
     ) -> TaskGraphView: ...
 
-    async def snapshot_graph(
+    async def snapshot(
         self,
         graph_id: str,
         *,
         principal: Principal,
     ) -> TaskGraphSnapshot: ...
 
-    async def list_graph_events(
+    async def list_events(
         self,
         graph_id: str,
         *,
@@ -43,7 +43,7 @@ class TaskQueryApi(Protocol):
         limit: int = 100,
     ) -> Page[TaskEvent]: ...
 
-    def stream_graph_events(
+    def stream_events(
         self,
         graph_id: str,
         *,
@@ -51,7 +51,7 @@ class TaskQueryApi(Protocol):
         after_sequence: int = 0,
     ) -> AsyncIterator[TaskEvent]: ...
 
-    async def wait_graph(
+    async def wait(
         self,
         graph_id: str,
         *,
@@ -61,22 +61,22 @@ class TaskQueryApi(Protocol):
 
 
 class TaskApi(TaskQueryApi, Protocol):
-    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
+    async def start(self, request: TaskGraphRequest) -> TaskGraphResult: ...
 
-    async def run_graph(
+    async def run(
         self,
         request: TaskGraphRequest,
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult: ...
 
-    async def recover_graph(
+    async def recover(
         self,
         graph_id: str,
         request: RecoverGraphRequest,
     ) -> TaskGraphResult: ...
 
-    async def cancel_graph(
+    async def cancel(
         self,
         graph_id: str,
         request: CancelGraphRequest,
