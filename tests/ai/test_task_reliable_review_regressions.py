@@ -12,6 +12,7 @@ from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
+    DefaultTaskGraphService,
     LocalTaskGraphLauncher,
     TaskGraph,
     TaskGraphLaunch,
@@ -21,7 +22,6 @@ from linktools.ai.task import (
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
-from linktools.ai.task._service_impl import DefaultTaskService
 from linktools.ai.workspace import trusted_workspace_principal
 
 
@@ -267,14 +267,14 @@ async def test_nonterminal_waiter_failure_propagates_after_fresh_snapshot() -> N
             lease_seconds=30,
         )
         principal = trusted_workspace_principal("tenant")
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             SimpleNamespace(tasks=repository),
             _AllowAuthorization(),
             local_waiter=_FailingLocalWaiter(),
         )
 
         with pytest.raises(AIError) as error:
-            await service.wait_graph(
+            await service.wait(
                 graph.graph_id,
                 principal=principal,
                 timeout_seconds=1,
@@ -458,18 +458,18 @@ async def test_event_stream_rechecks_foreign_update_while_local_node_is_inflight
         )
         await asyncio.wait_for(runner.entered.wait(), 1)
 
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             SimpleNamespace(tasks=repository),
             _AllowAuthorization(),
             local_waiter=launcher,
         )
-        history = await service.list_graph_events(
+        history = await service.list_events(
             graph.graph_id,
             principal=principal,
             limit=100,
         )
         assert history.items
-        stream = service.stream_graph_events(
+        stream = service.stream_events(
             graph.graph_id,
             principal=principal,
             after_sequence=history.items[-1].sequence,
