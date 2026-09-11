@@ -55,8 +55,8 @@ jobs:
           local = local_path.read_text(encoding='utf-8')
           local = replace_once(
               local,
-              'from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping, Sequence\n',
-              'from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence\n',
+              'from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence\n',
+              'from collections.abc import Awaitable, Callable, Mapping, Sequence\n',
               'local Collection import',
           )
           local = replace_once(local, '    RuntimeStorageContract,\n', '', 'local RuntimeStorageContract import')
