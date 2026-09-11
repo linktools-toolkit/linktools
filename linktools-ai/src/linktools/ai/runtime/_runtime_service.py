@@ -48,6 +48,7 @@ from ..task import (
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
+    TaskGraphService,
     TaskNode,
 )
 from ..workspace import Workspace
@@ -78,10 +79,9 @@ from .service_api import (
     ReplayEvaluationRequest,
     ResumeSessionRequest,
     RetryExecutionRequest,
-    RunEvaluationRequest,
     SessionService,
     SessionView,
-    TaskService,
+    StartEvaluationRequest,
     UpdateSessionRequest,
     ExecutionTreeEvent,
 )
@@ -163,7 +163,7 @@ class Runtime(Generic[AppT]):
         compiler: AgentCompiler,
         execution: ExecutionService,
         session: SessionService,
-        task: TaskService,
+        graph: TaskGraphService,
         evaluation: EvaluationService,
         approval: ApprovalService,
         external: ExternalService,
@@ -184,7 +184,7 @@ class Runtime(Generic[AppT]):
                 compiler,
                 execution,
                 session,
-                task,
+                graph,
                 evaluation,
                 approval,
                 external,
@@ -200,7 +200,7 @@ class Runtime(Generic[AppT]):
         self._compiler = compiler
         self.execution = execution
         self.session = session
-        self.task = task
+        self.graph = graph
         self.evaluation = evaluation
         self.approval = approval
         self.external = external
@@ -283,7 +283,7 @@ class Runtime(Generic[AppT]):
     def workspace(self) -> Workspace:
         return self._workspace
 
-    def stream_tree(
+    def _watch_execution_tree(
         self,
         execution_id: str,
         *,
@@ -445,7 +445,13 @@ class Runtime(Generic[AppT]):
             resolved_planning,
             resolved_thinking,
         )
-        return Execution(self, handle.execution_id, binding.digest, resolved_principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding.digest,
+            resolved_principal,
+            self._watch_execution_tree,
+        )
 
     async def _retry_execution(
         self,
@@ -467,7 +473,13 @@ class Runtime(Generic[AppT]):
             files=_request_files(files),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
-        return Execution(self, handle.execution_id, binding_digest, principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding_digest,
+            principal,
+            self._watch_execution_tree,
+        )
 
     async def _fork_execution(
         self,
@@ -489,7 +501,13 @@ class Runtime(Generic[AppT]):
             files=_request_files(files),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
-        return Execution(self, handle.execution_id, binding_digest, principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding_digest,
+            principal,
+            self._watch_execution_tree,
+        )
 
     async def cancel(
         self,
@@ -605,15 +623,15 @@ class Runtime(Generic[AppT]):
             ),
         )
 
-    async def _run_evaluation_for_agent(
+    async def _start_evaluation_for_agent(
         self,
         agent_digest: str,
-        request: RunEvaluationRequest,
+        request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None",
     ) -> EvaluationHandle:
         binding = self._bind_agent(agent_digest, output=output)
-        return await self.evaluation.run(binding.digest, request)
+        return await self.evaluation.start(binding.digest, request)
 
     async def _replay_evaluation_for_agent(
         self,
@@ -629,7 +647,13 @@ class Runtime(Generic[AppT]):
             snapshot_id,
             request,
         )
-        return Execution(self, handle.execution_id, binding.digest, request.principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding.digest,
+            request.principal,
+            self._watch_execution_tree,
+        )
 
     def _task_for_agent(
         self,
@@ -683,8 +707,13 @@ class Runtime(Generic[AppT]):
             limits=limits,
             correlation=correlation,
         )
-        await self.task.start_graph(request)
-        return TaskGraphRun(self, graph.graph_id, request.principal)
+        await self.graph.start(request)
+        return TaskGraphRun(
+            self,
+            graph.graph_id,
+            request.principal,
+            self._watch_execution_tree,
+        )
 
     async def run_graph(
         self,
@@ -714,7 +743,7 @@ class Runtime(Generic[AppT]):
     ) -> JsonValue:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        snapshot = await self.task.snapshot_graph(
+        snapshot = await self.graph.snapshot(
             graph_id,
             principal=resolved_principal,
         )
@@ -960,7 +989,7 @@ async def _open_runtime(
             components.compiler,
             components.execution,
             components.session,
-            components.task,
+            components.graph,
             components.evaluation,
             components.approval,
             components.external,

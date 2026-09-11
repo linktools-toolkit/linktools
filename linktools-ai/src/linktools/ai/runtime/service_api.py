@@ -30,15 +30,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import (
-    CancelGraphRequest,
-    TaskEvent,
-    TaskEventType,
-    TaskGraphRequest,
-    TaskGraphResult,
-    TaskGraphSnapshot,
-    TaskGraphView,
-)
+from ..task import TaskEvent
 from ._input_contract import validate_user_input
 from ._snapshot import RunSnapshot
 from .recovery import (
@@ -46,6 +38,7 @@ from .recovery import (
     ResolveToolEffectRequest,
     ToolEffectResolutionResult,
 )
+
 
 def _request_correlation(value: Mapping[str, object] | None) -> CorrelationData:
     try:
@@ -439,7 +432,7 @@ class LoadedSession:
 
 
 @dataclass(frozen=True, slots=True)
-class RunEvaluationRequest:
+class StartEvaluationRequest:
     principal: Principal
     dataset_digest: str
     memory_scope: str
@@ -869,50 +862,9 @@ class SessionService(Protocol):
     ) -> SessionView: ...
 
 
-class TaskService(Protocol):
-    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
-    async def run_graph(
-        self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None
-    ) -> TaskGraphResult: ...
-    async def inspect_graph(
-        self, graph_id: str, *, principal: Principal
-    ) -> TaskGraphView: ...
-    async def snapshot_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> TaskGraphSnapshot: ...
-    async def list_graph_events(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-        limit: int = 100,
-    ) -> Page[TaskEvent]: ...
-    def stream_graph_events(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-    ) -> "AsyncIterator[TaskEvent]": ...
-    async def wait_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-        timeout_seconds: "float | None" = None,
-    ) -> TaskGraphResult: ...
-    async def cancel_graph(
-        self, graph_id: str, request: CancelGraphRequest
-    ) -> TaskGraphView: ...
-
-
 class EvaluationService(Protocol):
-    async def run(
-        self, binding_digest: str, request: RunEvaluationRequest
+    async def start(
+        self, binding_digest: str, request: StartEvaluationRequest
     ) -> EvaluationHandle: ...
     async def inspect(
         self, evaluation_id: str, *, principal: Principal
@@ -986,7 +938,6 @@ __all__ = [
     "ArtifactView",
     "CancelExecutionRequest",
     "CancelExecutionResult",
-    "CancelGraphRequest",
     "CloseSessionRequest",
     "CompareEvaluationRequest",
     "CreateSessionRequest",
@@ -1023,15 +974,12 @@ __all__ = [
     "ReplayEvaluationRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
-    "RunEvaluationRequest",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
     "SessionView",
-    "TaskEvent",
-    "TaskEventType",
+    "StartEvaluationRequest",
     "TaskGraphRunEvent",
-    "TaskService",
     "TranscriptItem",
     "UpdateSessionRequest",
 ]

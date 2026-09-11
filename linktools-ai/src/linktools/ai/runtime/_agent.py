@@ -4,7 +4,7 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
@@ -25,9 +25,9 @@ from .service_api import (
     ExecutionTraceItem,
     ExecutionTreeEvent,
     ReplayEvaluationRequest,
-    RunEvaluationRequest,
     SessionHistoryItem,
     SessionView,
+    StartEvaluationRequest,
     TranscriptItem,
 )
 
@@ -38,12 +38,23 @@ if TYPE_CHECKING:
 AppT = TypeVar("AppT")
 
 
+class _ExecutionTreeWatcher(Protocol):
+    def __call__(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Execution(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     execution_id: str
     _binding_digest: str
     _principal: Principal
+    _watch_tree: _ExecutionTreeWatcher
 
     async def wait(self, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
         return await self._runtime.execution.wait(
@@ -57,7 +68,7 @@ class Execution(Generic[AppT]):
         *,
         after_sequences: "Mapping[str, int] | None" = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        return self._runtime.stream_tree(
+        return self._watch_tree(
             self.execution_id,
             principal=self._principal,
             after_sequences=after_sequences,
@@ -465,13 +476,13 @@ class Agent(Generic[AppT]):
         )
         return Session(self._runtime, self.id, self._agent_digest, session_id, principal)
 
-    async def run_evaluation(
+    async def start_evaluation(
         self,
-        request: RunEvaluationRequest,
+        request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None" = None,
     ) -> EvaluationHandle:
-        return await self._runtime._run_evaluation_for_agent(
+        return await self._runtime._start_evaluation_for_agent(
             self._agent_digest,
             request,
             output=output,

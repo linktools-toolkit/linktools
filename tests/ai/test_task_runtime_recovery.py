@@ -80,7 +80,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         state=reopened,
         capabilities=(capabilities,),
     ) as runtime:
-        result = await runtime.task.wait_graph(
+        result = await runtime.graph.wait(
             graph.graph_id,
             principal=runtime.default_principal,
             timeout_seconds=10,

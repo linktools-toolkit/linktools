@@ -13,6 +13,7 @@ from linktools.ai.runtime.state._codec import (
 )
 from linktools.ai.task import (
     CancelGraphRequest,
+    DefaultTaskGraphService,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphHandle,
@@ -21,7 +22,6 @@ from linktools.ai.task import (
     TaskGraphView,
     TaskNode,
 )
-from linktools.ai.task._service_impl import DefaultTaskService
 
 
 class _AllowAuthorization:
@@ -124,14 +124,14 @@ async def test_task_service_replay_rejects_correlation_drift() -> None:
             _request(graph, correlation={"trace_id": "trace-a"})
         )
         await state.task.admissions.admit(original, graph)
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             state.task,
             _AllowAuthorization(),
             launcher,
         )
 
         with pytest.raises(AIError) as raised:
-            await service.start_graph(
+            await service.start(
                 _request(graph, correlation={"trace_id": "trace-b"})
             )
 
@@ -157,13 +157,13 @@ async def test_cancel_cleanup_restores_durable_submission_principal_and_correlat
             )
         )
         await state.task.admissions.admit(admission, graph)
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             state.task,
             _AllowAuthorization(),
             launcher,
         )
 
-        view = await service.cancel_graph(
+        view = await service.cancel(
             graph.graph_id,
             CancelGraphRequest(
                 Principal("operator", "tenant"),

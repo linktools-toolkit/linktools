@@ -40,7 +40,7 @@ from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
 from linktools.ai.task import (
-    DefaultTaskService,
+    DefaultTaskGraphService,
     TaskEvent,
     TaskEventType,
     TaskGraphSnapshot,
@@ -318,10 +318,10 @@ class _RunningTasks:
 @pytest.mark.asyncio
 async def test_task_wait_timeout_has_stable_code() -> None:
     persistence = SimpleNamespace(tasks=_RunningTasks())
-    service = DefaultTaskService(persistence, _AllowAll())  # type: ignore[arg-type]
+    service = DefaultTaskGraphService(persistence, _AllowAll())  # type: ignore[arg-type]
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
-        await service.wait_graph(
+        await service.wait(
             "graph",
             principal=principal,
             timeout_seconds=0.01,

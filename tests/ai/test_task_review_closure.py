@@ -23,7 +23,7 @@ from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime.state._store import StateTransaction
 from linktools.ai.task import (
     CancelGraphRequest,
-    DefaultTaskService,
+    DefaultTaskGraphService,
     LocalTaskGraphLauncher,
     TaskEvent,
     TaskGraph,
@@ -143,8 +143,8 @@ async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
             "active"
         ] is TaskStatus.READY
 
-        service = DefaultTaskService(state.task, _AllowAuthorization())
-        view = await service.cancel_graph(
+        service = DefaultTaskGraphService(state.task, _AllowAuthorization())
+        view = await service.cancel(
             graph.graph_id,
             CancelGraphRequest(
                 trusted_workspace_principal("tenant"),
@@ -279,14 +279,14 @@ async def test_cancel_cleanup_failure_marks_operation_effect_unknown() -> None:
     try:
         graph = TaskGraph("cancel-ledger", (TaskNode("node"),))
         await admit_graph(state, graph)
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             state.task,
             _AllowAuthorization(),
             _FailingCancelLauncher(),
         )
         key = "cancel-ledger-request-0001"
         with pytest.raises(AIError) as error:
-            await service.cancel_graph(
+            await service.cancel(
                 graph.graph_id,
                 CancelGraphRequest(
                     trusted_workspace_principal("tenant"),
@@ -383,9 +383,9 @@ async def test_task_get_graph_rejects_missing_canonical_node() -> None:
             await repository.get_graph(graph.graph_id, tenant_id="tenant")
         assert repository_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-        service = DefaultTaskService(state.task, _AllowAuthorization())
+        service = DefaultTaskGraphService(state.task, _AllowAuthorization())
         with pytest.raises(AIError) as service_error:
-            await service.inspect_graph(
+            await service.inspect(
                 graph.graph_id,
                 principal=trusted_workspace_principal("tenant"),
             )
@@ -448,11 +448,11 @@ async def test_cancel_readback_does_not_accept_corrupt_graph_as_terminal() -> No
             )
 
         await repository.state_store.mutate(delete_node)
-        service = DefaultTaskService(state.task, _AllowAuthorization())
+        service = DefaultTaskGraphService(state.task, _AllowAuthorization())
         key = "cancel-corrupt-readback-0001"
 
         with pytest.raises(AIError) as error:
-            await service.cancel_graph(
+            await service.cancel(
                 graph.graph_id,
                 CancelGraphRequest(
                     trusted_workspace_principal("tenant"),
@@ -531,12 +531,12 @@ async def test_wait_graph_reuses_existing_read_authorization(
         monkeypatch.setattr(repository, "get_header", counted_get_header)
         monkeypatch.setattr(repository, "list_events", complete_before_read)
         authorization = _CountingAuthorization()
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             SimpleNamespace(tasks=repository),
             authorization,
         )
 
-        result = await service.wait_graph(
+        result = await service.wait(
             graph.graph_id,
             principal=trusted_workspace_principal("tenant"),
             timeout_seconds=1,
