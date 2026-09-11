@@ -3627,7 +3627,6 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         record: MemoryRecord,
         *,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[MemoryRecord | None, bool]:
         _require_tenant(record, self._tenant_id)
@@ -3656,48 +3655,21 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             if current is None:
                 if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if expected_storage_version not in (None, 0):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                physical_version = operation_record.sequence
-                next_value = replace(
-                    record,
-                    revision=physical_version,
-                    metadata={
-                        **record.metadata,
-                        "storage_version": physical_version,
-                    },
-                )
+                next_value = replace(record, revision=1)
                 await transaction.insert_record(
-                    replace(
-                        self._stored("memory", record.memory_id, next_value),
-                        storage_version=physical_version,
-                    )
+                    self._stored("memory", record.memory_id, next_value)
                 )
             else:
                 value = await self._decode(current, MemoryRecord)
                 if (
                     isinstance(current.storage_version, bool)
-                    or current.storage_version < 1
-                    or value.revision != current.storage_version
+                    or current.storage_version < 0
+                    or value.revision < 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if expected_revision != value.revision:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if (
-                    expected_storage_version is None
-                    or expected_storage_version != current.storage_version
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if operation_record.sequence <= current.storage_version:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                next_value = replace(
-                    record,
-                    revision=value.revision + 1,
-                    metadata={
-                        **record.metadata,
-                        "storage_version": current.storage_version + 1,
-                    },
-                )
+                next_value = replace(record, revision=value.revision + 1)
                 await _replace_checked(
                     transaction,
                     _projected_record(self, current, next_value),
@@ -3746,7 +3718,6 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         *,
         tenant_id: str,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[bool, bool]:
         if tenant_id != self._tenant_id:
@@ -3772,10 +3743,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             key = self._key("memory", memory_id)
             current = await transaction.get_record(key)
             if current is None:
-                if expected_revision not in (None, 0) or expected_storage_version not in (
-                    None,
-                    0,
-                ):
+                if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await _insert_operation(
                     transaction,
@@ -3785,13 +3753,12 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 )
                 return False, False
             # A zero revision represents a completed missing-read observation.
-            if expected_revision == 0 and expected_storage_version in (None, 0):
+            if expected_revision == 0:
                 value = await self._decode(current, MemoryRecord)
                 if (
                     isinstance(current.storage_version, bool)
-                    or current.storage_version < 1
-                    or value.revision != current.storage_version
-                    or operation_record.sequence <= current.storage_version
+                    or current.storage_version < 0
+                    or value.revision < 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await _insert_operation(
@@ -3804,19 +3771,12 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             value = await self._decode(current, MemoryRecord)
             if (
                 isinstance(current.storage_version, bool)
-                or current.storage_version < 1
-                or value.revision != current.storage_version
+                or current.storage_version < 0
+                or value.revision < 1
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if expected_revision is None or value.revision != expected_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if (
-                expected_storage_version is None
-                or current.storage_version != expected_storage_version
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if operation_record.sequence <= current.storage_version:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if not await transaction.delete_record(
                 key,
                 expected_storage_version=current.storage_version,

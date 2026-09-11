@@ -1859,7 +1859,6 @@ class MemoryRepository(RuntimeRepository, Protocol):
         record: MemoryRecord,
         *,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[MemoryRecord | None, bool]: ...
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
@@ -1878,7 +1877,6 @@ class MemoryRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[bool, bool]: ...
 
