@@ -14,8 +14,8 @@ from linktools.ai.runtime._execution import (
     DefaultExecutionService,
 )
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.task import DefaultTaskGraphService
 from linktools.ai.task._local import LocalTaskGraphLauncher
-from linktools.ai.task._service_impl import DefaultTaskService
 
 
 class _ExecutionRecords:
@@ -293,7 +293,7 @@ async def test_execution_service_preflight_surfaces_detached_cancel_failure() ->
 
 @pytest.mark.asyncio
 async def test_task_service_drains_owned_finalizers_before_preflight() -> None:
-    service = object.__new__(DefaultTaskService)
+    service = object.__new__(DefaultTaskGraphService)
     release = asyncio.Event()
 
     async def finalizer() -> None:
@@ -314,7 +314,7 @@ async def test_task_service_drains_owned_finalizers_before_preflight() -> None:
 
 @pytest.mark.asyncio
 async def test_task_service_preflight_surfaces_detached_finalizer_failure() -> None:
-    service = object.__new__(DefaultTaskService)
+    service = object.__new__(DefaultTaskGraphService)
     service._detached_finalizers = set()
     service._detached_finalizer_failure = None
 
