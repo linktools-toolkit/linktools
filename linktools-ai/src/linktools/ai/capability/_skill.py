@@ -100,7 +100,7 @@ class LinkToolsSkills(AbstractCapability[AgentContext[object]]):
         preloaded_skill_ids: Sequence[str] = (),
         max_preloaded_bytes: int = 256 * 1024,
     ) -> None:
-        self.id = "linktools-skill"
+        self.id = "linktools.ai.skills"
         if not isinstance(sources, SkillSourceRegistry):
             raise TypeError("sources must be SkillSourceRegistry")
         ordered = tuple(sorted(skills, key=lambda item: item.id))
