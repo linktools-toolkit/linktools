@@ -183,7 +183,7 @@ async def test_cancel_cleanup_restores_durable_submission_principal_and_correlat
         await state.close()
 
 
-def test_task_admission_v1_empty_correlation_uses_canonical_wire() -> None:
+def test_task_admission_empty_correlation_uses_current_wire_shape() -> None:
     graph = TaskGraph("task-correlation-wire", (TaskNode("node"),))
     admission = TaskGraphAdmission.from_request(_request(graph, correlation={}))
 
@@ -192,7 +192,7 @@ def test_task_admission_v1_empty_correlation_uses_canonical_wire() -> None:
     assert payload["$dataclass"] == "task_graph_admission"
     fields = payload["fields"]
     assert isinstance(fields, dict)
-    assert "correlation" not in fields
+    assert "correlation" in fields
 
     decoded = _decode_enveloped_domain(
         encode_envelope({"type": "task_graph_admission", "payload": payload}),
