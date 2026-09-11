@@ -26,11 +26,6 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
 
 OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
-OPENAI_PROVIDER_INSTANCE = ConfigField(
-    name="OPENAI_PROVIDER_INSTANCE",
-    cast=str,
-    default=None,
-)
 OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
 OPENAI_API_KEY = ConfigField(name="OPENAI_API_KEY", cast=str, default=None, secret=True)
 _logger = environ.get_logger("commands.ai.run")
@@ -49,12 +44,6 @@ class Command(BaseCommand):
             help="Runtime state storage backend (default: sqlite)",
         )
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
-        parser.add_argument(
-            "--provider-instance",
-            action=ConfigAction,
-            config=OPENAI_PROVIDER_INSTANCE,
-            help="stable non-secret identity for a custom OpenAI-compatible provider",
-        )
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
         parser.add_argument(
@@ -99,7 +88,6 @@ class Command(BaseCommand):
                     state=state,
                     models=ModelRegistry.openai(
                         model=args.model,
-                        provider_instance=args.provider_instance,
                         base_url=args.base_url,
                         api_key=args.api_key,
                     ),
