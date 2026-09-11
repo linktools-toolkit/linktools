@@ -26,6 +26,7 @@ from linktools.ai.runtime._agent_executor import (
     _thinking_capability,
     _validate_thinking_model,
 )
+from linktools.ai.runtime._tool_return_codec import tool_return_content_digest
 
 
 def test_thinking_parts_are_forwarded_as_thinking_events() -> None:
@@ -46,29 +47,20 @@ def test_text_parts_are_forwarded_as_text_events() -> None:
     ) == LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "world")
 
 
-class _DigestBridge:
-    def owns_call(self, tool_call_id: str) -> bool:
-        assert tool_call_id == "call-1"
-        return True
-
-    def result_digest(self, tool_call_id: str) -> str:
-        assert tool_call_id == "call-1"
-        return "d" * 64
-
-
-def test_managed_tool_result_uses_tool_operation_digest() -> None:
+def test_tool_result_uses_model_visible_content_digest() -> None:
+    content = {"ok": True}
     event = FunctionToolResultEvent(
-        part=ToolReturnPart("tool", {"ok": True}, tool_call_id="call-1")
+        part=ToolReturnPart("tool", content, tool_call_id="call-1")
     )
 
-    emission = _map_event(event, _DigestBridge())  # type: ignore[arg-type]
+    emission = _map_event(event)
 
     assert emission == DurableBoundary(
         ExecutionEventType.TOOL_CALL_FINISHED,
         {
             "call_id": "call-1",
             "tool_name": "tool",
-            "result_digest": "d" * 64,
+            "result_digest": tool_return_content_digest(content),
             "status": "SUCCEEDED",
         },
     )
