@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""V1 persistence regressions for instruction and deferred-work pins."""
+"""Persistence regressions for instruction and deferred-work pins."""
 
-from copy import deepcopy
 from datetime import datetime, timezone
 
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, canonical_sha256
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.runtime.state._codec import (
+    decode_domain,
+    encode_domain,
+    iter_runtime_object_refs,
+)
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     PendingDeferredCall,
@@ -18,10 +21,8 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
     RuntimePayloadRef,
-    RuntimeStorageContract,
     StoredUserInput,
 )
-from linktools.ai.runtime.state._codec import iter_runtime_object_refs
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
 
@@ -36,7 +37,6 @@ def _binding() -> AgentBindingSnapshot:
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
 
 
@@ -82,7 +82,6 @@ def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRe
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
         repository_instructions=repository_instructions,
     )
 
@@ -124,15 +123,6 @@ def _checkpoint(pending_tools: PendingToolContinuation | None) -> RecoveryCheckp
     )
 
 
-def test_older_v1_execution_defaults_instruction_pin_to_none() -> None:
-    wire = deepcopy(encode_domain(_execution(None)))
-    assert isinstance(wire, dict)
-    wire["fields"].pop("repository_instructions", None)
-
-    decoded = decode_domain(wire, ExecutionRecord)
-    assert decoded.repository_instructions is None
-
-
 def test_instruction_aware_execution_round_trips_exact_pin() -> None:
     reference = _instruction_ref()
     wire = encode_domain(_execution(reference))
@@ -143,16 +133,7 @@ def test_instruction_aware_execution_round_trips_exact_pin() -> None:
     assert decoded.repository_instructions == reference
 
 
-def test_older_v1_checkpoint_defaults_deferred_frontier_to_none() -> None:
-    wire = deepcopy(encode_domain(_checkpoint(None)))
-    assert isinstance(wire, dict)
-    wire["fields"].pop("pending_tools", None)
-
-    decoded = decode_domain(wire, RecoveryCheckpoint)
-    assert decoded.pending_tools is None
-
-
-def test_deferred_frontier_round_trips_without_schema_version_bump() -> None:
+def test_deferred_frontier_round_trips_current_contract() -> None:
     current = _checkpoint(_continuation())
     wire = encode_domain(current)
 
