@@ -5,18 +5,21 @@
 import pytest
 from pydantic_ai.capabilities import ProcessEventStream, Thinking
 from pydantic_ai.messages import (
+    FunctionToolResultEvent,
     PartDeltaEvent,
     PartStartEvent,
     TextPart,
     TextPartDelta,
     ThinkingPart,
     ThinkingPartDelta,
+    ToolReturnPart,
 )
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.core import ExecutionDeltaType
+from linktools.ai.core import ExecutionDeltaType, ExecutionEventType
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._agent_executor import (
+    DurableBoundary,
     LiveDelta,
     _event_stream_capability,
     _map_event,
@@ -41,6 +44,34 @@ def test_text_parts_are_forwarded_as_text_events() -> None:
     assert _map_event(
         PartDeltaEvent(index=1, delta=TextPartDelta(content_delta="world"))
     ) == LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, "world")
+
+
+class _DigestBridge:
+    def owns_call(self, tool_call_id: str) -> bool:
+        assert tool_call_id == "call-1"
+        return True
+
+    def result_digest(self, tool_call_id: str) -> str:
+        assert tool_call_id == "call-1"
+        return "d" * 64
+
+
+def test_managed_tool_result_uses_tool_operation_digest() -> None:
+    event = FunctionToolResultEvent(
+        part=ToolReturnPart("tool", {"ok": True}, tool_call_id="call-1")
+    )
+
+    emission = _map_event(event, _DigestBridge())  # type: ignore[arg-type]
+
+    assert emission == DurableBoundary(
+        ExecutionEventType.TOOL_CALL_FINISHED,
+        {
+            "call_id": "call-1",
+            "tool_name": "tool",
+            "result_digest": "d" * 64,
+            "status": "SUCCEEDED",
+        },
+    )
 
 
 @pytest.mark.asyncio
