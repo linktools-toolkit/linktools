@@ -139,7 +139,7 @@ async def test_linktools_skills_is_the_direct_skill_capability() -> None:
         SkillSourceRegistry(),
     )
     assert [item["id"] for item in await capability.list_skills()] == ["a", "z"]
-    assert capability.get_toolset().id == "linktools-skill"
+    assert capability.get_toolset().id == "linktools.ai.skills"
 
     with pytest.raises(AIError) as error:
         LinkToolsSkills(
