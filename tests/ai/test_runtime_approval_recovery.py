@@ -86,12 +86,10 @@ def _continuation() -> PendingToolContinuation:
         "call-1",
         "read_file",
         payload,
-        payload.digest,
         {"source": "workspace"},
     )
     return PendingToolContinuation(
         "step-1",
-        canonical_sha256({"call_id": call.tool_call_id}),
         approvals=(call,),
     )
 

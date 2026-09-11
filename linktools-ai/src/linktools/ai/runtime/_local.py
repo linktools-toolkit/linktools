@@ -849,29 +849,6 @@ class _RecoveryCoordinator:
         calls = tuple(calls_list)
         continuation = PendingToolContinuation(
             source_step_run_id=step_run_id,
-            requests_digest=canonical_sha256(
-                {
-                    "version": 1,
-                    "approvals": [
-                        {
-                            "tool_call_id": item.tool_call_id,
-                            "tool_name": item.tool_name,
-                            "arguments_digest": item.arguments_digest,
-                            "metadata": item.metadata,
-                        }
-                        for item in approvals
-                    ],
-                    "calls": [
-                        {
-                            "tool_call_id": item.tool_call_id,
-                            "tool_name": item.tool_name,
-                            "arguments_digest": item.arguments_digest,
-                            "metadata": item.metadata,
-                        }
-                        for item in calls
-                    ],
-                }
-            ),
             approvals=approvals,
             calls=calls,
         )
@@ -2626,7 +2603,6 @@ class LocalExecutionBackend:
             call.tool_call_id,
             call.tool_name,
             arguments_payload,
-            arguments_payload.digest,
             raw_metadata,
         )
 

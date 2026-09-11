@@ -912,29 +912,29 @@ class PendingDeferredCall:
     tool_call_id: str
     tool_name: str
     arguments_payload: StoredPayload
-    arguments_digest: str
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("deferred call identity is required")
-        if self.arguments_payload.digest != self.arguments_digest:
-            raise ValueError("deferred call arguments digest does not match payload")
         try:
             object.__setattr__(self, "metadata", dict(self.metadata))
         except (TypeError, ValueError) as error:
             raise ValueError("deferred call metadata is invalid") from error
 
+    @property
+    def arguments_digest(self) -> str:
+        return self.arguments_payload.digest
+
 
 @dataclass(frozen=True, slots=True)
 class PendingToolContinuation:
     source_step_run_id: str
-    requests_digest: str
     approvals: tuple[PendingDeferredCall, ...] = ()
     calls: tuple[PendingDeferredCall, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.source_step_run_id or not _is_sha256(self.requests_digest):
+        if not self.source_step_run_id:
             raise ValueError("deferred continuation identity is invalid")
         values = (*self.approvals, *self.calls)
         ids = tuple(item.tool_call_id for item in values)

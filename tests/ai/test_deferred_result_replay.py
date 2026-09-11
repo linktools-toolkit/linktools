@@ -87,7 +87,6 @@ class _Checkpoints:
             updated_at=datetime.now(timezone.utc),
             pending_tools=PendingToolContinuation(
                 "step",
-                canonical_sha256({"pending": pending.tool_call_id}),
                 approvals=(pending,) if approvals else (),
                 calls=() if approvals else (pending,),
             ),
@@ -246,7 +245,6 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         "tool-call",
         "external_tool",
         StoredPayload.inline_json({"value": 1}),
-        StoredPayload.inline_json({"value": 1}).digest,
     )
     call_id = external_call_id_for_call("tenant", "execution", "step", pending.tool_call_id)
     calls = _ExternalCalls(
@@ -305,7 +303,6 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
         "approval-call",
         "approval_tool",
         StoredPayload.inline_json({"value": 1}),
-        StoredPayload.inline_json({"value": 1}).digest,
     )
     approval_id = approval_id_for_call(
         "tenant", "execution", "step", pending.tool_call_id

@@ -91,12 +91,10 @@ def _continuation() -> PendingToolContinuation:
         "call-1",
         "read_file",
         arguments,
-        arguments.digest,
         {"kind": "workspace_approval"},
     )
     return PendingToolContinuation(
         "step-1",
-        canonical_sha256({"call_id": call.tool_call_id}),
         approvals=(call,),
     )
 
