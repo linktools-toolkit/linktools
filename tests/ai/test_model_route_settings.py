@@ -53,22 +53,12 @@ def test_openai_provider_instance_changes_durable_identity() -> None:
     assert first.fingerprint != second.fingerprint
 
 
-def test_openai_custom_endpoint_gets_conservative_instance_identity() -> None:
-    first = ModelRegistry.openai(
-        model="gpt-test",
-        base_url="https://first.example/v1",
-    ).snapshot().resolve("default")
-    second = ModelRegistry.openai(
-        model="gpt-test",
-        base_url="https://second.example/v1",
-    ).snapshot().resolve("default")
-
-    first_instance = dict(first.semantic_payload)["provider_instance"]
-    second_instance = dict(second.semantic_payload)["provider_instance"]
-    assert isinstance(first_instance, str) and first_instance.startswith("openai-endpoint-")
-    assert isinstance(second_instance, str) and second_instance.startswith("openai-endpoint-")
-    assert first_instance != second_instance
-    assert first.fingerprint != second.fingerprint
+def test_openai_custom_endpoint_requires_provider_instance() -> None:
+    with pytest.raises(ValueError, match="provider_instance"):
+        ModelRegistry.openai(
+            model="gpt-test",
+            base_url="https://gateway.example/v1",
+        )
 
 
 def test_openai_public_provider_has_stable_default_instance() -> None:
@@ -125,32 +115,6 @@ def test_model_registry_restore_requires_exact_provider_instance() -> None:
             dict(historical.semantic_payload),
             route_id="default",
         )
-
-    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-
-
-def test_legacy_public_openai_binding_can_restore_without_provider_instance() -> None:
-    registry = ModelRegistry.openai(model="gpt-test")
-    current = registry.snapshot().resolve("default")
-    historical = dict(current.semantic_payload)
-    historical.pop("provider_instance")
-
-    restored = registry.snapshot().restore(historical, route_id="default")
-
-    assert restored is current
-
-
-def test_legacy_openai_binding_cannot_restore_to_custom_endpoint() -> None:
-    public = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
-    historical = dict(public.semantic_payload)
-    historical.pop("provider_instance")
-    registry = ModelRegistry.openai(
-        model="gpt-test",
-        base_url="https://gateway.example/v1",
-    )
-
-    with pytest.raises(AIError) as raised:
-        registry.snapshot().restore(historical, route_id="default")
 
     assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
