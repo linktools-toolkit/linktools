@@ -115,10 +115,21 @@ class AgentCompiler:
         *,
         output: "type[BaseModel] | None" = None,
     ) -> AgentBinding:
-        """Bind one one-level child without materializing nested delegation targets."""
+        """Bind one child with delegation disabled for that execution."""
         if not isinstance(definition, AgentDefinition):
             raise TypeError("definition must be AgentDefinition")
-        return self._bind(definition, output=output, subagents=())
+        child_definition = self._build_definition(
+            definition.spec,
+            model=definition.model,
+            selected_tools=definition.selected_tools,
+            selected_skills=definition.selected_skills,
+            selected_mcp=definition.selected_mcp,
+            selected_capabilities=definition.selected_capabilities,
+            selected_subagents=(),
+            ordinary_policy=definition.ordinary_tool_policy,
+            mcp_policy=definition.mcp_selector_policy,
+        )
+        return self._bind(child_definition, output=output, subagents=())
 
     def _bind(
         self,
@@ -135,7 +146,6 @@ class AgentCompiler:
             ),
             base_model=dict(definition.model.semantic_payload),
             selected=tuple(_pin(candidate) for candidate in _semantic_candidates(definition)),
-            selected_subagents=definition.selected_subagents,
             subagents=tuple(subagents),
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
@@ -168,7 +178,7 @@ class AgentCompiler:
                 selected_skills=selected["skill"],
                 selected_mcp=selected["mcp"],
                 selected_capabilities=selected["capability"],
-                selected_subagents=cast("tuple[str, ...]", snapshot.selected_subagents),
+                selected_subagents=snapshot.subagent_ids,
                 ordinary_policy=ordinary_policy,
                 mcp_policy=mcp_policy,
             )
