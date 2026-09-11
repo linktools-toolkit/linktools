@@ -45,6 +45,7 @@ from ._plan import (
     RuntimeStatePlan,
     RuntimeStateRoute,
 )
+from ._recovery_repositories import build_recovery_repository_bundle
 from ._repositories import OperationLedgerRepository, build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
@@ -321,8 +322,13 @@ async def materialize_runtime_state(
                 stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain
             )
             for domain in RuntimeDomain
-            if domain is not RuntimeDomain.TASK
+            if domain not in {RuntimeDomain.RECOVERY, RuntimeDomain.TASK}
         }
+        bundles[RuntimeDomain.RECOVERY] = build_recovery_repository_bundle(
+            recovery_store,
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
         task_store = stores[RuntimeDomain.TASK]
         bundles[RuntimeDomain.TASK] = {
             "operations": OperationLedgerRepository(

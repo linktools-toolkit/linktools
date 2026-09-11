@@ -14,9 +14,6 @@ from linktools.ai.core import ApprovalStatus
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._store import FactQuery
-from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state._repositories import ApprovalRepositoryImpl
 from linktools.ai.runtime.state._contracts import (
     ApprovalRecord,
     ContextProjection,
@@ -30,7 +27,11 @@ from linktools.ai.runtime.state._readmodel import (
     ExecutionReadModelRepository,
     ExecutionReadModelStatus,
 )
-from linktools.ai.runtime.state._store import StateStore, StateTransaction
+from linktools.ai.runtime.state._recovery_repositories import (
+    RecoveryApprovalRepositoryImpl,
+)
+from linktools.ai.runtime.state._sql import SqlStateStore
+from linktools.ai.runtime.state._store import FactQuery, StateStore, StateTransaction
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.storage import _object as object_module
 from sqlalchemy import event
@@ -231,7 +232,7 @@ async def test_approval_cancel_batches_known_record_sql(
     await provision_database(engine)
     store = SqlStateStore(engine)
     await store.initialize()
-    repository = ApprovalRepositoryImpl(
+    repository = RecoveryApprovalRepositoryImpl(
         store,
         namespace="io-approval",
         tenant_id="tenant",
