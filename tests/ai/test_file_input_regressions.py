@@ -155,7 +155,7 @@ async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
         (FunctionToolset([_echo_path]),),
         {
             "_echo_path": ManagedToolDescriptor(
-                effect_owner="intrinsic",
+                effect_owner="none",
                 effect="none",
                 tool_class="filesystem.read",
                 workspace_path_fields=("path",),
@@ -185,7 +185,7 @@ async def test_final_tool_boundary_does_not_freeze_transient_sandbox_failure() -
         (FunctionToolset([_echo_path]),),
         {
             "_echo_path": ManagedToolDescriptor(
-                effect_owner="intrinsic",
+                effect_owner="none",
                 effect="none",
                 tool_class="filesystem.read",
                 workspace_path_fields=("path",),
