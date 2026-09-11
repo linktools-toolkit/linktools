@@ -207,7 +207,7 @@ class TaskPersistence(Protocol):
     admissions: _TaskAdmissionPersistence
 
 
-class DefaultTaskService(TaskGraphService):
+class DefaultTaskGraphService(TaskGraphService):
     """Own durable TaskGraph submission, observation, recovery, and cancellation."""
 
     def __init__(
@@ -1560,4 +1560,4 @@ def _stable_operation_error(error_code: "str | None") -> AIError:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-__all__ = ["DefaultTaskService", "TaskPersistence"]
+__all__ = ["DefaultTaskGraphService", "TaskPersistence"]
