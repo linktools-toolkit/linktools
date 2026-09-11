@@ -99,16 +99,16 @@ def _binding_snapshot() -> AgentBindingSnapshot:
         subagents=(),
         output_mode="text",
         output_schema={"type": "string"},
-        binding_digest="a" * 64,
     )
 
 
 def _started_execution(now: datetime) -> ExecutionRecord:
+    binding = _binding_snapshot()
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="default",
         session_id=None,
-        binding_digest="a" * 64,
+        binding_digest=binding.binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -125,7 +125,7 @@ def _started_execution(now: datetime) -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding_snapshot(),
+        binding=binding,
         **execution_owner_fields("diagnostic prompt"),
     )
 
@@ -251,7 +251,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
         await reopened.close()
 
 
-def test_historical_execution_without_diagnostics_defaults_to_none() -> None:
+def test_execution_without_diagnostics_field_is_integrity_error() -> None:
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError("legacy"))
     _started, _result, commit = _failed_terminal(
         datetime.now(timezone.utc),
@@ -259,13 +259,12 @@ def test_historical_execution_without_diagnostics_defaults_to_none() -> None:
     )
     payload = _encode_persisted_domain(commit.execution)
     payload["fields"].pop("error_diagnostics")
-    decoded = _decode_enveloped_domain(
-        encode_envelope({"type": "execution_record", "payload": payload}),
-        ExecutionRecord,
-    )
-    assert decoded.error_diagnostics is None
-    assert decoded.status is ExecutionStatus.FAILED
-    assert decoded.error_code == ErrorCode.INTERNAL_ERROR.value
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(
+            encode_envelope({"type": "execution_record", "payload": payload}),
+            ExecutionRecord,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
