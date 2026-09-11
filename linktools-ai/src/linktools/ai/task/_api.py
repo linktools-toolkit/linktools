@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from ..core import AuthorizationPolicy
 from ._local import LocalTaskGraphLauncher, TaskNodeRunner
 from ._service import TaskGraphService
-from ._service_impl import DefaultTaskService, TaskPersistence
+from ._service_impl import DefaultTaskGraphService, TaskPersistence
 
 
 @asynccontextmanager
@@ -21,7 +21,7 @@ async def open_local_task_graph_service(
 ) -> "AsyncIterator[TaskGraphService]":
     """Open the durable local TaskGraph service."""
     launcher = LocalTaskGraphLauncher(persistence.tasks, runner, owner=owner)
-    service = DefaultTaskService(persistence, authorization, launcher)
+    service = DefaultTaskGraphService(persistence, authorization, launcher)
     try:
         await service.recover_pending()
         yield service
