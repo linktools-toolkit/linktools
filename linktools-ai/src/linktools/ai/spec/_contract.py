@@ -101,7 +101,7 @@ class AgentSpec:
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
     thinking: ThinkingValue = False
-    tool_retries: int = 3
+    tool_retries: int = 10000
     output_retries: int = 3
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()

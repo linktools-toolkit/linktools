@@ -81,10 +81,10 @@ def test_output_schema_literal_ref_is_not_treated_as_schema_ref() -> None:
     }
 
 
-def test_agent_tool_retry_default_is_finite_and_small() -> None:
-    assert AgentSpec("agent").tool_retries == 3
-    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries == 3
-    assert CapabilityGroup("group").agent("agent").tool_retries == 3
+def test_agent_tool_retry_default_is_finite() -> None:
+    assert AgentSpec("agent").tool_retries == 10000
+    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries == 10000
+    assert CapabilityGroup("group").agent("agent").tool_retries == 10000
 
 
 def _request_context(model: TestModel) -> ModelRequestContext:
