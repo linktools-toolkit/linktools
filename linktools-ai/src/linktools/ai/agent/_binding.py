@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 _PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
 _PIN_FIELDS = frozenset({"kind", "id", "contract"})
-_REQUIRED_FIELDS = frozenset(
+_BINDING_FIELDS = frozenset(
     {
         "version",
         "agent_spec",
@@ -27,7 +27,6 @@ _REQUIRED_FIELDS = frozenset(
         "output_schema",
     }
 )
-_KNOWN_FIELDS = _REQUIRED_FIELDS | frozenset({"selected_subagents"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +106,6 @@ class AgentBindingSnapshot:
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
     output_schema: Mapping[str, JsonValue]
-    selected_subagents: "tuple[str, ...] | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.version, int) or isinstance(self.version, bool) or self.version < 1:
@@ -137,19 +135,6 @@ class AgentBindingSnapshot:
         subagents = tuple(sorted(self.subagents, key=lambda item: item.id))
         if subagents != self.subagents or len({item.id for item in subagents}) != len(subagents):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self.selected_subagents is None:
-            selected_subagents = tuple(item.id for item in subagents)
-        else:
-            selected_subagents = tuple(sorted(self.selected_subagents))
-            if (
-                selected_subagents != self.selected_subagents
-                or len(set(selected_subagents)) != len(selected_subagents)
-                or any(not isinstance(item, str) or not item.strip() for item in selected_subagents)
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if any(item.id not in selected_subagents for item in subagents):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        object.__setattr__(self, "selected_subagents", selected_subagents)
 
     @property
     def subagent_ids(self) -> "tuple[str, ...]":
@@ -165,7 +150,7 @@ class AgentBindingSnapshot:
         )
 
     def to_payload(self) -> "dict[str, JsonValue]":
-        payload: dict[str, JsonValue] = {
+        return {
             "version": self.version,
             "agent_spec": AgentSpecCodec().to_wire_payload(self.agent_spec),
             "base_model": dict(self.base_model),
@@ -174,18 +159,10 @@ class AgentBindingSnapshot:
             "output_mode": self.output_mode,
             "output_schema": dict(self.output_schema),
         }
-        selected_subagents = cast("tuple[str, ...]", self.selected_subagents)
-        if selected_subagents != self.subagent_ids:
-            payload["selected_subagents"] = list(selected_subagents)
-        return payload
 
     @classmethod
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
-        if (
-            not isinstance(value, Mapping)
-            or not _REQUIRED_FIELDS.issubset(value)
-            or not set(value).issubset(_KNOWN_FIELDS)
-        ):
+        if not isinstance(value, Mapping) or set(value) != _BINDING_FIELDS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         version = value["version"]
         if not isinstance(version, int) or isinstance(version, bool) or version < 1:
@@ -193,16 +170,10 @@ class AgentBindingSnapshot:
         if version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         selected = value["selected"]
-        raw_selected_subagents = value.get("selected_subagents")
         subagents = value["subagents"]
         mode = value["output_mode"]
         if (
             not isinstance(selected, list)
-            or raw_selected_subagents is not None
-            and (
-                not isinstance(raw_selected_subagents, list)
-                or any(not isinstance(item, str) for item in raw_selected_subagents)
-            )
             or not isinstance(subagents, list)
             or mode not in {"text", "structured"}
         ):
@@ -213,11 +184,6 @@ class AgentBindingSnapshot:
                 agent_spec=AgentSpecCodec().from_payload(_require_mapping(value["agent_spec"])),
                 base_model=_normalize_mapping(value["base_model"]),
                 selected=tuple(SemanticPin.from_payload(item) for item in selected),
-                selected_subagents=(
-                    None
-                    if raw_selected_subagents is None
-                    else tuple(cast("list[str]", raw_selected_subagents))
-                ),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=cast(OutputMode, mode),
                 output_schema=_normalize_mapping(value["output_schema"]),
@@ -247,8 +213,7 @@ class AgentBinding:
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
             or dict(self.definition.model.semantic_payload)
             != dict(self.snapshot.base_model)
-            or self.definition.selected_subagents != self.snapshot.selected_subagents
-            or any(item.id not in self.definition.selected_subagents for item in self.snapshot.subagents)
+            or self.definition.selected_subagents != self.snapshot.subagent_ids
             or self.output_binding.mode != self.snapshot.output_mode
             or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
         ):
