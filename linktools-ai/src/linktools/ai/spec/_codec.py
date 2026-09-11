@@ -25,9 +25,11 @@ _AGENT_FIELDS = frozenset(
         "allow_tools",
         "allow_skills",
         "allow_subagents",
+        "allow_capabilities",
         "usage_limits",
         "planning",
         "thinking",
+        "tool_retries",
         "output_retries",
         "description",
         "preload_skills",
@@ -63,6 +65,7 @@ class AgentSpecCodec:
             "allow_tools": list(value.allow_tools),
             "allow_skills": list(value.allow_skills),
             "allow_subagents": list(value.allow_subagents),
+            "allow_capabilities": list(value.allow_capabilities),
             "usage_limits": None
             if value.usage_limits is None
             else {
@@ -74,9 +77,9 @@ class AgentSpecCodec:
             },
             "planning": value.planning,
             "thinking": value.thinking,
+            "tool_retries": value.tool_retries,
+            "output_retries": value.output_retries,
         }
-        if value.output_retries != 1:
-            payload["output_retries"] = value.output_retries
         if value.preload_skills:
             payload["preload_skills"] = list(value.preload_skills)
         return payload
@@ -97,9 +100,11 @@ class AgentSpecCodec:
         allow_tools = raw.get("allow_tools", ["*"])
         allow_skills = raw.get("allow_skills", ["*"])
         allow_subagents = raw.get("allow_subagents", ["*"])
+        allow_capabilities = raw.get("allow_capabilities", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
-        output_retries = raw.get("output_retries", 1)
+        tool_retries = raw.get("tool_retries", 10000)
+        output_retries = raw.get("output_retries", 3)
         description = raw.get("description")
         preload_skills: object = raw.get("preload_skills", [])
         if not isinstance(preload_skills, list) or any(
@@ -118,13 +123,21 @@ class AgentSpecCodec:
             ("allow_tools", allow_tools),
             ("allow_skills", allow_skills),
             ("allow_subagents", allow_subagents),
+            ("allow_capabilities", allow_capabilities),
         ):
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a string array")
         if not isinstance(planning, bool):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "planning must be bool")
-        if not isinstance(output_retries, int) or isinstance(output_retries, bool) or output_retries < 0:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "output_retries must be a non-negative integer")
+        for name, value in (
+            ("tool_retries", tool_retries),
+            ("output_retries", output_retries),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise AIError(
+                    ErrorCode.OUTPUT_CONTRACT_INVALID,
+                    f"{name} must be a non-negative integer",
+                )
         if description is not None and (
             not isinstance(description, str) or not 1 <= len(description) <= 1024
         ):
@@ -139,9 +152,11 @@ class AgentSpecCodec:
                 allow_tools=tuple(cast("list[str]", allow_tools)),
                 allow_skills=tuple(cast("list[str]", allow_skills)),
                 allow_subagents=tuple(cast("list[str]", allow_subagents)),
+                allow_capabilities=tuple(cast("list[str]", allow_capabilities)),
                 usage_limits=_decode_usage_limits(raw.get("usage_limits")),
                 planning=planning,
                 thinking=normalized_thinking,
+                tool_retries=tool_retries,
                 output_retries=output_retries,
                 description=cast("str | None", description),
                 preload_skills=tuple(cast("list[str]", preload_skills)),
@@ -360,9 +375,8 @@ def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
         return None
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits must be an object or null")
-    unknown = set(value).difference(_USAGE_LIMIT_FIELDS)
-    if unknown:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits contains unknown fields")
+    if any(not isinstance(name, str) for name in value):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "usage_limits field name is invalid")
     kwargs = {name: value[name] for name in _USAGE_LIMIT_FIELDS if name in value}
     try:
         return AgentUsageLimits(**kwargs)

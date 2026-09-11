@@ -12,14 +12,17 @@ import pytest
 from linktools.ai.core import Page, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
-from linktools.ai.runtime import Runtime, RuntimeContext
+from linktools.ai.runtime import Runtime
+from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._execution import _overlay_execution_correlation
 from linktools.ai.runtime._history import _trace_item
 from linktools.ai.runtime._metric_id import _tool_observation_id
 from linktools.ai.task import TaskEvent, TaskEventType
 from linktools.ai.task._metrics import _TaskMetricProjector
-from pydantic_ai_harness.step_persistence import StepEvent
+from linktools.ai.runtime.state._step_contracts import (
+    StepEvent,
+)
 
 
 class _Recorder:
@@ -82,7 +85,9 @@ class _TaskEvents:
     ) -> Page[TaskEvent]:
         assert graph_id == "graph"
         assert tenant_id == "tenant"
-        values = tuple(event for event in self.events if event.sequence > after_sequence)
+        values = tuple(
+            event for event in self.events if event.sequence > after_sequence
+        )
         items = values[:limit]
         return Page(items, "more" if len(values) > limit else None)
 
@@ -101,7 +106,9 @@ class _TaskAdmissions:
     async def get(self, graph_id: str, *, tenant_id: str) -> object:
         assert graph_id == "graph"
         assert tenant_id == "tenant"
-        return SimpleNamespace(correlation={"audit_run_id": "audit-1", "stage": "analysis"})
+        return SimpleNamespace(
+            correlation={"audit_run_id": "audit-1", "stage": "analysis"}
+        )
 
 
 def _observation(observation_id: str) -> Observation:
@@ -159,6 +166,7 @@ def test_retry_and_fork_correlation_reject_invalid_overlay() -> None:
 @pytest.mark.asyncio
 async def test_disabled_runtime_metric_control_has_stable_public_contract() -> None:
     runtime = Runtime(
+        object(),
         object(),
         object(),
         object(),

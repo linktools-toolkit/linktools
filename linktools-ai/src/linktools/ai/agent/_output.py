@@ -5,7 +5,7 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Any, Literal, Sequence, cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -25,7 +25,17 @@ class AssistantTextOutput(BaseModel):
     text: str
 
 
+_TEXT_OUTPUT_SCHEMA: dict[str, JsonValue] = {
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+
 OutputMode = Literal["text", "structured"]
+_LITERAL_JSON_KEYWORDS = frozenset({"const", "default", "enum", "examples"})
+_SCHEMA_MAP_KEYWORDS = frozenset({"properties", "patternProperties", "dependentSchemas"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +50,8 @@ class OutputBinding:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         schema = self.schema_definition
         _validate_schema_definition(schema)
+        if self.mode == "text" and schema != _TEXT_OUTPUT_SCHEMA:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
 
     @classmethod
     def create(cls, mode: OutputMode, schema: Mapping[str, JsonValue]) -> "OutputBinding":
@@ -66,6 +78,15 @@ class OutputBinding:
             }
         )
 
+    def validate_payload(self, value: JsonValue) -> None:
+        """Validate one final JSON payload against this durable output contract."""
+        try:
+            _schema_validator(self.schema_definition).validate(value)
+        except JsonSchemaValidationError as error:
+            raise AIError(
+                ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
+            ) from error
+
     @property
     def runtime_output_type(self) -> "type[object]":
         if self.mode == "text":
@@ -76,11 +97,11 @@ class OutputBinding:
 def bind_output(output: "type[BaseModel] | None" = None) -> OutputBinding:
     """Create the exact durable output contract for a fresh execution."""
     if output is None or output is AssistantTextOutput:
-        return OutputBinding.create("text", AssistantTextOutput.model_json_schema())
+        return OutputBinding.create("text", _TEXT_OUTPUT_SCHEMA)
     if not isinstance(output, type) or not issubclass(output, BaseModel):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
-        schema = _normalize_schema(output.model_json_schema())
+        schema = canonicalize_output_schema_v1(output.model_json_schema(), output)
         _durable_runtime_type(schema)
     except AIError:
         raise
@@ -98,8 +119,6 @@ def restore_output(mode: JsonValue, schema: JsonValue) -> OutputBinding:
             cast(OutputMode, mode),
             cast(Mapping[str, JsonValue], schema),
         )
-        if binding.mode == "text" and binding.schema_definition != bind_output().schema_definition:
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         if binding.mode == "structured":
             _durable_runtime_type(binding.schema_definition)
         return binding
@@ -163,6 +182,14 @@ def _validate_schema_definition(schema: Mapping[str, JsonValue]) -> None:
 
 
 def _normalize_schema(value: object) -> "dict[str, JsonValue]":
+    return canonicalize_output_schema_v1(value)
+
+
+def canonicalize_output_schema_v1(
+    value: object,
+    output_type: "type[BaseModel] | None" = None,
+) -> "dict[str, JsonValue]":
+    """Canonicalize only stable generated-name noise in a v1 output schema."""
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
@@ -173,7 +200,146 @@ def _normalize_schema(value: object) -> "dict[str, JsonValue]":
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     if not isinstance(schema, dict):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    return cast("dict[str, JsonValue]", schema)
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+
+    definitions = schema.get("$defs", {})
+    if definitions is not None and not isinstance(definitions, dict):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    refs = _local_definition_refs(schema)
+    if output_type is not None:
+        title = schema.get("title")
+        config = getattr(output_type, "model_config", {})
+        explicit_title = isinstance(config, Mapping) and config.get("title") is not None
+        if not explicit_title and title == output_type.__name__:
+            schema.pop("title", None)
+
+    reachable: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(definition_key: str) -> None:
+        if definition_key in visiting:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if definition_key in visited:
+            return
+        if not isinstance(definitions, dict) or definition_key not in definitions:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        visiting.add(definition_key)
+        reachable.append(definition_key)
+        for child in refs.get(definition_key, ()):
+            visit(child)
+        visiting.remove(definition_key)
+        visited.add(definition_key)
+
+    for definition_key in refs.get("", ()):
+        visit(definition_key)
+
+    rewritten = _canonical_schema_node(schema, reachable, root=True)
+    if reachable:
+        rewritten["$defs"] = {
+            f"d{index}": _canonical_schema_node(
+                definitions[key],
+                reachable,
+                original_key=key,
+            )
+            for index, key in enumerate(reachable)
+        }
+    else:
+        rewritten.pop("$defs", None)
+    return cast("dict[str, JsonValue]", rewritten)
+
+
+def _local_definition_refs(value: object) -> "dict[str, tuple[str, ...]]":
+    references: dict[str, list[str]] = {"": []}
+
+    def collect(node: object, owner: str) -> None:
+        if isinstance(node, Mapping):
+            for key, child in node.items():
+                if key == "$defs":
+                    if owner != "":
+                        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                    continue
+                if key in _LITERAL_JSON_KEYWORDS or key == "dependentRequired":
+                    continue
+                if key in _SCHEMA_MAP_KEYWORDS:
+                    if not isinstance(child, Mapping):
+                        continue
+                    for nested_schema in child.values():
+                        collect(nested_schema, owner)
+                    continue
+                if key == "$dynamicRef":
+                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                if key == "$ref":
+                    if not isinstance(child, str) or not child.startswith("#/$defs/"):
+                        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                    target = _decode_definition_pointer(child)
+                    references.setdefault(owner, []).append(target)
+                    continue
+                collect(child, owner)
+        elif isinstance(node, list):
+            for child in node:
+                collect(child, owner)
+
+    collect(value, "")
+    definitions = value.get("$defs") if isinstance(value, Mapping) else None
+    if isinstance(definitions, Mapping):
+        for key, definition in definitions.items():
+            if not isinstance(key, str):
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            references.setdefault(key, [])
+            collect(definition, key)
+    return {key: tuple(values) for key, values in references.items()}
+
+
+def _decode_definition_pointer(value: str) -> str:
+    key = value.removeprefix("#/$defs/")
+    if not key:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return key.replace("~1", "/").replace("~0", "~")
+
+
+def _canonical_schema_node(
+    value: object,
+    reachable: "Sequence[str]",
+    *,
+    root: bool = False,
+    original_key: "str | None" = None,
+) -> object:
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, child in value.items():
+            if key == "$defs":
+                continue
+            if key in _LITERAL_JSON_KEYWORDS:
+                result[str(key)] = child
+                continue
+            if key == "$ref" and isinstance(child, str):
+                target = _decode_definition_pointer(child)
+                if target not in reachable:
+                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+                child = f"#/$defs/d{reachable.index(target)}"
+            if key == "title" and not root and original_key is not None and child == original_key:
+                continue
+            result[str(key)] = _canonical_schema_node(child, reachable)
+        for key in ("required", "type"):
+            current = result.get(key)
+            if isinstance(current, list):
+                result[key] = sorted(set(current), key=lambda item: str(item))
+        dependent = result.get("dependentRequired")
+        if isinstance(dependent, dict):
+            result["dependentRequired"] = {
+                name: sorted(set(items), key=lambda item: str(item))
+                if isinstance(items, list)
+                else items
+                for name, items in dependent.items()
+            }
+        return result
+    if isinstance(value, list):
+        return [_canonical_schema_node(child, reachable) for child in value]
+    return value
 
 
 def _validate_fingerprint(value: str) -> None:

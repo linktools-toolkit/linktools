@@ -19,6 +19,8 @@ from ..core import (
     CursorPayload,
     CursorSigner,
     OperationKind,
+    OperationLedgerInput,
+    OperationLedgerRecord,
     OperationStatus,
     Page,
     Principal,
@@ -29,11 +31,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from .service_api import ArtifactDownload, ArtifactView
-from .state._contracts import (
-    ArtifactState,
-    OperationLedgerInput,
-    OperationLedgerRecord,
-)
+from .state._contracts import ArtifactState
 
 _logger = environ.get_logger("ai.runtime.artifact")
 

@@ -12,16 +12,23 @@ import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import SkillSourceRegistry
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationStatus
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime._capabilities import compose_platform_capabilities
-from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
+from linktools.ai.runtime._compaction import RuntimeCompaction
+from linktools.ai.runtime._execution import (
+    CancelEffectOutcome,
+    DefaultExecutionService,
+    _ExecutionRuntimeBridge,
+)
 from linktools.ai.runtime.service_api import CancelExecutionRequest
-from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import RepositoryInstructions, trusted_workspace_principal
-from pydantic_ai_harness.compaction import DeduplicateFileReads
-from pydantic_ai_harness.step_persistence import InMemoryStepStore
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
+from ._runtime_test_helpers import execution_owner_fields
 
 
 class _EmptyRepositoryInstructionResolver:
@@ -39,7 +46,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"version": 1, "id": "default"},
+        base_model={"version": 1, "id": "default"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -52,45 +59,44 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 async def test_default_platform_composition_keeps_file_read_deduplication() -> None:
     capabilities = await compose_platform_capabilities(
         agent_name="agent",
-        conversation_id=None,
         step_run_id="run",
         segment_sequence=1,
         history_id=None,
         memory_scope=None,
-        step_store=InMemoryStepStore(),
+        step_store=StagingStepStore(),
         memory_store=None,
         runtime_tool_names=(),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=(),
         context_target_tokens=None,
         parent_step_run_id=None,
-        tool_operations=None,
-        background_tasks=set(),
         plan_store_resolver=None,
     )
-    assert any(isinstance(capability, DeduplicateFileReads) for capability in capabilities)
+    assert any(isinstance(capability, RuntimeCompaction) for capability in capabilities)
 
 
 @pytest.mark.asyncio
-async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure() -> None:
-    executor = AgentExecutor(
-        SkillSourceRegistry(),
-        instruction_resolver=_EmptyRepositoryInstructionResolver(),
-        metrics=None,
-    )
+async def test_agent_executor_cancellation_captures_usage_without_replacing_cancel() -> (
+    None
+):
+    executor = AgentExecutor(SkillSourceRegistry(), metrics=None)
+    captured = False
 
     async def cancelled(*args: object, **kwargs: object) -> None:
         del args, kwargs
         raise asyncio.CancelledError
 
-    async def usage_sink(_usage: object) -> None:
+    def usage_sink(_usage: object) -> None:
+        nonlocal captured
+        captured = True
         raise RuntimeError("usage sink failed")
 
     executor._execute = cancelled  # type: ignore[method-assign]
     scope = SimpleNamespace(
         binding=SimpleNamespace(
-            definition=SimpleNamespace(spec=SimpleNamespace(usage_limits=None))
+            definition=SimpleNamespace(
+                spec=SimpleNamespace(usage_limits=None),
+                selected_tools=(),
+                skill_definitions=(),
+            )
         ),
         usage_sink=usage_sink,
         step_run_id="run",
@@ -100,9 +106,7 @@ async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure
     with pytest.raises(asyncio.CancelledError):
         await executor.execute(scope)  # type: ignore[arg-type]
 
-    pending = executor.pending_background_tasks
-    assert len(pending) == 1
-    await asyncio.gather(*pending, return_exceptions=True)
+    assert captured is True
 
 
 @pytest.mark.asyncio
@@ -131,6 +135,7 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        **execution_owner_fields(),
     )
     cancelling = replace(
         execution,
@@ -138,7 +143,9 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         revision=2,
         event_sequence=2,
     )
-    operation = SimpleNamespace(operation_id="operation", status=OperationStatus.PENDING)
+    operation = SimpleNamespace(
+        operation_id="operation", status=OperationStatus.PENDING
+    )
 
     class Operations:
         def __init__(self) -> None:
@@ -158,12 +165,16 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
             return cancelling if operations.created else execution
 
     class Idempotency:
-        async def list_by_resource(self, *args: object, **kwargs: object) -> tuple[object, ...]:
+        async def list_by_resource(
+            self, *args: object, **kwargs: object
+        ) -> tuple[object, ...]:
             del args, kwargs
             return ()
 
     class Backend:
-        async def commit_cancel_checkpoint(self, *args: object, **kwargs: object) -> ExecutionRecord:
+        async def commit_cancel_checkpoint(
+            self, *args: object, **kwargs: object
+        ) -> ExecutionRecord:
             del args, kwargs
             return cancelling
 
@@ -173,11 +184,28 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         async def abort_start(self, _execution: ExecutionRecord) -> None:
             raise AssertionError("started execution must not use pending-start cleanup")
 
+        async def verify_terminal_projection(
+            self,
+            execution: ExecutionRecord,
+            status: ExecutionStatus,
+            required_step_run_id: str | None,
+        ) -> None:
+            del execution, status, required_step_run_id
+
+        async def cancel_children(
+            self,
+            parent_execution_id: str,
+            principal: object,
+        ) -> None:
+            del parent_execution_id, principal
+
     class Committer:
         def __init__(self) -> None:
             self.commit = None
 
-        async def commit_terminal_checkpoint(self, commit: object, *, session_id: str | None) -> object:
+        async def commit_terminal_checkpoint(
+            self, commit: object, *, session_id: str | None
+        ) -> object:
             del session_id
             self.commit = commit
             return SimpleNamespace()
@@ -190,9 +218,11 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         executions=Executions(),
         idempotency=Idempotency(),
     )
-    service._backend = Backend()
-    service._subagent_cancellation = None
-    service._terminal_committer = committer
+    backend = Backend()
+    backend.commit_terminal_checkpoint = committer.commit_terminal_checkpoint  # type: ignore[method-assign]
+    bridge = _ExecutionRuntimeBridge()
+    bridge.bind(backend)  # type: ignore[arg-type]
+    service._runtime_bridge = bridge
 
     async def load_authorized(*args: object, **kwargs: object) -> ExecutionRecord:
         del args, kwargs
@@ -201,12 +231,8 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
     async def resolve_cancel_race(*args: object, **kwargs: object) -> None:
         del args, kwargs
 
-    async def verify_terminal(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
     service._load_authorized = load_authorized
     service._resolve_cancel_race = resolve_cancel_race
-    service._terminal_verifier = verify_terminal
 
     result = await service._cancel(
         "execution",

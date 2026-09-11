@@ -10,7 +10,7 @@ from .service_api import (
     ExecutionTraceItem,
     TranscriptItem,
 )
-from .state import ExecutionRepository
+from .state._contracts import ExecutionRepository
 
 
 class DefaultExecutionHistoryService:

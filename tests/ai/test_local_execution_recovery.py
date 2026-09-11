@@ -15,10 +15,10 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
 from linktools.ai.runtime._local import LocalExecutionBackend, _is_infrastructure_error
-from linktools.ai.runtime.state import ExecutionRecord, RuntimeStorageContract
+from linktools.ai.runtime.state._contracts import ExecutionRecord, RuntimeStorageContract
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
-from linktools.ai.runtime.state import StoredUserInput
+from linktools.ai.runtime.state._contracts import StoredUserInput
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -26,7 +26,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -58,11 +58,6 @@ def _request() -> ExecutionRequest:
         mode="run",
         planning=False,
         thinking=False,
-        stored_user_input=StoredUserInput(
-            1,
-            "text",
-            StoredPayload.inline_text("prompt"),
-        ),
     )
 
 
@@ -90,6 +85,14 @@ def _record() -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        principal_id="principal",
+        principal_kind="service",
+        stored_user_input=StoredUserInput(
+            1,
+            "text",
+            StoredPayload.inline_text("prompt"),
+        ),
+        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 
@@ -135,11 +138,13 @@ def _backend() -> LocalExecutionBackend:
     backend._recovery_enabled = False
     backend._tenant_id = "tenant"
     backend._storage_contract = RuntimeStorageContract(1, (), (), ())
+    backend._storage_contract_factory = None
     backend._namespace = "test"
     backend._tasks = {}
     backend._captured_usage = {}
     backend._worker_failures = {}
     backend._worker_cancel_requests = set()
+    backend._worker_shutdown_requests = set()
     backend._terminal_events = {}
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
@@ -149,6 +154,7 @@ def _backend() -> LocalExecutionBackend:
     backend._checkpoint_tasks = set()
     backend._execution_durable_tasks = {}
     backend._metric_recorder = None
+    backend._live_broker = SimpleNamespace(complete=lambda _execution_id: None)
     return backend
 
 
@@ -169,12 +175,10 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy() -> No
     assert started.status is ExecutionStatus.STARTED
     checkpoint = commands.recovery_checkpoint
     assert checkpoint is not None
-    assert checkpoint.input.binding_digest == execution.binding_digest
-    assert checkpoint.input.binding == execution.binding
-    assert checkpoint.input.user_input.codec == "text"
-    assert checkpoint.input.mode == execution.mode
-    assert checkpoint.input.planning is execution.planning
-    assert checkpoint.input.thinking == execution.thinking
+    assert checkpoint.execution_id == execution.execution_id
+    assert checkpoint.state.value == "admitted"
+    assert checkpoint.agent_run_sequence == execution.agent_run_sequence
+    assert checkpoint.pending_tools is None
 
 
 @pytest.mark.parametrize(

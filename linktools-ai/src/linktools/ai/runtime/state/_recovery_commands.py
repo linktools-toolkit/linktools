@@ -20,8 +20,7 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
-from .._tool import ToolOperationRecord
-from ._contracts import ExecutionEventAppend, ExecutionRecord
+from ._contracts import ExecutionEventAppend, ExecutionRecord, ToolOperationRecord
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._repositories import (
     EventRepositoryImpl,
@@ -329,7 +328,7 @@ class RuntimeRecoveryCommands:
                             stream,
                             execution.event_sequence + index,
                             key,
-                            event.event_type.value,
+                            event.event_type,
                             None,
                             None,
                             event.payload,
@@ -360,7 +359,7 @@ class RuntimeRecoveryCommands:
                     len(prefix) == event_count
                     and all(
                         actual.sequence == execution.event_sequence + index
-                        and actual.event_type is expected.event_type
+                        and actual.event_type == expected.event_type
                         and actual.payload == expected.payload
                         for index, (actual, expected) in enumerate(
                             zip(prefix, events, strict=True),

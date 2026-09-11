@@ -21,7 +21,10 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._factory import _RuntimeCloseCoordinator
-from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime._execution import (
+    DefaultExecutionService,
+    _ExecutionRuntimeBridge,
+)
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state._durability import (
     CommitObservation,
@@ -114,7 +117,7 @@ def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
     with pytest.raises(AIError) as error:
         bind_output(_RecursiveOutput)
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
-    assert error.value.safe_details == {"reason": "output_schema_not_durable"}
+    assert error.value.safe_details == {}
 
 
 @pytest.mark.asyncio
@@ -313,28 +316,36 @@ async def test_runtime_object_preflight_ignores_external_filesystem_work(
 
 
 @pytest.mark.asyncio
-async def test_execution_retention_requires_runtime_release_before_cleanup() -> None:
+async def test_execution_retention_releases_staging_after_execution_lookup() -> None:
     calls: list[str] = []
-
-    async def runtime_release(execution_id: str, *, tenant_id: str) -> None:
-        calls.append(f"runtime:{execution_id}:{tenant_id}")
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def execution_get(execution_id: str, *, tenant_id: str) -> object:
         calls.append(f"execution:{execution_id}:{tenant_id}")
-        return object()
+        return SimpleNamespace(session_id=None, agent_run_sequence=0)
+
+    async def release_staging_many(
+        *,
+        candidate_step_run_ids: tuple[str, ...],
+        execution_id: str,
+    ) -> None:
+        calls.append(f"staging:{execution_id}:{candidate_step_run_ids}")
 
     controller = object.__new__(RuntimeRetentionController)
-    controller._execution_runtime_release = runtime_release
     controller._execution = SimpleNamespace(
         executions=SimpleNamespace(get=execution_get),
     )
+    controller._conversation = SimpleNamespace()
+    controller._namespace = "runtime"
+    controller._steps = SimpleNamespace(release_staging_many=release_staging_many)
+    controller._objects = SimpleNamespace()
+    controller._transient_domains = frozenset()
 
-    with pytest.raises(AIError) as error:
-        await controller.release_execution_handoff("execution", tenant_id="tenant")
+    await controller.release_execution_handoff("execution", tenant_id="tenant")
 
-    assert error.value.code is ErrorCode.STORAGE_CONFLICT
-    assert calls == ["runtime:execution:tenant"]
+    assert calls == [
+        "execution:execution:tenant",
+        "staging:execution:()",
+    ]
 
 
 @pytest.mark.asyncio
@@ -402,6 +413,7 @@ async def test_local_execution_close_rejects_pending_command_owned_work() -> Non
     backend._segment_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
+    backend._worker_shutdown_requests = set()
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._checkpoint_tasks = {task}
@@ -435,6 +447,7 @@ async def test_runtime_release_waits_for_execution_scoped_durable_task() -> None
     backend._segment_only_worker_exits = set()
     backend._repository_instruction_provenance = {}
     backend._worker_cancel_requests = set()
+    backend._worker_shutdown_requests = set()
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     backend._execution_durable_tasks = {"execution": {task}}
@@ -467,11 +480,31 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
             await release.wait()
             self.owned = False
 
+        def worker_failure(
+            self,
+            execution_id: str,
+            *,
+            tenant_id: str,
+        ) -> AIError | None:
+            del execution_id, tenant_id
+            return None
+
     service = object.__new__(DefaultExecutionService)
-    service._local_waiter = Waiter()
-    service._backend = None
+    bridge = _ExecutionRuntimeBridge()
+    bridge.bind(Waiter())  # type: ignore[arg-type]
+    service._runtime_bridge = bridge
+
+    class LiveBroker:
+        def __init__(self) -> None:
+            self.abandoned: list[str] = []
+
+        def abandon_prepared_local_producer(self, execution_id: str) -> None:
+            self.abandoned.append(execution_id)
+
+    live_broker = LiveBroker()
+    service._live_broker = live_broker
     abandoned: list[str] = []
-    service._local_stream_abort = abandoned.append
+    del abandoned
 
     async def load_authorized(
         execution_id: str, principal: Principal, action: object
@@ -503,7 +536,7 @@ async def test_execution_wait_rechecks_after_local_worker_quiescence() -> None:
         )
     )
     await started.wait()
-    assert abandoned == ["execution"]
+    assert live_broker.abandoned == ["execution"]
     assert not task.done()
     release.set()
     assert await task == "terminal"

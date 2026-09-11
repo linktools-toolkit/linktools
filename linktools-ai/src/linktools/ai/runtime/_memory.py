@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-backed Harness memory storage."""
+"""Runtime persistence adapter for Harness memory."""
 
-import asyncio
+from __future__ import annotations
+
 import hashlib
 import json
 import re
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -15,9 +18,7 @@ from pydantic_ai_harness.memory import (
     MemoryMutation,
     MemoryOperation,
     MemoryOperationConflictError,
-    MemorySearchMatch,
-    MemorySearchResult,
-    SearchableMemoryStore,
+    MemoryStore,
 )
 
 from ..core import (
@@ -30,25 +31,27 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ._object import (
-    RuntimeObjectKeyFactory,
-    put_runtime_object,
-    read_runtime_object,
-)
-from .state import MemoryRecord, MemoryState, RuntimeDomain
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
+from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
+from .state import RuntimeDomain
+from .state._contracts import MemoryRecord, MemoryState
 
 _logger = environ.get_logger("ai.runtime.memory")
-_MEMORY_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
+_MAX_CONTENT_CHARS = 65_536
+_MEMORY_VERSION = re.compile(r"m1:[0-9a-f]{64}")
+_STORE_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
 
-def _memory_working_scope_digest(execution_id: str, memory_scope: str) -> str:
-    logical_scope_digest = canonical_sha256(memory_scope)
-    return canonical_sha256({"execution_id": execution_id, "memory_scope_digest": logical_scope_digest})
+@dataclass(frozen=True, slots=True)
+class _MutationReceipt:
+    path: str
+    version: str | None
+    existed: bool
+    kind: str
 
 
-class RuntimeMemoryStore(SearchableMemoryStore):
-    """Map Harness memory paths to the bound Runtime memory repositories."""
+class RuntimeMemoryStore:
+    """Persist Harness memory files inside one Runtime memory scope."""
 
     def __init__(
         self,
@@ -60,7 +63,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         execution_id: str,
         memory_scope: str,
         transient: bool = False,
-        payload_policy: "PayloadPolicy | None" = None,
+        payload_policy: PayloadPolicy | None = None,
     ) -> None:
         try:
             validate_tenant_id(tenant_id)
@@ -71,41 +74,48 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         self._object_store = object_store
         self._namespace = namespace
         self._tenant_id = tenant_id
-        self._execution_id = execution_id
-        self._transient = transient
         self._payload_policy = payload_policy or PayloadPolicy()
-        logical_scope_digest = canonical_sha256(memory_scope)
+        scope_digest = canonical_sha256(memory_scope)
         self._memory_scope_digest = (
-            _memory_working_scope_digest(execution_id, memory_scope)
+            canonical_sha256(
+                {"execution_id": execution_id, "memory_scope_digest": scope_digest}
+            )
             if transient
-            else logical_scope_digest
+            else scope_digest
         )
-        self._lock = asyncio.Lock()
 
-    async def read(self, path: str, *, max_chars: int) -> "MemoryFile | None":
-        if max_chars <= 0:
+    async def read(self, path: str, *, max_chars: int) -> MemoryFile | None:
+        logical_path = _normalize_path(path)
+        if (
+            not isinstance(max_chars, int)
+            or isinstance(max_chars, bool)
+            or max_chars <= 0
+        ):
             raise ValueError("max_chars must be positive")
-        logical_path = self._path(path)
         record = await self._record(logical_path)
         if record is None:
             return None
         content = await self._content(record)
+        version = _record_version(record)
+        if version is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         operation_id = record.metadata.get("operation_id")
-        return MemoryFile(content[:max_chars], _version(record.revision), operation_id if isinstance(operation_id, str) else None, len(content) > max_chars)
+        return MemoryFile(
+            content=content[:max_chars],
+            version=version,
+            operation_id=operation_id if isinstance(operation_id, str) else None,
+            truncated=len(content) > max_chars,
+        )
 
     async def get_operation(self, operation: MemoryOperation) -> MemoryMutation | None:
-        record = await self._state.operations.get(
-            _operation_id(self._memory_scope_digest, operation.id),
-            tenant_id=self._tenant_id,
-        )
-        if record is None:
+        receipt = await self._get_receipt(operation)
+        if receipt is None:
             return None
-        if record.resource_kind is not ResourceKind.MEMORY or record.request_digest != operation.fingerprint:
-            raise MemoryOperationConflictError("memory operation fingerprint conflict")
-        if record.status is not OperationStatus.SUCCEEDED or record.result_ref is None:
-            raise MemoryOperationConflictError("memory operation is not replayable")
-        mutation = _decode_mutation(record.result_ref)
-        return MemoryMutation(mutation.version, True, mutation.existed)
+        return MemoryMutation(
+            version=receipt.version,
+            replayed=True,
+            existed=receipt.existed,
+        )
 
     async def write(
         self,
@@ -115,68 +125,91 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         expected_version: str | None,
         operation: MemoryOperation | None = None,
     ) -> MemoryMutation:
-        logical_path = self._path(path)
-        async with self._lock:
-            replay = await self._replay(operation)
-            if replay is not None:
-                return replay
-            current = await self._record(logical_path)
-            _check_version(current, expected_version)
-            inline = StoredPayload.inline_text(content)
-            stored_content = inline
-            if not payload_fits_inline(inline, self._payload_policy):
-                blob = await put_runtime_object(
-                    self._object_store,
-                    RuntimeObjectKeyFactory(self._namespace),
-                    RuntimeDomain.MEMORY,
+        logical_path = _normalize_path(path)
+        _validate_content(content)
+        _validate_expected_version(expected_version)
+        operation = _ensure_operation(operation, "write", logical_path, content)
+        replay = await self._get_receipt(operation)
+        if replay is not None:
+            _require_receipt(replay, logical_path, "write")
+            return MemoryMutation(replay.version, True, replay.existed)
+
+        current = await self._record(logical_path)
+        _check_version(current, expected_version)
+        expected_storage_version = (
+            None if current is None else _record_storage_version(current)
+        )
+        version = _version_token(
+            self._namespace,
+            self._tenant_id,
+            self._memory_scope_digest,
+            logical_path,
+            operation.id,
+        )
+        stored_content = StoredPayload.inline_text(content)
+        if not payload_fits_inline(stored_content, self._payload_policy):
+            reference = await put_runtime_object(
+                self._object_store,
+                RuntimeObjectKeyFactory(self._namespace),
+                RuntimeDomain.MEMORY,
+                self._tenant_id,
+                content.encode("utf-8"),
+            )
+            stored_content = StoredPayload.object(reference)
+        now = datetime.now(timezone.utc)
+        next_record = MemoryRecord(
+            _memory_id(self._memory_scope_digest, logical_path),
+            self._tenant_id,
+            self._memory_scope_digest,
+            stored_content,
+            {
+                "path": logical_path,
+                "version": version,
+                "operation_id": _operation_id(
+                    self._memory_scope_digest,
+                    operation.id,
+                ),
+            },
+            0,
+            now if current is None else current.created_at,
+            now,
+        )
+        receipt = _MutationReceipt(
+            logical_path,
+            version,
+            current is not None,
+            "write",
+        )
+        try:
+            stored, replayed = await self._state.records.apply_write(
+                next_record,
+                expected_revision=None if current is None else current.revision,
+                expected_storage_version=expected_storage_version,
+                operation=_operation_input(
+                    operation,
+                    self._memory_scope_digest,
                     self._tenant_id,
-                    content.encode("utf-8"),
-                )
-                stored_content = StoredPayload.object(blob)
-            now = datetime.now(timezone.utc)
-            next_record = MemoryRecord(
-                _memory_id(self._memory_scope_digest, logical_path),
-                self._tenant_id,
-                self._memory_scope_digest,
-                stored_content,
-                {"path": logical_path, **({} if operation is None else {"operation_id": operation.id})},
-                0 if current is None else current.revision + 1,
-                now if current is None else current.created_at,
-                now,
+                    receipt,
+                    OperationKind.MEMORY_WRITE,
+                    next_record.memory_id,
+                ),
             )
-            mutation = MemoryMutation(_version(next_record.revision), False, current is not None)
-            operation_input = _operation_input(
-                operation,
-                self._memory_scope_digest,
-                self._tenant_id,
-                mutation,
-                OperationKind.MEMORY_WRITE,
-                _memory_id(self._memory_scope_digest, logical_path),
-            )
-            try:
-                stored, replayed = await self._state.records.put_with_operation(
-                    next_record,
-                    expected_revision=None if current is None else current.revision,
-                    operation=operation_input,
-                )
-            except AIError as error:
-                mapped = await self._map_mutation_error(error, operation)
-                raise mapped from error
-            if replayed:
-                replay = await self._replay(operation)
-                if replay is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return replay
-            if stored is None:
+        except AIError as error:
+            raise await self._map_mutation_error(error, operation) from error
+        if replayed:
+            replay = await self._get_receipt(operation)
+            if replay is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            mutation = MemoryMutation(_version(stored.revision), False, current is not None)
-            _logger.debug(
-                "runtime memory written: memory_scope_digest=%s path_digest=%s replayed=%s",
-                self._memory_scope_digest,
-                canonical_sha256(logical_path),
-                False,
-            )
-            return mutation
+            _require_receipt(replay, logical_path, "write")
+            return MemoryMutation(replay.version, True, replay.existed)
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.debug(
+            "memory write committed: scope=%s path=%s",
+            self._memory_scope_digest,
+            logical_path,
+        )
+        return MemoryMutation(version, False, current is not None)
 
     async def delete(
         self,
@@ -185,190 +218,334 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         expected_version: str | None,
         operation: MemoryOperation | None = None,
     ) -> MemoryMutation:
-        logical_path = self._path(path)
-        async with self._lock:
-            replay = await self._replay(operation)
-            if replay is not None:
-                return replay
-            current = await self._record(logical_path)
-            _check_version(current, expected_version)
-            if current is None:
-                mutation = MemoryMutation(None, False, False)
-            else:
-                mutation = MemoryMutation(None, False, True)
-            operation_input = _operation_input(
-                operation,
-                self._memory_scope_digest,
-                self._tenant_id,
-                mutation,
-                OperationKind.MEMORY_DELETE,
-                _memory_id(self._memory_scope_digest, logical_path),
-            )
-            try:
-                deleted, replayed = await self._state.records.delete_with_operation(
-                    _memory_id(self._memory_scope_digest, logical_path),
-                    tenant_id=self._tenant_id,
-                    expected_revision=None if current is None else current.revision,
-                    operation=operation_input,
-                )
-            except AIError as error:
-                mapped = await self._map_mutation_error(error, operation)
-                raise mapped from error
-            if replayed:
-                replay = await self._replay(operation)
-                if replay is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return replay
-            if deleted != (current is not None):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _logger.debug(
-                "runtime memory deleted: memory_scope_digest=%s path_digest=%s replayed=%s",
-                self._memory_scope_digest,
-                canonical_sha256(logical_path),
-                False,
-            )
-            return mutation
+        logical_path = _normalize_path(path)
+        _validate_expected_version(expected_version)
+        operation = _ensure_operation(operation, "delete", logical_path, None)
+        replay = await self._get_receipt(operation)
+        if replay is not None:
+            _require_receipt(replay, logical_path, "delete")
+            return MemoryMutation(replay.version, True, replay.existed)
 
-    async def list_paths(self, prefix: str = "", *, limit: int) -> "list[str]":
-        if limit <= 0:
-            raise ValueError("limit must be positive")
-        normalized_prefix = self._prefix(prefix)
-        records = await self._list_records()
-        result = sorted(
-            (item.metadata["path"] for item in records if isinstance(item.metadata.get("path"), str)),
+        current = await self._record(logical_path)
+        _check_version(current, expected_version)
+        receipt = _MutationReceipt(
+            logical_path,
+            None,
+            current is not None,
+            "delete",
         )
-        return [path for path in result if path.startswith(normalized_prefix)][:limit]
-
-    async def search(
-        self,
-        prefix: str,
-        query: str,
-        *,
-        limit: int,
-        max_files: int,
-        max_chars: int,
-        max_file_chars: int,
-    ) -> MemorySearchResult:
-        normalized_prefix = self._prefix(prefix)
-        if not query.split() or limit <= 0 or max_files <= 0 or max_chars <= 0 or max_file_chars <= 0:
-            return MemorySearchResult([], 0, False)
-        records = await self._list_records()
-        matching_records = [
-            record
-            for record in records
-            if isinstance(record.metadata.get("path"), str)
-            and record.metadata["path"].startswith(normalized_prefix)
-        ]
-        matching_records.sort(key=lambda record: str(record.metadata["path"]))
-        files_truncated = len(matching_records) > max_files
-        records = matching_records[:max_files]
-        candidates: list[tuple[float, str, str]] = []
-        scanned = 0
-        content_truncated = False
-        terms = tuple(term.lower() for term in query.split())
-        for record in records[:max_files]:
-            logical_path = record.metadata.get("path")
-            if not isinstance(logical_path, str):
+        try:
+            deleted, replayed = await self._state.records.apply_delete(
+                _memory_id(self._memory_scope_digest, logical_path),
+                tenant_id=self._tenant_id,
+                expected_revision=0 if current is None else current.revision,
+                expected_storage_version=(
+                    None if current is None else _record_storage_version(current)
+                ),
+                operation=_operation_input(
+                    operation,
+                    self._memory_scope_digest,
+                    self._tenant_id,
+                    receipt,
+                    OperationKind.MEMORY_DELETE,
+                    _memory_id(self._memory_scope_digest, logical_path),
+                ),
+            )
+        except AIError as error:
+            raise await self._map_mutation_error(error, operation) from error
+        if replayed:
+            replay = await self._get_receipt(operation)
+            if replay is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            path = logical_path
-            scanned += 1
-            full_content = await self._content(record)
-            content_truncated = content_truncated or len(full_content) > max_file_chars
-            content = full_content[:max_file_chars]
-            searchable = f"{path}\n{content}".lower()
-            score = float(sum(searchable.count(term) for term in terms))
-            if score == 0:
-                continue
-            index = min((content.lower().find(term) for term in terms if content.lower().find(term) >= 0), default=0)
-            start = max(0, index - 120)
-            snippet = content[start:start + min(400, max_chars)]
-            candidates.append((score, path, snippet))
-        candidates.sort(key=lambda item: (-item[0], item[1]))
-        matches: list[MemorySearchMatch] = []
-        remaining = max_chars
-        for score, path, snippet in candidates[:limit]:
-            available = remaining - len(path)
-            if available <= 0:
-                break
-            visible = snippet[:available]
-            matches.append(MemorySearchMatch(path, visible, score))
-            remaining -= len(path) + len(visible)
-        return MemorySearchResult(matches, scanned, files_truncated or content_truncated or len(matches) < len(candidates))
+            _require_receipt(replay, logical_path, "delete")
+            return MemoryMutation(replay.version, True, replay.existed)
+        if deleted != (current is not None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.debug(
+            "memory delete committed: scope=%s path=%s",
+            self._memory_scope_digest,
+            logical_path,
+        )
+        return MemoryMutation(None, False, current is not None)
 
-    async def _list_records(self, *, limit: int | None = None) -> list[MemoryRecord]:
-        records: list[MemoryRecord] = []
-        cursor = None
-        while limit is None or len(records) < limit:
-            page_limit = 200 if limit is None else min(200, limit - len(records))
+    async def list_paths(self, prefix: str = "", *, limit: int) -> list[str]:
+        normalized_prefix = _normalize_prefix(prefix)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be positive")
+        paths: list[str] = []
+        cursor: str | None = None
+        while len(paths) < limit:
             page = await self._state.records.list(
                 tenant_id=self._tenant_id,
                 memory_scope_digest=self._memory_scope_digest,
+                prefix=normalized_prefix,
                 cursor=cursor,
-                limit=page_limit,
+                limit=min(1000, limit - len(paths)),
             )
-            records.extend(page.items)
-            if page.next_cursor is None or page.next_cursor == cursor or not page.items:
+            batch = _record_paths(list(page.items))
+            if any(not path.startswith(normalized_prefix) for path in batch):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            paths.extend(batch)
+            if page.next_cursor is None:
                 break
             cursor = page.next_cursor
-        return records if limit is None else records[:limit]
+        return paths
+
+    async def _get_receipt(
+        self,
+        operation: MemoryOperation,
+    ) -> _MutationReceipt | None:
+        _validate_operation(operation)
+        operation_id = _operation_id(self._memory_scope_digest, operation.id)
+        record = await self._state.operations.get(
+            operation_id,
+            tenant_id=self._tenant_id,
+        )
+        if record is None:
+            return None
+        if record.request_digest != operation.fingerprint:
+            raise MemoryOperationConflictError(
+                f"operation id {operation.id!r} was reused with different arguments"
+            )
+        if (
+            record.operation_id != operation_id
+            or record.tenant_id != self._tenant_id
+            or record.resource_kind is not ResourceKind.MEMORY
+            or record.status is not OperationStatus.SUCCEEDED
+            or record.result_ref is None
+            or record.execution_id is not None
+            or record.result_digest is not None
+            or record.error_code is not None
+            or not record.compactable
+            or isinstance(record.sequence, bool)
+            or not isinstance(record.sequence, int)
+            or record.sequence < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        receipt = _decode_receipt(record.result_ref)
+        expected_kind = (
+            OperationKind.MEMORY_WRITE
+            if receipt.kind == "write"
+            else OperationKind.MEMORY_DELETE
+        )
+        if (
+            record.resource_id != _memory_id(self._memory_scope_digest, receipt.path)
+            or record.operation_kind is not expected_kind
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if receipt.version is not None and receipt.version != _version_token(
+            self._namespace,
+            self._tenant_id,
+            self._memory_scope_digest,
+            receipt.path,
+            operation.id,
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return receipt
+
+    async def _map_mutation_error(
+        self,
+        error: AIError,
+        operation: MemoryOperation,
+    ) -> Exception:
+        if error.code is not ErrorCode.STORAGE_CONFLICT:
+            return error
+        existing = await self._state.operations.get(
+            _operation_id(self._memory_scope_digest, operation.id),
+            tenant_id=self._tenant_id,
+        )
+        if existing is not None:
+            return MemoryOperationConflictError(
+                f"operation id {operation.id!r} conflicted with an existing mutation"
+            )
+        return MemoryConflictError("memory version conflict")
 
     async def _record(self, logical_path: str) -> MemoryRecord | None:
-        return await self._state.records.get(
+        record = await self._state.records.get(
             _memory_id(self._memory_scope_digest, logical_path),
             tenant_id=self._tenant_id,
         )
+        if record is not None:
+            _validate_record(
+                record,
+                logical_path,
+                self._memory_scope_digest,
+                self._tenant_id,
+            )
+        return record
 
     async def _content(self, record: MemoryRecord) -> str:
-        if record.content.kind == "inline":
-            content = record.content.decode()
-            if not isinstance(content, str):
+        try:
+            if record.content.kind == "inline":
+                content = record.content.decode()
+                if not isinstance(content, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            elif record.content.ref is not None:
+                content = (
+                    await read_runtime_object(
+                        self._object_store,
+                        record.content.ref,
+                    )
+                ).decode("utf-8")
+            else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return content
-        reference = record.content.ref
-        if reference is None:
+        except AIError:
+            raise
+        except (UnicodeDecodeError, TypeError, ValueError, OSError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if len(content) > _MAX_CONTENT_CHARS or "\x00" in content:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return (await read_runtime_object(self._object_store, reference)).decode("utf-8")
-
-    async def _replay(self, operation: MemoryOperation | None) -> MemoryMutation | None:
-        return None if operation is None else await self.get_operation(operation)
-
-    async def _map_mutation_error(self, error: AIError, operation: MemoryOperation | None) -> Exception:
-        if error.code is not ErrorCode.STORAGE_CONFLICT:
-            return error
-        if operation is not None:
-            existing = await self._state.operations.get(
-                _operation_id(self._memory_scope_digest, operation.id),
-                tenant_id=self._tenant_id,
-            )
-            if existing is not None:
-                if existing.request_digest != operation.fingerprint:
-                    return MemoryOperationConflictError("memory operation fingerprint conflict")
-                return MemoryOperationConflictError("memory operation conflict")
-        return MemoryConflictError("memory version conflict")
-
-    def _path(self, path: str) -> str:
-        if not isinstance(path, str) or not path or any(
-            not _MEMORY_PATH_SEGMENT.fullmatch(segment) for segment in path.split("/")
-        ):
-            raise ValueError("memory path is invalid")
-        return path
-
-    def _prefix(self, prefix: str) -> str:
-        if prefix == "":
-            return ""
-        normalized = prefix.rstrip("/")
-        if not normalized:
-            raise ValueError("memory prefix is invalid")
-        self._path(normalized)
-        return f"{normalized}/"
+        return content
 
 
-def _operation_input(operation: "MemoryOperation | None", namespace_digest: str, tenant_id: str, mutation: MemoryMutation, kind: OperationKind, resource_id: str) -> "OperationLedgerInput | None":
-    if operation is None:
-        return None
+def _record_paths(records: list[MemoryRecord]) -> list[str]:
+    paths: list[str] = []
+    for record in records:
+        path = record.metadata.get("path")
+        if not isinstance(path, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        normalized = _normalize_path(path)
+        if normalized != path:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        paths.append(normalized)
+    if paths != sorted(paths):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return paths
+
+
+def _normalize_path(path: str) -> str:
+    if (
+        not isinstance(path, str)
+        or not path
+        or path.startswith("/")
+        or "\\" in path
+        or "\x00" in path
+    ):
+        raise ValueError("memory path is invalid")
+    parts = path.split("/")
+    if any(not _STORE_SEGMENT.fullmatch(part) or ".." in part for part in parts):
+        raise ValueError("memory path is invalid")
+    return "/".join(parts)
+
+
+def _normalize_prefix(prefix: str) -> str:
+    if prefix == "":
+        return ""
+    _normalize_path(prefix.removesuffix("/"))
+    return prefix
+
+
+def _validate_content(content: str) -> None:
+    if (
+        not isinstance(content, str)
+        or len(content) > _MAX_CONTENT_CHARS
+        or "\x00" in content
+    ):
+        raise ValueError("memory content is invalid")
+    try:
+        content.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ValueError("memory content is invalid") from error
+
+
+def _validate_operation(operation: MemoryOperation) -> None:
+    if (
+        not isinstance(operation, MemoryOperation)
+        or not isinstance(operation.id, str)
+        or not operation.id
+        or not isinstance(operation.fingerprint, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", operation.fingerprint)
+    ):
+        raise ValueError("memory operation is invalid")
+
+
+def _ensure_operation(
+    operation: MemoryOperation | None,
+    kind: str,
+    path: str,
+    content: str | None,
+) -> MemoryOperation:
+    if operation is not None:
+        _validate_operation(operation)
+        return operation
+    return MemoryOperation(
+        id=uuid.uuid4().hex,
+        fingerprint=canonical_sha256({"kind": kind, "path": path, "content": content}),
+    )
+
+
+def _record_version(record: MemoryRecord) -> str | None:
+    value = record.metadata.get("version")
+    return (
+        value if isinstance(value, str) and _MEMORY_VERSION.fullmatch(value) else None
+    )
+
+
+def _record_storage_version(record: MemoryRecord) -> int:
+    value = record.metadata.get("storage_version")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _validate_record(
+    record: MemoryRecord,
+    logical_path: str,
+    scope_digest: str,
+    tenant_id: str,
+) -> None:
+    if (
+        record.tenant_id != tenant_id
+        or record.memory_id != _memory_id(scope_digest, logical_path)
+        or record.memory_scope_digest != scope_digest
+        or not isinstance(record.revision, int)
+        or isinstance(record.revision, bool)
+        or record.revision < 1
+        or _record_version(record) is None
+        or _record_storage_version(record) != record.revision
+        or record.metadata.get("path") != logical_path
+        or not isinstance(record.metadata.get("operation_id"), str)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _version_token(
+    namespace: str,
+    tenant_id: str,
+    scope_digest: str,
+    path: str,
+    identity: str,
+) -> str:
+    return "m1:" + canonical_sha256(
+        {
+            "namespace": namespace,
+            "tenant_id": tenant_id,
+            "scope": scope_digest,
+            "path": path,
+            "identity": canonical_sha256(identity),
+        }
+    )
+
+
+def _memory_id(scope_digest: str, logical_path: str) -> str:
+    return hashlib.sha256(f"{scope_digest}\0{logical_path}".encode()).hexdigest()
+
+
+def _operation_id(scope_digest: str, operation_id: str) -> str:
+    return hashlib.sha256(f"{scope_digest}\0{operation_id}".encode()).hexdigest()
+
+
+def _operation_input(
+    operation: MemoryOperation,
+    scope_digest: str,
+    tenant_id: str,
+    receipt: _MutationReceipt,
+    kind: OperationKind,
+    resource_id: str,
+) -> OperationLedgerInput:
     now = datetime.now(timezone.utc)
     return OperationLedgerInput(
-        _operation_id(namespace_digest, operation.id),
+        _operation_id(scope_digest, operation.id),
         tenant_id,
         ResourceKind.MEMORY,
         resource_id,
@@ -376,7 +553,7 @@ def _operation_input(operation: "MemoryOperation | None", namespace_digest: str,
         kind,
         OperationStatus.SUCCEEDED,
         operation.fingerprint,
-        _encode_mutation(mutation),
+        _encode_receipt(receipt),
         None,
         None,
         True,
@@ -385,39 +562,107 @@ def _operation_input(operation: "MemoryOperation | None", namespace_digest: str,
     )
 
 
-def _memory_id(namespace_digest: str, logical_path: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{logical_path}".encode()).hexdigest()
+def _encode_receipt(receipt: _MutationReceipt) -> str:
+    status = (
+        "deleted"
+        if receipt.kind == "delete" and receipt.existed
+        else "not_found"
+        if receipt.kind == "delete"
+        else "updated"
+        if receipt.existed
+        else "created"
+    )
+    return json.dumps(
+        {
+            "version": 1,
+            "result": {
+                "file": receipt.path,
+                "version": receipt.version,
+                "status": status,
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
-def _operation_id(namespace_digest: str, operation_id: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{operation_id}".encode()).hexdigest()
-
-
-def _version(revision: int) -> str:
-    return f"v{revision}"
-
-
-def _check_version(record: MemoryRecord | None, expected_version: str | None) -> None:
-    if record is None:
-        if expected_version is not None:
-            raise MemoryConflictError("memory version conflict")
-        return
-    if expected_version != _version(record.revision):
-        raise MemoryConflictError("memory version conflict")
-
-
-def _encode_mutation(mutation: MemoryMutation) -> str:
-    return json.dumps({"version": mutation.version, "existed": mutation.existed}, separators=(",", ":"), sort_keys=True)
-
-
-def _decode_mutation(value: str) -> MemoryMutation:
+def _decode_receipt(value: str) -> _MutationReceipt:
     try:
         raw = json.loads(value)
-        if not isinstance(raw, dict):
-            raise ValueError  # noqa: TRY004
-        return MemoryMutation(None if raw.get("version") is None else str(raw["version"]), False, bool(raw["existed"]))
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        if (
+            not isinstance(raw, dict)
+            or isinstance(raw.get("version"), bool)
+            or not isinstance(raw.get("version"), int)
+            or raw.get("version") != 1
+            or not {"version", "result"}.issubset(raw)
+        ):
+            raise ValueError("memory receipt is malformed")
+        result = raw["result"]
+        if not isinstance(result, dict) or not {
+            "file",
+            "version",
+            "status",
+        }.issubset(result):
+            raise ValueError("memory receipt result is malformed")
+        path = _normalize_path(result["file"])
+        version = result["version"]
+        status = result["status"]
+        if status not in {"created", "updated", "deleted", "not_found"}:
+            raise ValueError("memory receipt status is invalid")
+        if status in {"created", "updated"}:
+            if (
+                not isinstance(version, str)
+                or _MEMORY_VERSION.fullmatch(version) is None
+            ):
+                raise ValueError("memory receipt version is invalid")
+            kind = "write"
+        else:
+            if version is not None:
+                raise ValueError("delete receipt cannot carry a version")
+            kind = "delete"
+        return _MutationReceipt(
+            path=path,
+            version=version,
+            existed=status not in {"created", "not_found"},
+            kind=kind,
+        )
+    except AIError:
+        raise
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-__all__ = ["RuntimeMemoryStore"]
+def _require_receipt(receipt: _MutationReceipt, path: str, kind: str) -> None:
+    if receipt.path != path or receipt.kind != kind:
+        raise MemoryOperationConflictError(
+            "memory operation targets a different mutation"
+        )
+
+
+def _check_version(record: MemoryRecord | None, expected: str | None) -> None:
+    if record is None:
+        if expected is not None:
+            raise MemoryConflictError("memory version conflict")
+        return
+    actual = _record_version(record)
+    if actual is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if expected != actual:
+        raise MemoryConflictError("memory version conflict")
+
+
+def _validate_expected_version(value: str | None) -> None:
+    if value is not None and (
+        not isinstance(value, str) or _MEMORY_VERSION.fullmatch(value) is None
+    ):
+        raise ValueError("memory version is invalid")
+
+
+__all__ = [
+    "MemoryFile",
+    "MemoryMutation",
+    "MemoryOperation",
+    "MemoryStore",
+    "RuntimeMemoryStore",
+]

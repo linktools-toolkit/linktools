@@ -6,11 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from linktools.ai.capability import SubagentCapability
+from linktools.ai.capability import LinkToolsSubagents
 from linktools.ai.core import ExecutionStatus, Principal, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._subagent import SubagentDispatcher
-from linktools.ai.runtime._subagent_adapter import _PydanticSubagentCapability
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionResult
 from linktools.ai.spec import SubagentRef
 from pydantic_ai.exceptions import ToolFailed
@@ -95,8 +94,9 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
         assert files == ()
         raise AIError(ErrorCode.TOOL_EXECUTION_FAILED, safe_details=details)
 
-    capability = _PydanticSubagentCapability(
-        SubagentCapability((SubagentRef("agent", "child"),), delegate)  # type: ignore[arg-type]
+    capability = LinkToolsSubagents(
+        (SubagentRef("agent", "child"),),
+        delegate,
     )
     toolset = capability.get_toolset()
     context = RunContext(

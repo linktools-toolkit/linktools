@@ -14,6 +14,8 @@ from typing import Any
 from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai.exceptions import (
+    ApprovalRequired,
+    CallDeferred,
     ModelRetry,
     SkipToolExecution,
     ToolFailed,
@@ -77,6 +79,16 @@ class _ToolMetricContext:
                 tool_def=tool_def,
                 started=started,
                 status="SUCCEEDED",
+                error_code=None,
+            )
+            raise
+        except (ApprovalRequired, CallDeferred):
+            self._record(
+                attempt_id,
+                call=call,
+                tool_def=tool_def,
+                started=started,
+                status="DEFERRED",
                 error_code=None,
             )
             raise

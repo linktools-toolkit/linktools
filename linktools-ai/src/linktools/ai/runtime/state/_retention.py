@@ -15,10 +15,6 @@ from ._steps import RuntimeStepStore
 _logger = environ.get_logger("ai.runtime.state.retention")
 
 
-class _ExecutionRuntimeRelease(Protocol):
-    async def __call__(self, execution_id: str, *, tenant_id: str) -> None: ...
-
-
 class _RuntimeObjectRouter(Protocol):
     def object_store(self, domain: RuntimeDomain) -> ObjectStore: ...
     async def release_object_scope(
@@ -53,25 +49,11 @@ class RuntimeRetentionController:
             for domain in RuntimeDomain
             if plan.route(domain).retention is RuntimeRetentionMode.TRANSIENT
         )
-        self._execution_runtime_release: _ExecutionRuntimeRelease | None = None
         self._closed = False
-
-    def bind_execution_runtime_release(
-        self,
-        callback: _ExecutionRuntimeRelease,
-    ) -> None:
-        self._execution_runtime_release = callback
 
     async def release_execution_handoff(
         self, execution_id: str, *, tenant_id: str
     ) -> None:
-        if self._execution_runtime_release is not None:
-            await self._execution_runtime_release(execution_id, tenant_id=tenant_id)
-            _logger.debug(
-                "execution runtime ownership released: tenant=%s execution=%s",
-                tenant_id,
-                execution_id,
-            )
         execution = await self._execution.executions.get(
             execution_id, tenant_id=tenant_id
         )

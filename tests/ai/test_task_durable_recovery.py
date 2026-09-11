@@ -293,11 +293,15 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
     admission = TaskGraphAdmission.from_request(request)
     engine = None
     if backend == "filesystem":
-        create_state = lambda: RuntimeState.filesystem(path)
+        def create_state() -> RuntimeState:
+            return RuntimeState.filesystem(path)
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
         await provision_database(engine)
-        create_state = lambda: RuntimeState.sql(engine)
+
+        def create_state() -> RuntimeState:
+            assert engine is not None
+            return RuntimeState.sql(engine)
 
     try:
         state = create_state()
@@ -379,23 +383,12 @@ async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
 
 def test_durable_task_requires_durable_execution_and_recovery(tmp_path) -> None:
     task = RuntimeStateRoute.filesystem(tmp_path / "task")
-    recovery = RuntimeStateRoute.filesystem(tmp_path / "recovery")
-    execution = RuntimeStateRoute.filesystem(tmp_path / "execution")
 
     with pytest.raises(ValueError, match="durable task requires durable execution"):
         RuntimeState.from_plan(
             RuntimeStatePlan(
                 task=task,
-                recovery=recovery,
-                execution=RuntimeStateRoute.transient(),
-            )
-        )
-
-    with pytest.raises(ValueError, match="durable task requires durable recovery"):
-        RuntimeState.from_plan(
-            RuntimeStatePlan(
-                task=task,
-                execution=execution,
                 recovery=RuntimeStateRoute.transient(),
+                execution=RuntimeStateRoute.transient(),
             )
         )

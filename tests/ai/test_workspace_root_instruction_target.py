@@ -1,195 +1,152 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace root path adaptation for repository instructions."""
+"""Workspace-root path adaptation before repository-instruction checks."""
 
-from pathlib import Path
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
-from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import (
-    _WorkspaceToolGate,
-    _repository_instruction_marker,
-)
-from linktools.ai.workspace import (
-    RepositoryInstructionDocument,
-    RepositoryInstructions,
-    WorkspacePolicy,
-)
-
-_TOOL_CLASSES = (
-    ("read_file", "filesystem.read"),
-    ("write_file", "filesystem.write"),
-    ("edit_file", "filesystem.write"),
-    ("file_info", "filesystem.read"),
-    ("create_directory", "filesystem.write"),
-    ("list_directory", "filesystem.read"),
-    ("search_files", "filesystem.read"),
-    ("find_files", "filesystem.read"),
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
 )
 
 
-class _Resolver:
+class _Session:
+    async def canonicalize_path(self, path: str) -> str:
+        if path == "":
+            return "."
+        if "\x00" in path:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if path == "../outside":
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        if "\\" in path:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return path
+
+
+class _RepositoryBoundary:
     def __init__(self, error: AIError | None = None) -> None:
         self.error = error
-        self.calls: list[tuple[str | Path, frozenset[str]]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def resolve(
+    def render(self) -> str:
+        return ""
+
+    async def check(
         self,
-        path: str | Path = ".",
         *,
-        exclude_sources: frozenset[str] = frozenset(),
-    ) -> RepositoryInstructions:
-        self.calls.append((path, exclude_sources))
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        path_fields: tuple[str, ...],
+    ) -> None:
+        del tool_call_id, path_fields
+        self.calls.append((tool_name, arguments))
         if self.error is not None:
             raise self.error
-        return RepositoryInstructions(())
 
 
-def _gate(
-    root: Path,
-    resolver: _Resolver,
-    *,
-    trusted_tool_classes: tuple[tuple[str, str], ...],
-    history: tuple[ModelRequest | ModelResponse, ...] = (),
-    authority: frozenset[tuple[str, str]] = frozenset(),
-) -> _WorkspaceToolGate:
-    return _WorkspaceToolGate(
-        execution_id="execution",
-        workspace_root=root,
-        repository_instruction_history=history,
-        repository_instruction_marker_authority=authority,
-        repository_instructions=RepositoryInstructions(()),
-        instruction_resolver=resolver,
-        policy=WorkspacePolicy(),
-        trusted_tool_classes=trusted_tool_classes,
+async def _list_directory(path: str = ".") -> str:
+    return path
+
+
+def _toolset(repository: _RepositoryBoundary) -> RuntimeToolBoundaryToolset:
+    return RuntimeToolBoundaryToolset(
+        (FunctionToolset([_list_directory]),),
+        {
+            "_list_directory": ManagedToolDescriptor(
+                effect_owner="none",
+                effect="none",
+                tool_class="filesystem.read",
+                workspace_path_fields=("path",),
+            )
+        },
+        id="workspace",
+        sandbox_session=_Session(),  # type: ignore[arg-type]
+        repository_boundary=repository,
+    )
+
+
+def _context() -> RunContext[None]:
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
     )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("tool_name", "tool_class"), _TOOL_CLASSES)
-async def test_empty_path_uses_root_for_instruction_lookup_without_rewriting_args(
-    tmp_path: Path,
-    tool_name: str,
-    tool_class: str,
-) -> None:
-    resolver = _Resolver()
-    gate = _gate(
-        tmp_path,
-        resolver,
-        trusted_tool_classes=((tool_name, tool_class),),
-    )
-    args = {"path": ""}
+async def test_empty_path_uses_workspace_root_before_instruction_lookup() -> None:
+    repository = _RepositoryBoundary()
+    toolset = _toolset(repository)
+    context = _context()
+    tools = await toolset.get_tools(context)
 
-    result = await gate.before_tool_execute(
-        SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
-        call=ToolCallPart(tool_name=tool_name, args=args, tool_call_id="call-1"),
-        tool_def=ToolDefinition(name=tool_name),
-        args=args,
-    )
-
-    assert resolver.calls == [(".", frozenset())]
-    assert result is args
-    assert args == {"path": ""}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("path", ("\x00", "../outside", "bad\\path", "bad|path"))
-async def test_invalid_instruction_target_is_returned_to_model_without_resolver_call(
-    tmp_path: Path,
-    path: str,
-) -> None:
-    resolver = _Resolver()
-    gate = _gate(
-        tmp_path,
-        resolver,
-        trusted_tool_classes=(("list_directory", "filesystem.read"),),
-    )
-    args = {"path": path}
-
-    with pytest.raises(ModelRetry) as raised:
-        await gate.before_tool_execute(
-            SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
-            call=ToolCallPart(
-                tool_name="list_directory",
-                args=args,
-                tool_call_id="call-1",
-            ),
-            tool_def=ToolDefinition(name="list_directory"),
-            args=args,
+    assert (
+        await toolset.call_tool(
+            "_list_directory",
+            {"path": ""},
+            context,
+            tools["_list_directory"],
         )
-
-    assert raised.value.message == (
-        "TOOL_RETRY_REQUIRED: workspace path is invalid or outside the workspace; "
-        "use a path within the workspace root and retry"
+        == "."
     )
-    assert resolver.calls == []
-    assert args == {"path": path}
+    assert repository.calls == [("_list_directory", {"path": "."})]
 
 
 @pytest.mark.asyncio
-async def test_resolver_contract_error_for_valid_target_remains_fatal(tmp_path: Path) -> None:
-    error = AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    resolver = _Resolver(error)
-    gate = _gate(
-        tmp_path,
-        resolver,
-        trusted_tool_classes=(("list_directory", "filesystem.read"),),
-    )
+@pytest.mark.parametrize(
+    ("path", "expected_code"),
+    (
+        ("\x00", ErrorCode.REQUEST_FIELD_INVALID),
+        ("../outside", ErrorCode.AUTHORIZATION_DENIED),
+        ("bad\\path", ErrorCode.REQUEST_FIELD_INVALID),
+    ),
+)
+async def test_invalid_workspace_target_fails_before_instruction_lookup(
+    path: str,
+    expected_code: ErrorCode,
+) -> None:
+    repository = _RepositoryBoundary()
+    toolset = _toolset(repository)
+    context = _context()
+    tools = await toolset.get_tools(context)
 
     with pytest.raises(AIError) as raised:
-        await gate.before_tool_execute(
-            SimpleNamespace(tool_call_approved=False),  # type: ignore[arg-type]
-            call=ToolCallPart(
-                tool_name="list_directory",
-                args={"path": "pkg"},
-                tool_call_id="call-1",
-            ),
-            tool_def=ToolDefinition(name="list_directory"),
-            args={"path": "pkg"},
+        await toolset.call_tool(
+            "_list_directory",
+            {"path": path},
+            context,
+            tools["_list_directory"],
+        )
+
+    assert raised.value.code is expected_code
+    assert repository.calls == []
+
+
+@pytest.mark.asyncio
+async def test_instruction_boundary_error_for_valid_root_target_is_fatal() -> None:
+    error = AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    repository = _RepositoryBoundary(error)
+    toolset = _toolset(repository)
+    context = _context()
+    tools = await toolset.get_tools(context)
+
+    with pytest.raises(AIError) as raised:
+        await toolset.call_tool(
+            "_list_directory",
+            {"path": "pkg"},
+            context,
+            tools["_list_directory"],
         )
 
     assert raised.value is error
-    assert resolver.calls == [("pkg", frozenset())]
-
-
-def test_empty_path_root_marker_restores_as_valid_scope(tmp_path: Path) -> None:
-    document = RepositoryInstructionDocument("agents:AGENTS.md", ".", "root")
-    marker = _repository_instruction_marker(
-        "execution",
-        RepositoryInstructions((document,)),
-    )
-    call = ToolCallPart(
-        tool_name="list_directory",
-        args={"path": ""},
-        tool_call_id="call-1",
-    )
-    history = (
-        ModelResponse(parts=[call], run_id="run-1"),
-        ModelRequest(
-            parts=[
-                ToolReturnPart(
-                    tool_name="list_directory",
-                    content=marker,
-                    tool_call_id="call-1",
-                    outcome="failed",
-                )
-            ],
-            run_id="run-1",
-        ),
-    )
-
-    gate = _gate(
-        tmp_path,
-        _Resolver(),
-        trusted_tool_classes=(("list_directory", "filesystem.read"),),
-        history=history,
-        authority=frozenset({("run-1", "call-1")}),
-    )
-
-    rendered = gate.get_instructions()(SimpleNamespace())  # type: ignore[arg-type]
-    assert "root" in rendered
+    assert repository.calls == [("_list_directory", {"path": "pkg"})]

@@ -97,10 +97,12 @@ class AgentSpec:
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
     allow_subagents: "tuple[str, ...]" = ("*",)
+    allow_capabilities: "tuple[str, ...]" = ("*",)
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
     thinking: ThinkingValue = False
-    output_retries: int = 1
+    tool_retries: int = 10000
+    output_retries: int = 3
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()
     _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
@@ -123,10 +125,14 @@ class AgentSpec:
             raise TypeError("agent usage_limits must be AgentUsageLimits or None")
         if not isinstance(self.planning, bool):
             raise TypeError("agent planning must be bool")
-        if not isinstance(self.output_retries, int) or isinstance(self.output_retries, bool):
-            raise TypeError("agent output_retries must be an integer")
-        if self.output_retries < 0:
-            raise ValueError("agent output_retries cannot be negative")
+        for name, value in (
+            ("tool_retries", self.tool_retries),
+            ("output_retries", self.output_retries),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise TypeError(f"agent {name} must be an integer")
+            if value < 0:
+                raise ValueError(f"agent {name} cannot be negative")
         if self.description is not None and (
             not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
         ):
@@ -134,6 +140,10 @@ class AgentSpec:
         thinking = normalize_thinking(self.thinking)
         allow_skills = canonical_selectors(self.allow_skills, field_name="allow_skills")
         preload_skills = canonical_selectors(self.preload_skills, field_name="preload_skills")
+        allow_capabilities = canonical_selectors(
+            self.allow_capabilities,
+            field_name="allow_capabilities",
+        )
         if "*" in preload_skills:
             raise AIError(
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
@@ -150,12 +160,21 @@ class AgentSpec:
             extensions = ImmutableJsonMapping(self._extensions)
         except (TypeError, ValueError) as error:
             raise TypeError("agent extensions must be JSON values") from error
-        if "preload_skills" in extensions or "output_retries" in extensions:
+        if any(
+            key in extensions
+            for key in (
+                "allow_capabilities",
+                "tool_retries",
+                "output_retries",
+                "preload_skills",
+            )
+        ):
             raise ValueError("agent extensions contain a reserved field")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_selectors(self.allow_tools, field_name="allow_tools", mcp=True))
         object.__setattr__(self, "allow_skills", allow_skills)
         object.__setattr__(self, "allow_subagents", canonical_selectors(self.allow_subagents, field_name="allow_subagents"))
+        object.__setattr__(self, "allow_capabilities", allow_capabilities)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "preload_skills", preload_skills)
         object.__setattr__(self, "_extensions", extensions)

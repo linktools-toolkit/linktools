@@ -6,19 +6,21 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.observe import Observation
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import (
-    ToolOperationDecision,
     _RuntimeStepPersistence,
 )
+from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
 from linktools.ai.runtime._history import _trace_item
-from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
+from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._metric_id import _model_observation_id
-from linktools.ai.runtime._tool_metrics import _ToolMetricContext
 from pydantic_ai import Agent, ModelRetry, RunContext
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai_harness.step_persistence import InMemoryStepStore
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
 
 
 class _Recorder:
@@ -38,61 +40,27 @@ async def _text_model(
     return ModelResponse(parts=[TextPart("done")])
 
 
-class _ToolOperations:
-    async def begin(self, ctx, call, tool_def, args, replay_safe):
-        del ctx, tool_def, args
-        return ToolOperationDecision(
-            operation_id=f"operation:{call.tool_call_id}",
-            owner="owner",
-            fence=1,
-            replay_safe=replay_safe,
-        )
-
-    async def renew(self, decision):
-        return decision
-
-    async def complete(self, decision, result):
-        del decision, result
-        return False
-
-    async def fail(self, decision, error):
-        del decision, error
-        return False
-
-    async def unknown(self, decision, error):
-        del decision, error
-        raise AssertionError("unexpected unknown tool effect")
-
-
 def _persistence(
-    store: InMemoryStepStore,
+    store: StagingStepStore,
     run_id: str,
     recorder: _Recorder | None,
+    journal: ModelRequestJournal,
 ) -> _RuntimeStepPersistence:
-    tool_metrics = (
-        None
-        if recorder is None
-        else _ToolMetricContext(
-            recorder,
-            source_namespace="workspace",
-            tenant_id="tenant",
-            execution_id="execution",
-            session_id=None,
-            step_run_id=run_id,
-            agent_id="agent",
-        )
-    )
     return _RuntimeStepPersistence(
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id=run_id,
-        tool_operations=_ToolOperations(),
-        tool_metrics=tool_metrics,
+        model_journal=journal,
+        model_observation_enabled=recorder is not None,
     )
 
 
-def _model_metrics(recorder: _Recorder, run_id: str) -> _RuntimeModelMetricCapability:
-    return _RuntimeModelMetricCapability(
+def _model_metrics(
+    recorder: _Recorder | None,
+    run_id: str,
+    journal: ModelRequestJournal,
+) -> RuntimeModelObservationCapability:
+    return RuntimeModelObservationCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",
@@ -100,9 +68,7 @@ def _model_metrics(recorder: _Recorder, run_id: str) -> _RuntimeModelMetricCapab
         session_id=None,
         step_run_id=run_id,
         agent_id="agent",
-        provider="test",
-        model_identity="test:test",
-        route_id="default",
+        journal=journal,
     )
 
 
@@ -120,19 +86,30 @@ def _trace(event) -> object:
 
 @pytest.mark.asyncio
 async def test_model_metric_and_trace_share_observation_id_and_duration() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     recorder = _Recorder()
     run_id = "metric-trace-run"
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id=run_id,
+    )
     agent = Agent(
         TestModel(custom_output_text="done"),
         deps_type=object,
-        capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
+        capabilities=[
+            _model_metrics(recorder, run_id, journal),
+            _persistence(store, run_id, recorder, journal),
+        ],
     )
 
     await agent.run("hello", deps=SimpleNamespace(correlation={}))
 
     model_observations = [
-        value for value in recorder.observations if value.kind == "linktools.model.request"
+        value
+        for value in recorder.observations
+        if value.kind == "linktools.model.request"
     ]
     assert len(model_observations) == 1
     completed = [
@@ -142,35 +119,59 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
     ]
     assert len(completed) == 1
     event = completed[0]
-    expected = _model_observation_id(run_id, event.step_index)
+    expected = _model_observation_id(
+        "workspace",
+        "tenant",
+        "execution",
+        run_id,
+        1,
+        "agent",
+    )
     assert model_observations[0].observation_id == expected
     assert event.metadata["linktools.ai.observation_id"] == expected
     assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
     trace = _trace(event)
     assert trace.payload["observation_id"] == expected
-    assert trace.payload["duration_ns"] == int(event.metadata["linktools.ai.duration_ns"])
+    assert trace.payload["duration_ns"] == int(
+        event.metadata["linktools.ai.duration_ns"]
+    )
 
 
 @pytest.mark.asyncio
-async def test_failed_model_metric_and_trace_share_observation_id_and_duration() -> None:
-    async def fail_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+async def test_failed_model_metric_and_trace_share_observation_id_and_duration() -> (
+    None
+):
+    async def fail_model(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> ModelResponse:
         del messages, info
         raise RuntimeError("boom")
 
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     recorder = _Recorder()
     run_id = "metric-trace-failed-run"
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id=run_id,
+    )
     agent = Agent(
         FunctionModel(fail_model),
         deps_type=object,
-        capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
+        capabilities=[
+            _model_metrics(recorder, run_id, journal),
+            _persistence(store, run_id, recorder, journal),
+        ],
     )
 
     with pytest.raises(RuntimeError, match="boom"):
         await agent.run("hello", deps=SimpleNamespace(correlation={}))
 
     model_observations = [
-        value for value in recorder.observations if value.kind == "linktools.model.request"
+        value
+        for value in recorder.observations
+        if value.kind == "linktools.model.request"
     ]
     assert len(model_observations) == 1
     failed = [
@@ -180,24 +181,42 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
     ]
     assert len(failed) == 1
     event = failed[0]
-    expected = _model_observation_id(run_id, event.step_index)
+    expected = _model_observation_id(
+        "workspace",
+        "tenant",
+        "execution",
+        run_id,
+        1,
+        "agent",
+    )
     assert model_observations[0].observation_id == expected
     assert event.metadata["linktools.ai.observation_id"] == expected
     assert int(event.metadata["linktools.ai.duration_ns"]) >= 0
     trace = _trace(event)
     assert trace.payload["observation_id"] == expected
-    assert trace.payload["duration_ns"] == int(event.metadata["linktools.ai.duration_ns"])
+    assert trace.payload["duration_ns"] == int(
+        event.metadata["linktools.ai.duration_ns"]
+    )
 
 
 @pytest.mark.asyncio
 async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     recorder = _Recorder()
     run_id = "output-retry-metric-run"
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id=run_id,
+    )
     agent = Agent(
         FunctionModel(_text_model),
         deps_type=object,
-        capabilities=[_model_metrics(recorder, run_id), _persistence(store, run_id, recorder)],
+        capabilities=[
+            _model_metrics(recorder, run_id, journal),
+            _persistence(store, run_id, recorder, journal),
+        ],
         retries={"output": 2},
     )
 
@@ -241,11 +260,20 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
 
 @pytest.mark.asyncio
 async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     run_id = "output-retry-no-metrics-run"
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id=run_id,
+    )
     agent = Agent(
         FunctionModel(_text_model),
-        capabilities=[_persistence(store, run_id, None)],
+        capabilities=[
+            _model_metrics(None, run_id, journal),
+            _persistence(store, run_id, None, journal),
+        ],
         retries={"output": 1},
     )
 
@@ -271,11 +299,20 @@ async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
 
 @pytest.mark.asyncio
 async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     run_id = "no-metrics-run"
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id=run_id,
+    )
     agent = Agent(
         TestModel(custom_output_text="done"),
-        capabilities=[_persistence(store, run_id, None)],
+        capabilities=[
+            _model_metrics(None, run_id, journal),
+            _persistence(store, run_id, None, journal),
+        ],
     )
 
     await agent.run("hello")

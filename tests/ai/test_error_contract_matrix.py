@@ -25,7 +25,6 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import (
-    DefaultExecutionService,
     ExecutionResult,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
@@ -35,6 +34,8 @@ from linktools.ai.runtime._agent_executor import (
     _execution_error,
     _map_event,
 )
+from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime._execution import _ExecutionRuntimeBridge
 from linktools.ai.runtime._planner import _execution_failure
 from linktools.ai.runtime._subagent import _subagent_result
 from linktools.ai.storage import StoragePath
@@ -227,9 +228,10 @@ async def test_execution_wait_timeout_has_stable_code() -> None:
         )
 
     service._load_authorized = load_authorized  # type: ignore[method-assign]
-    service._backend = None
-    service._local_waiter = None
-    service._local_stream_abort = None
+    service._runtime_bridge = _ExecutionRuntimeBridge()
+    service._live_broker = SimpleNamespace(
+        abandon_prepared_local_producer=lambda _execution_id: None
+    )
     principal = Principal("principal", "tenant", "service")
     with pytest.raises(AIError) as error:
         await DefaultExecutionService.wait.__wrapped__(

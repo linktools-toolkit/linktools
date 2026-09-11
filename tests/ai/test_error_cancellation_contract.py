@@ -8,12 +8,13 @@ from typing import get_args, get_origin, get_type_hints
 
 import pytest
 from linktools.ai.asset._sql import SqlAssetBackend
-from linktools.ai.capability import SubagentDelegate, materialize_mcp_servers
+from linktools.ai.capability import SubagentDelegate
 from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._local import LocalExecutionBackend
+from linktools.ai.runtime._mcp import materialize_mcp_servers
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -554,6 +555,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     backend._terminal_events = {}
     backend._worker_failures = {}
     backend._worker_cancel_requests = set()
+    backend._worker_shutdown_requests = set()
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
     backend._approval_pause_segments = {}

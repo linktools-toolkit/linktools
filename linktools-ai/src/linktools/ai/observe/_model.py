@@ -359,8 +359,8 @@ class MetricDefinition:
         )
         if len(fields) > _QUERY_FIELDS_MAX or len(fields) != len(set(fields)):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        for query_field in fields:
-            _identifier(query_field, name="query field")
+        for field_name in fields:
+            _identifier(field_name, name="query field")
 
         if (
             self.source.kind is MetricSourceKind.OBSERVATION_COUNT
@@ -501,8 +501,8 @@ class MetricQuery:
         )
         if len(groups) != len(set(groups)):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        for group_field in groups:
-            _identifier(group_field, name="group field")
+        for field_name in groups:
+            _identifier(field_name, name="group field")
 
         if self.bucket is not None and (
             not isinstance(self.bucket, timedelta) or self.bucket <= timedelta(0)

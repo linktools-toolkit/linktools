@@ -4,14 +4,16 @@
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 import pytest
 from linktools.ai.capability import workspace_capabilities
-from linktools.ai.workspace import Workspace
+from linktools.ai.runtime._compaction import RuntimeCompaction
+from linktools.ai.workspace import SandboxResource, Workspace
+from linktools.ai.workspace._bubblewrap import _build_bwrap_args
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
+from pydantic_ai_harness.compaction import DeduplicateFileReads
 
 
 def _context() -> RunContext[None]:
@@ -23,84 +25,42 @@ def _context() -> RunContext[None]:
     )
 
 
-class _FakeRunShellToolset:
-    def __init__(self, events: list[object]) -> None:
-        self._events = events
+class _FakeSession:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
 
-    async def __aenter__(self) -> "_FakeRunShellToolset":
-        self._events.append("enter")
-        return self
-
-    async def __aexit__(self, *args: Any) -> None:
-        self._events.append("exit")
-
-    async def get_tools(self, ctx: object) -> dict[str, object]:
-        del ctx
-        self._events.append("get_tools")
-        return {"run_command": object()}
-
-    async def call_tool(
+    async def run_command(
         self,
-        name: str,
-        tool_args: dict[str, object],
-        ctx: object,
-        tool: object,
+        command: str,
+        *,
+        timeout_seconds: float | None = None,
     ) -> str:
-        del tool_args, ctx, tool
-        self._events.append(("call", name))
+        del timeout_seconds
+        self.calls.append(command)
         return "ok"
 
 
-class _FakeBaseShellToolset:
-    def __init__(self, events: list[object]) -> None:
-        self._events = events
-
-    async def for_run(self, ctx: object) -> _FakeRunShellToolset:
-        del ctx
-        self._events.append("for_run")
-        return _FakeRunShellToolset(self._events)
-
-
-class _FakeShell:
-    events: list[object] = []
-
-    @classmethod
-    def __class_getitem__(cls, item: object) -> type["_FakeShell"]:
-        del item
-        return cls
-
-    def __init__(self, **kwargs: object) -> None:
-        del kwargs
-
-    def get_toolset(self) -> _FakeBaseShellToolset:
-        return _FakeBaseShellToolset(self.events)
-
-
 @pytest.mark.asyncio
-async def test_local_sandbox_uses_harness_per_run_lifecycle(
+async def test_workspace_capability_adapts_the_caller_owned_session(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.capability import _workspace
-
-    _FakeShell.events = []
-    monkeypatch.setattr(_workspace, "Shell", _FakeShell)
-    capability = workspace_capabilities(Workspace.load(tmp_path), ("run_command",))[0]
-    toolset = capability.toolset  # type: ignore[attr-defined]
-    run_toolset = await toolset.for_run(_context())  # type: ignore[arg-type]
-    try:
-        result = await run_toolset.tools["run_command"].function("echo ok")  # type: ignore[attr-defined]
-    finally:
-        await run_toolset.__aexit__(None, None, None)
+    session = _FakeSession()
+    capability = workspace_capabilities(
+        Workspace.load(tmp_path, workspace_id="workspace"),
+        ("run_command",),
+        session=session,  # type: ignore[arg-type]
+    )[0]
+    toolset = capability.get_toolset()
+    tools = await toolset.get_tools(_context())
+    result = await toolset.call_tool(
+        "run_command",
+        {"command": "echo ok"},
+        _context(),
+        tools["run_command"],
+    )
 
     assert result == "ok"
-    assert _FakeShell.events == [
-        "for_run",
-        "enter",
-        "get_tools",
-        ("call", "run_command"),
-        "exit",
-    ]
+    assert session.calls == ["echo ok"]
 
 
 class _CancellingCloseSession:
@@ -108,26 +68,78 @@ class _CancellingCloseSession:
         raise asyncio.CancelledError
 
 
-class _CancellingCloseSandbox:
-    async def open(self) -> _CancellingCloseSession:
-        return _CancellingCloseSession()
-
-
 @pytest.mark.asyncio
 async def test_cancelled_close_does_not_replace_primary_failure(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, sandbox=_CancellingCloseSandbox())  # type: ignore[arg-type]
-    capability = workspace_capabilities(workspace, ("read_file",))[0]
-    run_toolset = await capability.toolset.for_run(_context())  # type: ignore[attr-defined,arg-type]
-    primary = RuntimeError("primary")
-
-    assert await run_toolset.__aexit__(RuntimeError, primary, None) is None
+    del tmp_path
+    session = _CancellingCloseSession()
+    with pytest.raises(asyncio.CancelledError):
+        await session.close()
 
 
 @pytest.mark.asyncio
 async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, sandbox=_CancellingCloseSandbox())  # type: ignore[arg-type]
-    capability = workspace_capabilities(workspace, ("read_file",))[0]
-    run_toolset = await capability.toolset.for_run(_context())  # type: ignore[attr-defined,arg-type]
-
+    del tmp_path
+    session = _CancellingCloseSession()
     with pytest.raises(asyncio.CancelledError):
-        await run_toolset.__aexit__(None, None, None)
+        await session.close()
+
+
+def test_runtime_compaction_uses_harness_deduplication() -> None:
+    compaction = RuntimeCompaction(
+        4096,
+        workspace_read_available=True,
+        journal=None,
+        observer=None,
+        projection_sink=None,
+    )
+
+    assert isinstance(compaction._deduplicate, DeduplicateFileReads)
+    assert compaction._target_tokens == 4096
+
+
+def test_bubblewrap_hidden_mount_overrides_workspace_resource_bind(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "package"
+    source.mkdir()
+    (source / "private").mkdir()
+    resource = SandboxResource("resource", source)
+
+    arguments = _build_bwrap_args(
+        root=workspace,
+        runtime_root=tmp_path / "runtime",
+        bwrap=Path("/usr/bin/bwrap"),
+        lock_root=workspace / ".linktools" / "locks",
+        resources=(resource,),
+        hidden_paths=("package/private",),
+        worker_resources=[{"key": "resource", "path": "/skills/resource"}],
+    )
+
+    visible_bind = arguments.index("/workspace/package")
+    hidden_mount = arguments.index("/workspace/package/private")
+    assert hidden_mount > visible_bind
+
+
+def test_bubblewrap_allows_explicit_skill_resource_under_hidden_storage(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / ".linktools" / "skills" / "review"
+    source.mkdir(parents=True)
+    resource = SandboxResource("resource", source)
+
+    arguments = _build_bwrap_args(
+        root=workspace,
+        runtime_root=tmp_path / "runtime",
+        bwrap=Path("/usr/bin/bwrap"),
+        lock_root=workspace / ".linktools" / "locks",
+        resources=(resource,),
+        hidden_paths=(".linktools",),
+        worker_resources=[{"key": "resource", "path": "/skills/resource"}],
+    )
+
+    assert arguments.count(str(source)) == 1
+    assert "/workspace/.linktools/skills/review" not in arguments

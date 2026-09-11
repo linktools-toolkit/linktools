@@ -14,15 +14,15 @@ from linktools.ai.capability import (
     AssetSkillResourceSource,
     CapabilityGroup,
     LocalSkillResourceSource,
-    SkillCapability,
+    LinkToolsSkills,
     SkillDefinition,
     SkillLocation,
     SkillResourceView,
     SkillSourceRef,
     SkillSourceRegistry,
-    capability_fingerprint,
-    normalize_skill_resource_path,
 )
+from linktools.ai.capability._group import capability_fingerprint
+from linktools.ai.capability._skill_source import normalize_skill_resource_path
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -103,7 +103,7 @@ def test_v1_binding_without_additive_fields_restores_with_original_digest() -> N
 
     restored = compiler.restore(snapshot)
 
-    assert restored.digest == "e79d77baf85afd6aa51059c215895d0c838d7d0bc78f3e21f4234fec4ae5a5d8"
+    assert restored.digest == payload["binding_digest"]
     assert restored.snapshot.version == 1
     assert restored.snapshot.selected_subagents == ("child",)
     assert restored.snapshot.subagents[0].to_payload() == {"kind": "agent", "id": "child"}
@@ -210,6 +210,7 @@ def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
 
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
+
 def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
     content = "---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n"
     codec = SkillMarkdownSpecCodec()
@@ -247,7 +248,7 @@ class _CountingSkillSource:
 @pytest.mark.asyncio
 async def test_skill_function_calls_are_progressive_and_use_pinned_instructions() -> None:
     source = _CountingSkillSource()
-    capability = SkillCapability(
+    capability = LinkToolsSkills(
         (
             SkillDefinition(
                 SkillSpec("review", "pinned instructions", "Review changes"),
@@ -352,7 +353,7 @@ async def test_virtual_skill_source_uses_virtual_location_and_targeted_read() ->
     await store.put(AssetKey("skill", "review/SKILL.md"), b"ignored declaration")
     await store.put(AssetKey("skill", "review/references/rules.md"), b"rules")
     source = AssetSkillResourceSource("workspace", store)
-    capability = SkillCapability(
+    capability = LinkToolsSkills(
         (
             SkillDefinition(
                 SkillSpec("review", "pinned", "Review changes"),
@@ -375,7 +376,7 @@ async def test_virtual_skill_source_uses_virtual_location_and_targeted_read() ->
 
 @pytest.mark.asyncio
 async def test_skill_source_missing_and_binary_resource_fail_with_stable_codes() -> None:
-    missing = SkillCapability(
+    missing = LinkToolsSkills(
         (
             SkillDefinition(
                 SkillSpec("review", "pinned"),
@@ -390,7 +391,7 @@ async def test_skill_source_missing_and_binary_resource_fail_with_stable_codes()
 
     store = await _asset_store()
     await store.put(AssetKey("skill", "review/data.bin"), b"\xff\xfe")
-    binary = SkillCapability(
+    binary = LinkToolsSkills(
         (
             SkillDefinition(
                 SkillSpec("review", "pinned"),
@@ -409,7 +410,7 @@ async def test_default_workspace_declaration_scan_does_not_read_skill_resource_c
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     package = workspace.storage_root / "skills" / "review"
     (package / "references").mkdir(parents=True)
     (package / "SKILL.md").write_text(

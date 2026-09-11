@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """Frozen pure projections for persisted transcript view coordinates."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import cast
 
+from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -18,7 +20,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from ...core import JsonValue
+from ...core import JsonValue, normalize_json_value
+from ...errors import AIError, ErrorCode
 from ..service_api import SessionHistoryItem
 
 SESSION_HISTORY_VIEW_V1 = 1
@@ -82,67 +85,119 @@ def count_execution_transcript_items(messages: Sequence[ModelMessage]) -> int:
 def _projected_parts(
     message: ModelMessage,
 ) -> tuple[tuple[str, JsonValue, str | None, str | None], ...]:
-    if isinstance(message, ModelRequest):
-        parts: list[tuple[str, JsonValue, str | None, str | None]] = []
-        for part in message.parts:
-            if isinstance(part, SystemPromptPart):
-                parts.append(("system", _json_content(part.content), None, None))
-            elif isinstance(part, UserPromptPart):
-                content = _user_content(part)
-                if content is not None:
-                    parts.append(("user", content, None, None))
-            elif isinstance(part, ToolReturnPart):
-                parts.append(
-                    (
-                        "tool_result",
-                        _json_content(part.content),
-                        part.tool_name,
-                        part.tool_call_id,
-                    )
+    serialized = _serialized_parts(message)
+    raw_parts = tuple(message.parts)
+    if len(serialized) != len(raw_parts):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    values: list[tuple[str, JsonValue, str | None, str | None]] = []
+    for part, payload in zip(raw_parts, serialized, strict=True):
+        if isinstance(part, SystemPromptPart):
+            values.append(("system", _payload_content(payload), None, None))
+            continue
+        if isinstance(part, UserPromptPart):
+            values.append(("user", _user_content(part, payload), None, None))
+            continue
+        if isinstance(part, ToolReturnPart):
+            values.append(
+                (
+                    "tool_result",
+                    _payload_content(payload),
+                    part.tool_name,
+                    part.tool_call_id,
                 )
-            elif isinstance(part, RetryPromptPart):
-                parts.append(("retry", str(part.content), None, None))
-        return tuple(parts)
-    if isinstance(message, ModelResponse):
-        parts = []
-        for part in message.parts:
-            if isinstance(part, TextPart):
-                parts.append(("assistant", part.content, None, None))
-            elif isinstance(part, ThinkingPart):
-                parts.append(("thinking", part.content, None, None))
-            elif isinstance(part, ToolCallPart):
-                parts.append(
-                    (
-                        "tool_call",
-                        part.args_as_dict(),
-                        part.tool_name,
-                        part.tool_call_id,
-                    )
+            )
+            continue
+        if isinstance(part, RetryPromptPart):
+            values.append(
+                (
+                    "retry",
+                    _payload_content(payload),
+                    part.tool_name,
+                    part.tool_call_id,
                 )
-        return tuple(parts)
-    return ()
+            )
+            continue
+        if isinstance(part, TextPart):
+            values.append(("assistant", part.content, None, None))
+            continue
+        if isinstance(part, ThinkingPart):
+            values.append(("thinking", part.content, None, None))
+            continue
+        if isinstance(part, ToolCallPart):
+            values.append(
+                (
+                    "tool_call",
+                    normalize_json_value(part.args_as_dict()),
+                    part.tool_name,
+                    part.tool_call_id,
+                )
+            )
+            continue
+        values.append(
+            (
+                _part_kind(part, payload),
+                payload,
+                _optional_string(getattr(part, "tool_name", None)),
+                _optional_string(getattr(part, "tool_call_id", None)),
+            )
+        )
+    return tuple(values)
 
 
-def _user_content(part: UserPromptPart) -> JsonValue | None:
+def _serialized_parts(message: ModelMessage) -> tuple[dict[str, JsonValue], ...]:
+    try:
+        value = ModelMessagesTypeAdapter.dump_python([message], mode="json")
+        normalized = normalize_json_value(value)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if (
+        not isinstance(normalized, list)
+        or len(normalized) != 1
+        or not isinstance(normalized[0], Mapping)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    parts = normalized[0].get("parts")
+    if not isinstance(parts, list) or any(not isinstance(part, Mapping) for part in parts):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return tuple(cast(dict[str, JsonValue], dict(part)) for part in parts)
+
+
+def _payload_content(payload: Mapping[str, JsonValue]) -> JsonValue:
+    return payload.get("content")
+
+
+def _user_content(part: UserPromptPart, payload: Mapping[str, JsonValue]) -> JsonValue:
     if isinstance(part.content, str):
         return part.content
-    values: list[str] = []
+    text_values: list[str] = []
+    text_only = True
     for item in part.content:
         if isinstance(item, str):
-            values.append(item)
+            text_values.append(item)
         elif isinstance(item, TextContent):
-            values.append(item.content)
-    return values if values else None
+            text_values.append(item.content)
+        else:
+            text_only = False
+            break
+    if text_only:
+        return text_values
+    return _payload_content(payload)
 
 
-def _json_content(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, list):
-        return [_json_content(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _json_content(item) for key, item in value.items()}
-    return str(value)
+def _part_kind(part: object, payload: Mapping[str, JsonValue]) -> str:
+    for candidate in (
+        getattr(part, "part_kind", None),
+        getattr(part, "kind", None),
+        payload.get("part_kind"),
+        payload.get("kind"),
+    ):
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return "unknown_part"
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 __all__ = [

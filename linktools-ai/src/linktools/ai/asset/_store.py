@@ -208,6 +208,21 @@ class AssetStore:
         next_key = selected[-1].key if selected and start + len(selected) < len(ordered) else None
         return Page(selected, _make_cursor(revision, kind, prefix, next_key))
 
+    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
+        """Return one stable, active metadata snapshot for a freeze operation."""
+        self._ensure_ready()
+        values = await self._storage.list_info()
+        return tuple(
+            sorted(
+                (
+                    info
+                    for info in values
+                    if info.status is StorageEntryStatus.NORMAL
+                ),
+                key=lambda info: (info.key.kind, info.key.id),
+            )
+        )
+
     async def list_info_with_owners(
         self,
         *,

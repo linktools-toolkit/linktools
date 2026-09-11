@@ -115,8 +115,7 @@ class ExecutionStatus(str, Enum):
     FINALIZING = "FINALIZING"
     START_UNKNOWN = "START_UNKNOWN"
     RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
-    WAITING_APPROVAL = "WAITING_APPROVAL"
-    WAITING_EXTERNAL = "WAITING_EXTERNAL"
+    WAITING_DEFERRED = "WAITING_DEFERRED"
     CANCELLING = "CANCELLING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
@@ -162,7 +161,6 @@ class ApprovalStatus(str, Enum):
     APPROVED = "APPROVED"
     DENIED = "DENIED"
     CANCELLED = "CANCELLED"
-    EXPIRED = "EXPIRED"
 
 
 class ApprovalDecision(str, Enum):
@@ -200,7 +198,6 @@ class ExternalCallStatus(str, Enum):
     PENDING = "PENDING"
     SUPPLIED = "SUPPLIED"
     CANCELLED = "CANCELLED"
-    EXPIRED = "EXPIRED"
 
 
 class OperationKind(str, Enum):

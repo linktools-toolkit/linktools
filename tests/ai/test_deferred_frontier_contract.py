@@ -1,248 +1,159 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Deferred human-approval frontier contracts."""
+"""Deferred frontier and native step-persistence contracts."""
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
-from pydantic_ai.capabilities import CombinedCapability
-from pydantic_ai.exceptions import ApprovalRequired
-from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import DeferredToolRequests, RunContext, ToolDefinition
-from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.step_persistence import StepPersistence
-
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import AgentExecutor, _RuntimePersistenceBoundary
-from linktools.ai.runtime._capabilities import (
-    ToolOperationDecision,
-    _RuntimeStepPersistence,
-    _WorkspaceToolGate,
+from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
 )
 from linktools.ai.workspace import (
-    RepositoryInstructions,
     ToolPermissionRule,
-    WorkspacePolicy,
     WorkspaceToolPermissionPolicy,
 )
+from pydantic_ai.exceptions import ApprovalRequired
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import DeferredToolRequests, RunContext
+from pydantic_ai.usage import RunUsage
 
 
 class _Bridge:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def begin(
-        self,
-        ctx: RunContext[None],
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        args: dict[str, Any],
-        replay_safe: bool,
-    ) -> ToolOperationDecision:
-        del ctx, call, tool_def, args, replay_safe
+    async def begin(self, *args: object, **kwargs: object) -> Any:
+        del args, kwargs
         self.calls.append("begin")
-        return ToolOperationDecision("operation", "owner", 1, True)
+        raise AssertionError("deferred gate must run before tool admission")
 
-    async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
+    async def renew(self, decision: Any) -> Any:
         return decision
 
-    async def complete(self, decision: ToolOperationDecision, result: Any) -> bool:
+    async def complete(self, decision: Any, result: Any) -> bool:
         del decision, result
         self.calls.append("complete")
         return False
 
-    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> bool:
+    async def fail(self, decision: Any, error: BaseException) -> bool:
         del decision, error
         self.calls.append("fail")
         return False
 
-    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None:
+    async def unknown(self, decision: Any, error: BaseException) -> None:
         del decision, error
         self.calls.append("unknown")
 
-    async def existing_call_ids(self, tool_call_ids: tuple[str, ...]) -> frozenset[str]:
-        del tool_call_ids
-        return frozenset()
+    async def defer(self, decision: Any) -> bool:
+        del decision
+        self.calls.append("defer")
+        return False
 
 
 class _Store:
     def __init__(self) -> None:
         self.snapshots: list[object] = []
-        self.effects: list[object] = []
 
     async def save_snapshot(self, snapshot: object) -> None:
         self.snapshots.append(snapshot)
 
-    async def record_tool_effect(self, effect: object) -> None:
-        self.effects.append(effect)
-
-
-class _EmptyResolver:
-    async def resolve(
-        self,
-        target: str,
-        *,
-        exclude_sources: frozenset[str] = frozenset(),
-    ) -> RepositoryInstructions:
-        del target, exclude_sources
-        return RepositoryInstructions(())
+    async def append_event(self, event: object) -> None:
+        del event
 
 
 def _context() -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id="run")
-
-
-def _approval_call(call_id: str = "approval-1") -> ToolCallPart:
-    return ToolCallPart(
-        tool_name="read_file",
-        args={"path": "pkg/file.txt"},
-        tool_call_id=call_id,
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
     )
 
 
 @pytest.mark.asyncio
-async def test_runtime_step_persistence_uses_last_observed_step_and_sink_once(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bridge = _Bridge()
+async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() -> None:
     store = _Store()
     captured: list[int] = []
     persistence = _RuntimeStepPersistence(
-        tool_operations=bridge,
-        store=store,
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="agent",
         run_id="run",
         deferred_pause_sink=captured.append,
     )
     node_result = object()
-    after_node = AsyncMock(return_value=node_result)
-    after_run = AsyncMock(side_effect=lambda _ctx, *, result: result)
-    monkeypatch.setattr(StepPersistence, "after_node_run", after_node)
-    monkeypatch.setattr(StepPersistence, "after_run", after_run)
-
-    ctx = SimpleNamespace(run_step=7)
-    assert await persistence.after_node_run(
-        ctx, node=object(), result=node_result  # type: ignore[arg-type]
-    ) is node_result
-    ctx.run_step = 0
-    deferred = DeferredToolRequests(approvals=[_approval_call()])
-    result = SimpleNamespace(output=deferred)
+    ctx = SimpleNamespace(run_step=7, conversation_id=None, messages=[])
+    assert (
+        await persistence.after_node_run(
+            ctx,
+            node=object(),
+            result=node_result,  # type: ignore[arg-type]
+        )
+        is node_result
+    )
+    deferred = DeferredToolRequests(approvals=[])
+    result = SimpleNamespace(output=deferred, all_messages=lambda: [])
     assert await persistence.after_run(ctx, result=result) is result  # type: ignore[arg-type]
 
     assert captured == [7]
-    assert store.snapshots == []
-    assert bridge.calls == []
-    after_node.assert_awaited_once()
-    after_run.assert_awaited_once()
+    assert len(store.snapshots) == 1
+    snapshot = store.snapshots[0]
+    assert getattr(snapshot, "state") == "interrupted"
+    assert getattr(snapshot, "step_index") == 7
 
 
 @pytest.mark.asyncio
-async def test_runtime_step_persistence_rejects_generic_deferred_calls(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred() -> None:
     persistence = _RuntimeStepPersistence(
-        tool_operations=_Bridge(),
-        store=_Store(),
+        store=HarnessStepStoreAdapter(_Store(), execution_id=None),
         agent_name="agent",
         run_id="run",
-        deferred_pause_sink=lambda _step: None,
-    )
-    monkeypatch.setattr(
-        StepPersistence,
-        "after_run",
-        AsyncMock(side_effect=lambda _ctx, *, result: result),
     )
     persistence._last_observed_step_index = 3
-    result = SimpleNamespace(output=DeferredToolRequests(calls=[_approval_call("external")]))
+    result = SimpleNamespace(output=DeferredToolRequests(approvals=[]))
     with pytest.raises(AIError) as error:
-        await persistence.after_run(SimpleNamespace(run_step=0), result=result)  # type: ignore[arg-type]
-    assert error.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
+        await persistence.after_run(
+            SimpleNamespace(run_step=0),
+            result=result,  # type: ignore[arg-type]
+        )
+    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
 
 
 @pytest.mark.asyncio
-async def test_ask_gate_defers_before_runtime_operation_or_harness_effect(tmp_path) -> None:
+async def test_ask_boundary_defers_before_runtime_operation() -> None:
     bridge = _Bridge()
-    store = _Store()
-    persistence = _RuntimeStepPersistence(
-        tool_operations=bridge,
-        store=store,
-        agent_name="agent",
-        run_id="run",
-        trusted_tool_classes=(("read_file", "filesystem.read"),),
-    )
-    gate = _WorkspaceToolGate(
-        execution_id="execution",
-        workspace_root=tmp_path,
-        repository_instruction_history=(),
-        repository_instruction_marker_authority=frozenset(),
-        repository_instructions=RepositoryInstructions(()),
-        instruction_resolver=_EmptyResolver(),
-        policy=WorkspacePolicy(
-            tool_permissions=WorkspaceToolPermissionPolicy(
-                (ToolPermissionRule("ask", tool_name="read_file"),)
+
+    async def read_file(path: str) -> str:
+        return path
+
+    boundary = RuntimeToolBoundaryToolset(
+        (FunctionToolset([read_file]),),
+        {
+            "read_file": ManagedToolDescriptor(
+                effect_owner="none",
+                effect="none",
+                tool_class="filesystem.read",
             )
+        },
+        id="workspace",
+        workspace_policy=WorkspaceToolPermissionPolicy(
+            (ToolPermissionRule("ask", tool_name="read_file"),)
         ),
-        trusted_tool_classes=(("read_file", "filesystem.read"),),
+        tool_operations=bridge,  # type: ignore[arg-type]
     )
-    combined = CombinedCapability((_RuntimePersistenceBoundary(persistence), gate))
-    call = _approval_call()
-    definition = ToolDefinition(
-        name="read_file",
-        capability_id="workspace-sandbox",
-        metadata={"linktools.ai.replay_safe": True},
-    )
+    context = _context()
+    tools = await boundary.get_tools(context)
     with pytest.raises(ApprovalRequired):
-        await combined.before_tool_execute(
-            _context(),
-            call=call,
-            tool_def=definition,
-            args={"path": "pkg/file.txt"},
+        await boundary.call_tool(
+            "read_file",
+            {"path": "pkg/file.txt"},
+            context,
+            tools["read_file"],
         )
     assert bridge.calls == []
-    assert store.effects == []
-    assert store.snapshots == []
-    assert not persistence._calls
-
-
-def test_pending_tool_calls_keeps_only_unresolved_current_run_in_model_order() -> None:
-    approval_a = ToolCallPart("approve_a", {"x": 1}, tool_call_id="a")
-    terminal = ToolCallPart("settled", {"y": 2}, tool_call_id="settled")
-    approval_b = ToolCallPart("approve_b", {"z": 3}, tool_call_id="b")
-    messages = (
-        ModelResponse(parts=[approval_a, terminal, approval_b], run_id="run"),
-        ModelRequest(
-            parts=[ToolReturnPart("settled", "ok", tool_call_id="settled")],
-            run_id="run",
-        ),
-        ModelResponse(
-            parts=[ToolCallPart("foreign", {}, tool_call_id="foreign")],
-            run_id="other-run",
-        ),
-    )
-    pending = AgentExecutor.pending_tool_calls(messages, run_id="run")
-    assert pending == (approval_a, approval_b)
-
-
-def test_pending_tool_calls_rejects_orphan_terminal_and_duplicate_call_id() -> None:
-    with pytest.raises(AIError) as orphan:
-        AgentExecutor.pending_tool_calls(
-            (
-                ModelRequest(
-                    parts=[ToolReturnPart("tool", "ok", tool_call_id="missing")],
-                    run_id="run",
-                ),
-            ),
-            run_id="run",
-        )
-    assert orphan.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-    call = ToolCallPart("tool", {}, tool_call_id="same")
-    with pytest.raises(AIError) as duplicate:
-        AgentExecutor.pending_tool_calls(
-            (ModelResponse(parts=[call, call], run_id="run"),),
-            run_id="run",
-        )
-    assert duplicate.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

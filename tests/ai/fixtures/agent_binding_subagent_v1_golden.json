@@ -9,15 +9,19 @@
     "allow_tools": ["*"],
     "allow_skills": ["*"],
     "allow_subagents": ["child"],
+    "allow_capabilities": ["*"],
     "usage_limits": null,
     "planning": false,
-    "thinking": false
+    "thinking": false,
+    "tool_retries": 10000,
+    "output_retries": 3
   },
-  "model": {
-    "version": 1,
-    "provider": "openai",
+  "base_model": {
     "model_identity": "openai:gpt-test",
-    "settings": {}
+    "provider": "openai",
+    "provider_instance": "openai-public",
+    "settings": {},
+    "version": 1
   },
   "selected": [],
   "subagents": [
@@ -26,16 +30,13 @@
   "output_mode": "text",
   "output_schema": {
     "additionalProperties": false,
-    "description": "Canonical Runtime representation of plain assistant text.",
     "properties": {
       "text": {
-        "title": "Text",
         "type": "string"
       }
     },
     "required": ["text"],
-    "title": "AssistantTextOutput",
     "type": "object"
   },
-  "binding_digest": "e79d77baf85afd6aa51059c215895d0c838d7d0bc78f3e21f4234fec4ae5a5d8"
+  "binding_digest": "5b9028995cb764f7aa0030c137f0f9d8d4db39fce27f438eeaf104d72cd22130"
 }

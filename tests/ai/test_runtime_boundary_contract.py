@@ -17,7 +17,10 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._coordinator import _LocalRuntimeCoordinator
 from linktools.ai.runtime._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
-from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime._execution import (
+    DefaultExecutionService,
+    _ExecutionRuntimeBridge,
+)
 from linktools.ai.runtime.service_api import ExecutionStreamEvent
 
 
@@ -234,8 +237,7 @@ async def test_second_stream_close_does_not_close_first_subscription() -> None:
 @pytest.mark.asyncio
 async def test_wait_authorizes_before_abandoning_stream() -> None:
     service = object.__new__(DefaultExecutionService)
-    abandoned: list[str] = []
-    service._local_stream_abort = abandoned.append
+    service._runtime_bridge = _ExecutionRuntimeBridge()
 
     async def denied(
         execution_id: str,
@@ -254,7 +256,6 @@ async def test_wait_authorizes_before_abandoning_stream() -> None:
             principal=principal,
         )
     assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
-    assert abandoned == []
 
 
 class _LaunchExecutions:
@@ -269,11 +270,20 @@ class _LaunchExecutions:
 def _launch_service(backend: object) -> tuple[DefaultExecutionService, list[str], list[str]]:
     service = object.__new__(DefaultExecutionService)
     service._state = SimpleNamespace(executions=_LaunchExecutions())
-    service._backend = backend
+    bridge = _ExecutionRuntimeBridge()
+    bridge.bind(backend)  # type: ignore[arg-type]
+    service._runtime_bridge = bridge
     prepared: list[str] = []
     abandoned: list[str] = []
-    service._local_stream_prepare = prepared.append
-    service._local_stream_abort = abandoned.append
+
+    class Broker:
+        def prepare_local_producer(self, execution_id: str) -> None:
+            prepared.append(execution_id)
+
+        def abandon_prepared_local_producer(self, execution_id: str) -> None:
+            abandoned.append(execution_id)
+
+    service._live_broker = Broker()
     return service, prepared, abandoned
 
 
@@ -376,7 +386,7 @@ async def test_cancellation_after_worker_installation_retains_reservation() -> N
 @pytest.mark.asyncio
 async def test_wait_timeout_includes_initial_authorized_read() -> None:
     service = object.__new__(DefaultExecutionService)
-    service._local_stream_abort = None
+    service._runtime_bridge = _ExecutionRuntimeBridge()
 
     async def slow_authorized(
         execution_id: str,

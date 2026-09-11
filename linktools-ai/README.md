@@ -51,7 +51,7 @@ Useful options:
 from linktools.ai import Runtime, Workspace
 from linktools.ai.model import ModelRegistry
 
-workspace = Workspace.discover("/workspace/project")
+workspace = Workspace.initialize("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
 
 async with Runtime.open(workspace, models=models) as runtime:
@@ -69,12 +69,12 @@ async with Runtime.open(workspace, models=models) as runtime:
 Use `CapabilityGroup` for direct application registrations:
 
 ```python
-from linktools.ai import CapabilityGroup, RunContext, Runtime
+from linktools.ai import AgentContext, CapabilityGroup, Runtime
 
 application = CapabilityGroup[None]("application")
 
 @application.tool
-def lookup_ticket(ctx: RunContext[None], ticket_id: str) -> str:
+def lookup_ticket(ctx: AgentContext[None], ticket_id: str) -> str:
     return ticket_id
 
 application.agent(
@@ -94,7 +94,9 @@ async with Runtime.open(
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
 
-`CapabilityGroup.tool()` and `CapabilityGroup.capability()` accept a positive semantic `revision`. The revision is an explicit fingerprint input for Python behavior whose semantics cannot be reconstructed from a declaration payload. It is not a project-wide version layer.
+`CapabilityGroup.tool()` and `CapabilityGroup.capability()` accept a positive semantic `revision`. The revision is an explicit fingerprint input for Python behavior whose semantics cannot be reconstructed from a declaration payload. Generic Pydantic capabilities retain their native Pydantic AI behavior, including model selection, tools, lifecycle hooks, deferred loading, and per-agent/per-run binding. Their `semantic_id`, `revision`, and optional `semantic_config` are recorded in the Agent binding; `semantic_config` should be supplied when runtime configuration changes semantics without changing the revision. LinkTools reserves only its own internal capability identities and revalidates final output against the durable `OutputBinding`. It is not a project-wide version layer.
+
+Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
 `CapabilityGroup.agent()` creates an `AgentSpec`; declarations themselves use the single v1 wire contract and do not expose a per-declaration revision field.
 
@@ -134,15 +136,30 @@ For downstream declaration formats or custom kinds such as `worker` or `audit`, 
 
 Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `Workspace(..., sandbox=...)`, `Workspace.load(..., sandbox=...)`, or `Workspace.discover(..., sandbox=...)`.
 
-When `sandbox=None`, LinkTools uses its built-in local adapter. That adapter delegates actual filesystem/process operations to the local Harness implementation, but LinkTools owns the stable model-visible workspace tool signatures, descriptions, metadata, and durable semantic pins.
+When `sandbox=None`, LinkTools uses its built-in local adapter. LinkTools owns
+the stable model-visible workspace tool signatures, descriptions, metadata, and
+durable semantic pins.
 
 A run with no selected workspace filesystem/shell tools does not open a sandbox. Otherwise the run opens exactly one `SandboxSession`; filesystem tools, foreground shell commands, and background `start/check/stop` commands share that session, which is closed when the model run succeeds, fails, or is cancelled.
 
 Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
 
-Sandbox v1 virtualizes only workspace filesystem and shell tool effects. Runtime state, `AssetStore`, Skill loading, and repository-instruction discovery are not automatically moved into a remote Sandbox. A remote implementation must therefore expose the intended logical project tree itself; LinkTools does not provide project-tree synchronization for an unsynchronized remote Sandbox in v1.
+`LocalSandbox` runs with the workspace as its current directory and is an
+execution boundary, not an operating-system security boundary. On Linux,
+`BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
+user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted
+read-only runtime rootfs containing the same LinkTools build and Python >=
+3.10. It has no automatic Local fallback. Bubblewrap isolates only Session
+file/command execution; the host Agent, model requests, Python custom tools,
+and MCP remain outside it. Its network namespace provides Session loopback and
+no external route, but shared workspace files and explicitly shared IPC remain
+outside that guarantee.
 
-The built-in local Sandbox is an execution boundary, not a claim of container- or VM-level operating-system isolation.
+Selected local Skills are exposed as read-only `SandboxResource` directories at
+`/skills/<key>` in Bubblewrap and at their validated host location in Local
+sessions. The mapping is derived for the current run and is not persisted into
+Skill declarations. Background command state is ephemeral and is cleaned up
+with the Session; it is not a cross-run service.
 
 ## 4. Agent selection and capability policy
 
@@ -220,6 +237,8 @@ A Session owns conversation continuity and the stable Agent id. Every new execut
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
+URL and uploaded-file content remains an external reference: Runtime persists its declared metadata and does not implicitly download it. Inline binary content and workspace file inputs are frozen as bytes before execution reservation when their durable contract requires it. Model transport retries use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults to `tool_retries=10000`, and output correction defaults to `output_retries=3`.
+
 Execution file input uses the same durable boundary:
 
 ```python
@@ -253,7 +272,13 @@ Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL compositi
 
 SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. Runtime startup still does not provision or migrate database schemas; schema provisioning remains an explicit deployment step.
 
-Durable local execution and recovery are provided by Runtime state and recovery checkpoints and do not require an external workflow server.
+Durable local execution and recovery are provided by Runtime state and recovery
+checkpoints and do not require an external workflow server. Harness provides the
+Planning, Memory, StepPersistence, and context-compaction capability behavior,
+while LinkTools remains the durable owner of plans, Memory records and mutation
+receipts, execution history, and the raw transcript. Memory content continues to
+persist through `MemoryState` and `ObjectStore`. Compaction only rewrites the
+request context projection; it never rewrites the raw transcript.
 
 ### Workspace relocation
 
@@ -302,9 +327,9 @@ The top-level composition API is intentionally small:
 ```python
 from linktools.ai import (
     Agent,
+    AgentContext,
     CapabilityGroup,
     Execution,
-    RunContext,
     Runtime,
     Session,
     Workspace,

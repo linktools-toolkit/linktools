@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Final declaration, runtime policy, and SkillCapability contracts."""
+"""Final declaration, capability, and runtime-leaf contracts."""
 
 import json
 
 import pytest
-from linktools.ai.capability import SkillCapability, SkillDefinition, SkillSourceRegistry
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._agent_executor import _RuntimePersistenceBoundary, _ToolPresentation
-from linktools.ai.runtime._capabilities import (
-    PLAN_SAFE_METADATA_KEY,
-    select_runtime_tool_names,
-    tool_allowed_in_planning,
-    tool_name_allowed,
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
+
+from linktools.ai.capability import (
+    LinkToolsSkills,
+    SkillDefinition,
+    SkillSourceRegistry,
 )
-from linktools.ai.runtime._workspace_binding import WorkspaceToolCallBinder
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._capabilities import select_runtime_tool_names
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
+)
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -24,14 +30,9 @@ from linktools.ai.spec import (
     SkillSpec,
     SkillSpecCodec,
 )
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, CombinedCapability
-from pydantic_ai.messages import ModelResponse, ToolCallPart
-from pydantic_ai.tools import ToolDefinition
-from pydantic_ai.toolsets import FunctionToolset, PreparedToolset, RenamedToolset
-from pydantic_ai_harness.step_persistence import StepPersistence
 
 
-def test_runtime_tool_selection_keeps_planning_outside_allow_tools() -> None:
+def test_runtime_tool_selection_keeps_framework_tools_outside_allow_tools() -> None:
     assert select_runtime_tool_names(
         ordinary_tool_policy=("write_plan",),
         memory_scope="memory",
@@ -48,365 +49,40 @@ def test_runtime_tool_selection_keeps_planning_outside_allow_tools() -> None:
     ) == ("delegate_task", "list_subagents")
 
 
-def test_runtime_tool_selection_honors_wildcard_for_ordinary_memory_tools() -> None:
-    assert tool_name_allowed("read_memory", ("*",))
+def test_runtime_tool_selection_honors_memory_wildcard() -> None:
     assert select_runtime_tool_names(
         ordinary_tool_policy=("*",),
         memory_scope="memory",
     ) == ("delete_memory", "read_memory", "search_memory", "write_memory")
 
 
-def test_planning_gate_requires_framework_filesystem_provenance() -> None:
-    classes = (("read_file", "filesystem.read"),)
-    trusted = ToolDefinition(name="read_file", capability_id="workspace-sandbox")
-    fake = ToolDefinition(name="read_file", capability_id="custom-filesystem")
-    explicit_custom = ToolDefinition(
-        name="custom_read",
-        capability_id="custom-filesystem",
-        metadata={PLAN_SAFE_METADATA_KEY: True},
-    )
-
-    assert tool_allowed_in_planning(
-        trusted,
-        trusted_tool_classes=classes,
-        trusted_mcp_selectors=(),
-    )
-    assert not tool_allowed_in_planning(
-        fake,
-        trusted_tool_classes=classes,
-        trusted_mcp_selectors=(),
-    )
-    assert tool_allowed_in_planning(
-        explicit_custom,
-        trusted_tool_classes=classes,
-        trusted_mcp_selectors=(),
-    )
-
-
-def test_planning_gate_uses_trusted_mcp_provenance_not_name_prefix() -> None:
-    trusted = ToolDefinition(
-        name="mcp__trusted__read",
-        capability_id="mcp__trusted",
-        metadata={PLAN_SAFE_METADATA_KEY: True},
-    )
-    custom = ToolDefinition(
-        name="mcp__custom__read",
-        capability_id="custom-mcp",
-        metadata={PLAN_SAFE_METADATA_KEY: True},
-    )
-    spoofed = ToolDefinition(name="mcp__trusted__read", capability_id="custom-mcp")
-
-    assert not tool_allowed_in_planning(
-        trusted,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=("mcp__trusted",),
-    )
-    assert tool_allowed_in_planning(
-        custom,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=("mcp__trusted",),
-    )
-    assert not tool_allowed_in_planning(
-        spoofed,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=("mcp__trusted",),
-    )
-
-
-@pytest.mark.asyncio
-async def test_exact_mcp_selector_requires_matching_trusted_runtime_tool() -> None:
-    presentation = _ToolPresentation(
-        (),
-        static_tool_names=(),
-        mcp_policy=("mcp__trusted__read",),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=("mcp__trusted",),
-        instruction_aware=False,
-    )
-    trusted = ToolDefinition(
-        name="mcp__trusted__read",
-        capability_id="mcp__trusted",
-    )
-    assert await presentation._prepare_final_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
-
-    with pytest.raises(AIError) as missing:
-        await presentation._prepare_final_tools(None, [])  # type: ignore[arg-type]
-    assert missing.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-    spoofed = ToolDefinition(
-        name="mcp__trusted__read",
-        capability_id="custom-mcp",
-    )
-    with pytest.raises(AIError) as wrong_provenance:
-        await presentation._prepare_final_tools(None, [spoofed])  # type: ignore[arg-type]
-    assert wrong_provenance.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-@pytest.mark.asyncio
-async def test_mcp_server_wildcard_requires_trusted_runtime_provenance() -> None:
-    presentation = _ToolPresentation(
-        (),
-        static_tool_names=(),
-        mcp_policy=("mcp__trusted__*",),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=("mcp__trusted",),
-        instruction_aware=False,
-    )
-    trusted = ToolDefinition(
-        name="mcp__trusted__read",
-        capability_id="mcp__trusted",
-    )
-    assert await presentation._prepare_final_tools(None, [trusted]) == [trusted]  # type: ignore[arg-type]
-
-    spoofed = ToolDefinition(
-        name="mcp__trusted__read",
-        capability_id="custom-mcp",
-    )
+def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
     with pytest.raises(AIError) as error:
-        await presentation._prepare_final_tools(None, [spoofed])  # type: ignore[arg-type]
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-@pytest.mark.asyncio
-async def test_mcp_server_wildcard_allows_empty_runtime_toolset() -> None:
-    presentation = _ToolPresentation(
-        (),
-        static_tool_names=(),
-        mcp_policy=("mcp__trusted__*",),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=("mcp__trusted",),
-        instruction_aware=False,
-    )
-    assert await presentation._prepare_final_tools(None, []) == []  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
-async def test_static_tool_surface_must_match_compiled_exact_set() -> None:
-    presentation = _ToolPresentation(
-        ("business",),
-        static_tool_names=("business",),
-        mcp_policy=(),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=(),
-        instruction_aware=False,
-    )
-    business = ToolDefinition(name="business")
-    assert await presentation._prepare_final_tools(None, [business]) == [business]  # type: ignore[arg-type]
-
-    with pytest.raises(AIError) as missing:
-        await presentation._prepare_final_tools(None, [])  # type: ignore[arg-type]
-    assert missing.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-    substituted = ToolDefinition(name="business", capability_id="custom")
-    with pytest.raises(AIError) as wrong_owner:
-        await presentation._prepare_final_tools(None, [substituted])  # type: ignore[arg-type]
-    assert wrong_owner.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-    empty = _ToolPresentation(
-        ("*",),
-        static_tool_names=(),
-        mcp_policy=(),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=(),
-        instruction_aware=False,
-    )
-    with pytest.raises(AIError) as extra:
-        await empty._prepare_final_tools(None, [ToolDefinition(name="extra")])  # type: ignore[arg-type]
-    assert extra.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-@pytest.mark.asyncio
-async def test_custom_capability_cannot_impersonate_reserved_control_tool() -> None:
-    presentation = _ToolPresentation(
-        ("*",),
-        static_tool_names=(),
-        mcp_policy=(),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=(),
-        instruction_aware=False,
-    )
-    spoofed = ToolDefinition(name="write_plan", capability_id="custom")
-
-    with pytest.raises(AIError) as error:
-        await presentation._prepare_final_tools(None, [spoofed])  # type: ignore[arg-type]
-    assert error.value.code is ErrorCode.CAPABILITY_POLICY_CONFLICT
-
-
-def test_tool_presentation_is_outermost_wrapper_after_custom_toolset_wrappers() -> None:
-    class RenameCapability(AbstractCapability[object]):
-        def get_wrapper_toolset(self, toolset: FunctionToolset[object]) -> RenamedToolset[object]:  # type: ignore[override]
-            return RenamedToolset(toolset, {"renamed": "original"})
-
-    presentation = _ToolPresentation(
-        ("*",),
-        static_tool_names=(),
-        mcp_policy=(),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=(),
-        instruction_aware=False,
-    )
-    combined = CombinedCapability((presentation, RenameCapability()))
-    wrapped = combined.get_wrapper_toolset(FunctionToolset())
-
-    assert type(presentation).prepare_tools is AbstractCapability.prepare_tools
-    assert presentation.get_ordering().position == "outermost"
-    assert isinstance(wrapped, PreparedToolset)
-    assert isinstance(wrapped.wrapped, RenamedToolset)
-
-
-def test_runtime_persistence_boundary_is_outside_custom_execution_middleware() -> None:
-    class CustomOutermost(AbstractCapability[object]):
-        def get_ordering(self) -> CapabilityOrdering:
-            return CapabilityOrdering(position="outermost")
-
-    presentation = _ToolPresentation(
-        ("*",),
-        static_tool_names=(),
-        mcp_policy=(),
-        plan_mode=False,
-        trusted_tool_classes=(),
-        trusted_mcp_selectors=(),
-        instruction_aware=False,
-    )
-    custom = CustomOutermost()
-    boundary = _RuntimePersistenceBoundary(StepPersistence())
-    combined = CombinedCapability((presentation, custom, boundary))
-
-    assert combined.capabilities[0] is boundary
-    assert boundary.wrapped is not custom
-    assert boundary.get_ordering().wraps == (AbstractCapability,)
-
-
-@pytest.mark.asyncio
-async def test_runtime_persistence_boundary_binds_before_snapshot() -> None:
-    events: list[str] = []
-
-    class RecordingPersistence(StepPersistence[object]):
-        async def after_node_run(self, ctx, *, node, result):  # type: ignore[no-untyped-def]
-            del ctx, node
-            events.append("snapshot")
-            return result
-
-    class RecordingBinder:
-        async def bind_messages(self, messages, **kwargs):  # type: ignore[no-untyped-def]
-            del messages, kwargs
-            events.append("binding")
-
-        async def validate_messages(self, messages, **kwargs):  # type: ignore[no-untyped-def]
-            del messages, kwargs
-
-    boundary = _RuntimePersistenceBoundary(
-        RecordingPersistence(),
-        workspace_binder=RecordingBinder(),  # type: ignore[arg-type]
-        execution_id="execution",
-        step_run_id="step",
-        path_fields_provider=lambda: {},
-    )
-
-    class Context:
-        messages = []
-
-    await boundary.after_node_run(
-        Context(),  # type: ignore[arg-type]
-        node=object(),  # type: ignore[arg-type]
-        result=object(),  # type: ignore[arg-type]
-    )
-
-    assert events == ["binding", "snapshot"]
-
-
-@pytest.mark.asyncio
-async def test_workspace_binding_validation_rejects_missing_durable_binding() -> None:
-    class MissingBindingStore:
-        async def get(self, execution_id, step_run_id, tool_call_id):  # type: ignore[no-untyped-def]
-            del execution_id, step_run_id, tool_call_id
-            return None
-
-    binder = WorkspaceToolCallBinder(MissingBindingStore(), object())  # type: ignore[arg-type]
-    message = ModelResponse(
-        parts=[
-            ToolCallPart(
-                "read_file",
-                {"path": "/old/workspace/file.txt"},
-                tool_call_id="call",
-            )
-        ],
-        run_id="step",
-    )
-
-    with pytest.raises(AIError) as raised:
-        await binder.validate_messages(
-            (message,),
-            execution_id="execution",
-            step_run_id="step",
-            path_fields={"read_file": ("path",)},
+        AgentSpecCodec().decode(
+            json.dumps(
+                {
+                    "version": 1,
+                    "id": "agent",
+                    "model": "model",
+                    "planning": "yes",
+                }
+            ).encode()
         )
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_planning_gate_rejects_non_boolean_plan_safe_metadata() -> None:
-    tool = ToolDefinition(
-        name="custom",
-        capability_id="custom",
-        metadata={PLAN_SAFE_METADATA_KEY: "yes"},
-    )
-    with pytest.raises(AIError) as error:
-        tool_allowed_in_planning(
-            tool,
-            trusted_tool_classes=(),
-            trusted_mcp_selectors=(),
-        )
-    assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-@pytest.mark.parametrize(
-    ("payload", "expected_code"),
-    (
-        (
-            {"version": 1, "id": 1, "model": "default"},
-            ErrorCode.OUTPUT_CONTRACT_INVALID,
-        ),
-        (
-            {"version": 1, "id": "agent", "model": 1},
-            ErrorCode.OUTPUT_CONTRACT_INVALID,
-        ),
-        (
-            {"version": True, "id": "agent", "model": "default"},
-            ErrorCode.STORAGE_INTEGRITY_ERROR,
-        ),
-        (
-            {"version": 2, "id": "agent", "model": "default"},
-            ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-        ),
-    ),
-)
-def test_agent_spec_codec_rejects_invalid_v1_payload(
-    payload: dict[str, object],
-    expected_code: ErrorCode,
-) -> None:
-    with pytest.raises(AIError) as error:
-        AgentSpecCodec().decode(json.dumps(payload).encode("utf-8"))
-    assert error.value.code is expected_code
-
-
-def test_declaration_codecs_preserve_unknown_additive_fields_without_affecting_semantics() -> None:
+def test_declaration_codecs_preserve_unknown_additive_fields() -> None:
     skill_payload = {
         "version": 1,
         "id": "skill",
         "content": "skill content",
         "future_metadata": {"$future_v2": ["ignored"]},
     }
-    decoded_skill = SkillSpecCodec().decode(json.dumps(skill_payload).encode("utf-8"))
+    decoded_skill = SkillSpecCodec().decode(json.dumps(skill_payload).encode())
     assert decoded_skill == SkillSpec("skill", "skill content")
-    assert decoded_skill._extensions["future_metadata"] == {"$future_v2": ["ignored"]}
+    assert decoded_skill._extensions["future_metadata"] == {
+        "$future_v2": ["ignored"]
+    }
 
     mcp_payload = {
         "version": 1,
@@ -414,65 +90,48 @@ def test_declaration_codecs_preserve_unknown_additive_fields_without_affecting_s
         "command": "echo",
         "future_metadata": {"$future_v2": ["ignored"]},
     }
-    decoded_mcp = MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode("utf-8"))
+    decoded_mcp = MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode())
     assert decoded_mcp == MCPServerSpec("mcp", "echo")
-    assert decoded_mcp._extensions["future_metadata"] == {"$future_v2": ["ignored"]}
+    assert decoded_mcp._extensions["future_metadata"] == {
+        "$future_v2": ["ignored"]
+    }
 
 
-@pytest.mark.parametrize(
-    ("codec", "payload"),
-    (
-        (SkillSpecCodec(), {"version": 1, "id": 1, "content": "skill"}),
-        (MCPServerSpecCodec(), {"version": 1, "id": "mcp", "command": 1}),
-        (MCPServerSpecCodec(), {"version": 1, "id": "mcp", "command": "echo", "args": [1]}),
-    ),
-)
-def test_declaration_codecs_reject_type_coercion(codec: object, payload: dict[str, object]) -> None:
-    with pytest.raises((AIError, TypeError, ValueError)):
-        codec.decode(json.dumps(payload).encode("utf-8"))  # type: ignore[attr-defined]
+def test_agent_spec_codec_ignores_unknown_usage_limit_fields() -> None:
+    payload = {
+        "version": 1,
+        "id": "agent",
+        "usage_limits": {
+            "model_requests": 1,
+            "future_limit": {"unit": "request"},
+        },
+    }
+
+    decoded = AgentSpecCodec().decode(json.dumps(payload).encode())
+
+    assert decoded.usage_limits == AgentUsageLimits(model_requests=1)
 
 
-def test_spec_constructors_reject_mismatched_runtime_types() -> None:
+def test_spec_constructors_reject_invalid_values() -> None:
     with pytest.raises(TypeError):
         AgentUsageLimits(model_requests=True)
-    with pytest.raises(TypeError):
-        AgentSpec(1)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
-        AgentSpec("agent", model="")
-    with pytest.raises(TypeError):
-        AgentSpec("agent", instructions="not-an-array")  # type: ignore[arg-type]
+        AgentUsageLimits()
+    with pytest.raises(ValueError):
+        AgentSpec("")
     with pytest.raises(TypeError):
         AgentSpec("agent", instructions=(1,))  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        AgentSpec("agent", usage_limits=object())  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         SkillSpec("", "content")
     with pytest.raises(TypeError):
         SkillSpec("skill", 1)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         MCPServerSpec("mcp", "")
-    with pytest.raises(TypeError):
-        MCPServerSpec("mcp", "echo", args="not-an-array")  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
-        MCPServerSpec("mcp", "echo", args=(1,))  # type: ignore[arg-type]
-
-
-def test_spec_constructors_reject_invalid_values() -> None:
-    with pytest.raises(ValueError):
-        AgentUsageLimits()
-    with pytest.raises(ValueError):
-        AgentUsageLimits(model_requests=0)
-    with pytest.raises(ValueError):
-        AgentSpec("")
-    with pytest.raises(ValueError):
-        SkillSpec("", "content")
-    with pytest.raises(ValueError):
-        MCPServerSpec("", "echo")
 
 
 @pytest.mark.asyncio
-async def test_skill_capability_sorts_selected_skills_and_rejects_duplicates() -> None:
-    capability = SkillCapability(
+async def test_linktools_skills_is_the_direct_skill_capability() -> None:
+    capability = LinkToolsSkills(
         (
             SkillDefinition(SkillSpec("z", "z skill")),
             SkillDefinition(SkillSpec("a", "a skill")),
@@ -480,9 +139,10 @@ async def test_skill_capability_sorts_selected_skills_and_rejects_duplicates() -
         SkillSourceRegistry(),
     )
     assert [item["id"] for item in await capability.list_skills()] == ["a", "z"]
+    assert capability.get_toolset().id == "linktools.ai.skills"
 
     with pytest.raises(AIError) as error:
-        SkillCapability(
+        LinkToolsSkills(
             (
                 SkillDefinition(SkillSpec("same", "one")),
                 SkillDefinition(SkillSpec("same", "two")),
@@ -490,3 +150,52 @@ async def test_skill_capability_sorts_selected_skills_and_rejects_duplicates() -
             SkillSourceRegistry(),
         )
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
+
+
+async def _business(value: str) -> str:
+    return value
+
+
+def _context() -> RunContext[None]:
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> None:
+    boundary = RuntimeToolBoundaryToolset(
+        (FunctionToolset([_business]),),
+        {
+            "_business": ManagedToolDescriptor(
+                effect_owner="none",
+                effect="none",
+                tool_class="business",
+            )
+        },
+        id="business",
+    )
+    context = _context()
+    tools = await boundary.get_tools(context)
+    assert (
+        await boundary.call_tool(
+            "_business",
+            {"value": "ok"},
+            context,
+            tools["_business"],
+        )
+        == "ok"
+    )
+
+    unknown = RuntimeToolBoundaryToolset(
+        (FunctionToolset([_business]),),
+        {},
+        id="invalid",
+    )
+    with pytest.raises(AIError) as error:
+        await unknown.get_tools(context)
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

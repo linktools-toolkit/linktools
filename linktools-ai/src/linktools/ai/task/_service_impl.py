@@ -325,19 +325,7 @@ class DefaultTaskService(TaskApi):
     async def recover_pending(self) -> None:
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if self._preflight is not None:
-            cursor: str | None = None
-            while True:
-                page = await self._persistence.admissions.list_recoverable_page(
-                    cursor=cursor,
-                    limit=128,
-                )
-                for launch in page.items:
-                    self._preflight.validate_recovery(launch.graph)
-                if page.next_cursor is None:
-                    break
-                cursor = page.next_cursor
-        cursor = None
+        cursor: str | None = None
         recovered = 0
         while True:
             page = await self._persistence.admissions.list_recoverable_page(

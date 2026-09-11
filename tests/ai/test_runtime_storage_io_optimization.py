@@ -3,20 +3,15 @@
 """Focused I/O invariants for Runtime storage optimization."""
 
 import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypeVar
 
 import pytest
 from linktools.ai.core import ApprovalStatus
 from linktools.ai.migrate import provision_database
-from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime.state import FactQuery, RuntimeDomain, SqlStateStore
-from linktools.ai.runtime.state._approval_repository import (
-    ApprovalAdmissionRepositoryImpl,
-)
+from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import (
     ApprovalRecord,
     ContextProjection,
@@ -25,12 +20,10 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptSeekDimension,
 )
 from linktools.ai.runtime.state._history import TranscriptRepository
-from linktools.ai.runtime.state._readmodel import (
-    ExecutionReadModelBuild,
-    ExecutionReadModelRepository,
-    ExecutionReadModelStatus,
+from linktools.ai.runtime.state._recovery_repositories import (
+    RecoveryApprovalRepositoryImpl,
 )
-from linktools.ai.runtime.state._store import StateStore, StateTransaction
+from linktools.ai.runtime.state._sql import SqlStateStore
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.storage import _object as object_module
 from sqlalchemy import event
@@ -38,30 +31,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 pytestmark = pytest.mark.asyncio
 
-ResultT = TypeVar("ResultT")
-
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
     yield value
-
-
-class _CountingStateStore:
-    def __init__(self, delegate: StateStore) -> None:
-        self._delegate = delegate
-        self.mutation_count = 0
-
-    async def read(
-        self,
-        operation: Callable[[StateTransaction], Awaitable[ResultT]],
-    ) -> ResultT:
-        return await self._delegate.read(operation)
-
-    async def mutate(
-        self,
-        operation: Callable[[StateTransaction], Awaitable[ResultT]],
-    ) -> ResultT:
-        self.mutation_count += 1
-        return await self._delegate.mutate(operation)
 
 
 async def test_filesystem_object_store_syncs_payload_before_publish(
@@ -231,7 +203,7 @@ async def test_approval_cancel_batches_known_record_sql(
     await provision_database(engine)
     store = SqlStateStore(engine)
     await store.initialize()
-    repository = ApprovalAdmissionRepositoryImpl(
+    repository = RecoveryApprovalRepositoryImpl(
         store,
         namespace="io-approval",
         tenant_id="tenant",
@@ -244,7 +216,6 @@ async def test_approval_cancel_batches_known_record_sql(
                 approval_id=approval_id,
                 execution_id="execution",
                 tenant_id="tenant",
-                operation_id=f"operation-{approval_id}",
                 status=ApprovalStatus.PENDING,
                 idempotency_key_digest=None,
                 decision=None,
@@ -291,86 +262,3 @@ async def test_approval_cancel_batches_known_record_sql(
         event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
         await store.close()
         await engine.dispose()
-
-
-async def test_execution_read_model_batches_streams_by_ordinal() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="io-readmodel", tenant_id="tenant")
-    try:
-        delegate = state.execution.executions.state_store
-        store = _CountingStateStore(delegate)
-        repository = ExecutionReadModelRepository(
-            store,  # type: ignore[arg-type]
-            namespace="io-readmodel",
-            tenant_id="tenant",
-        )
-        owner, fence, claimed = await repository._claim("execution")
-        assert claimed is None
-        build = ExecutionReadModelBuild(
-            "execution",
-            "tenant",
-            "source",
-            tuple({"index": index} for index in range(129)),
-            tuple({"index": index} for index in range(257)),
-            ({"index": 0},),
-        )
-
-        await repository._write_build(build, owner, fence)
-
-        assert store.mutation_count == 4
-        stored = await delegate.read(
-            lambda transaction: transaction.get_record(
-                repository._record_key("execution")
-            )
-        )
-        assert stored is not None
-        value = repository._decode_record(stored)
-        assert value.status is ExecutionReadModelStatus.COMPLETE
-        assert (value.trace_count, value.history_count, value.transcript_count) == (
-            129,
-            257,
-            1,
-        )
-        history_facts = await delegate.read(
-            lambda transaction: transaction.list_facts(
-                FactQuery(repository._stream("execution", "history"))
-            )
-        )
-        assert tuple(len(fact.data["items"]) for fact in history_facts) == (
-            128,
-            128,
-            1,
-        )
-    finally:
-        await state.close()
-
-
-async def test_empty_execution_read_model_uses_one_publish_mutation() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="io-readmodel-empty", tenant_id="tenant")
-    try:
-        delegate = state.execution.executions.state_store
-        store = _CountingStateStore(delegate)
-        repository = ExecutionReadModelRepository(
-            store,  # type: ignore[arg-type]
-            namespace="io-readmodel-empty",
-            tenant_id="tenant",
-        )
-        owner, fence, claimed = await repository._claim("execution")
-        assert claimed is None
-        await repository._write_build(
-            ExecutionReadModelBuild(
-                "execution",
-                "tenant",
-                "source",
-                (),
-                (),
-                (),
-            ),
-            owner,
-            fence,
-        )
-
-        assert store.mutation_count == 2
-    finally:
-        await state.close()

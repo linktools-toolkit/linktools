@@ -12,13 +12,12 @@ from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
-from linktools.ai.runtime.state import (
+from linktools.ai.runtime.state._commands import RuntimeStateCommands
+from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+from linktools.ai.runtime.state._sql import SqlStateStore
+from linktools.ai.runtime.state._store import (
     FactQuery,
-    FilesystemStateStore,
-    RuntimeStateCommands,
-    SqlStateStore,
     StateTransaction,
     StoredFact,
     StoredRecord,
@@ -29,7 +28,9 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.step_persistence import RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    RunRecord,
+)
 from sqlalchemy import event
 from sqlalchemy.dialects import mysql
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -42,7 +43,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"version": 1, "id": "default"},
+        base_model={"version": 1, "id": "default"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -62,7 +63,9 @@ def _tool_run(run_id: str) -> RunRecord:
     )
 
 
-async def test_sql_state_group_maps_programming_failure_to_internal(tmp_path: Path) -> None:
+async def test_sql_state_group_maps_programming_failure_to_internal(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
@@ -84,7 +87,9 @@ async def test_sql_state_group_maps_programming_failure_to_internal(tmp_path: Pa
         await engine.dispose()
 
 
-async def test_sql_latest_per_subject_uses_portable_aggregate_query(tmp_path: Path) -> None:
+async def test_sql_latest_per_subject_uses_portable_aggregate_query(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
@@ -208,30 +213,29 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             owner="owner",
             background_tasks=background_tasks,
             payload_policy=PayloadPolicy(),
-            terminal_commands=_runtime_commands(state, "parallel-tools", background_tasks),
-        )
-        persistence = _RuntimeStepPersistence(
-            tool_operations=bridge,
-            store=state.steps,
-            agent_name="agent",
-            run_id=run_id,
+            terminal_commands=_runtime_commands(
+                state, "parallel-tools", background_tasks
+            ),
         )
         call_ids = ("call-a", "call-b")
         entered = {call_id: asyncio.Event() for call_id in call_ids}
         release = asyncio.Event()
 
         async def execute(call_id: str) -> object:
-            context = RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id)
+            context = RunContext(
+                deps=None, model=TestModel(), usage=RunUsage(), run_id=run_id
+            )
             call = ToolCallPart("tool", {}, tool_call_id=call_id)
             tool_def = ToolDefinition(
                 name="tool",
                 metadata={"linktools.ai.replay_safe": True},
             )
-            await persistence.before_tool_execute(
+            decision = await bridge.begin(
                 context,
-                call=call,
-                tool_def=tool_def,
-                args={},
+                call,
+                tool_def,
+                {},
+                True,
             )
 
             async def handler(_args: dict[str, object]) -> dict[str, str]:
@@ -239,20 +243,9 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
                 await release.wait()
                 return {"call_id": call_id}
 
-            result = await persistence.wrap_tool_execute(
-                context,
-                call=call,
-                tool_def=tool_def,
-                args={},
-                handler=handler,
-            )
-            return await persistence.after_tool_execute(
-                context,
-                call=call,
-                tool_def=tool_def,
-                args={},
-                result=result,
-            )
+            result = await handler({})
+            await bridge.complete(decision, result)
+            return result
 
         tasks = [asyncio.create_task(execute(call_id)) for call_id in call_ids]
         await asyncio.gather(*(entered[call_id].wait() for call_id in call_ids))
@@ -262,7 +255,6 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             {"call_id": "call-b"},
         ]
 
-        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
         for call_id in call_ids:
             operation = await state.recovery.tools.get_by_call(
                 run_id,
@@ -272,12 +264,6 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
             assert operation is not None
             assert operation.status is ToolOperationStatus.COMPLETED
             assert operation.binding_digest == "a" * 64
-            effect = await recovery.get_tool_effect(
-                run_id=run_id,
-                tool_call_id=call_id,
-            )
-            assert effect is not None
-            assert effect.status == "completed"
     finally:
         await state.close()
 
@@ -296,7 +282,9 @@ async def test_mysql_audit_columns_match_schema_contract() -> None:
         ) in ddl
 
 
-async def test_filesystem_state_store_is_single_writer_and_reopens(tmp_path: Path) -> None:
+async def test_filesystem_state_store_is_single_writer_and_reopens(
+    tmp_path: Path,
+) -> None:
     first = FilesystemStateStore(
         tmp_path / "state",
         namespace="n",
@@ -350,9 +338,7 @@ async def test_filesystem_unknown_commit_poison_is_fail_closed(
             await store.mutate(mutate)
         assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
         with pytest.raises(AIError) as read_error:
-            await store.read(
-                lambda transaction: transaction.get_sequence(b"s" * 32)
-            )
+            await store.read(lambda transaction: transaction.get_sequence(b"s" * 32))
         assert read_error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     finally:
         await store.close()

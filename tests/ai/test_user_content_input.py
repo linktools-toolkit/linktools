@@ -2,16 +2,21 @@
 # -*- coding: utf-8 -*-
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, UploadedFile
+from pydantic_ai.messages import BinaryContent, ImageUrl, UploadedFile
 
 from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime._input import ExecutionInputMaterializer
-from linktools.ai.workspace import SandboxSession, Workspace
+from linktools.ai.runtime._input import (
+    ExecutionInputMaterializer,
+    decode_user_content_payload,
+)
+from linktools.ai.runtime._input_contract import validate_user_content
+from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
 
 
 class _CountingSession:
@@ -37,14 +42,20 @@ class _CountingSandbox:
     def __init__(self, session: _CountingSession) -> None:
         self.session = session
 
-    async def open(self) -> SandboxSession:
+    async def open(
+        self,
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> SandboxSession:
+        del root, resources
         return self.session  # type: ignore[return-value]
 
 
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
-    access = WorkspaceAccess(_CountingSandbox(session))  # type: ignore[arg-type]
-    workspace = Workspace.load(".")
+    workspace = Workspace.load(".", workspace_id="workspace")
+    access = WorkspaceAccess(_CountingSandbox(session), root=workspace.root)
     return ExecutionInputMaterializer(access, workspace.policy), session
 
 
@@ -101,25 +112,18 @@ async def test_unknown_file_media_type_fails_before_read() -> None:
         await materializer.close()
 
 
-def test_uploaded_file_is_rejected_at_request_boundary() -> None:
+def test_uploaded_file_is_durable_at_request_boundary() -> None:
     uploaded = UploadedFile("file-123", "openai", media_type="text/plain")
-
-    with pytest.raises(AIError) as raised:
-        ExecutionRequest(
-            user_prompt=("Inspect this file", uploaded),
-            principal=Principal("user", "tenant", "local_trusted"),
-            idempotency_key="user-content-request",
-            memory_scope=None,
-            mode="run",
-            planning=False,
-            thinking=False,
-        )
-
-    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    assert raised.value.safe_details == {
-        "field": "user_prompt",
-        "reason": "uploaded_file_not_durable",
-    }
+    request = ExecutionRequest(
+        user_prompt=("Inspect this file", uploaded),
+        principal=Principal("user", "tenant", "local_trusted"),
+        idempotency_key="user-content-request",
+        memory_scope=None,
+        mode="run",
+        planning=False,
+        thinking=False,
+    )
+    assert request.user_prompt == ("Inspect this file", uploaded)
 
 
 def test_execution_request_keeps_canonical_user_content() -> None:
@@ -135,3 +139,22 @@ def test_execution_request_keeps_canonical_user_content() -> None:
     )
 
     assert request.user_prompt == tuple(prompt)
+
+
+def test_user_content_version_rejects_boolean_values() -> None:
+    with pytest.raises(AIError) as raised:
+        decode_user_content_payload({"version": True, "items": []})
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_url_vendor_metadata_must_be_json() -> None:
+    content = ImageUrl(
+        url="https://example.com/evidence.png",
+        vendor_metadata={"value": object()},
+    )
+
+    with pytest.raises(AIError) as raised:
+        validate_user_content((content,))
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID

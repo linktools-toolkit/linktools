@@ -32,7 +32,6 @@ from sqlalchemy import delete, event, select, text, update
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from .test_metrics_sql_server_sums import _server
 
 _START = datetime(2026, 9, 7, tzinfo=timezone.utc)
 _WINDOW = MetricWindow.between(_START, _START + timedelta(seconds=2))

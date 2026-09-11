@@ -134,7 +134,6 @@ async def _open_runtime_history(
                 "execution-history",
                 _grant_key(workspace),
             ),
-            read_model=None,
         )
         service = DefaultExecutionHistoryService(
             selected_state.execution.executions,

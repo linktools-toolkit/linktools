@@ -7,10 +7,10 @@ import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
-from typing import cast
 
 from linktools.core import environ
-from pydantic_ai_harness.step_persistence import (
+
+from ._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
@@ -20,10 +20,8 @@ from ...core import (
     ExecutionEventType,
     ApprovalStatus,
     ExecutionStatus,
+    ExternalCallStatus,
     IdempotencyStatus,
-    OperationKind,
-    OperationStatus,
-    ResourceKind,
     SessionStatus,
     ToolOperationStatus,
     canonical_json_bytes,
@@ -32,29 +30,35 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
-from .._tool import ToolOperationRecord
+from ._contracts import ToolOperationRecord
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,
     ApprovalRepository,
     ConversationCursor,
     ConversationHistoryRecord,
+    ConversationHistoryRepository,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionHistorySealRecord,
     ExecutionHistoryState,
     ExecutionRecord,
+    ExecutionRepository,
     ExecutionRunSealHead,
     ExecutionStartClaim,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
+    EventRepository,
+    ExternalCallRecord,
+    ExternalCallRepository,
     HistoryQuality,
-    PendingApprovalContinuation,
+    PendingToolContinuation,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
+    RecoveryCheckpointRepository,
+    SessionRepository,
     SessionRecord,
-    ToolApprovalAdmission,
     ToolOperationAdmission,
 )
 from ._durability import (
@@ -64,16 +68,8 @@ from ._durability import (
     run_durable_commit,
 )
 from ._repositories import (
-    ConversationHistoryRepositoryImpl,
-    EventRepositoryImpl,
-    ExecutionRepositoryImpl,
-    OperationLedgerRepository,
-    RecoveryCheckpointRepositoryImpl,
-    SessionRepositoryImpl,
-    ToolRepositoryImpl,
     _tool_admission_matches,
 )
-from ._plan import RuntimeDomain
 from ._steps import (
     PreparedExecutionProjection,
     PreparedStepSnapshot,
@@ -90,16 +86,17 @@ class RuntimeStateCommands:
 
     def __init__(
         self,
-        execution: ExecutionRepositoryImpl,
+        execution: ExecutionRepository,
         *,
         namespace: str,
-        events: EventRepositoryImpl,
-        operations: OperationLedgerRepository | None = None,
+        events: EventRepository,
+        operations: object | None = None,
         approvals: ApprovalRepository | None = None,
-        conversation: SessionRepositoryImpl | None = None,
-        recovery: RecoveryCheckpointRepositoryImpl | None = None,
-        conversation_history: ConversationHistoryRepositoryImpl | None = None,
-        tools: ToolRepositoryImpl | None = None,
+        external_calls: ExternalCallRepository | None = None,
+        conversation: SessionRepository | None = None,
+        recovery: RecoveryCheckpointRepository | None = None,
+        conversation_history: ConversationHistoryRepository | None = None,
+        tools: object | None = None,
         conversation_steps: StateStepArchive | None = None,
         execution_steps: StateStepArchive | None = None,
         recovery_steps: StateStepArchive | None = None,
@@ -110,6 +107,7 @@ class RuntimeStateCommands:
         self._events = events
         self._operations = operations
         self._approvals = approvals
+        self._external_calls = external_calls
         self._conversation = conversation
         self._recovery = recovery
         self._conversation_history = conversation_history
@@ -123,6 +121,538 @@ class RuntimeStateCommands:
         if self._approvals is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._approvals
+
+    def _require_external_calls(self) -> ExternalCallRepository:
+        if self._external_calls is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._external_calls
+
+    async def commit_deferred_checkpoint(
+        self,
+        *,
+        execution_id: str,
+        tenant_id: str,
+        expected_execution_revision: int,
+        expected_event_sequence: int,
+        expected_recovery_revision: int,
+        expected_agent_run_sequence: int,
+        continuation: PendingToolContinuation,
+        audit_events: Sequence[ExecutionEventAppend] = (),
+        approval_records: Sequence[ApprovalRecord] = (),
+        external_records: Sequence[ExternalCallRecord] = (),
+        occurred_at: datetime,
+        background_tasks: "set[asyncio.Task[object]] | None" = None,
+    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+        approvals = self._require_approvals()
+        external_calls = self._require_external_calls()
+        if occurred_at.tzinfo is None:
+            raise ValueError("deferred checkpoint timestamp must be timezone-aware")
+        if continuation.source_step_run_id == "":
+            raise ValueError("deferred checkpoint source step is required")
+        approval_values = tuple(approval_records)
+        external_values = tuple(external_records)
+        request_events = tuple(
+            ExecutionEventAppend(
+                ExecutionEventType.APPROVAL_REQUESTED,
+                {
+                    "tool_call_id": item.tool_call_id,
+                    "tool_name": item.tool_name,
+                    "arguments_digest": item.arguments_digest,
+                },
+            )
+            for item in continuation.approvals
+        ) + tuple(
+            ExecutionEventAppend(
+                ExecutionEventType.EXTERNAL_REQUESTED,
+                {
+                    "tool_call_id": item.tool_call_id,
+                    "tool_name": item.tool_name,
+                    "arguments_digest": item.arguments_digest,
+                },
+            )
+            for item in continuation.calls
+        )
+        if not request_events:
+            raise ValueError("deferred checkpoint requires requests")
+        if len(approval_values) != len(continuation.approvals):
+            raise ValueError("approval records do not match continuation")
+        if len(external_values) != len(continuation.calls):
+            raise ValueError("external records do not match continuation")
+        if any(
+            record.execution_id != execution_id
+            or record.tenant_id != tenant_id
+            or record.status is not ApprovalStatus.PENDING
+            for record in approval_values
+        ):
+            raise ValueError("approval record identity is invalid")
+        if any(
+            record.execution_id != execution_id
+            or record.tenant_id != tenant_id
+            or record.status is not ExternalCallStatus.PENDING
+            for record in external_values
+        ):
+            raise ValueError("external record identity is invalid")
+        if tuple(record.approval_id for record in approval_values) != tuple(
+            _deferred_resource_id(
+                "approval-v1",
+                tenant_id,
+                execution_id,
+                continuation.source_step_run_id,
+                item.tool_call_id,
+            )
+            for item in continuation.approvals
+        ):
+            raise ValueError("approval record ids do not match continuation")
+        if tuple(record.call_id for record in external_values) != tuple(
+            _deferred_resource_id(
+                "external-call-v1",
+                tenant_id,
+                execution_id,
+                continuation.source_step_run_id,
+                item.tool_call_id,
+            )
+            for item in continuation.calls
+        ):
+            raise ValueError("external record ids do not match continuation")
+        stores = _dedupe_stores(
+            (
+                self._execution.state_store,
+                self._recovery.state_store,
+                approvals.state_store,
+                external_calls.state_store,
+            )
+        )
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+        async def operation() -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+            async def mutate(
+                group: StateGroupTransaction,
+            ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+                execution_tx = group.transaction(self._execution.state_store)
+                recovery_tx = group.transaction(self._recovery.state_store)
+                current_execution = await self._execution.get_in_transaction(
+                    execution_tx,
+                    execution_id,
+                    tenant_id=tenant_id,
+                )
+                current_checkpoint = await self._recovery.get_in_transaction(
+                    recovery_tx,
+                    execution_id,
+                    tenant_id=tenant_id,
+                )
+                if (
+                    current_execution is None
+                    or current_checkpoint is None
+                    or current_execution.status is not ExecutionStatus.STARTED
+                    or current_execution.revision != expected_execution_revision
+                    or current_execution.event_sequence != expected_event_sequence
+                    or current_execution.agent_run_sequence
+                    != expected_agent_run_sequence
+                    or current_checkpoint.revision != expected_recovery_revision
+                    or current_checkpoint.state is not RecoveryCheckpointState.ACTIVE
+                    or current_checkpoint.step_run_id
+                    != continuation.source_step_run_id
+                    or current_checkpoint.agent_run_sequence
+                    != expected_agent_run_sequence
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                for record in approval_values:
+                    await approvals.create_in_transaction(recovery_tx, record)
+                for record in external_values:
+                    await external_calls.create_in_transaction(recovery_tx, record)
+                updated_execution = (
+                    await self._execution.enter_deferred_wait_in_transaction(
+                        execution_tx,
+                        execution_id,
+                        tenant_id=tenant_id,
+                        expected_revision=expected_execution_revision,
+                        expected_event_sequence=expected_event_sequence,
+                        expected_agent_run_sequence=expected_agent_run_sequence,
+                        audit_events=audit_events,
+                        deferred_events=request_events,
+                        occurred_at=occurred_at,
+                    )
+                )
+                updated_checkpoint = await self._recovery.compare_and_swap_in_transaction(
+                    recovery_tx,
+                    execution_id,
+                    tenant_id=tenant_id,
+                    expected_revision=expected_recovery_revision,
+                    next_record=replace(
+                        current_checkpoint,
+                        state=RecoveryCheckpointState.WAITING,
+                        pending_tools=continuation,
+                        revision=expected_recovery_revision + 1,
+                        updated_at=occurred_at,
+                    ),
+                )
+                return updated_execution, updated_checkpoint
+
+            return await stores[0].storage_group.mutate(stores, mutate)
+
+        async def readback() -> CommitObservation[tuple[ExecutionRecord, RecoveryCheckpoint]]:
+            execution = await self._execution.get(execution_id, tenant_id=tenant_id)
+            checkpoint = await self._recovery.get(execution_id, tenant_id=tenant_id)
+            if execution is None or checkpoint is None:
+                return CommitObservation(
+                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                )
+            for expected in approval_values:
+                actual = await approvals.get(
+                    expected.approval_id,
+                    tenant_id=tenant_id,
+                )
+                if actual != expected:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+            for expected in external_values:
+                actual = await external_calls.get(
+                    expected.call_id,
+                    tenant_id=tenant_id,
+                )
+                if actual != expected:
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+            if (
+                execution.status is ExecutionStatus.WAITING_DEFERRED
+                and execution.agent_run_sequence == expected_agent_run_sequence
+                and checkpoint.state is RecoveryCheckpointState.WAITING
+                and checkpoint.pending_tools == continuation
+            ):
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=(execution, checkpoint),
+                )
+            if (
+                execution.status is ExecutionStatus.STARTED
+                and execution.revision == expected_execution_revision
+                and execution.event_sequence == expected_event_sequence
+                and checkpoint.revision == expected_recovery_revision
+            ):
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            return CommitObservation(
+                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+            )
+
+        owner_tasks = self._background_tasks if background_tasks is None else background_tasks
+        outcome = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=owner_tasks,
+        )
+        return _require_durable_pair(outcome)
+
+    async def commit_deferred_cancel_checkpoint(
+        self,
+        commit: ExecutionCancelRequestCommit,
+        *,
+        expected_recovery_revision: int,
+        expected_pending_tools: PendingToolContinuation,
+        background_tasks: "set[asyncio.Task[object]] | None" = None,
+    ) -> ExecutionRecord:
+        approvals = self._require_approvals()
+        external_calls = self._require_external_calls()
+        stores = _dedupe_stores(
+            (
+                self._execution.state_store,
+                self._recovery.state_store,
+                approvals.state_store,
+                external_calls.state_store,
+            )
+        )
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        approval_ids = tuple(
+            _deferred_resource_id(
+                "approval-v1",
+                commit.tenant_id,
+                commit.execution_id,
+                expected_pending_tools.source_step_run_id,
+                item.tool_call_id,
+            )
+            for item in expected_pending_tools.approvals
+        )
+        call_ids = tuple(
+            _deferred_resource_id(
+                "external-call-v1",
+                commit.tenant_id,
+                commit.execution_id,
+                expected_pending_tools.source_step_run_id,
+                item.tool_call_id,
+            )
+            for item in expected_pending_tools.calls
+        )
+
+        async def operation() -> ExecutionRecord:
+            async def mutate(group: StateGroupTransaction) -> ExecutionRecord:
+                execution_tx = group.transaction(self._execution.state_store)
+                recovery_tx = group.transaction(self._recovery.state_store)
+                execution = await self._execution.get_in_transaction(
+                    execution_tx,
+                    commit.execution_id,
+                    tenant_id=commit.tenant_id,
+                )
+                checkpoint = await self._recovery.get_in_transaction(
+                    recovery_tx,
+                    commit.execution_id,
+                    tenant_id=commit.tenant_id,
+                )
+                if (
+                    execution is None
+                    or checkpoint is None
+                    or execution.status is not ExecutionStatus.WAITING_DEFERRED
+                    or execution.revision != commit.expected_revision
+                    or execution.event_sequence != commit.expected_event_sequence
+                    or checkpoint.revision != expected_recovery_revision
+                    or checkpoint.state is not RecoveryCheckpointState.WAITING
+                    or checkpoint.pending_tools != expected_pending_tools
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await approvals.cancel_pending_in_transaction(
+                    recovery_tx,
+                    approval_ids,
+                    execution_id=commit.execution_id,
+                    tenant_id=commit.tenant_id,
+                    decided_at=commit.requested_at,
+                )
+                await external_calls.cancel_pending_in_transaction(
+                    recovery_tx,
+                    call_ids,
+                    execution_id=commit.execution_id,
+                    tenant_id=commit.tenant_id,
+                    cancelled_at=commit.requested_at,
+                )
+                updated = await self._execution.request_cancel_in_transaction(
+                    execution_tx,
+                    commit,
+                    expected_status=ExecutionStatus.WAITING_DEFERRED,
+                )
+                await self._recovery.compare_and_swap_in_transaction(
+                    recovery_tx,
+                    commit.execution_id,
+                    tenant_id=commit.tenant_id,
+                    expected_revision=expected_recovery_revision,
+                    next_record=replace(
+                        checkpoint,
+                        state=RecoveryCheckpointState.ACTIVE,
+                        pending_tools=None,
+                        revision=expected_recovery_revision + 1,
+                        updated_at=commit.requested_at,
+                    ),
+                )
+                return updated
+
+            return await stores[0].storage_group.mutate(stores, mutate)
+
+        async def readback() -> CommitObservation[ExecutionRecord]:
+            execution = await self._execution.get(
+                commit.execution_id,
+                tenant_id=commit.tenant_id,
+            )
+            checkpoint = await self._recovery.get(
+                commit.execution_id,
+                tenant_id=commit.tenant_id,
+            )
+            if execution is None or checkpoint is None:
+                return CommitObservation(
+                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                )
+            for approval_id in approval_ids:
+                record = await approvals.get(
+                    approval_id,
+                    tenant_id=commit.tenant_id,
+                )
+                if (
+                    record is None
+                    or record.execution_id != commit.execution_id
+                    or record.status is ApprovalStatus.PENDING
+                ):
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+            for call_id in call_ids:
+                record = await external_calls.get(
+                    call_id,
+                    tenant_id=commit.tenant_id,
+                )
+                if (
+                    record is None
+                    or record.execution_id != commit.execution_id
+                    or record.status is ExternalCallStatus.PENDING
+                ):
+                    return CommitObservation(
+                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                        error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                    )
+            if (
+                execution.status
+                in {
+                    ExecutionStatus.CANCELLING,
+                    ExecutionStatus.FINALIZING,
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }
+                and execution.event_sequence
+                >= commit.expected_event_sequence + 1
+                and checkpoint.state
+                in {
+                    RecoveryCheckpointState.ACTIVE,
+                    RecoveryCheckpointState.COMPLETED,
+                }
+                and checkpoint.pending_tools is None
+                and checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
+                and checkpoint.terminal_handoff is None
+                and checkpoint.revision >= expected_recovery_revision + 1
+            ):
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=execution,
+                )
+            if (
+                execution.status is ExecutionStatus.WAITING_DEFERRED
+                and execution.revision == commit.expected_revision
+                and execution.event_sequence == commit.expected_event_sequence
+                and checkpoint.revision == expected_recovery_revision
+                and checkpoint.pending_tools == expected_pending_tools
+            ):
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            return CommitObservation(
+                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+            )
+
+        owner_tasks = self._background_tasks if background_tasks is None else background_tasks
+        outcome = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=owner_tasks,
+        )
+        return _require_durable_record(outcome)
+
+    async def claim_deferred_resume_checkpoint(
+        self,
+        *,
+        execution_id: str,
+        tenant_id: str,
+        expected_execution_revision: int,
+        expected_event_sequence: int,
+        expected_recovery_revision: int,
+        expected_agent_run_sequence: int,
+        expected_pending_tools: PendingToolContinuation,
+        background_tasks: "set[asyncio.Task[object]] | None" = None,
+    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+        stores = _dedupe_stores(
+            (self._execution.state_store, self._recovery.state_store)
+        )
+        if not _same_group(stores):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        next_sequence = expected_agent_run_sequence + 1
+        next_run_id = step_run_id(
+            namespace=self._namespace,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            segment_sequence=next_sequence,
+        )
+
+        async def operation() -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+            async def mutate(
+                group: StateGroupTransaction,
+            ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
+                execution_tx = group.transaction(self._execution.state_store)
+                recovery_tx = group.transaction(self._recovery.state_store)
+                execution = await self._execution.get_in_transaction(
+                    execution_tx,
+                    execution_id,
+                    tenant_id=tenant_id,
+                )
+                checkpoint = await self._recovery.get_in_transaction(
+                    recovery_tx,
+                    execution_id,
+                    tenant_id=tenant_id,
+                )
+                if (
+                    execution is None
+                    or checkpoint is None
+                    or execution.status is not ExecutionStatus.WAITING_DEFERRED
+                    or execution.revision != expected_execution_revision
+                    or execution.event_sequence != expected_event_sequence
+                    or execution.agent_run_sequence != expected_agent_run_sequence
+                    or checkpoint.revision != expected_recovery_revision
+                    or checkpoint.state is not RecoveryCheckpointState.WAITING
+                    or checkpoint.pending_tools != expected_pending_tools
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                updated_execution = (
+                    await self._execution.claim_deferred_resume_in_transaction(
+                        execution_tx,
+                        execution_id,
+                        tenant_id=tenant_id,
+                        expected_revision=expected_execution_revision,
+                        expected_event_sequence=expected_event_sequence,
+                        expected_agent_run_sequence=expected_agent_run_sequence,
+                    )
+                )
+                updated_checkpoint = await self._recovery.compare_and_swap_in_transaction(
+                    recovery_tx,
+                    execution_id,
+                    tenant_id=tenant_id,
+                    expected_revision=expected_recovery_revision,
+                    next_record=replace(
+                        checkpoint,
+                        state=RecoveryCheckpointState.ACTIVE,
+                        step_run_id=next_run_id,
+                        agent_run_sequence=next_sequence,
+                        pending_tools=None,
+                        revision=expected_recovery_revision + 1,
+                        updated_at=updated_execution.updated_at,
+                    ),
+                )
+                return updated_execution, updated_checkpoint
+
+            return await stores[0].storage_group.mutate(stores, mutate)
+
+        async def readback() -> CommitObservation[tuple[ExecutionRecord, RecoveryCheckpoint]]:
+            execution = await self._execution.get(execution_id, tenant_id=tenant_id)
+            checkpoint = await self._recovery.get(execution_id, tenant_id=tenant_id)
+            if execution is None or checkpoint is None:
+                return _partial_integrity()
+            if (
+                execution.status is ExecutionStatus.STARTED
+                and execution.agent_run_sequence == next_sequence
+                and checkpoint.state is RecoveryCheckpointState.ACTIVE
+                and checkpoint.step_run_id == next_run_id
+                and checkpoint.pending_tools is None
+            ):
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=(execution, checkpoint),
+                )
+            if (
+                execution.status is ExecutionStatus.WAITING_DEFERRED
+                and execution.revision == expected_execution_revision
+                and checkpoint.revision == expected_recovery_revision
+                and checkpoint.pending_tools == expected_pending_tools
+            ):
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            return _partial_integrity()
+
+        owner_tasks = self._background_tasks if background_tasks is None else background_tasks
+        outcome = await run_durable_commit(
+            operation,
+            readback,
+            background_tasks=owner_tasks,
+        )
+        return _require_durable_pair(outcome)
 
     async def _commit_or_raise(
         self,
@@ -171,7 +701,6 @@ class RuntimeStateCommands:
                 parent_history_id=None,
                 prefix_index_head_id=None,
                 inherited_message_count=0,
-                inherited_history_item_count=0,
             )
             await self._conversation_history.create_in_transaction(
                 transaction,
@@ -244,13 +773,16 @@ class RuntimeStateCommands:
                 prefix_matches = (
                     len(prefix) == len(expected_events)
                     and all(
-                        actual.event_type is expected.event_type
+                        actual.event_type == expected.event_type
                         and actual.payload == expected.payload
                         for actual, expected in zip(prefix, expected_events)
                     )
                 )
                 if prefix_matches:
-                    if execution.revision < target_revision or execution.event_sequence < target_sequence:
+                    if (
+                        execution.revision < target_revision
+                        or execution.event_sequence < target_sequence
+                    ):
                         return CommitObservation(
                             DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                             error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
@@ -316,764 +848,6 @@ class RuntimeStateCommands:
         if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from outcome.error
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
-
-    async def commit_approval_wait_checkpoint(
-        self,
-        *,
-        execution_id: str,
-        tenant_id: str,
-        expected_execution_revision: int,
-        expected_event_sequence: int,
-        expected_recovery_revision: int,
-        expected_agent_run_sequence: int,
-        expected_previous_pending_approval: PendingApprovalContinuation | None,
-        continuation: PendingApprovalContinuation,
-        admissions: Sequence[ToolApprovalAdmission],
-        audit_events: Sequence[ExecutionEventAppend] = (),
-        recovery_run: RunRecord,
-        recovery_snapshot: ContinuableSnapshot,
-        occurred_at: datetime,
-        background_tasks: "set[asyncio.Task[object]] | None" = None,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
-        approvals = self._require_approvals()
-        self._require_recovery()
-        if self._recovery_steps is None or self._recovery_steps.runtime_domain is not RuntimeDomain.RECOVERY:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        ordered_admissions = tuple(admissions)
-        ordered_audit = tuple(audit_events)
-        if not ordered_admissions:
-            raise ValueError("approval wait requires admissions")
-        approval_ids = tuple(item.record.approval_id for item in ordered_admissions)
-        if len(set(approval_ids)) != len(approval_ids):
-            raise ValueError("approval ids must be unique")
-        if not isinstance(occurred_at, datetime) or occurred_at.tzinfo is None:
-            raise ValueError("approval wait timestamp must be timezone-aware")
-        if (
-            continuation.source_step_run_id != recovery_run.run_id
-            or continuation.source_step_run_id != recovery_snapshot.run_id
-            or recovery_snapshot.state != "interrupted"
-            or not recovery_snapshot.messages
-            or continuation.batch_id
-            != _approval_batch_id(execution_id, continuation.source_step_run_id, approval_ids)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (
-            expected_previous_pending_approval is not None
-            and expected_previous_pending_approval.source_step_run_id == continuation.source_step_run_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for admission in ordered_admissions:
-            record = admission.record
-            operation = admission.operation
-            if (
-                record.status is not ApprovalStatus.PENDING
-                or record.idempotency_key_digest is not None
-                or record.decision is not None
-                or record.decided_by is not None
-                or record.decision_digest is not None
-                or record.decided_at is not None
-                or record.tenant_id != tenant_id
-                or record.execution_id != execution_id
-                or operation.tenant_id != tenant_id
-                or operation.execution_id != execution_id
-                or operation.resource_kind is not ResourceKind.APPROVAL
-                or operation.resource_id != record.approval_id
-                or operation.operation_kind is not OperationKind.APPROVAL
-                or operation.status is not OperationStatus.SUCCEEDED
-                or operation.result_ref != record.approval_id
-                or operation.result_digest is None
-                or operation.error_code is not None
-                or not operation.compactable
-            ):
-                raise ValueError("approval admission identity is invalid")
-
-        prepared = await self._recovery_steps.prepare_snapshots(
-            recovery_run,
-            (recovery_snapshot,),
-        )
-        if (
-            len(prepared) != 1
-            or prepared[0].owner_id != recovery_run.run_id
-            or prepared[0].stored.state != "interrupted"
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        stores = _dedupe_stores(
-            (
-                self._execution.state_store,
-                self._recovery.state_store,
-                approvals.state_store,
-                self._recovery_steps.state_store,
-            )
-        )
-        if not _same_group(stores):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        approval_events = tuple(
-            ExecutionEventAppend(
-                ExecutionEventType.APPROVAL_REQUESTED,
-                {
-                    "approval_id": admission.record.approval_id,
-                    "tool_name": admission.tool_name,
-                    "args_digest": admission.args_digest,
-                    "batch_id": continuation.batch_id,
-                },
-            )
-            for admission in ordered_admissions
-        )
-        audit_count = len(ordered_audit)
-        approval_count = len(ordered_admissions)
-        target_execution_revision = expected_execution_revision + audit_count + approval_count
-        target_event_sequence = expected_event_sequence + audit_count + approval_count
-        target_recovery_revision = expected_recovery_revision + 1
-
-        async def operation() -> tuple[ExecutionRecord, RecoveryCheckpoint]:
-            async def mutate(group: StateGroupTransaction) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
-                execution_transaction = group.transaction(self._execution.state_store)
-                recovery_transaction = group.transaction(self._recovery.state_store)
-                approval_transaction = group.transaction(approvals.state_store)
-                step_transaction = group.transaction(self._recovery_steps.state_store)
-                current_execution = await self._execution.get_in_transaction(
-                    execution_transaction,
-                    execution_id,
-                    tenant_id=tenant_id,
-                )
-                current_recovery = await self._recovery.get_in_transaction(
-                    recovery_transaction,
-                    execution_id,
-                    tenant_id=tenant_id,
-                )
-                if not _approval_wait_predecessor_matches(
-                    current_execution,
-                    current_recovery,
-                    expected_execution_revision=expected_execution_revision,
-                    expected_event_sequence=expected_event_sequence,
-                    expected_recovery_revision=expected_recovery_revision,
-                    expected_agent_run_sequence=expected_agent_run_sequence,
-                    expected_previous_pending_approval=expected_previous_pending_approval,
-                    source_step_run_id=continuation.source_step_run_id,
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if (
-                    expected_previous_pending_approval is not None
-                    and current_recovery is not None
-                    and current_recovery.step_run_id
-                    == expected_previous_pending_approval.source_step_run_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._recovery_steps.materialize_snapshot_in_transaction(
-                    step_transaction,
-                    recovery_run,
-                    prepared[0],
-                )
-                for admission in ordered_admissions:
-                    _record, replayed = await approvals.create_with_operation_in_transaction(
-                        approval_transaction,
-                        admission.record,
-                        operation=admission.operation,
-                    )
-                    if replayed:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                updated_execution = await self._execution.enter_approval_wait_in_transaction(
-                    execution_transaction,
-                    execution_id,
-                    tenant_id=tenant_id,
-                    expected_revision=expected_execution_revision,
-                    expected_event_sequence=expected_event_sequence,
-                    expected_agent_run_sequence=expected_agent_run_sequence,
-                    audit_events=ordered_audit,
-                    approval_events=approval_events,
-                    occurred_at=occurred_at,
-                )
-                if current_recovery is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                updated_recovery = await self._recovery.compare_and_swap_in_transaction(
-                    recovery_transaction,
-                    execution_id,
-                    tenant_id=tenant_id,
-                    expected_revision=expected_recovery_revision,
-                    next_record=replace(
-                        current_recovery,
-                        state=RecoveryCheckpointState.WAITING,
-                        pending_approval=continuation,
-                        revision=target_recovery_revision,
-                        updated_at=updated_execution.updated_at,
-                    ),
-                )
-                return updated_execution, updated_recovery
-
-            return await stores[0].storage_group.mutate(stores, mutate)
-
-        async def readback() -> CommitObservation[tuple[ExecutionRecord, RecoveryCheckpoint]]:
-            try:
-                execution = await self._execution.get(execution_id, tenant_id=tenant_id)
-                recovery = await self._recovery.get(execution_id, tenant_id=tenant_id)
-                stored_run = await self._recovery_steps.get_run(run_id=continuation.source_step_run_id)
-                stored_snapshot = await self._recovery_steps.latest_snapshot(
-                    run_id=continuation.source_step_run_id,
-                    include_interrupted=True,
-                )
-                page = await self._events.list(
-                    execution_id,
-                    tenant_id=tenant_id,
-                    after_sequence=expected_event_sequence,
-                    limit=audit_count + approval_count + 1,
-                )
-                events = page.items
-                approval_records = tuple(
-                    [
-                        await approvals.get(admission.record.approval_id, tenant_id=tenant_id)
-                        for admission in ordered_admissions
-                    ]
-                )
-                approval_slice = events[audit_count:audit_count + approval_count]
-                marker_count = sum(
-                    1
-                    for index, event in enumerate(approval_slice)
-                    if event.sequence == expected_event_sequence + audit_count + index + 1
-                    and event.event_type is ExecutionEventType.APPROVAL_REQUESTED
-                    and event.payload == approval_events[index].payload
-                )
-                if marker_count == 0:
-                    if _approval_wait_predecessor_matches(
-                        execution,
-                        recovery,
-                        expected_execution_revision=expected_execution_revision,
-                        expected_event_sequence=expected_event_sequence,
-                        expected_recovery_revision=expected_recovery_revision,
-                        expected_agent_run_sequence=expected_agent_run_sequence,
-                        expected_previous_pending_approval=expected_previous_pending_approval,
-                        source_step_run_id=continuation.source_step_run_id,
-                    ):
-                        if any(record is not None for record in approval_records):
-                            return CommitObservation(
-                                DurableCommitState.NOT_COMMITTED,
-                                error=AIError(ErrorCode.APPROVAL_CONFLICT),
-                            )
-                        return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                    return CommitObservation(
-                        DurableCommitState.NOT_COMMITTED,
-                        error=AIError(ErrorCode.STORAGE_CONFLICT),
-                    )
-                if marker_count != approval_count:
-                    return _partial_integrity()
-                expected_all_events = (*ordered_audit, *approval_events)
-                if (
-                    len(events) < len(expected_all_events)
-                    or any(
-                        event.sequence != expected_event_sequence + index
-                        or event.event_type is not expected.event_type
-                        or event.payload != expected.payload
-                        for index, (event, expected) in enumerate(zip(events, expected_all_events), 1)
-                    )
-                    or stored_run != recovery_run
-                    or stored_snapshot != recovery_snapshot
-                    or any(
-                        record is None
-                        or not _approval_create_identity_matches(record, admission.record)
-                        or record.status not in {
-                            ApprovalStatus.PENDING,
-                            ApprovalStatus.APPROVED,
-                            ApprovalStatus.DENIED,
-                            ApprovalStatus.CANCELLED,
-                            ApprovalStatus.EXPIRED,
-                        }
-                        for record, admission in zip(approval_records, ordered_admissions)
-                    )
-                    or execution is None
-                    or recovery is None
-                    or execution.revision < target_execution_revision
-                    or execution.event_sequence < target_event_sequence
-                    or execution.agent_run_sequence < expected_agent_run_sequence
-                    or recovery.revision < target_recovery_revision
-                    or recovery.agent_run_sequence < expected_agent_run_sequence
-                    or execution.agent_run_sequence != recovery.agent_run_sequence
-                ):
-                    return _partial_integrity()
-                if (
-                    execution.revision == target_execution_revision
-                    and execution.event_sequence == target_event_sequence
-                    and (
-                        execution.status is not ExecutionStatus.WAITING_APPROVAL
-                        or execution.agent_run_sequence != expected_agent_run_sequence
-                    )
-                ):
-                    return _partial_integrity()
-                if recovery.revision == target_recovery_revision and not _approval_wait_target_recovery_matches(
-                    recovery,
-                    continuation=continuation,
-                    expected_agent_run_sequence=expected_agent_run_sequence,
-                ):
-                    return _partial_integrity()
-                return CommitObservation(
-                    DurableCommitState.COMMITTED,
-                    value=(execution, recovery),
-                )
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    return _partial_integrity(error)
-                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-
-        owner_tasks = self._background_tasks if background_tasks is None else background_tasks
-        outcome = await run_durable_commit(operation, readback, background_tasks=owner_tasks)
-        return _require_durable_pair(outcome)
-
-    async def commit_approval_policy_checkpoint(
-        self,
-        *,
-        execution_id: str,
-        tenant_id: str,
-        expected_recovery_revision: int,
-        expected_pending_approval: PendingApprovalContinuation,
-        batch_approval_ids: Sequence[str],
-        denied_approval_ids: Sequence[str],
-        decided_at: datetime,
-        background_tasks: "set[asyncio.Task[object]] | None" = None,
-    ) -> tuple[ApprovalRecord, ...]:
-        approvals = self._require_approvals()
-        self._require_recovery()
-        batch = tuple(batch_approval_ids)
-        denied = tuple(denied_approval_ids)
-        if (
-            not batch
-            or len(set(batch)) != len(batch)
-            or not denied
-            or len(set(denied)) != len(denied)
-            or tuple(value for value in batch if value in set(denied)) != denied
-            or expected_pending_approval.batch_id
-            != _approval_batch_id(execution_id, expected_pending_approval.source_step_run_id, batch)
-            or not isinstance(decided_at, datetime)
-            or decided_at.tzinfo is None
-        ):
-            raise ValueError("approval policy checkpoint input is invalid")
-        stores = _dedupe_stores((self._recovery.state_store, approvals.state_store))
-        if not _same_group(stores):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        target_recovery_revision = expected_recovery_revision + 1
-
-        async def operation() -> tuple[ApprovalRecord, ...]:
-            async def mutate(group: StateGroupTransaction) -> tuple[ApprovalRecord, ...]:
-                recovery_transaction = group.transaction(self._recovery.state_store)
-                approval_transaction = group.transaction(approvals.state_store)
-                recovery = await self._recovery.get_in_transaction(
-                    recovery_transaction,
-                    execution_id,
-                    tenant_id=tenant_id,
-                )
-                if not _approval_waiting_recovery_predecessor(
-                    recovery,
-                    expected_revision=expected_recovery_revision,
-                    expected_pending_approval=expected_pending_approval,
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                records: list[ApprovalRecord] = []
-                for approval_id in batch:
-                    record = await approvals.get_approval_in_transaction(
-                        approval_transaction,
-                        approval_id,
-                        tenant_id=tenant_id,
-                    )
-                    if record is None or record.execution_id != execution_id or record.tenant_id != tenant_id:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    records.append(record)
-                denied_set = set(denied)
-                if any(record.status is not ApprovalStatus.PENDING for record in records if record.approval_id in denied_set):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                updated = await approvals.cancel_pending_in_transaction(
-                    approval_transaction,
-                    denied,
-                    execution_id=execution_id,
-                    tenant_id=tenant_id,
-                    decided_at=decided_at,
-                )
-                if recovery is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._recovery.compare_and_swap_in_transaction(
-                    recovery_transaction,
-                    execution_id,
-                    tenant_id=tenant_id,
-                    expected_revision=expected_recovery_revision,
-                    next_record=replace(
-                        recovery,
-                        revision=target_recovery_revision,
-                        updated_at=decided_at,
-                    ),
-                )
-                return updated
-
-            return await stores[0].storage_group.mutate(stores, mutate)
-
-        async def readback() -> CommitObservation[tuple[ApprovalRecord, ...]]:
-            try:
-                records = tuple([await approvals.get(value, tenant_id=tenant_id) for value in batch])
-                recovery = await self._recovery.get(execution_id, tenant_id=tenant_id)
-                if any(record is None or record.tenant_id != tenant_id or record.execution_id != execution_id for record in records):
-                    return _partial_integrity()
-                by_id = {record.approval_id: record for record in records if record is not None}
-                denied_records = tuple(by_id[value] for value in denied)
-                cancelled_count = sum(record.status is ApprovalStatus.CANCELLED for record in denied_records)
-                if any(record.status in {ApprovalStatus.APPROVED, ApprovalStatus.DENIED, ApprovalStatus.EXPIRED} for record in denied_records):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT))
-                if 0 < cancelled_count < len(denied):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT))
-                if recovery is None or recovery.revision < expected_recovery_revision:
-                    return _partial_integrity()
-                if cancelled_count == len(denied):
-                    if recovery.revision < target_recovery_revision:
-                        return _partial_integrity()
-                    if recovery.revision == target_recovery_revision and not _approval_waiting_recovery_predecessor(
-                        recovery,
-                        expected_revision=target_recovery_revision,
-                        expected_pending_approval=expected_pending_approval,
-                    ):
-                        return _partial_integrity()
-                    return CommitObservation(DurableCommitState.COMMITTED, value=tuple(cast(ApprovalRecord, record) for record in records))
-                if _approval_waiting_recovery_predecessor(
-                    recovery,
-                    expected_revision=expected_recovery_revision,
-                    expected_pending_approval=expected_pending_approval,
-                ):
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                return CommitObservation(DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT))
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    return _partial_integrity(error)
-                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-
-        owner_tasks = self._background_tasks if background_tasks is None else background_tasks
-        outcome = await run_durable_commit(operation, readback, background_tasks=owner_tasks)
-        return _require_durable_tuple(outcome)
-
-    async def claim_approval_resume_checkpoint(
-        self,
-        *,
-        execution_id: str,
-        tenant_id: str,
-        expected_execution_revision: int,
-        expected_event_sequence: int,
-        expected_recovery_revision: int,
-        expected_agent_run_sequence: int,
-        expected_pending_approval: PendingApprovalContinuation,
-        approval_ids: Sequence[str],
-        background_tasks: "set[asyncio.Task[object]] | None" = None,
-    ) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
-        approvals = self._require_approvals()
-        self._require_recovery()
-        ordered = tuple(approval_ids)
-        if (
-            not ordered
-            or len(set(ordered)) != len(ordered)
-            or expected_pending_approval.batch_id
-            != _approval_batch_id(execution_id, expected_pending_approval.source_step_run_id, ordered)
-        ):
-            raise ValueError("approval resume checkpoint input is invalid")
-        stores = _dedupe_stores((self._execution.state_store, self._recovery.state_store, approvals.state_store))
-        if not _same_group(stores):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        next_sequence = expected_agent_run_sequence + 1
-        target_execution_revision = expected_execution_revision + 1
-        target_recovery_revision = expected_recovery_revision + 1
-        next_run_id = step_run_id(
-            namespace=self._namespace,
-            tenant_id=tenant_id,
-            execution_id=execution_id,
-            segment_sequence=next_sequence,
-        )
-
-        async def operation() -> tuple[ExecutionRecord, RecoveryCheckpoint]:
-            async def mutate(group: StateGroupTransaction) -> tuple[ExecutionRecord, RecoveryCheckpoint]:
-                execution_tx = group.transaction(self._execution.state_store)
-                recovery_tx = group.transaction(self._recovery.state_store)
-                approval_tx = group.transaction(approvals.state_store)
-                execution = await self._execution.get_in_transaction(execution_tx, execution_id, tenant_id=tenant_id)
-                recovery = await self._recovery.get_in_transaction(recovery_tx, execution_id, tenant_id=tenant_id)
-                if (
-                    execution is None
-                    or execution.status is not ExecutionStatus.WAITING_APPROVAL
-                    or execution.revision != expected_execution_revision
-                    or execution.event_sequence != expected_event_sequence
-                    or execution.agent_run_sequence != expected_agent_run_sequence
-                    or not _approval_waiting_recovery_predecessor(
-                        recovery,
-                        expected_revision=expected_recovery_revision,
-                        expected_pending_approval=expected_pending_approval,
-                        expected_agent_run_sequence=expected_agent_run_sequence,
-                    )
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                for approval_id in ordered:
-                    record = await approvals.get_approval_in_transaction(approval_tx, approval_id, tenant_id=tenant_id)
-                    if record is None or record.execution_id != execution_id or record.tenant_id != tenant_id:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if record.status is ApprovalStatus.PENDING:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                updated_execution = await self._execution.claim_approval_resume_in_transaction(
-                    execution_tx,
-                    execution_id,
-                    tenant_id=tenant_id,
-                    expected_revision=expected_execution_revision,
-                    expected_event_sequence=expected_event_sequence,
-                    expected_agent_run_sequence=expected_agent_run_sequence,
-                )
-                if recovery is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                updated_recovery = await self._recovery.compare_and_swap_in_transaction(
-                    recovery_tx,
-                    execution_id,
-                    tenant_id=tenant_id,
-                    expected_revision=expected_recovery_revision,
-                    next_record=replace(
-                        recovery,
-                        state=RecoveryCheckpointState.ACTIVE,
-                        step_run_id=next_run_id,
-                        agent_run_sequence=next_sequence,
-                        revision=target_recovery_revision,
-                        updated_at=updated_execution.updated_at,
-                    ),
-                )
-                return updated_execution, updated_recovery
-
-            return await stores[0].storage_group.mutate(stores, mutate)
-
-        async def readback() -> CommitObservation[tuple[ExecutionRecord, RecoveryCheckpoint]]:
-            try:
-                execution = await self._execution.get(execution_id, tenant_id=tenant_id)
-                recovery = await self._recovery.get(execution_id, tenant_id=tenant_id)
-                records = tuple([await approvals.get(value, tenant_id=tenant_id) for value in ordered])
-                if any(record is None or record.execution_id != execution_id or record.tenant_id != tenant_id for record in records):
-                    return _partial_integrity()
-                if execution is None or recovery is None:
-                    return _partial_integrity()
-                all_terminal = all(cast(ApprovalRecord, record).status is not ApprovalStatus.PENDING for record in records)
-                exact_predecessor = (
-                    all_terminal
-                    and execution.status is ExecutionStatus.WAITING_APPROVAL
-                    and execution.revision == expected_execution_revision
-                    and execution.event_sequence == expected_event_sequence
-                    and execution.agent_run_sequence == expected_agent_run_sequence
-                    and _approval_waiting_recovery_predecessor(
-                        recovery,
-                        expected_revision=expected_recovery_revision,
-                        expected_pending_approval=expected_pending_approval,
-                        expected_agent_run_sequence=expected_agent_run_sequence,
-                    )
-                )
-                if exact_predecessor:
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
-                if execution.agent_run_sequence == expected_agent_run_sequence and recovery.agent_run_sequence == expected_agent_run_sequence:
-                    return CommitObservation(DurableCommitState.NOT_COMMITTED, error=AIError(ErrorCode.STORAGE_CONFLICT))
-                if (
-                    execution.agent_run_sequence < next_sequence
-                    or recovery.agent_run_sequence < next_sequence
-                    or execution.agent_run_sequence != recovery.agent_run_sequence
-                    or execution.revision < target_execution_revision
-                    or execution.event_sequence < expected_event_sequence
-                    or recovery.revision < target_recovery_revision
-                ):
-                    return _partial_integrity()
-                if (
-                    execution.revision == target_execution_revision
-                    and execution.agent_run_sequence == next_sequence
-                    and (
-                        execution.status is not ExecutionStatus.STARTED
-                        or execution.event_sequence != expected_event_sequence
-                    )
-                ):
-                    return _partial_integrity()
-                if (
-                    recovery.revision == target_recovery_revision
-                    and recovery.agent_run_sequence == next_sequence
-                    and (
-                        recovery.state is not RecoveryCheckpointState.ACTIVE
-                        or recovery.step_run_id != next_run_id
-                        or recovery.pending_approval != expected_pending_approval
-                    )
-                ):
-                    return _partial_integrity()
-                return CommitObservation(DurableCommitState.COMMITTED, value=(execution, recovery))
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    return _partial_integrity(error)
-                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-
-        owner_tasks = self._background_tasks if background_tasks is None else background_tasks
-        outcome = await run_durable_commit(operation, readback, background_tasks=owner_tasks)
-        return _require_durable_pair(outcome)
-
-    async def commit_waiting_approval_cancel_checkpoint(
-        self,
-        commit: ExecutionCancelRequestCommit,
-        *,
-        approval_ids: Sequence[str],
-        expected_recovery_revision: int,
-        expected_agent_run_sequence: int,
-        expected_pending_approval: PendingApprovalContinuation,
-        audit_events: Sequence[ExecutionEventAppend] = (),
-        background_tasks: "set[asyncio.Task[object]] | None" = None,
-    ) -> ExecutionRecord:
-        approvals = self._require_approvals()
-        self._require_recovery()
-        ordered = tuple(approval_ids)
-        ordered_audit = tuple(audit_events)
-        if (
-            not ordered
-            or len(set(ordered)) != len(ordered)
-            or expected_agent_run_sequence < 1
-            or expected_pending_approval.batch_id
-            != _approval_batch_id(commit.execution_id, expected_pending_approval.source_step_run_id, ordered)
-        ):
-            raise ValueError("waiting approval cancel checkpoint input is invalid")
-        stores = _dedupe_stores((self._execution.state_store, self._recovery.state_store, approvals.state_store))
-        if not _same_group(stores):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        expected_events = (*ordered_audit, ExecutionEventAppend(ExecutionEventType.CANCEL_REQUESTED, {"operation_id": commit.operation_id}))
-        event_count = len(expected_events)
-        target_execution_revision = commit.expected_revision + event_count
-        target_event_sequence = commit.expected_event_sequence + event_count
-        target_recovery_revision = expected_recovery_revision + 1
-
-        async def operation() -> ExecutionRecord:
-            async def mutate(group: StateGroupTransaction) -> ExecutionRecord:
-                execution_tx = group.transaction(self._execution.state_store)
-                recovery_tx = group.transaction(self._recovery.state_store)
-                approval_tx = group.transaction(approvals.state_store)
-                execution = await self._execution.get_in_transaction(execution_tx, commit.execution_id, tenant_id=commit.tenant_id)
-                recovery = await self._recovery.get_in_transaction(recovery_tx, commit.execution_id, tenant_id=commit.tenant_id)
-                if (
-                    execution is None
-                    or execution.status is not ExecutionStatus.WAITING_APPROVAL
-                    or execution.revision != commit.expected_revision
-                    or execution.event_sequence != commit.expected_event_sequence
-                    or execution.agent_run_sequence != expected_agent_run_sequence
-                    or not _approval_waiting_recovery_predecessor(
-                        recovery,
-                        expected_revision=expected_recovery_revision,
-                        expected_pending_approval=expected_pending_approval,
-                        expected_agent_run_sequence=expected_agent_run_sequence,
-                    )
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                for approval_id in ordered:
-                    record = await approvals.get_approval_in_transaction(approval_tx, approval_id, tenant_id=commit.tenant_id)
-                    if record is None or record.execution_id != commit.execution_id or record.tenant_id != commit.tenant_id:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await approvals.cancel_pending_in_transaction(
-                    approval_tx,
-                    ordered,
-                    execution_id=commit.execution_id,
-                    tenant_id=commit.tenant_id,
-                    decided_at=commit.requested_at,
-                )
-                updated_execution = await self._execution.request_cancel_in_transaction(
-                    execution_tx,
-                    commit,
-                    expected_status=ExecutionStatus.WAITING_APPROVAL,
-                    pending_events=ordered_audit,
-                )
-                if recovery is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._recovery.compare_and_swap_in_transaction(
-                    recovery_tx,
-                    commit.execution_id,
-                    tenant_id=commit.tenant_id,
-                    expected_revision=expected_recovery_revision,
-                    next_record=replace(
-                        recovery,
-                        revision=target_recovery_revision,
-                        updated_at=commit.requested_at,
-                    ),
-                )
-                return updated_execution
-
-            return await stores[0].storage_group.mutate(stores, mutate)
-
-        async def readback() -> CommitObservation[ExecutionRecord]:
-            try:
-                execution = await self._execution.get(commit.execution_id, tenant_id=commit.tenant_id)
-                recovery = await self._recovery.get(commit.execution_id, tenant_id=commit.tenant_id)
-                records = tuple([await approvals.get(value, tenant_id=commit.tenant_id) for value in ordered])
-                page = await self._events.list(
-                    commit.execution_id,
-                    tenant_id=commit.tenant_id,
-                    after_sequence=commit.expected_event_sequence,
-                    limit=event_count + 1,
-                )
-                events = page.items
-                if execution is None or recovery is None or any(
-                    record is None or record.execution_id != commit.execution_id or record.tenant_id != commit.tenant_id
-                    for record in records
-                ):
-                    return _partial_integrity()
-                revision_delta = execution.revision - commit.expected_revision
-                sequence_delta = execution.event_sequence - commit.expected_event_sequence
-                if (
-                    revision_delta < 0
-                    or sequence_delta < 0
-                    or revision_delta < sequence_delta
-                    or any(event.sequence != commit.expected_event_sequence + index for index, event in enumerate(events, 1))
-                    or (events and events[-1].sequence > execution.event_sequence)
-                    or (sequence_delta > 0 and not events)
-                ):
-                    return _partial_integrity()
-                prefix = events[:event_count]
-                prefix_matches = len(prefix) == event_count and all(
-                    actual.event_type is expected.event_type and actual.payload == expected.payload
-                    for actual, expected in zip(prefix, expected_events)
-                )
-                if not prefix_matches:
-                    exact_predecessor = (
-                        execution.status is ExecutionStatus.WAITING_APPROVAL
-                        and execution.revision == commit.expected_revision
-                        and execution.event_sequence == commit.expected_event_sequence
-                        and execution.agent_run_sequence == expected_agent_run_sequence
-                        and _approval_waiting_recovery_predecessor(
-                            recovery,
-                            expected_revision=expected_recovery_revision,
-                            expected_pending_approval=expected_pending_approval,
-                            expected_agent_run_sequence=expected_agent_run_sequence,
-                        )
-                    )
-                    return CommitObservation(
-                        DurableCommitState.NOT_COMMITTED,
-                        error=None if exact_predecessor else AIError(ErrorCode.STORAGE_CONFLICT),
-                    )
-                if (
-                    any(cast(ApprovalRecord, record).status is ApprovalStatus.PENDING for record in records)
-                    or execution.revision < target_execution_revision
-                    or execution.event_sequence < target_event_sequence
-                    or recovery.revision < target_recovery_revision
-                    or execution.agent_run_sequence != expected_agent_run_sequence
-                    or recovery.agent_run_sequence != expected_agent_run_sequence
-                    or execution.agent_run_sequence != recovery.agent_run_sequence
-                ):
-                    return _partial_integrity()
-                if recovery.revision == target_recovery_revision and not _approval_waiting_recovery_predecessor(
-                    recovery,
-                    expected_revision=target_recovery_revision,
-                    expected_pending_approval=expected_pending_approval,
-                    expected_agent_run_sequence=expected_agent_run_sequence,
-                ):
-                    return _partial_integrity()
-                if recovery.revision > target_recovery_revision and (
-                    recovery.state not in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED}
-                    or recovery.pending_approval is not None
-                ):
-                    return _partial_integrity()
-                if execution.status is ExecutionStatus.CANCELLING:
-                    if recovery.state is RecoveryCheckpointState.COMPLETED:
-                        return _partial_integrity()
-                elif execution.status is ExecutionStatus.CANCELLED:
-                    if recovery.revision <= target_recovery_revision or recovery.state not in {RecoveryCheckpointState.HANDOFF, RecoveryCheckpointState.COMPLETED}:
-                        return _partial_integrity()
-                else:
-                    return _partial_integrity()
-                return CommitObservation(DurableCommitState.COMMITTED, value=execution)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    return _partial_integrity(error)
-                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-
-        owner_tasks = self._background_tasks if background_tasks is None else background_tasks
-        outcome = await run_durable_commit(operation, readback, background_tasks=owner_tasks)
-        return _require_durable_execution(outcome)
 
     async def commit_start_checkpoint(
         self,
@@ -1469,6 +1243,69 @@ class RuntimeStateCommands:
             }:
                 raise result.error
             raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
+
+    async def commit_tool_deferred(
+        self,
+        tool_operation_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        fence: int,
+    ) -> ToolOperationRecord:
+        tools = self._tools
+        if tools is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        stores = [tools.state_store]
+
+        async def callback(group: StateGroupTransaction) -> ToolOperationRecord:
+            return await tools.defer_in_transaction(
+                group.transaction(tools.state_store),
+                tool_operation_id,
+                tenant_id=tenant_id,
+                owner=owner,
+                fence=fence,
+            )
+
+        async def readback() -> CommitObservation[ToolOperationRecord]:
+            observed = await tools.get_operation(
+                tool_operation_id,
+                tenant_id=tenant_id,
+            )
+            if observed is None:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if (
+                observed.status is ToolOperationStatus.PENDING
+                and observed.owner is None
+                and observed.lease_expires_at is None
+                and observed.fence == fence
+            ):
+                return CommitObservation(
+                    DurableCommitState.COMMITTED,
+                    value=observed,
+                )
+            if (
+                observed.status is ToolOperationStatus.CLAIMED
+                and observed.owner == owner
+                and observed.fence == fence
+            ):
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            return CommitObservation(
+                DurableCommitState.NOT_COMMITTED,
+                error=AIError(ErrorCode.TOOL_OPERATION_CONFLICT),
+            )
+
+        result = await run_durable_commit(
+            lambda: stores[0].storage_group.mutate(stores, callback),
+            readback,
+            background_tasks=self._background_tasks,
+        )
+        if result.state is DurableCommitState.COMMITTED and result.value is not None:
+            if result.cancelled:
+                raise asyncio.CancelledError
+            return result.value
+        if result.error is not None:
+            raise result.error
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
 
     async def commit_tool_admission(
         self,
@@ -2617,7 +2454,8 @@ class RuntimeStateCommands:
         if (
             len(started_events.items) != 1
             or started_events.items[0].sequence != claim.expected_event_sequence + 1
-            or started_events.items[0].event_type is not ExecutionEventType.EXECUTION_STARTED
+            or started_events.items[0].event_type
+            != ExecutionEventType.EXECUTION_STARTED.value
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if recovery_checkpoint is not None:
@@ -2627,7 +2465,8 @@ class RuntimeStateCommands:
             )
             if (
                 actual is None
-                or actual.input != recovery_checkpoint.input
+                or actual.execution_id != recovery_checkpoint.execution_id
+                or actual.tenant_id != recovery_checkpoint.tenant_id
                 or actual.agent_run_sequence != 0
                 or actual.step_run_id is not None
                 or actual.state is not RecoveryCheckpointState.ADMITTED
@@ -2765,7 +2604,7 @@ class RuntimeStateCommands:
         )
         if len(events.items) != len(expected_events) or any(
             actual.sequence != commit.expected_event_sequence + index + 1
-            or actual.event_type is not expected.event_type
+            or actual.event_type != expected.event_type
             or actual.payload != expected.payload
             for index, (actual, expected) in enumerate(
                 zip(events.items, expected_events, strict=True)
@@ -2891,99 +2730,21 @@ def _dedupe_stores(stores: Sequence[StateStore]) -> tuple[StateStore, ...]:
     return tuple(result)
 
 
-def _approval_batch_id(
+def _deferred_resource_id(
+    contract: str,
+    tenant_id: str,
     execution_id: str,
     source_step_run_id: str,
-    approval_ids: Sequence[str],
+    tool_call_id: str,
 ) -> str:
     return canonical_sha256(
         {
-            "contract": "tool-approval-batch-v1",
+            "contract": contract,
+            "tenant_id": tenant_id,
             "execution_id": execution_id,
             "source_step_run_id": source_step_run_id,
-            "approval_ids": sorted(approval_ids),
+            "tool_call_id": tool_call_id,
         }
-    )
-
-
-def _approval_create_identity_matches(
-    current: ApprovalRecord,
-    expected: ApprovalRecord,
-) -> bool:
-    return (
-        current.approval_id == expected.approval_id
-        and current.execution_id == expected.execution_id
-        and current.tenant_id == expected.tenant_id
-        and current.operation_id == expected.operation_id
-    )
-
-
-def _approval_wait_predecessor_matches(
-    execution: ExecutionRecord | None,
-    recovery: RecoveryCheckpoint | None,
-    *,
-    expected_execution_revision: int,
-    expected_event_sequence: int,
-    expected_recovery_revision: int,
-    expected_agent_run_sequence: int,
-    expected_previous_pending_approval: PendingApprovalContinuation | None,
-    source_step_run_id: str,
-) -> bool:
-    return (
-        execution is not None
-        and execution.status is ExecutionStatus.STARTED
-        and execution.revision == expected_execution_revision
-        and execution.event_sequence == expected_event_sequence
-        and execution.agent_run_sequence == expected_agent_run_sequence
-        and recovery is not None
-        and recovery.state is RecoveryCheckpointState.ACTIVE
-        and recovery.revision == expected_recovery_revision
-        and recovery.agent_run_sequence == expected_agent_run_sequence
-        and recovery.step_run_id == source_step_run_id
-        and recovery.pending_approval == expected_previous_pending_approval
-        and recovery.pending_operation_id is None
-        and recovery.handoff_phase is RecoveryHandoffPhase.NONE
-        and recovery.terminal_handoff is None
-    )
-
-
-def _approval_wait_target_recovery_matches(
-    recovery: RecoveryCheckpoint,
-    *,
-    continuation: PendingApprovalContinuation,
-    expected_agent_run_sequence: int,
-) -> bool:
-    return (
-        recovery.state is RecoveryCheckpointState.WAITING
-        and recovery.step_run_id == continuation.source_step_run_id
-        and recovery.agent_run_sequence == expected_agent_run_sequence
-        and recovery.pending_approval == continuation
-        and recovery.pending_operation_id is None
-        and recovery.handoff_phase is RecoveryHandoffPhase.NONE
-        and recovery.terminal_handoff is None
-    )
-
-
-def _approval_waiting_recovery_predecessor(
-    recovery: RecoveryCheckpoint | None,
-    *,
-    expected_revision: int,
-    expected_pending_approval: PendingApprovalContinuation,
-    expected_agent_run_sequence: int | None = None,
-) -> bool:
-    return (
-        recovery is not None
-        and recovery.state is RecoveryCheckpointState.WAITING
-        and recovery.revision == expected_revision
-        and (
-            expected_agent_run_sequence is None
-            or recovery.agent_run_sequence == expected_agent_run_sequence
-        )
-        and recovery.pending_approval == expected_pending_approval
-        and recovery.step_run_id == expected_pending_approval.source_step_run_id
-        and recovery.pending_operation_id is None
-        and recovery.handoff_phase is RecoveryHandoffPhase.NONE
-        and recovery.terminal_handoff is None
     )
 
 
@@ -3014,25 +2775,7 @@ def _require_durable_pair(
     raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
 
 
-def _require_durable_tuple(
-    outcome: DurableCommitResult[tuple[ApprovalRecord, ...]],
-) -> tuple[ApprovalRecord, ...]:
-    if outcome.state is DurableCommitState.COMMITTED:
-        if outcome.value is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if outcome.cancelled:
-            raise asyncio.CancelledError
-        return outcome.value
-    if outcome.state is DurableCommitState.NOT_COMMITTED:
-        if outcome.error is not None:
-            raise outcome.error
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
-    if outcome.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from outcome.error
-    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from outcome.error
-
-
-def _require_durable_execution(
+def _require_durable_record(
     outcome: DurableCommitResult[ExecutionRecord],
 ) -> ExecutionRecord:
     if outcome.state is DurableCommitState.COMMITTED:
@@ -3084,7 +2827,7 @@ class ExecutionStateCommands:
     def __init__(
         self,
         state_store: StateStore,
-        executions: ExecutionRepositoryImpl,
+        executions: ExecutionRepository,
         steps: StateStepArchive | None,
         *,
         background_tasks: "set[asyncio.Task[object]]",
@@ -3261,9 +3004,9 @@ class ConversationStateCommands:
     def __init__(
         self,
         state_store: StateStore,
-        sessions: SessionRepositoryImpl,
+        sessions: SessionRepository,
         steps: StateStepArchive | None,
-        histories: ConversationHistoryRepositoryImpl | None = None,
+        histories: ConversationHistoryRepository | None = None,
     ) -> None:
         self._state_store = state_store
         self._sessions = sessions

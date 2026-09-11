@@ -12,8 +12,6 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
-    RecoveryExecutionInput,
-    RecoveryIdempotencyInput,
     RuntimeStorageContract,
     StoredUserInput,
 )
@@ -74,7 +72,7 @@ def _snapshot(*, binding_digest: str = "a" * 64) -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -113,34 +111,13 @@ def _execution(
         planning=planning,
         thinking=thinking,
         binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
-    )
-
-
-def _recovery(
-    *,
-    binding_digest: str = "a" * 64,
-    binding: AgentBindingSnapshot | None = None,
-    planning: bool = False,
-    thinking: bool = False,
-) -> RecoveryExecutionInput:
-    return RecoveryExecutionInput(
-        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="principal",
         principal_kind="service",
-        session_id=None,
-        memory_scope=None,
-        binding_digest=binding_digest,
-        lineage_kind=ExecutionLineageKind.RUN.value,
-        parent_execution_id=None,
-        root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
-        conversation_step_run_id=None,
-        idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
-        mode="run",
-        planning=planning,
-        thinking=thinking,
-        binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
+        stored_user_input=StoredUserInput(
+            1,
+            "text",
+            StoredPayload.inline_text("prompt"),
+        ),
         storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
@@ -156,11 +133,13 @@ def _compiler() -> AgentCompiler:
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
     plain = ModelRegistry.openai(
         model="gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://first.example/v1",
         api_key="first-key",
     ).snapshot().resolve("default")
     prefixed = ModelRegistry.openai(
         model="openai:gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://second.example/v1",
         api_key="second-key",
     ).snapshot().resolve("default")
@@ -173,6 +152,7 @@ def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -
 def test_model_registry_replaces_connection_binding_with_same_semantic_identity() -> None:
     registry = ModelRegistry.openai(
         model="gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://first.example/v1",
         api_key="first-key",
     )
@@ -182,6 +162,7 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     registry.register_openai(
         "default",
         model="gpt-test",
+        provider_instance="corp-openai-primary",
         base_url="https://second.example/v1",
         api_key="second-key",
     )
@@ -197,7 +178,7 @@ def test_current_binding_snapshot_persists_only_v1_semantic_inputs() -> None:
     snapshot = AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -208,7 +189,7 @@ def test_current_binding_snapshot_persists_only_v1_semantic_inputs() -> None:
     assert set(snapshot.to_payload()) == {
         "version",
         "agent_spec",
-        "model",
+        "base_model",
         "selected",
         "subagents",
         "output_mode",
@@ -275,10 +256,3 @@ def test_execution_requires_exact_binding_snapshot() -> None:
     assert value.binding.binding_digest == value.binding_digest
     with pytest.raises(ValueError, match="execution binding snapshot"):
         _execution(binding_digest="c" * 64, binding=_snapshot(binding_digest="d" * 64))
-
-
-def test_recovery_requires_exact_binding_snapshot() -> None:
-    value = _recovery(planning=True, thinking=True)
-    assert value.binding.binding_digest == value.binding_digest
-    with pytest.raises(ValueError, match="recovery binding snapshot"):
-        _recovery(binding_digest="c" * 64, binding=_snapshot(binding_digest="d" * 64))

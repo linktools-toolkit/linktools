@@ -14,13 +14,13 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
-    DefaultExecutionHistoryService,
     ExecutionHistoryItem,
     ExecutionTraceItem,
     Page,
-    RuntimeHistory,
     TranscriptItem,
 )
+from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
+from linktools.ai.runtime._runtime_history import RuntimeHistory
 from linktools.ai.workspace import Workspace
 
 
@@ -115,7 +115,7 @@ async def test_runtime_history_opens_without_model_or_agent_composition(
 ) -> None:
     monkeypatch.delenv("OPENAI_MODEL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
 
     import linktools.ai.runtime._factory as runtime_factory
 

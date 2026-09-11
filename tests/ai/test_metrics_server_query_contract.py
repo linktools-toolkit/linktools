@@ -13,7 +13,7 @@ from linktools.ai.observe._sql import SqlMetricStore
 from unittest.mock import AsyncMock
 
 from .test_metrics_server_read_integrity import (
-    _NAMESPACE, _ServerMetrics, _WINDOW, _observation, _server, server_metrics,
+    _NAMESPACE, _ServerMetrics, _WINDOW, _observation,
 )
 
 

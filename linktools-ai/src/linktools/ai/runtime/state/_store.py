@@ -301,10 +301,10 @@ class StoredRecord:
             raise ValueError("record kind contains a path separator")
         if (
             not isinstance(self.sort_key, str)
-            or not 0 < len(self.sort_key) <= 128
-            or self.sort_key.isascii() is False
+            or not self.sort_key
+            or not self.sort_key.isascii()
         ):
-            raise ValueError("record sort_key must contain 1..128 ASCII characters")
+            raise ValueError("record sort_key must contain non-empty ASCII characters")
         _require_state(self.state, "record state", optional=True)
         _require_nonnegative_int(self.storage_version, "storage_version")
         _require_optional_string(self.lease_owner, "lease_owner")
@@ -423,6 +423,7 @@ class RecordQuery:
     parent_digest: bytes | None = None
     kind: str | None = None
     states: frozenset[str] | None = None
+    sort_key_prefix: str | None = None
     after_sort_key: str | None = None
     after_key_digest: bytes | None = None
     limit: int | None = None
@@ -444,6 +445,12 @@ class RecordQuery:
             or any(character in self.kind for character in "/\\")
         ):
             raise ValueError("record kind contains a path separator")
+        if self.sort_key_prefix is not None and (
+            not isinstance(self.sort_key_prefix, str)
+            or not self.sort_key_prefix
+            or not self.sort_key_prefix.isascii()
+        ):
+            raise ValueError("record sort key prefix must contain non-empty ASCII characters")
         if (self.after_sort_key is None) != (self.after_key_digest is None):
             raise ValueError("record cursor requires both sort key and key digest")
         if self.after_sort_key is not None:
@@ -889,8 +896,8 @@ def sortable_identity(identity: JsonValue) -> str:
 def encode_sort_key(value: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("sort key is required")
-    if len(value) > 128 or not value.isascii():
-        raise ValueError("sort key must contain 1..128 ASCII characters")
+    if not value.isascii():
+        raise ValueError("sort key must contain ASCII characters")
     return value
 
 

@@ -5,13 +5,14 @@ dependencies:
   - filelock>=3.4.0
   - jsonschema>=4.23.0,<5.0.0
   - pydantic-ai-slim[mcp,openai]>=2.40.0,<3.0.0
-  - pydantic-ai-harness[dynamic-workflow]>=0.29.0
+  - pydantic-ai-harness>=0.29.0
   - PyYAML>=6.0,<7.0
 
 dev-dependencies:
   - linktools
   - pytest
   - pytest-asyncio
+  - httpx>=0.28.0,<1.0.0
   - sqlalchemy[asyncio]==2.0.51
   - aiosqlite==0.22.1
   - asyncpg

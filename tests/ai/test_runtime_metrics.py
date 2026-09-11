@@ -16,7 +16,7 @@ from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime import _metrics as runtime_metrics
-from linktools.ai.runtime._metric_capability import _RuntimeModelMetricCapability
+from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
@@ -34,6 +34,9 @@ from linktools.ai.task import (
 from linktools.ai.task._metrics import _TaskMetricProjector
 from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
+from pydantic_ai import RunContext
+from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
+from pydantic_ai.usage import RunUsage
 
 
 class _TextModelBinding:
@@ -196,7 +199,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
     secret = "TOP_SECRET_PROMPT_VALUE"
 
     async with Runtime.open(
-        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, workspace_id="workspace"),
         models=_TextModels(),  # type: ignore[arg-type]
         metrics=metrics,
     ) as runtime:
@@ -243,7 +246,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
     metrics = Metrics.from_store(_FailingMetricStore(), namespace="runtime-fail-open")  # type: ignore[arg-type]
 
     async with Runtime.open(
-        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, workspace_id="workspace"),
         models=_TextModels(),  # type: ignore[arg-type]
         metrics=metrics,
     ) as runtime:
@@ -291,7 +294,7 @@ async def test_runtime_metric_buffer_commit_unknown_uses_facade_exact_replay() -
 @pytest.mark.asyncio
 async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
     recorder = _CaptureRecorder()
-    capability = _RuntimeModelMetricCapability(
+    capability = RuntimeModelObservationCapability(
         recorder,
         source_namespace="workspace",
         tenant_id="tenant",
@@ -299,19 +302,31 @@ async def test_model_metric_does_not_capture_prompt_or_exception_text() -> None:
         session_id="session",
         step_run_id="run",
         agent_id="agent",
-        provider="provider",
-        model_identity="provider:model",
-        route_id="default",
     )
     secret = "DO_NOT_PERSIST_THIS_SECRET"
 
     async def model_handler(_request: object) -> object:
         raise RuntimeError(f"provider failed with {secret}")
 
+    model = TestModel()
+    context = RunContext(
+        deps=type("Deps", (), {"correlation": {}})(),
+        model=model,
+        usage=RunUsage(),
+        run_id="run",
+        run_step=1,
+    )
+    request_context = ModelRequestContext(
+        model=model,
+        messages=[],
+        model_settings=None,
+        model_request_parameters=ModelRequestParameters(),
+    )
+
     with pytest.raises(RuntimeError):
         await capability.wrap_model_request(  # type: ignore[arg-type]
-            None,
-            request_context=object(),
+            context,
+            request_context=request_context,
             handler=model_handler,  # type: ignore[arg-type]
         )
 

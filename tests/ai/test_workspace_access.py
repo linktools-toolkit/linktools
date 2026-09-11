@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import DisabledSandbox, SandboxSession, Workspace
+from linktools.ai.workspace import DisabledSandbox, SandboxResource, SandboxSession, Workspace
 
 
 class _ByteSession:
@@ -31,16 +31,22 @@ class _ByteSandbox:
         self._session = session
         self.opens = 0
 
-    async def open(self) -> SandboxSession:
+    async def open(
+        self,
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> SandboxSession:
+        del root, resources
         self.opens += 1
         return self._session  # type: ignore[return-value]
 
 
 @pytest.mark.asyncio
-async def test_workspace_access_lazily_opens_one_custom_session() -> None:
+async def test_workspace_access_lazily_opens_one_custom_session(tmp_path: Path) -> None:
     session = _ByteSession({"a.bin": b"a", "b.bin": b"b"})
     sandbox = _ByteSandbox(session)
-    access = WorkspaceAccess(sandbox)  # type: ignore[arg-type]
+    access = WorkspaceAccess(sandbox, root=tmp_path)
 
     assert sandbox.opens == 0
     assert await access.read_bytes("a.bin") == b"a"
@@ -60,7 +66,7 @@ async def test_workspace_access_lazily_opens_one_custom_session() -> None:
 @pytest.mark.asyncio
 async def test_workspace_access_uses_local_workspace_boundary(tmp_path: Path) -> None:
     (tmp_path / "evidence.bin").write_bytes(b"evidence")
-    access = WorkspaceAccess.for_workspace(Workspace.load(tmp_path))
+    access = WorkspaceAccess.for_workspace(Workspace.load(tmp_path, workspace_id="workspace"))
     try:
         assert await access.read_bytes("evidence.bin") == b"evidence"
     finally:
@@ -70,7 +76,7 @@ async def test_workspace_access_uses_local_workspace_boundary(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_workspace_access_does_not_fallback_from_disabled_sandbox(tmp_path: Path) -> None:
     access = WorkspaceAccess.for_workspace(
-        Workspace.load(tmp_path, sandbox=DisabledSandbox())
+        Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
     )
     with pytest.raises(AIError) as raised:
         await access.read_bytes("evidence.bin")

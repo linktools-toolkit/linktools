@@ -10,15 +10,18 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Runtime, RuntimeContext, RuntimeDomain, RuntimeState
+from linktools.ai.runtime import Runtime, RuntimeDomain, RuntimeState
+from linktools.ai.runtime._context import RuntimeContext
+from linktools.ai.runtime._harness_memory import build_harness_memory
 from linktools.ai.runtime._memory import RuntimeMemoryStore
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.workspace import Workspace
+from pydantic_ai_harness.memory import Memory
 
 
 @pytest.mark.asyncio
-async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
+async def test_runtime_memory_store_implements_harness_path_storage() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
@@ -30,25 +33,125 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
             execution_id="execution",
             memory_scope="workspace",
         )
-        await store.write(
-            "workspace/memory/MEMORY.md",
+        created = await store.write(
+            "memory/MEMORY.md",
             "remember commit-writer",
             expected_version=None,
         )
-        assert await store.list_paths("workspace/memory/", limit=10) == [
-            "workspace/memory/MEMORY.md"
-        ]
-        result = await store.search(
-            "workspace/memory/",
-            "commit-writer",
-            limit=10,
-            max_files=10,
-            max_chars=1_000,
-            max_file_chars=1_000,
+
+        assert created.version is not None
+        assert created.existed is False
+        assert await store.list_paths("memory/", limit=10) == ["memory/MEMORY.md"]
+        stored = await store.read("memory/MEMORY.md", max_chars=100)
+        assert stored is not None
+        assert stored.content == "remember commit-writer"
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_capability_is_harness_owned_over_runtime_state() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-capability", tenant_id="tenant")
+    try:
+        store = RuntimeMemoryStore(
+            state.memory,
+            object_store=state.object_store(RuntimeDomain.MEMORY),
+            namespace="memory-capability",
+            tenant_id="tenant",
+            execution_id="execution",
+            memory_scope="workspace",
         )
-        assert [match.path for match in result.matches] == [
-            "workspace/memory/MEMORY.md"
-        ]
+        capability = build_harness_memory(
+            store,
+            selected_tool_names=(
+                "delete_memory",
+                "read_memory",
+                "search_memory",
+                "write_memory",
+            ),
+            capability_id="linktools-memory",
+        )
+
+        assert isinstance(capability, Memory)
+        assert capability.id == "linktools-memory"
+        assert capability.inject_memory is False
+        assert capability.store is not store
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_missing_delete_uses_harness_mutation_contract() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-missing-delete", tenant_id="tenant")
+    try:
+        store = RuntimeMemoryStore(
+            state.memory,
+            object_store=state.object_store(RuntimeDomain.MEMORY),
+            namespace="memory-missing-delete",
+            tenant_id="tenant",
+            execution_id="execution",
+            memory_scope="workspace",
+        )
+
+        deleted = await store.delete("memory/notes.md", expected_version=None)
+
+        assert deleted.version is None
+        assert deleted.existed is False
+        assert deleted.replayed is False
+        created = await store.write(
+            "memory/notes.md",
+            "created after the missing read",
+            expected_version=None,
+        )
+        assert created.version is not None
+        assert created.existed is False
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_store_remains_writable_across_missing_delete_receipts() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-sequence-gap", tenant_id="tenant")
+    try:
+        store = RuntimeMemoryStore(
+            state.memory,
+            object_store=state.object_store(RuntimeDomain.MEMORY),
+            namespace="memory-sequence-gap",
+            tenant_id="tenant",
+            execution_id="execution",
+            memory_scope="workspace",
+        )
+
+        first_delete = await store.delete("memory/notes.md", expected_version=None)
+        second_delete = await store.delete("memory/notes.md", expected_version=None)
+        assert first_delete.existed is False
+        assert second_delete.existed is False
+
+        created = await store.write(
+            "memory/notes.md",
+            "created",
+            expected_version=None,
+        )
+        current = await store.read("memory/notes.md", max_chars=100)
+        assert current is not None
+        assert current.version == created.version
+        assert current.content == "created"
+
+        updated = await store.write(
+            "memory/notes.md",
+            "updated",
+            expected_version=current.version,
+        )
+        assert updated.existed is True
+        deleted = await store.delete(
+            "memory/notes.md",
+            expected_version=updated.version,
+        )
+        assert deleted.existed is True
+        assert await store.read("memory/notes.md", max_chars=100) is None
     finally:
         await state.close()
 
@@ -90,7 +193,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     models = ModelRegistry.openai(model="gpt-test")
     async with Runtime.open(workspace, models=models) as runtime:
         assert runtime.tenant_id == "default"

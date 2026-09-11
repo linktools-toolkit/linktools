@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
-from linktools.ai.capability import ToolEffectNotAppliedError
+from linktools.ai.capability._effect import ToolEffectNotAppliedError
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -26,6 +26,7 @@ from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._recovery_commands import RuntimeRecoveryCommands
 from linktools.ai.spec import AgentSpec
 from pydantic_ai.exceptions import ToolFailed
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -33,7 +34,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -65,6 +66,7 @@ def _execution(now: datetime) -> ExecutionRecord:
         planning=False,
         thinking=False,
         binding=_binding(),
+        **execution_owner_fields(),
     )
 
 

@@ -11,7 +11,8 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.runtime import Execution, TaskGraphRun, TaskGraphRunEvent
+from linktools.ai.runtime import Execution, TaskGraphRunEvent
+from linktools.ai.runtime._task import TaskGraphRun
 from linktools.ai.runtime.service_api import (
     ExecutionStreamEvent,
     ExecutionTreeEvent,
@@ -108,6 +109,13 @@ class _Runtime:
     def __init__(self) -> None:
         self.execution = _ExecutionService()
         self.task = _TaskService()
+
+    def stream_tree(self, execution_id, *, principal, after_sequences=None):
+        return self.execution.stream_tree(
+            execution_id,
+            principal=principal,
+            after_sequences=after_sequences,
+        )
 
 
 @pytest.mark.asyncio

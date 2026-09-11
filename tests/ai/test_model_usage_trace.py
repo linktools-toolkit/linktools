@@ -2,49 +2,31 @@
 # -*- coding: utf-8 -*-
 """Per-request model usage projection into Runtime trace."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionTraceItem
+from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._capabilities import (
-    ToolOperationDecision,
     _RuntimeStepPersistence,
-    _model_usage_metadata,
 )
 from linktools.ai.runtime._history import _trace_item
+from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
 from pydantic_ai import Agent, ModelRetry
+from pydantic_ai.capabilities import CombinedCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RequestUsage, RunUsage
-from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepEvent
-
-
-class _ToolOperations:
-    async def begin(self, ctx, call, tool_def, args, replay_safe):
-        del ctx, tool_def, args
-        return ToolOperationDecision(
-            operation_id=f"operation:{call.tool_call_id}",
-            owner="owner",
-            fence=1,
-            replay_safe=replay_safe,
-        )
-
-    async def renew(self, decision):
-        return decision
-
-    async def complete(self, decision, result):
-        del decision, result
-        return False
-
-    async def fail(self, decision, error):
-        del decision, error
-        return False
-
-    async def unknown(self, decision, error):
-        del decision, error
-        raise AssertionError("unexpected unknown tool effect")
+from linktools.ai.runtime.state._steps import (
+    StagingStepStore,
+)
+from linktools.ai.runtime.state._step_contracts import (
+    StepEvent,
+)
 
 
 async def _text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -91,16 +73,52 @@ def _project_usage(usage: RequestUsage) -> dict[str, object] | None:
     )
 
 
-def _persistence(store: InMemoryStepStore, run_id: str) -> _RuntimeStepPersistence:
-    return _RuntimeStepPersistence(
-        store=store,
+def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
+    usage = response.usage
+    return {
+        "linktools.ai.model_usage.input_tokens": str(usage.input_tokens),
+        "linktools.ai.model_usage.output_tokens": str(usage.output_tokens),
+        "linktools.ai.model_usage.cache_read_tokens": str(
+            usage.cache_read_tokens
+        ),
+        "linktools.ai.model_usage.cache_write_tokens": str(
+            usage.cache_write_tokens
+        ),
+    }
+
+
+def _persistence(
+    store: StagingStepStore,
+    run_id: str,
+) -> CombinedCapability[object]:
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id=run_id,
+    )
+    persistence = _RuntimeStepPersistence(
+        store=HarnessStepStoreAdapter(store, execution_id=None),
         agent_name="usage-test",
         run_id=run_id,
-        tool_operations=_ToolOperations(),
+        model_journal=journal,
     )
+    observation = RuntimeModelObservationCapability(
+        None,
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        session_id=None,
+        step_run_id=run_id,
+        agent_id="usage-test",
+        journal=journal,
+    )
+    return CombinedCapability([observation, persistence])
 
 
-async def _completed_usage(store: InMemoryStepStore, run_id: str) -> list[dict[str, object]]:
+async def _completed_usage(
+    store: StagingStepStore, run_id: str
+) -> list[dict[str, object]]:
     events = await store.list_events(run_id=run_id)
     values = [
         _project_event(event, ordinal)
@@ -111,11 +129,44 @@ async def _completed_usage(store: InMemoryStepStore, run_id: str) -> list[dict[s
     return [value for value in values if value is not None]
 
 
+@pytest.mark.asyncio
+async def test_asyncio_model_cancellation_records_failed_request() -> None:
+    store = StagingStepStore()
+
+    async def cancelled_model(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> ModelResponse:
+        del messages, info
+        raise asyncio.CancelledError
+
+    persistence = _persistence(store, "cancelled-model-run")
+    agent = Agent(FunctionModel(cancelled_model), capabilities=[persistence])
+
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run("hello")
+
+    events = await store.list_events(run_id="cancelled-model-run")
+    model_events = [
+        event.kind for event in events if event.kind.startswith("model_request_")
+    ]
+    assert model_events == ["model_request_started", "model_request_failed"]
+    failed = next(event for event in events if event.kind == "model_request_failed")
+    assert failed.metadata["linktools.ai.request_sequence"] == "1"
+    assert failed.metadata["linktools.ai.request_purpose"] == "agent"
+
+
 def _assert_token_sum(values: list[dict[str, object]], usage: RunUsage) -> None:
     assert sum(int(value["input_tokens"]) for value in values) == usage.input_tokens
     assert sum(int(value["output_tokens"]) for value in values) == usage.output_tokens
-    assert sum(int(value["cache_read_tokens"]) for value in values) == usage.cache_read_tokens
-    assert sum(int(value["cache_write_tokens"]) for value in values) == usage.cache_write_tokens
+    assert (
+        sum(int(value["cache_read_tokens"]) for value in values)
+        == usage.cache_read_tokens
+    )
+    assert (
+        sum(int(value["cache_write_tokens"]) for value in values)
+        == usage.cache_write_tokens
+    )
 
 
 def test_model_response_trace_contains_request_usage() -> None:
@@ -166,10 +217,21 @@ def test_model_response_trace_keeps_each_request_usage_separate() -> None:
     total = RunUsage()
     total.incr(first)
     total.incr(second)
-    assert total.input_tokens == first_trace["input_tokens"] + second_trace["input_tokens"]
-    assert total.output_tokens == first_trace["output_tokens"] + second_trace["output_tokens"]
-    assert total.cache_read_tokens == first_trace["cache_read_tokens"] + second_trace["cache_read_tokens"]
-    assert total.cache_write_tokens == first_trace["cache_write_tokens"] + second_trace["cache_write_tokens"]
+    assert (
+        total.input_tokens == first_trace["input_tokens"] + second_trace["input_tokens"]
+    )
+    assert (
+        total.output_tokens
+        == first_trace["output_tokens"] + second_trace["output_tokens"]
+    )
+    assert (
+        total.cache_read_tokens
+        == first_trace["cache_read_tokens"] + second_trace["cache_read_tokens"]
+    )
+    assert (
+        total.cache_write_tokens
+        == first_trace["cache_write_tokens"] + second_trace["cache_write_tokens"]
+    )
 
 
 def test_successful_model_response_trace_rejects_missing_usage_fact() -> None:
@@ -233,7 +295,9 @@ def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
         },
     ),
 )
-def test_cached_successful_model_response_trace_rejects_invalid_usage(payload: dict[str, object]) -> None:
+def test_cached_successful_model_response_trace_rejects_invalid_usage(
+    payload: dict[str, object],
+) -> None:
     with pytest.raises(AIError) as error:
         ExecutionTraceItem("execution", 1, payload)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -259,7 +323,7 @@ def test_failed_model_response_trace_has_no_request_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_model_retry_records_each_request_usage() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     agent = Agent(
         FunctionModel(_text_model),
         capabilities=[_persistence(store, "retry-run")],
@@ -284,7 +348,7 @@ async def test_model_retry_records_each_request_usage() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_loop_records_usage_before_and_after_tool() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     agent = Agent(
         TestModel(),
         capabilities=[_persistence(store, "tool-run")],
@@ -304,7 +368,7 @@ async def test_tool_loop_records_usage_before_and_after_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_records_completed_request_usage() -> None:
-    store = InMemoryStepStore()
+    store = StagingStepStore()
     agent = Agent(
         TestModel(custom_output_text="streamed"),
         capabilities=[_persistence(store, "stream-run")],

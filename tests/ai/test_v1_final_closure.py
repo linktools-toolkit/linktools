@@ -13,11 +13,13 @@ from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, step_run_id
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.runtime.state import FactQuery, StateStepArchive, stream_digest
+from linktools.ai.runtime.state._steps import StateStepArchive
+from linktools.ai.runtime.state._store import FactQuery, stream_digest
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
     _encode_step_envelope,
+    CURRENT_DATA_VERSION,
     decode_domain,
     decode_envelope,
     encode_domain,
@@ -35,7 +37,11 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from pydantic_ai.messages import ModelRequest, UserPromptPart
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+)
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -43,7 +49,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -241,16 +247,22 @@ def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     wire = encode_domain(cursor)
     fields = dict(wire["fields"])
     fields.pop("history_id")
-    assert decode_domain(
-        {"$dataclass": "conversation_cursor", "fields": fields},
-        ConversationCursor,
-    ) == cursor
+    assert (
+        decode_domain(
+            {"$dataclass": "conversation_cursor", "fields": fields},
+            ConversationCursor,
+        )
+        == cursor
+    )
     fields = dict(wire["fields"])
     fields["unknown"] = None
-    assert decode_domain(
-        {"$dataclass": "conversation_cursor", "fields": fields},
-        ConversationCursor,
-    ) == cursor
+    assert (
+        decode_domain(
+            {"$dataclass": "conversation_cursor", "fields": fields},
+            ConversationCursor,
+        )
+        == cursor
+    )
     _assert_integrity(
         lambda: decode_domain(
             {
@@ -274,29 +286,38 @@ def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
     )
     task_fields = dict(task_wire["fields"])
     task_fields["extra"] = None
-    assert decode_domain(
-        {"$dataclass": "task_node", "fields": task_fields},
-        TaskNode,
-    ) == task
+    assert (
+        decode_domain(
+            {"$dataclass": "task_node", "fields": task_fields},
+            TaskNode,
+        )
+        == task
+    )
     _assert_integrity(lambda: decode_domain({"plain": 1}, Any))
     _assert_integrity(lambda: decode_domain({"$tuple": [], "$mapping": []}, Any))
     assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}
 
 
-def test_v1_envelopes_keep_exact_members() -> None:
+def test_current_envelopes_keep_exact_members() -> None:
     cursor = ConversationCursor("run")
     envelope = encode_envelope(
         {"type": wire_type_id(cursor), "payload": encode_domain(cursor)}
     )
-    assert decode_envelope(envelope).version == 1
+    assert decode_envelope(envelope).version == CURRENT_DATA_VERSION
     _assert_integrity(
-        lambda: parse_envelope({"v": 1, "value": envelope["value"], "extra": 1})
+        lambda: parse_envelope(
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": envelope["value"],
+                "extra": 1,
+            }
+        )
     )
     _assert_integrity(lambda: parse_envelope({"value": envelope["value"]}))
     _assert_integrity(
         lambda: _decode_enveloped_domain(
             {
-                "v": 1,
+                "v": CURRENT_DATA_VERSION,
                 "value": {
                     "type": "conversation_cursor",
                     "payload": encode_domain(cursor),
@@ -308,7 +329,10 @@ def test_v1_envelopes_keep_exact_members() -> None:
     )
     _assert_integrity(
         lambda: _decode_enveloped_domain(
-            {"v": 1, "value": {"payload": encode_domain(cursor)}},
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": {"payload": encode_domain(cursor)},
+            },
             ConversationCursor,
         )
     )
@@ -319,7 +343,7 @@ def test_v1_envelopes_keep_exact_members() -> None:
     _assert_integrity(
         lambda: _decode_step_envelope(
             {
-                "v": 1,
+                "v": CURRENT_DATA_VERSION,
                 "value": {
                     "type": "stored_step_snapshot",
                     "payload": encode_domain(stored),
@@ -330,12 +354,21 @@ def test_v1_envelopes_keep_exact_members() -> None:
     )
     _assert_integrity(
         lambda: _decode_step_envelope(
-            {"v": 1, "value": {"type": "stored_step_snapshot"}}
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": {"type": "stored_step_snapshot"},
+            }
         )
     )
     _assert_unsupported(
         lambda: _decode_step_envelope(
-            {"v": 1, "value": {"type": "continuable_snapshot", "payload": {}}}
+            {
+                "v": CURRENT_DATA_VERSION,
+                "value": {
+                    "type": "continuable_snapshot",
+                    "payload": {},
+                },
+            }
         )
     )
     with pytest.raises(TypeError, match="unsupported domain type: ContinuableSnapshot"):
@@ -391,6 +424,7 @@ async def test_stored_snapshot_is_durable_authority_across_reopen(
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        **execution_owner_fields(),
     )
     run_id = step_run_id(
         namespace="closure-reopen",

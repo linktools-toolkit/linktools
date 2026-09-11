@@ -7,7 +7,14 @@ from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
 from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
 from ._definition import AgentDefinition
-from ._output import AssistantTextOutput, OutputBinding, OutputMode, bind_output, restore_output
+from ._output import (
+    AssistantTextOutput,
+    OutputBinding,
+    OutputMode,
+    bind_output,
+    canonicalize_output_schema_v1,
+    restore_output,
+)
 
 __all__ = [
     "AgentBinding",
@@ -21,5 +28,6 @@ __all__ = [
     "SemanticPin",
     "SubagentRef",
     "bind_output",
+    "canonicalize_output_schema_v1",
     "restore_output",
 ]

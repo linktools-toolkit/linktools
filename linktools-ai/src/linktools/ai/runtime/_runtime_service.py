@@ -70,6 +70,7 @@ from .service_api import (
     EvaluationHandle,
     EvaluationService,
     EventService,
+    ExternalService,
     ExecutionRequest,
     ExecutionService,
     ForkExecutionRequest,
@@ -82,6 +83,7 @@ from .service_api import (
     SessionView,
     TaskService,
     UpdateSessionRequest,
+    ExecutionTreeEvent,
 )
 from .state import RuntimeState
 
@@ -111,6 +113,16 @@ class _RuntimeMetricControl(Protocol):
         *,
         timeout_seconds: float = 5.0,
     ) -> RuntimeMetricFlushResult: ...
+
+
+class _ExecutionTreeStreamer(Protocol):
+    def stream(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: Mapping[str, int] | None = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
 def _request_correlation(value: "Mapping[str, object] | None") -> CorrelationData:
@@ -154,6 +166,7 @@ class Runtime(Generic[AppT]):
         task: TaskService,
         evaluation: EvaluationService,
         approval: ApprovalService,
+        external: ExternalService,
         event: EventService,
         artifact: ArtifactService,
         *,
@@ -161,6 +174,7 @@ class Runtime(Generic[AppT]):
         context: RuntimeContext[AppT],
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
+        tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_RuntimeMetricControl | None" = None,
     ) -> None:
         if any(
@@ -173,6 +187,7 @@ class Runtime(Generic[AppT]):
                 task,
                 evaluation,
                 approval,
+                external,
                 event,
                 artifact,
                 workspace,
@@ -188,6 +203,7 @@ class Runtime(Generic[AppT]):
         self.task = task
         self.evaluation = evaluation
         self.approval = approval
+        self.external = external
         self.event = event
         self.artifact = artifact
         self._workspace = workspace
@@ -199,6 +215,7 @@ class Runtime(Generic[AppT]):
         )
         self._close_callback = close_callback
         self._task_node_runtime = task_node_runtime
+        self._tree_streamer = tree_streamer
         self._metric_control = metric_control
         self._closed = False
         self._closing = False
@@ -265,6 +282,21 @@ class Runtime(Generic[AppT]):
     @property
     def workspace(self) -> Workspace:
         return self._workspace
+
+    def stream_tree(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: Mapping[str, int] | None = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        if self._tree_streamer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._tree_streamer.stream(
+            execution_id,
+            principal=principal,
+            after_sequences=after_sequences,
+        )
 
     @property
     def app(self) -> AppT:
@@ -931,12 +963,14 @@ async def _open_runtime(
             components.task,
             components.evaluation,
             components.approval,
+            components.external,
             components.event,
             components.artifact,
             workspace=workspace,
             context=context,
             close_callback=components.close_callback,
             task_node_runtime=components.task_node_runtime,
+            tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
         )
     except BaseException:

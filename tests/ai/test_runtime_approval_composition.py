@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.runtime.state import RecoveryCheckpointState
+from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import (
     Workspace,
@@ -51,8 +51,12 @@ class _ToolModels:
         return _ToolModelBinding()
 
 
+@pytest.mark.parametrize("backend", ("memory", "filesystem"))
 @pytest.mark.asyncio
-async def test_composed_runtime_ask_enters_durable_approval_wait(tmp_path: Path) -> None:
+async def test_composed_runtime_ask_enters_approval_wait(
+    tmp_path: Path,
+    backend: str,
+) -> None:
     agent_path = tmp_path / ".linktools" / "agents" / "default"
     agent_path.parent.mkdir(parents=True)
     agent_path.write_bytes(
@@ -62,11 +66,16 @@ async def test_composed_runtime_ask_enters_durable_approval_wait(tmp_path: Path)
     )
     workspace = Workspace.load(
         tmp_path,
+        workspace_id="workspace",
         policy=WorkspacePolicy(
             tool_permissions=WorkspaceToolPermissionPolicy(default="ask")
         ),
     )
-    state = RuntimeState.filesystem(tmp_path / "runtime-state")
+    state = (
+        RuntimeState.in_memory()
+        if backend == "memory"
+        else RuntimeState.filesystem(tmp_path / "runtime-state")
+    )
 
     async with Runtime.open(
         workspace,
@@ -80,19 +89,19 @@ async def test_composed_runtime_ask_enters_durable_approval_wait(tmp_path: Path)
                 execution.execution_id,
                 tenant_id=runtime.tenant_id,
             )
-            if record is not None and record.status is ExecutionStatus.WAITING_APPROVAL:
+            if record is not None and record.status is ExecutionStatus.WAITING_DEFERRED:
                 break
             await asyncio.sleep(0.01)
 
         assert record is not None
-        assert record.status is ExecutionStatus.WAITING_APPROVAL
+        assert record.status is ExecutionStatus.WAITING_DEFERRED
         checkpoint = await state.recovery.checkpoints.get(
             execution.execution_id,
             tenant_id=runtime.tenant_id,
         )
         assert checkpoint is not None
         assert checkpoint.state is RecoveryCheckpointState.WAITING
-        assert checkpoint.pending_approval is not None
+        assert checkpoint.pending_tools is not None
         approvals = await state.recovery.approvals.list_pending(
             execution.execution_id,
             tenant_id=runtime.tenant_id,

@@ -4,6 +4,7 @@
 
 import base64
 import binascii
+import hashlib
 import json
 import math
 import types
@@ -27,10 +28,10 @@ from typing import (
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
-from pydantic_ai_harness.step_persistence import (
+
+from ._step_contracts import (
     RunRecord,
     StepEvent,
-    ToolEffectRecord,
 )
 
 from ...agent import AgentBindingSnapshot
@@ -72,7 +73,7 @@ from ...task import (
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
-from .._tool import ToolOperationRecord
+from ._contracts import ToolOperationRecord
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,
@@ -106,19 +107,15 @@ from ._contracts import (
     LoadedModelContext,
     MemoryRecord,
     OperationTerminalUpdate,
-    PendingApprovalContinuation,
-    RecoveryActiveRecord,
-    RecoveryAdmissionRecord,
+    PendingDeferredCall,
+    PendingToolContinuation,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryConversationIntent,
-    RecoveryExecutionInput,
     RecoveryHandoffPhase,
-    RecoveryIdempotencyInput,
-    RecoveryIntegrityReport,
-    RecoveryStateRecord,
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
+    RepositoryInstructionBarrier,
     ResultRecord,
     RuntimePayloadRef,
     RuntimeStorageContract,
@@ -136,8 +133,6 @@ from ._contracts import (
     TranscriptSeekDimension,
     TranscriptSeekRecord,
     TranscriptSpanRef,
-    WorkspacePathBinding,
-    WorkspaceToolCallBinding,
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ._store import (
@@ -183,17 +178,13 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("operation_ledger_input", OperationLedgerInput),
     ("operation_ledger_record", OperationLedgerRecord),
     ("principal", Principal),
-    ("pending_approval_continuation", PendingApprovalContinuation),
+    ("pending_deferred_call", PendingDeferredCall),
+    ("pending_tool_continuation", PendingToolContinuation),
     ("recovery_checkpoint", RecoveryCheckpoint),
-    ("recovery_admission", RecoveryAdmissionRecord),
-    ("recovery_active", RecoveryActiveRecord),
     ("recovery_conversation_intent", RecoveryConversationIntent),
-    ("recovery_execution_input", RecoveryExecutionInput),
-    ("recovery_idempotency_input", RecoveryIdempotencyInput),
-    ("recovery_integrity_report", RecoveryIntegrityReport),
-    ("recovery_state", RecoveryStateRecord),
     ("recovery_terminal_handoff", RecoveryTerminalHandoff),
     ("recovery_terminal_outcome", RecoveryTerminalOutcome),
+    ("repository_instruction_barrier", RepositoryInstructionBarrier),
     ("resource_ref", ResourceRef),
     ("result_record", ResultRecord),
     ("session_record", SessionRecord),
@@ -217,8 +208,6 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("transcript_seek_dimension", TranscriptSeekDimension),
     ("transcript_seek", TranscriptSeekRecord),
     ("transcript_span_ref", TranscriptSpanRef),
-    ("workspace_path_binding", WorkspacePathBinding),
-    ("workspace_tool_call_binding", WorkspaceToolCallBinding),
     ("tool_operation_admission", ToolOperationAdmission),
     ("runtime_domain", RuntimeDomain),
     ("task_graph", TaskGraph),
@@ -234,7 +223,6 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("usage_metrics", UsageMetrics),
     ("run_record", RunRecord),
     ("step_event", StepEvent),
-    ("tool_effect", ToolEffectRecord),
 )
 _V1_WIRE_IDS = MappingProxyType(
     {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
@@ -395,6 +383,29 @@ def _decode_v1_task_result(
     )
 
 
+def _decode_v1_stored_user_input(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> StoredUserInput:
+    _require_fields(raw_fields, frozenset({"version", "codec", "payload"}))
+    version = _decode_domain(
+        raw_fields["version"], int, codec, persisted=persisted
+    )
+    codec_name = _decode_domain(
+        raw_fields["codec"], str, codec, persisted=persisted
+    )
+    if version != 1 or codec_name not in {"text", "user-content-v1"}:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    payload = _decode_domain(
+        raw_fields["payload"], StoredPayload, codec, persisted=persisted
+    )
+    try:
+        return StoredUserInput(version, codec_name, payload)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 def _encode_v1_optional_error_diagnostics(
     value: object,
     codec: "_VersionCodec",
@@ -427,28 +438,6 @@ def _encode_v1_execution_record(
     if not isinstance(value, ExecutionRecord):
         raise TypeError("V1 execution_record encoder received the wrong type")
     encoded = dict(_encode_v1_optional_error_diagnostics(value, codec, persisted))
-    if not value.correlation:
-        encoded.pop("correlation", None)
-    return encoded
-
-
-def _encode_v1_recovery_execution_input(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, RecoveryExecutionInput):
-        raise TypeError(
-            "V1 recovery_execution_input encoder received the wrong type"
-        )
-    encoded = {
-        field.name: _encode_domain(
-            attrgetter(field.name)(value),
-            codec,
-            persisted=persisted,
-        )
-        for field in fields(value)
-    }
     if not value.correlation:
         encoded.pop("correlation", None)
     return encoded
@@ -487,7 +476,6 @@ def _encode_v1_recovery_terminal_outcome(
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "execution_record": _encode_v1_execution_record,
-        "recovery_execution_input": _encode_v1_recovery_execution_input,
         "recovery_terminal_outcome": _encode_v1_recovery_terminal_outcome,
         "task_graph_admission": _encode_v1_task_graph_admission,
         "task_node": _encode_v1_task_node,
@@ -496,6 +484,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
+        "stored_user_input": _decode_v1_stored_user_input,
         "task_node": _decode_v1_task_node,
         "task_result": _decode_v1_task_result,
     }
@@ -771,8 +760,6 @@ def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
 
 def canonical_digest(value: Mapping[str, JsonValue]) -> str:
     """Return the digest used for replay and compact evidence."""
-    import hashlib
-
     return hashlib.sha256(canonical_json_bytes(dict(value))).hexdigest()
 
 
@@ -986,7 +973,7 @@ def _encode_domain(
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ValueError("GA v1 wire requires finite floats")
+            raise ValueError("Runtime v1 wire requires finite floats")
         return value
     if isinstance(value, datetime):
         if value.tzinfo is None:
@@ -1256,7 +1243,7 @@ def _decode_domain(
     if origin is Literal:
         for literal in arguments:
             if isinstance(literal, float) and not math.isfinite(literal):
-                raise TypeError("GA v1 schema literal requires finite floats")
+                raise TypeError("Runtime v1 schema literal requires finite floats")
         if isinstance(value, float):
             _require_finite_wire_float(value)
         if not any(
@@ -1318,7 +1305,7 @@ def _decode_domain(
     if target is set or origin is set:
         raise AIError(
             ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-            "GA v1 does not support set values",
+            "Runtime v1 does not support set values",
         )
     if target is frozenset or origin is frozenset:
         item_type = arguments[0] if arguments else Any
@@ -1359,7 +1346,7 @@ def _decode_domain(
         if result.isoformat() != raw:
             raise AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
-                "GA v1 datetime wire is not canonical",
+                "Runtime v1 datetime wire is not canonical",
             )
         return result
     if target is bytes:
@@ -1377,7 +1364,7 @@ def _decode_domain(
         if canonical != raw:
             raise AIError(
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
-                "GA v1 bytes wire is not canonical",
+                "Runtime v1 bytes wire is not canonical",
             )
         return result
     if isinstance(target, type) and target in codec.external_schema_types:
@@ -1401,7 +1388,7 @@ def _require_finite_wire_float(value: float) -> float:
     if not math.isfinite(value):
         raise AIError(
             ErrorCode.STORAGE_INTEGRITY_ERROR,
-            "GA v1 wire contains a non-finite float",
+            "Runtime v1 wire contains a non-finite float",
         )
     return value
 
@@ -1546,7 +1533,7 @@ def _decode_any(
     persisted: bool = False,
 ) -> object:
     if isinstance(value, Mapping):
-        matched = set(value.keys()).intersection(_RESERVED_V1_TAGS)
+        matched = set(value.keys()).intersection(_RESERVED_WIRE_TAGS)
         if len(matched) > 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if len(matched) == 0:
@@ -1610,7 +1597,7 @@ def _enum_type(wire_id: str, codec: _VersionCodec) -> type[Enum]:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
 
 
-_RESERVED_V1_TAGS = frozenset(
+_RESERVED_WIRE_TAGS = frozenset(
     {
         "$datetime",
         "$bytes",
@@ -1781,7 +1768,6 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     targets = {
         "run_record": RunRecord,
         "step_event": StepEvent,
-        "tool_effect": ToolEffectRecord,
         "stored_step_snapshot": StoredStepSnapshot,
     }
     target = targets.get(kind)
@@ -1798,43 +1784,42 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
 
 def _validate_v1_codec_definition() -> None:
     if CURRENT_DATA_VERSION != 1 or set(_VERSION_CODECS) != {1}:
-        raise RuntimeError("GA v1 codec registry is invalid")
+        raise RuntimeError("Runtime v1 codec registry is invalid")
     if _CURRENT_CODEC is not _VERSION_CODECS[1]:
-        raise RuntimeError("GA v1 current codec is invalid")
+        raise RuntimeError("Runtime v1 current codec is invalid")
     wire_ids = tuple(wire_id for wire_id, _target in _V1_WIRE_TYPES)
     enum_wire_ids = tuple(wire_id for wire_id, _target in _V1_ENUM_WIRE_TYPES)
     if len(wire_ids) != len(set(wire_ids)):
-        raise RuntimeError("GA v1 wire ids are not unique")
+        raise RuntimeError("Runtime v1 wire ids are not unique")
     if len(enum_wire_ids) != len(set(enum_wire_ids)):
-        raise RuntimeError("GA v1 enum wire ids are not unique")
+        raise RuntimeError("Runtime v1 enum wire ids are not unique")
     if set(_CURRENT_CODEC.domain_types) != set(wire_ids):
-        raise RuntimeError("GA v1 domain type registry is incomplete")
+        raise RuntimeError("Runtime v1 domain type registry is incomplete")
     if set(_CURRENT_CODEC.wire_ids.values()) != set(wire_ids):
-        raise RuntimeError("GA v1 domain wire-id registry is incomplete")
+        raise RuntimeError("Runtime v1 domain wire-id registry is incomplete")
     if set(_CURRENT_CODEC.enum_types) != set(enum_wire_ids):
-        raise RuntimeError("GA v1 enum type registry is incomplete")
+        raise RuntimeError("Runtime v1 enum type registry is incomplete")
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
-        raise RuntimeError("GA v1 enum wire-id registry is incomplete")
+        raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
     custom_encoders = {
         "execution_record",
-        "recovery_execution_input",
         "recovery_terminal_outcome",
         "task_graph_admission",
         "task_node",
         "task_result",
     }
-    custom_decoders = {"task_node", "task_result"}
+    custom_decoders = {"stored_user_input", "task_node", "task_result"}
     if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
-        raise RuntimeError("GA v1 dataclass encoder mapping is invalid")
+        raise RuntimeError("Runtime v1 dataclass encoder mapping is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_decoders:
-        raise RuntimeError("GA v1 dataclass decoder mapping is invalid")
+        raise RuntimeError("Runtime v1 dataclass decoder mapping is invalid")
     if not set(_V1_DATACLASS_ENCODERS).issubset(set(wire_ids)):
         raise RuntimeError(
-            "GA v1 dataclass encoder mapping contains an unknown type"
+            "Runtime v1 dataclass encoder mapping contains an unknown type"
         )
     if not set(_V1_DATACLASS_DECODERS).issubset(set(wire_ids)):
         raise RuntimeError(
-            "GA v1 dataclass decoder mapping contains an unknown type"
+            "Runtime v1 dataclass decoder mapping contains an unknown type"
         )
     task_node_fields = tuple(field.name for field in fields(TaskNode))
     if task_node_fields != (
@@ -1843,7 +1828,7 @@ def _validate_v1_codec_definition() -> None:
         "budget_cost",
         "_input",
     ):
-        raise RuntimeError("GA v1 task_node source contract changed")
+        raise RuntimeError("Runtime v1 task_node source contract changed")
 
 
 _validate_v1_codec_definition()

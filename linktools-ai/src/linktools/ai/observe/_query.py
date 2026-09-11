@@ -205,8 +205,8 @@ async def execute_query(
     if aggregation is not MetricAggregation.PERCENTILE and query.percentile is not None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-    for query_field in (*query.filters.keys(), *query.group_by):
-        if not _query_field_allowed(definition, query_field):
+    for field_name in (*query.filters.keys(), *query.group_by):
+        if not _query_field_allowed(definition, field_name):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
     start, end = query.window.resolve()

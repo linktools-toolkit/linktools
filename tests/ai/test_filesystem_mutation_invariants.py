@@ -22,6 +22,7 @@ from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -29,7 +30,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -137,6 +138,7 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
         planning=False,
         thinking=False,
         binding=_binding(),
+        **execution_owner_fields(),
     )
     try:
         await state.execution.executions.create(execution)

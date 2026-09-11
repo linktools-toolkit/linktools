@@ -19,7 +19,6 @@ _logger = environ.get_logger("ai.model.registry")
 class ModelRegistry:
     def __init__(self) -> None:
         self._bindings: dict[str, ModelBinding] = {}
-        self._revision = 0
         self._lock = RLock()
 
     @classmethod
@@ -27,20 +26,24 @@ class ModelRegistry:
         cls,
         *,
         model: str,
+        provider_instance: "str | None" = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
-        max_retries: "int | None" = None,
+        max_retries: int = 2,
+        retry_delay: "int | float" = 1.0,
         max_tokens: "int | None" = None,
     ) -> "ModelRegistry":
         registry = cls()
         registry.register_openai(
             "default",
             model=model,
+            provider_instance=provider_instance,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
             max_retries=max_retries,
+            retry_delay=retry_delay,
             max_tokens=max_tokens,
         )
         return registry
@@ -50,28 +53,31 @@ class ModelRegistry:
             raise ValueError("model route_id is required")
         with self._lock:
             self._bindings[binding.route_id] = binding
-            self._revision += 1
-            _logger.info("model binding registered: route=%s revision=%s", binding.route_id, self._revision)
+            _logger.info("model binding registered: route=%s", binding.route_id)
 
     def register_openai(
         self,
         route_id: str,
         *,
         model: str,
+        provider_instance: "str | None" = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
-        max_retries: "int | None" = None,
+        max_retries: int = 2,
+        retry_delay: "int | float" = 1.0,
         max_tokens: "int | None" = None,
     ) -> None:
         self.register(
             _OpenAIModelBinding(
                 route_id=route_id,
                 model=model,
+                provider_instance=provider_instance,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,
                 max_retries=max_retries,
+                retry_delay=retry_delay,
                 max_tokens=max_tokens,
             )
         )
@@ -80,17 +86,15 @@ class ModelRegistry:
         with self._lock:
             if route_id in self._bindings:
                 del self._bindings[route_id]
-                self._revision += 1
-                _logger.info("model binding removed: route=%s revision=%s", route_id, self._revision)
+                _logger.info("model binding removed: route=%s", route_id)
 
     def snapshot(self) -> ModelResolver:
         with self._lock:
-            return _ModelRegistrySnapshot(self._revision, MappingProxyType(dict(self._bindings)))
+            return _ModelRegistrySnapshot(MappingProxyType(dict(self._bindings)))
 
 
 class _ModelRegistrySnapshot:
-    def __init__(self, revision: int, bindings: "Mapping[str, ModelBinding]") -> None:
-        self._revision = revision
+    def __init__(self, bindings: "Mapping[str, ModelBinding]") -> None:
         self._bindings = bindings
 
     def resolve(self, route_id: str) -> ModelBinding:
@@ -105,19 +109,14 @@ class _ModelRegistrySnapshot:
         *,
         route_id: "str | None" = None,
     ) -> ModelBinding:
-        semantic = dict(payload)
-        if route_id is not None:
-            preferred = self._bindings.get(route_id)
-            if preferred is not None and dict(preferred.semantic_payload) == semantic:
-                return preferred
-        matches = tuple(
-            binding
-            for _name, binding in sorted(self._bindings.items())
-            if dict(binding.semantic_payload) == semantic
-        )
-        if not matches:
+        if route_id is None:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return matches[0]
+        binding = self._bindings.get(route_id)
+        if binding is None:
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
+        if dict(binding.semantic_payload) != dict(payload):
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        return binding
 
 
 __all__ = ["ModelRegistry"]

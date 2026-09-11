@@ -11,7 +11,6 @@ from pydantic import BaseModel
 from ..capability import (
     CapabilityContribution,
     SkillDefinition,
-    capability_fingerprint,
     mcp_selector_server,
     mcp_server_namespace,
     mcp_server_selector,
@@ -37,7 +36,14 @@ class AgentCompiler:
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        ordered = tuple(sorted(candidates, key=lambda item: (item.kind, item.id)))
+        generic = tuple(item for item in candidates if item.kind == "capability")
+        declarations = tuple(
+            sorted(
+                (item for item in candidates if item.kind != "capability"),
+                key=lambda item: (item.kind, item.id),
+            )
+        )
+        ordered = (*declarations, *generic)
         if len({(item.kind, item.id) for item in ordered}) != len(ordered):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         current_agents = dict(agents)
@@ -68,8 +74,9 @@ class AgentCompiler:
         selected_tools, selected_mcp, ordinary_policy, mcp_policy = self._select_tools(spec)
         selected_skills = self._select_exact_kind("skill", spec.allow_skills)
         selected_subagents = self._select_subagents(spec)
-        selected_capabilities = tuple(
-            candidate for candidate in self._candidates if candidate.kind == "capability"
+        selected_capabilities = self._select_exact_kind(
+            "capability",
+            spec.allow_capabilities,
         )
         return self._build_definition(
             spec,
@@ -133,13 +140,8 @@ class AgentCompiler:
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_payload(definition.spec)
             ),
-            model=dict(definition.model.semantic_payload),
-            selected=tuple(
-                sorted(
-                    (_pin(candidate) for candidate in _semantic_candidates(definition)),
-                    key=lambda item: (item.kind, item.id),
-                )
-            ),
+            base_model=dict(definition.model.semantic_payload),
+            selected=tuple(_pin(candidate) for candidate in _semantic_candidates(definition)),
             selected_subagents=definition.selected_subagents,
             subagents=durable_subagents,
             output_mode=output_binding.mode,
@@ -153,7 +155,10 @@ class AgentCompiler:
         if not isinstance(snapshot, AgentBindingSnapshot):
             raise TypeError("snapshot must be AgentBindingSnapshot")
         try:
-            model = self._models.restore(snapshot.model, route_id=snapshot.agent_spec.model)
+            model = self._models.restore(
+                snapshot.base_model,
+                route_id=snapshot.agent_spec.model,
+            )
             selected = self._restore_selected(snapshot.selected)
             ordinary_policy, mcp_policy = self._restore_policies(
                 snapshot.agent_spec,
@@ -216,7 +221,11 @@ class AgentCompiler:
                 candidate = current
             selected[pin.kind].append(candidate)
         return {
-            kind: tuple(sorted(values, key=lambda item: item.id))
+            kind: (
+                tuple(values)
+                if kind == "capability"
+                else tuple(sorted(values, key=lambda item: item.id))
+            )
             for kind, values in selected.items()
         }
 
@@ -266,7 +275,7 @@ class AgentCompiler:
 
     def _select_exact_kind(
         self,
-        kind: Literal["skill"],
+        kind: Literal["skill", "capability"],
         selectors: Sequence[str],
     ) -> "tuple[CapabilityContribution[object], ...]":
         values = {
@@ -275,14 +284,27 @@ class AgentCompiler:
             if candidate.kind == kind
         }
         if tuple(selectors) == ("*",):
-            return tuple(values[name] for name in sorted(values))
-        selected: list[CapabilityContribution[object]] = []
-        for selector in selectors:
-            candidate = values.get(selector)
-            if candidate is None:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            selected.append(candidate)
-        return tuple(sorted(selected, key=lambda item: item.id))
+            selected = tuple(
+                candidate for candidate in self._candidates if candidate.kind == kind
+            )
+            return (
+                selected
+                if kind == "capability"
+                else tuple(sorted(selected, key=lambda item: item.id))
+            )
+        selected_ids = set(selectors)
+        if not selected_ids.issubset(values):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        selected = tuple(
+            candidate
+            for candidate in self._candidates
+            if candidate.kind == kind and candidate.id in selected_ids
+        )
+        return (
+            selected
+            if kind == "capability"
+            else tuple(sorted(selected, key=lambda item: item.id))
+        )
 
     def _select_subagents(self, spec: AgentSpec) -> "tuple[str, ...]":
         available = set(self._agent_ids)
@@ -337,9 +359,12 @@ class AgentCompiler:
         if any(skill_id not in selected_skill_ids for skill_id in spec.preload_skills):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         semantic = tuple(
-            sorted(
-                (*selected_tools, *selected_skills, *selected_mcp, *selected_capabilities),
-                key=lambda item: (item.kind, item.id),
+            (
+                *sorted(
+                    (*selected_tools, *selected_skills, *selected_mcp),
+                    key=lambda item: (item.kind, item.id),
+                ),
+                *selected_capabilities,
             )
         )
         digest = canonical_sha256(
@@ -364,7 +389,7 @@ class AgentCompiler:
             selected_tools=tuple(sorted(selected_tools, key=lambda item: item.id)),
             selected_skills=tuple(sorted(selected_skills, key=lambda item: item.id)),
             selected_mcp=tuple(sorted(selected_mcp, key=lambda item: item.id)),
-            selected_capabilities=tuple(sorted(selected_capabilities, key=lambda item: item.id)),
+            selected_capabilities=tuple(selected_capabilities),
             selected_subagents=tuple(sorted(set(selected_subagents))),
             ordinary_tool_policy=tuple(ordinary_policy),
             mcp_selector_policy=tuple(mcp_policy),
@@ -375,31 +400,34 @@ def _semantic_candidates(
     definition: AgentDefinition,
 ) -> "tuple[CapabilityContribution[object], ...]":
     return tuple(
-        sorted(
-            (
-                *definition.selected_tools,
-                *definition.selected_skills,
-                *definition.selected_mcp,
-                *definition.selected_capabilities,
+        (
+            *sorted(
+                (
+                    *definition.selected_tools,
+                    *definition.selected_skills,
+                    *definition.selected_mcp,
+                ),
+                key=lambda item: (item.kind, item.id),
             ),
-            key=lambda item: (item.kind, item.id),
+            *definition.selected_capabilities,
         )
     )
 
 
 def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
     contract = candidate.semantic_contract
-    if capability_fingerprint(candidate.kind, candidate.id, contract) != candidate.fingerprint:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     version = contract.get("version", 1) if candidate.kind == "skill" else 1
     if not isinstance(version, int) or isinstance(version, bool):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return SemanticPin(
+    pin = SemanticPin(
         cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
         candidate.id,
         version,
         contract,
     )
+    if pin.fingerprint != candidate.fingerprint:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return pin
 
 
 def _binding_digest(

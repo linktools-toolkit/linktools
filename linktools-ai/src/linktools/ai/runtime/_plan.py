@@ -1,21 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""RuntimeState-backed Harness planning store."""
+"""Runtime-owned planning command and durable plan projection."""
 
-from typing import Literal, cast
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Literal
 
-from pydantic_ai_harness.planning import PlanItem, TaskStatus
+from linktools.core import environ
 
-from ..core import JsonValue
+from ..core import (
+    JsonValue,
+    validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
-from .state import StateStore, StateTransaction, StoredRecord, partition_digest, record_key_digest
+from .state._store import (
+    StateStore,
+    StateTransaction,
+    StoredRecord,
+    partition_digest,
+    record_key_digest,
+)
 
-_OWNER_KIND = Literal["session", "execution"]
+_logger = environ.get_logger("ai.runtime.plan")
+_OWNER_KINDS = frozenset({"session", "execution"})
 _KIND = "agent_plan"
+_VERSION = 1
+
+PlanOwnerKind = Literal["session", "execution"]
+PlanStatus = Literal["pending", "in_progress", "completed", "cancelled"]
+
+
+@dataclass(frozen=True, slots=True)
+class PlanItem:
+    content: str
+    status: PlanStatus = "pending"
 
 
 class RuntimePlanStore:
-    """Persist one owner plan through the existing optimistic StateStore contract."""
+    """Persist one complete plan through the existing optimistic state store."""
 
     def __init__(
         self,
@@ -23,40 +45,82 @@ class RuntimePlanStore:
         *,
         namespace: str,
         tenant_id: str,
-        owner_kind: _OWNER_KIND,
+        owner_kind: PlanOwnerKind,
         owner_id: str,
     ) -> None:
-        if owner_kind not in {"session", "execution"} or not owner_id:
+        if (
+            not isinstance(owner_kind, str)
+            or owner_kind not in _OWNER_KINDS
+            or not isinstance(owner_id, str)
+            or not owner_id
+        ):
             raise ValueError("plan owner is invalid")
         self._store = store
         self._namespace = namespace
         self._tenant_id = tenant_id
+        validate_tenant_id(tenant_id)
         self._owner_kind = owner_kind
         self._owner_id = owner_id
+        domain = "conversation" if owner_kind == "session" else "execution"
         self._key = record_key_digest(
             namespace,
             tenant_id,
-            "conversation" if owner_kind == "session" else "execution",
+            domain,
             _KIND,
             [owner_kind, owner_id],
         )
-        self._partition = partition_digest(
-            namespace,
-            tenant_id,
-            "conversation" if owner_kind == "session" else "execution",
-            _KIND,
-        )
+        self._partition = partition_digest(namespace, tenant_id, domain, _KIND)
+
+    @property
+    def owner_kind(self) -> PlanOwnerKind:
+        return self._owner_kind
+
+    @property
+    def owner_id(self) -> str:
+        return self._owner_id
 
     async def get_items(self) -> list[PlanItem]:
-        record = await self._store.read(lambda transaction: transaction.get_record(self._key))
-        return _decode_items(record)
+        record = await self._store.read(
+            lambda transaction: transaction.get_record(self._key)
+        )
+        return _decode_payload(
+            record,
+            owner_kind=self._owner_kind,
+            owner_id=self._owner_id,
+        )[0]
 
-    async def set_items(self, items: list[PlanItem]) -> None:
+    async def get_plan(self) -> dict[str, JsonValue]:
+        record = await self._store.read(
+            lambda transaction: transaction.get_record(self._key)
+        )
+        items, revision = _decode_payload(
+            record,
+            owner_kind=self._owner_kind,
+            owner_id=self._owner_id,
+        )
+        return {
+            "items": [_item_payload(item) for item in items],
+            "revision": revision,
+        }
+
+    async def write_plan(
+        self,
+        items: list[PlanItem],
+    ) -> dict[str, JsonValue]:
         values = _validated_items(items)
 
-        async def mutate(transaction: StateTransaction) -> None:
+        async def mutate(transaction: StateTransaction) -> dict[str, JsonValue]:
             current = await transaction.get_record(self._key)
-            next_record = self._record(values, current)
+            current_items, current_revision = _decode_payload(
+                current, owner_kind=self._owner_kind, owner_id=self._owner_id
+            )
+            if current_items == values:
+                return {
+                    "items": [_item_payload(item) for item in values],
+                    "revision": current_revision,
+                }
+            revision = 1 if current is None else current_revision + 1
+            next_record = self._record(values, revision, current)
             if current is None:
                 await transaction.insert_record(next_record)
             elif not await transaction.replace_record(
@@ -64,96 +128,44 @@ class RuntimePlanStore:
                 expected_storage_version=current.storage_version,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            result = {
+                "items": [_item_payload(item) for item in values],
+                "revision": revision,
+            }
+            _logger.debug(
+                "runtime plan replaced: owner_kind=%s owner_id=%s revision=%s items=%s",
+                self._owner_kind,
+                self._owner_id,
+                revision,
+                len(values),
+            )
+            return result
 
-        await self._store.mutate(mutate)
-
-    async def get_item(self, item_id: str) -> "PlanItem | None":
-        return next((item for item in await self.get_items() if item.id == item_id), None)
-
-    async def add_item(self, item: PlanItem) -> PlanItem:
-        candidate = _clone_item(item)
-
-        async def mutate(transaction: StateTransaction) -> PlanItem:
-            current = await transaction.get_record(self._key)
-            items = _decode_items(current)
-            if any(existing.id == candidate.id for existing in items):
-                raise ValueError(f"A step with id {candidate.id!r} is already in this plan.")
-            items.append(candidate)
-            await self._write(transaction, current, items)
-            return _clone_item(candidate)
-
-        return await self._store.mutate(mutate)
-
-    async def update_item(
-        self,
-        item_id: str,
-        *,
-        content: "str | None" = None,
-        status: "TaskStatus | None" = None,
-        active_form: "str | None" = None,
-        parent_id: "str | None" = None,
-        depends_on: "list[str] | None" = None,
-    ) -> "PlanItem | None":
-        async def mutate(transaction: StateTransaction) -> "PlanItem | None":
-            current = await transaction.get_record(self._key)
-            items = _decode_items(current)
-            index = next((i for i, item in enumerate(items) if item.id == item_id), None)
-            if index is None:
-                return None
-            item = items[index]
-            if content is not None:
-                item.content = content
-            if status is not None:
-                item.status = status
-            if active_form is not None:
-                item.active_form = active_form
-            if parent_id is not None:
-                item.parent_id = parent_id
-            if depends_on is not None:
-                item.depends_on = list(depends_on)
-            await self._write(transaction, current, items)
-            return _clone_item(item)
-
-        return await self._store.mutate(mutate)
-
-    async def remove_item(self, item_id: str) -> bool:
-        async def mutate(transaction: StateTransaction) -> bool:
-            current = await transaction.get_record(self._key)
-            items = _decode_items(current)
-            next_items = [item for item in items if item.id != item_id]
-            if len(next_items) == len(items):
-                return False
-            await self._write(transaction, current, next_items)
-            return True
-
-        return await self._store.mutate(mutate)
-
-    async def _write(
-        self,
-        transaction: StateTransaction,
-        current: "StoredRecord | None",
-        items: list[PlanItem],
-    ) -> None:
-        next_record = self._record(_validated_items(items), current)
-        if current is None:
-            await transaction.insert_record(next_record)
-            return
-        if not await transaction.replace_record(
-            next_record,
-            expected_storage_version=current.storage_version,
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        try:
+            return await self._store.mutate(mutate)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise
+            current = await self.get_items()
+            if current == values:
+                return {
+                    "items": [_item_payload(item) for item in values],
+                    "revision": (await self.get_plan())["revision"],
+                }
+            raise
 
     def _record(
         self,
         items: list[PlanItem],
-        current: "StoredRecord | None",
+        revision: int,
+        current: StoredRecord | None,
     ) -> StoredRecord:
-        data: dict[str, JsonValue] = {
-            "version": 1,
+        payload: dict[str, JsonValue] = {
+            "version": _VERSION,
             "owner_kind": self._owner_kind,
             "owner_id": self._owner_id,
-            "items": [cast(JsonValue, item.model_dump(mode="json")) for item in items],
+            "revision": revision,
+            "items": [_item_payload(item) for item in items],
         }
         return StoredRecord(
             key_digest=self._key,
@@ -161,44 +173,112 @@ class RuntimePlanStore:
             scope_digest=None,
             parent_digest=None,
             kind=_KIND,
-            sort_key="plan:" + self._key.hex()[:64],
+            sort_key="plan:" + self._key.hex(),
             state=None,
-            storage_version=0 if current is None else current.storage_version,
+            storage_version=1 if current is None else current.storage_version + 1,
             lease_owner=None,
             lease_fence=0,
             lease_expires_at=None,
-            data=data,
+            data=payload,
         )
 
 
-def _decode_items(record: "StoredRecord | None") -> list[PlanItem]:
+def _decode_payload(
+    record: StoredRecord | None,
+    *,
+    owner_kind: PlanOwnerKind,
+    owner_id: str,
+) -> tuple[list[PlanItem], int]:
     if record is None:
-        return []
+        return [], 0
+    if (
+        record.kind != _KIND
+        or isinstance(record.storage_version, bool)
+        or not isinstance(record.storage_version, int)
+        or record.storage_version < 1
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     data = record.data
-    if data.get("version") != 1:
+    if not isinstance(data, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = data.get("version")
+    if (
+        "version" not in data
+        or isinstance(version, bool)
+        or not isinstance(version, int)
+        or version < 1
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != _VERSION:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    items = data.get("items")
-    if not isinstance(items, list):
+    if not {
+        "version",
+        "owner_kind",
+        "owner_id",
+        "revision",
+        "items",
+    }.issubset(data):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if data.get("owner_kind") != owner_kind:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if data.get("owner_id") != owner_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    revision = data.get("revision")
+    raw_items = data.get("items")
+    if (
+        isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or not isinstance(raw_items, list)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if revision != record.storage_version:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        values = [PlanItem.model_validate(item) for item in items]
-    except Exception as error:
+        decoded_items: list[PlanItem] = []
+        for item in raw_items:
+            if not isinstance(item, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if not {"content", "status"}.issubset(item):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            decoded_items.append(PlanItem(item["content"], item["status"]))
+        items = _validated_items(decoded_items)
+    except (KeyError, TypeError, ValueError, AIError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    return _validated_items(values)
+    if len(items) != len(raw_items):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return items, revision
 
 
 def _validated_items(items: list[PlanItem]) -> list[PlanItem]:
-    values = [_clone_item(item) for item in items]
-    ids = tuple(item.id for item in values)
-    if len(ids) != len(set(ids)):
-        raise ValueError("plan item ids must be unique")
+    if not isinstance(items, list):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    values: list[PlanItem] = []
+    for item in items:
+        if not isinstance(item, PlanItem):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not isinstance(item.content, str) or not isinstance(item.status, str):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if item.status not in {
+            "pending",
+            "in_progress",
+            "completed",
+            "cancelled",
+        }:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not item.content.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        values.append(PlanItem(item.content, item.status))
     return values
 
 
-def _clone_item(item: PlanItem) -> PlanItem:
-    if not isinstance(item, PlanItem):
-        raise TypeError("plan item must be PlanItem")
-    return item.model_copy(deep=True)
+def _item_payload(item: PlanItem) -> dict[str, JsonValue]:
+    return {"content": item.content, "status": item.status}
 
 
-__all__ = ["RuntimePlanStore"]
+__all__ = [
+    "PlanItem",
+    "PlanOwnerKind",
+    "PlanStatus",
+    "RuntimePlanStore",
+]

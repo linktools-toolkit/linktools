@@ -2,21 +2,26 @@
 # -*- coding: utf-8 -*-
 """Workspace discovery, identity, and immutable policy."""
 
-import unicodedata
+import os
+import tempfile
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import yaml as _yaml
+from filelock import FileLock
+from linktools.core import environ
 
-from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256, normalize_json_value
+from ..core import JsonValue, Principal, PrincipalKind, normalize_json_value
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
     from ._sandbox import Sandbox
 
 _STORAGE_DIR_NAME = ".linktools"
+_logger = environ.get_logger("ai.workspace")
 
 
 def normalize_workspace_path(path: str) -> str:
@@ -135,10 +140,6 @@ class WorkspaceToolPermissionPolicy:
 
 @dataclass(frozen=True, slots=True)
 class WorkspacePolicy:
-    max_skill_depth: int = 8
-    max_concurrency: int = 4
-    timeout_seconds: float = 300
-    max_calls: int = 100
     tool_permissions: WorkspaceToolPermissionPolicy = field(
         default_factory=WorkspaceToolPermissionPolicy
     )
@@ -149,13 +150,6 @@ class WorkspacePolicy:
     max_binary_input_bytes: int = 64 * 1024 * 1024
 
     def validate(self) -> None:
-        if (
-            self.max_skill_depth < 0
-            or self.max_concurrency < 1
-            or self.timeout_seconds <= 0
-            or self.max_calls < 1
-        ):
-            raise ValueError("workspace policy limits must be positive")
         if not isinstance(self.tool_permissions, WorkspaceToolPermissionPolicy):
             raise TypeError("workspace tool_permissions must be WorkspaceToolPermissionPolicy")
         limits = (
@@ -242,6 +236,50 @@ class Workspace:
         )
 
     @classmethod
+    def initialize(
+        cls,
+        root: "str | Path",
+        *,
+        workspace_id: "str | None" = None,
+        policy: "WorkspacePolicy | None" = None,
+        sandbox: "Sandbox | None" = None,
+    ) -> "Workspace":
+        """Create the workspace identity once, then load it without path-derived state."""
+        candidate = Path(root).expanduser().resolve()
+        config_dir = candidate / _STORAGE_DIR_NAME
+        config_file = config_dir / "config.yaml"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(config_file) + ".lock"):
+            if config_file.exists():
+                config = load_config(config_file)
+                resolved = _configured_workspace_id(config)
+                if resolved is None:
+                    resolved = _validate_workspace_id(
+                        workspace_id
+                        if workspace_id is not None
+                        else uuid.uuid4().hex
+                    )
+                    config = dict(config)
+                    config["workspace_id"] = resolved
+                    _write_config_atomically(config_file, config)
+                elif workspace_id is not None and workspace_id != resolved:
+                    raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
+            else:
+                resolved = _validate_workspace_id(
+                    workspace_id if workspace_id is not None else uuid.uuid4().hex
+                )
+                config = {"workspace_id": resolved}
+                _write_config_atomically(config_file, config)
+                _logger.info("workspace initialized: id=%s", resolved)
+        return cls._build(
+            candidate,
+            config_file,
+            _select_policy(policy),
+            sandbox,
+            workspace_id,
+        )
+
+    @classmethod
     def _build(
         cls,
         root: Path,
@@ -250,17 +288,22 @@ class Workspace:
         sandbox: "Sandbox | None",
         workspace_id: "str | None",
     ) -> "Workspace":
+        config = load_config(config_file) if config_file else {}
+        configured_workspace_id = _configured_workspace_id(config)
         if workspace_id is not None:
-            if not isinstance(workspace_id, str):
-                raise TypeError("workspace_id must be a string or None")
-            if not workspace_id:
-                raise ValueError("workspace_id cannot be empty")
-            resolved_workspace_id = workspace_id
+            resolved_workspace_id = _validate_workspace_id(workspace_id)
+            if (
+                configured_workspace_id is not None
+                and configured_workspace_id != resolved_workspace_id
+            ):
+                raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
+        elif configured_workspace_id is None:
+            raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
         else:
-            resolved_workspace_id = canonical_sha256(["workspace", _normalized_root(root)])
+            resolved_workspace_id = configured_workspace_id
         return cls(
             root=root,
-            config=load_config(config_file) if config_file else {},
+            config=config,
             workspace_id=resolved_workspace_id,
             policy=policy,
             sandbox=sandbox,
@@ -299,8 +342,40 @@ def _select_policy(policy: "WorkspacePolicy | None") -> WorkspacePolicy:
     return selected
 
 
-def _normalized_root(root: Path) -> str:
-    return unicodedata.normalize("NFC", root.as_posix())
+def _validate_workspace_id(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
+    return value
+
+
+def _configured_workspace_id(config: Mapping[str, JsonValue]) -> "str | None":
+    value = config.get("workspace_id")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
+    return value
+
+
+def _write_config_atomically(path: Path, config: Mapping[str, JsonValue]) -> None:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            _yaml.safe_dump(dict(config), handle, allow_unicode=True, sort_keys=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 __all__ = [

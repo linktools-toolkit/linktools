@@ -30,7 +30,9 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskNode
-from pydantic_ai_harness.step_persistence import RunRecord
+from linktools.ai.runtime.state._step_contracts import (
+    RunRecord,
+)
 
 
 def _session() -> SessionRecord:
@@ -72,7 +74,7 @@ def _binding_snapshot_payload() -> dict[str, object]:
     snapshot = AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -90,24 +92,30 @@ def test_current_generic_dataclass_round_trip() -> None:
     assert decode_domain(encoded, SessionRecord) == cursor
 
 
-def test_persisted_generic_writer_keeps_schema_one() -> None:
+def test_persisted_generic_writer_uses_current_schema() -> None:
     session = _session()
     payload = _encode_persisted_domain(session)
     assert payload["schema"] == 1
-    assert _decode_enveloped_domain(
-        _envelope(payload),
-        SessionRecord,
-    ) == session
+    assert (
+        _decode_enveloped_domain(
+            _envelope(payload),
+            SessionRecord,
+        )
+        == session
+    )
 
 
 def test_context_projection_persisted_writer_round_trips() -> None:
     projection = ContextProjection((), "d" * 64)
     payload = _encode_persisted_domain(projection)
 
-    assert _decode_enveloped_domain(
-        _envelope(payload, wire_id="context_projection"),
-        ContextProjection,
-    ) == projection
+    assert (
+        _decode_enveloped_domain(
+            _envelope(payload, wire_id="context_projection"),
+            ContextProjection,
+        )
+        == projection
+    )
 
 
 def test_context_projection_rejects_runtime_type_mismatch_at_construction() -> None:
@@ -156,10 +164,13 @@ def test_unknown_historical_field_is_ignored() -> None:
     session = _session()
     payload = copy.deepcopy(_encode_persisted_domain(session))
     payload["fields"]["removed_field"] = {"not": "decoded"}
-    assert _decode_enveloped_domain(
-        _envelope(payload),
-        SessionRecord,
-    ) == session
+    assert (
+        _decode_enveloped_domain(
+            _envelope(payload),
+            SessionRecord,
+        )
+        == session
+    )
 
 
 def test_malformed_known_field_is_integrity_error() -> None:
@@ -170,7 +181,7 @@ def test_malformed_known_field_is_integrity_error() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_generic_payload_without_or_with_schema_one_is_readable() -> None:
+def test_generic_payload_without_or_with_current_schema_is_readable() -> None:
     session = _session()
     with_schema = _envelope(_encode_persisted_domain(session))
     without_schema = copy.deepcopy(with_schema)
@@ -280,7 +291,7 @@ def test_agent_binding_snapshot_preserves_unknown_ordinary_field() -> None:
     (
         "version",
         "agent_spec",
-        "model",
+        "base_model",
         "selected",
         "subagents",
         "output_mode",
@@ -316,7 +327,7 @@ def test_low_level_record_shape_remains_strict() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_step_persistence_keeps_schema_one_and_reads_unversioned_payload() -> None:
+def test_step_persistence_reads_current_payload() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     run = RunRecord(
         run_id="run",

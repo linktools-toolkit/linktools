@@ -14,7 +14,7 @@ from linktools.ai.observe._sql_query import _base_params, _decode_measurement_ro
 from sqlalchemy import text
 from sqlalchemy.dialects import mysql
 
-from .test_metrics_sql_server_sums import _plan, _server
+from .test_metrics_sql_server_sums import _plan
 
 
 @pytest.mark.parametrize("_server", ("mysql",), indirect=True)

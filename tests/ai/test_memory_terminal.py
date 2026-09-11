@@ -27,6 +27,7 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -34,7 +35,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -74,6 +75,7 @@ async def test_in_memory_terminal_commit_validates_success_result(
             planning=False,
             thinking=False,
             binding=_binding_snapshot(),
+            **execution_owner_fields(),
         )
         identity = IdempotencyRecord(
             "tenant",

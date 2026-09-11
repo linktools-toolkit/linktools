@@ -155,7 +155,7 @@ async def test_directory_asset_backend_does_not_follow_symlinks_by_default(
 async def test_workspace_declaration_symlinks_freeze_valid_external_declarations(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path / "workspace")
+    workspace = Workspace.load(tmp_path / "workspace", workspace_id="workspace")
     storage_root = workspace.storage_root
     external = tmp_path / "shared-declarations"
     external_skill = external / "skills" / "review"

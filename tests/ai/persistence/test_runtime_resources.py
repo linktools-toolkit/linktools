@@ -94,6 +94,7 @@ def test_mixed_runtime_plan_has_explicit_routes(tmp_path) -> None:
         conversation=RuntimeStateRoute.filesystem(tmp_path / "conversation"),
         execution=RuntimeStateRoute.transient(),
         memory=RuntimeStateRoute.memory(),
+        recovery=RuntimeStateRoute.transient(),
     )
     assert plan.route(RuntimeDomain.CONVERSATION).retention.value == "durable"
     assert plan.route(RuntimeDomain.EXECUTION).retention.value == "transient"

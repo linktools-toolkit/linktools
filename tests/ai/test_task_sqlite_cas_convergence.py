@@ -3,7 +3,6 @@
 """Regression coverage for TaskGraph optimistic CAS convergence."""
 
 import asyncio
-from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,7 +27,6 @@ from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import ObjectRef, StoredPayload
 from linktools.ai.task import (
     CancelGraphRequest,
-    TaskDependencyResult,
     TaskEvent,
     TaskEventType,
     TaskGraph,
@@ -93,7 +91,7 @@ def _workspace(root: Path) -> Workspace:
     agent_path.write_bytes(
         AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
     )
-    return Workspace.load(root)
+    return Workspace.load(root, workspace_id="workspace")
 
 
 async def _provision_sqlite(path: Path) -> None:

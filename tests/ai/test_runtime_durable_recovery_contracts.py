@@ -14,7 +14,7 @@ from linktools.ai.runtime import (
     ToolEffectNotApplied,
 )
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphSnapshot, TaskGraphView, TaskNode, TaskNodeView
+from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphSnapshot, TaskNode, TaskNodeView
 
 
 def _node(
@@ -45,10 +45,10 @@ def _node(
 def test_default_output_retries_do_not_change_canonical_agent_payload() -> None:
     codec = AgentSpecCodec()
     implicit = codec.to_payload(AgentSpec("agent"))
-    explicit = codec.to_payload(AgentSpec("agent", output_retries=1))
+    explicit = codec.to_payload(AgentSpec("agent", output_retries=3))
 
     assert implicit == explicit
-    assert "output_retries" not in implicit
+    assert implicit["output_retries"] == 3
     assert codec.to_payload(AgentSpec("agent", output_retries=0))["output_retries"] == 0
 
 

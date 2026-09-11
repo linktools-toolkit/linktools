@@ -18,10 +18,19 @@ from ._root import (
     trusted_workspace_principal,
     normalize_workspace_path,
 )
-from ._sandbox import DisabledSandbox, Sandbox, SandboxSession
+from ._local_sandbox import LocalSandbox
+from ._bubblewrap import BubblewrapSandbox
+from ._sandbox import (
+    DisabledSandbox,
+    Sandbox,
+    SandboxResource,
+    SandboxSession,
+    normalize_workspace_path as normalize_workspace_input_path,
+)
 
 __all__ = [
     "DisabledSandbox",
+    "BubblewrapSandbox",
     "LocalRepositoryInstructionResolver",
     "LocalRuleCatalog",
     "PermissionDecision",
@@ -29,11 +38,14 @@ __all__ = [
     "RepositoryInstructionResolver",
     "RepositoryInstructions",
     "Sandbox",
+    "SandboxResource",
     "SandboxSession",
+    "LocalSandbox",
     "ToolPermissionRule",
     "Workspace",
     "WorkspacePolicy",
     "WorkspaceToolPermissionPolicy",
+    "normalize_workspace_input_path",
     "normalize_workspace_path",
     "trusted_workspace_principal",
 ]

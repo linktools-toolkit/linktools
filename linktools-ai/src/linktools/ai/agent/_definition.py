@@ -42,7 +42,9 @@ class AgentDefinition:
         for expected_kind, values in groups:
             previous: str | None = None
             for value in values:
-                if value.kind != expected_kind or (previous is not None and value.id < previous):
+                if value.kind != expected_kind:
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                if expected_kind != "capability" and previous is not None and value.id < previous:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 identity = (value.kind, value.id)
                 if identity in identities:
@@ -59,14 +61,6 @@ class AgentDefinition:
             for value in self.selected_skills
             if isinstance(value.value, SkillDefinition)
         )
-
-    @property
-    def preloaded_skill_definitions(self) -> "tuple[SkillDefinition, ...]":
-        by_id = {definition.spec.id: definition for definition in self.skill_definitions}
-        try:
-            return tuple(by_id[skill_id] for skill_id in self.spec.preload_skills)
-        except KeyError as error:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
 
     @property
     def mcp_servers(self) -> "tuple[MCPServerSpec, ...]":

@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace tool semantics and Sandbox-backed runtime adaptation."""
+"""Adapt one opened workspace session to Pydantic AI tools."""
 
 import asyncio
-import os
-import stat
-import sys
-from collections.abc import Mapping, Sequence
-from contextlib import AsyncExitStack
+from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from linktools.core import environ
 from pydantic_ai import Tool
-from pydantic_ai.capabilities import AbstractCapability, Toolset
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai_harness.filesystem import FileSystem
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 from ..errors import AIError, ErrorCode
 from ..workspace import (
+    LocalSandbox,
     Sandbox,
     SandboxSession,
     Workspace,
@@ -31,12 +27,6 @@ from ._group import (
     capability_fingerprint,
     contribution_semantic_contract,
 )
-
-if TYPE_CHECKING:
-    from pydantic_ai import RunContext as PydanticRunContext
-    from pydantic_ai.toolsets import ToolsetTool
-    from pydantic_ai_harness.filesystem import FileSystemToolset
-    from pydantic_ai_harness.shell import ShellToolset
 
 _BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "create_directory",
@@ -67,349 +57,151 @@ WORKSPACE_SHELL_TOOL_NAMES = (
     "start_command",
     "stop_command",
 )
-_LEGACY_WORKSPACE_TOOL_NAMES = (
-    *_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES,
+_WORKSPACE_TOOL_NAMES = (
+    *WORKSPACE_FILESYSTEM_TOOL_NAMES,
     *WORKSPACE_SHELL_TOOL_NAMES,
 )
-_WORKSPACE_TOOL_NAMES = (*WORKSPACE_FILESYSTEM_TOOL_NAMES, *WORKSPACE_SHELL_TOOL_NAMES)
+_WORKSPACE_TOOL_CLASSES = {
+    **{
+        name: "filesystem.read"
+        for name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
+    },
+    **{
+        name: "filesystem.write"
+        for name in WORKSPACE_FILESYSTEM_TOOL_NAMES
+        if name not in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
+    },
+    **{name: "shell" for name in WORKSPACE_SHELL_TOOL_NAMES},
+}
 _WORKSPACE_METADATA_KEY = "linktools.ai.workspace_tool_class"
 _WORKSPACE_PATH_FIELDS_KEY = "linktools.ai.workspace_path_fields"
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
+_MODEL_CORRECTABLE_ERRORS = {
+    ErrorCode.REQUEST_FIELD_INVALID,
+    ErrorCode.STORAGE_NOT_FOUND,
+    ErrorCode.STORAGE_CONFLICT,
+    ErrorCode.AUTHORIZATION_DENIED,
+}
+_MODEL_ERROR_MESSAGES = {
+    ErrorCode.REQUEST_FIELD_INVALID: (
+        "The workspace tool arguments or target are invalid. Correct them and retry."
+    ),
+    ErrorCode.STORAGE_NOT_FOUND: (
+        "The requested workspace path does not exist, or its parent directory is missing. "
+        "Correct the path and retry."
+    ),
+    ErrorCode.STORAGE_CONFLICT: (
+        "The workspace changed since it was read. Read the target again and retry with "
+        "the current hash."
+    ),
+    ErrorCode.AUTHORIZATION_DENIED: (
+        "The requested workspace path or command is not allowed. Choose an allowed target "
+        "or command and retry."
+    ),
+}
 _logger = environ.get_logger("ai.capability.workspace")
 
 
-class _LocalSandbox:
-    def __init__(self, root: Path) -> None:
-        self._root = root
-
-    async def open(self) -> SandboxSession:
-        return _LocalSandboxSession(self._root)
-
-    async def _open_for_run(
-        self,
-        ctx: "PydanticRunContext[AgentContext[object]]",
-    ) -> SandboxSession:
-        session = _LocalSandboxSession(self._root)
-        await session._bind_run(ctx)
-        return session
-
-
-class _LocalSandboxSession:
-    def __init__(self, root: Path) -> None:
-        self._root = root.resolve()
-        self._filesystem = cast(
-            "FileSystemToolset[AgentContext[object]]",
-            FileSystem[AgentContext[object]](root_dir=root).get_toolset(),
-        )
-        self._shell = cast(
-            "ShellToolset[AgentContext[object]]",
-            Shell[AgentContext[object]](
-                cwd=root,
-                denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-            ).get_toolset(),
-        )
-        self._shell_context: "PydanticRunContext[AgentContext[object]] | None" = None
-        self._shell_tools: "dict[str, ToolsetTool[AgentContext[object]]]" = {}
-        self._stack: AsyncExitStack | None = None
-
-    async def _bind_run(
-        self,
-        ctx: "PydanticRunContext[AgentContext[object]]",
-    ) -> None:
-        stack = AsyncExitStack()
-        try:
-            filesystem = cast(
-                "FileSystemToolset[AgentContext[object]]",
-                await self._filesystem.for_run(ctx),
-            )
-            self._filesystem = cast(
-                "FileSystemToolset[AgentContext[object]]",
-                await stack.enter_async_context(filesystem),
-            )
-            shell = cast(
-                "ShellToolset[AgentContext[object]]",
-                await self._shell.for_run(ctx),
-            )
-            self._shell = cast(
-                "ShellToolset[AgentContext[object]]",
-                await stack.enter_async_context(shell),
-            )
-            self._shell_context = ctx
-            self._shell_tools = await self._shell.get_tools(ctx)
-        except BaseException:
-            await stack.__aexit__(*sys.exc_info())
-            raise
-        self._stack = stack
-
-    async def _call_shell(self, name: str, args: dict[str, Any]) -> str:
-        ctx = cast(
-            "PydanticRunContext[AgentContext[object]]",
-            self._shell_context,
-        )
-        result = await self._shell.call_tool(
-            name,
-            args,
-            ctx,
-            self._shell_tools[name],
-        )
-        return cast(str, result)
-
-    async def canonicalize_path(self, path: str) -> str:
-        if not isinstance(path, str) or not path or "\x00" in path:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        root = os.fspath(self._root)
-        candidate = os.path.abspath(
-            path if os.path.isabs(path) else os.path.join(root, path)
-        )
-        try:
-            relative = os.path.relpath(candidate, root)
-            if relative == os.pardir or relative.startswith(os.pardir + os.sep):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            return normalize_workspace_path(
-                "." if relative == os.curdir else Path(relative).as_posix()
-            )
-        except (AIError, ValueError, OSError) as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-
-    async def read_bytes(
-        self,
-        path: str,
-        *,
-        max_bytes: "int | None" = None,
-    ) -> bytes:
-        if max_bytes is not None and (
-            isinstance(max_bytes, bool)
-            or not isinstance(max_bytes, int)
-            or max_bytes < 0
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        try:
-            relative = normalize_workspace_path(path)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-        current = self._root
-        try:
-            for part in Path(relative).parts:
-                if part == ".":
-                    continue
-                current = current / part
-                info = current.lstat()
-                if stat.S_ISLNK(info.st_mode):
-                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            resolved = current
-            info = resolved.stat()
-            if not stat.S_ISREG(info.st_mode):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            if max_bytes is not None and info.st_size > max_bytes:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            return resolved.read_bytes()
-        except AIError:
-            raise
-        except (FileNotFoundError, OSError, ValueError) as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-
-    async def read_file(
-        self,
-        path: str,
-        *,
-        offset: int = 0,
-        limit: "int | None" = None,
-    ) -> str:
-        return await self._filesystem.read_file(path, offset=offset, limit=limit)
-
-    async def write_file(
-        self,
-        path: str,
-        content: str,
-        *,
-        expected_hash: "str | None" = None,
-    ) -> str:
-        return await self._filesystem.write_file(path, content, expected_hash=expected_hash)
-
-    async def edit_file(
-        self,
-        path: str,
-        old_text: str,
-        new_text: str,
-        *,
-        expected_hash: "str | None" = None,
-    ) -> str:
-        return await self._filesystem.edit_file(
-            path,
-            old_text,
-            new_text,
-            expected_hash=expected_hash,
-        )
-
-    async def list_directory(self, path: str = ".") -> str:
-        return await self._filesystem.list_directory(path)
-
-    async def search_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-        include_glob: "str | None" = None,
-    ) -> str:
-        return await self._filesystem.search_files(
-            pattern,
-            path=path,
-            include_glob=include_glob,
-        )
-
-    async def find_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-    ) -> str:
-        return await self._filesystem.find_files(pattern, path=path)
-
-    async def create_directory(self, path: str) -> str:
-        return await self._filesystem.create_directory(path)
-
-    async def file_info(self, path: str) -> str:
-        return await self._filesystem.file_info(path)
-
-    async def run_command(
-        self,
-        command: str,
-        *,
-        timeout_seconds: "float | None" = None,
-    ) -> str:
-        return await self._call_shell(
-            "run_command",
-            {"command": command, "timeout_seconds": timeout_seconds},
-        )
-
-    async def start_command(self, command: str) -> str:
-        return await self._call_shell("start_command", {"command": command})
-
-    async def check_command(self, command_id: str) -> str:
-        return await self._call_shell("check_command", {"command_id": command_id})
-
-    async def stop_command(self, command_id: str) -> str:
-        return await self._call_shell("stop_command", {"command_id": command_id})
-
-    async def close(self) -> None:
-        stack = self._stack
-        self._stack = None
-        if stack is None:
-            await self._shell.__aexit__(None, None, None)
-            return
-        await stack.aclose()
-
-
 class WorkspaceAccess:
-    """Own one SandboxSession and expose the public byte-read boundary."""
+    """Own one lazy SandboxSession for durable path and byte access."""
 
     def __init__(
         self,
         sandbox: Sandbox,
         *,
-        run_context: "PydanticRunContext[AgentContext[object]] | None" = None,
-        session: "SandboxSession | None" = None,
+        root: Path,
+        session: SandboxSession | None = None,
     ) -> None:
         self._sandbox = sandbox
-        self._run_context = run_context
+        self._root = root
         self._session = session
         self._lock = asyncio.Lock()
         self._closed = False
 
     @classmethod
     def for_workspace(cls, workspace: Workspace) -> "WorkspaceAccess":
-        sandbox = (
-            workspace.sandbox
-            if workspace.sandbox is not None
-            else _LocalSandbox(workspace.root)
-        )
-        return cls(sandbox)
+        sandbox = workspace.sandbox if workspace.sandbox is not None else LocalSandbox()
+        return cls(sandbox, root=workspace.root)
 
     async def _ensure_session(self) -> SandboxSession:
         async with self._lock:
             if self._closed:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            session = self._session
-            if session is None:
-                if isinstance(self._sandbox, _LocalSandbox) and self._run_context is not None:
-                    session = await self._sandbox._open_for_run(self._run_context)
-                else:
-                    session = await self._sandbox.open()
-                self._session = session
-            return session
+            if self._session is None:
+                self._session = await self._sandbox.open(root=self._root)
+            return self._session
 
     async def canonicalize_path(self, path: str) -> str:
         session = await self._ensure_session()
-        try:
-            return normalize_workspace_path(await session.canonicalize_path(path))
-        except AttributeError as error:
-            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+        return normalize_workspace_path(await session.canonicalize_path(path))
 
     async def read_bytes(
         self,
         path: str,
         *,
-        max_bytes: "int | None" = None,
+        max_bytes: int | None = None,
     ) -> bytes:
         session = await self._ensure_session()
-        try:
-            return await session.read_bytes(path, max_bytes=max_bytes)
-        except AttributeError as error:
-            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+        return await session.read_bytes(path, max_bytes=max_bytes)
 
     async def close(self) -> None:
-        await self._close(None)
-
-    async def _session_for_tools(self) -> SandboxSession:
-        return await self._ensure_session()
-
-    async def _close(self, primary_error: "BaseException | None") -> None:
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
             session = self._session
             self._session = None
-        if session is None:
-            return
-        close_task = asyncio.create_task(session.close(), name="workspace-sandbox-close")
-        try:
-            await asyncio.shield(close_task)
-        except asyncio.CancelledError:
-            if close_task.cancelled():
-                if primary_error is None:
-                    raise
-                _logger.exception("workspace sandbox cleanup failed after run failure")
-                return
-            try:
-                await close_task
-            except BaseException:  # noqa: BLE001
-                _logger.exception("workspace sandbox cleanup failed during cancellation")
-            raise
-        except BaseException:  # noqa: BLE001
-            if primary_error is None:
-                raise
-            _logger.exception("workspace sandbox cleanup failed after run failure")
+        if session is not None:
+            await session.close()
+
+
+def workspace_tool_path_fields(tool: Tool[Any]) -> tuple[str, ...]:
+    metadata = tool.tool_def.metadata or {}
+    return workspace_tool_path_fields_from_metadata(metadata)
+
+
+def workspace_tool_path_fields_from_metadata(
+    metadata: Mapping[str, object] | None,
+) -> tuple[str, ...]:
+    value = None if metadata is None else metadata.get(_WORKSPACE_PATH_FIELDS_KEY)
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
+
+
+def workspace_tool_path_metadata(fields: Sequence[str]) -> dict[str, object]:
+    values = tuple(fields)
+    if not values or any(not isinstance(field, str) or not field for field in values):
+        raise ValueError("workspace path fields must be non-empty strings")
+    if len(values) != len(set(values)):
+        raise ValueError("workspace path fields must be unique")
+    return {_WORKSPACE_PATH_FIELDS_KEY: list(values)}
 
 
 class _WorkspaceToolSurface:
-    def __init__(
-        self,
-        access: "WorkspaceAccess | None",
-    ) -> None:
-        self._access = access
+    def __init__(self, session: SandboxSession | None) -> None:
+        self._session = session
 
-    async def _require_session(self) -> SandboxSession:
-        if self._access is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await self._access._session_for_tools()
+    def _require_session(self) -> SandboxSession:
+        if self._session is None:
+            raise RuntimeError("workspace sandbox session is not open")
+        return self._session
+
+    @staticmethod
+    async def _call(operation: Awaitable[str]) -> str:
+        try:
+            return await operation
+        except AIError as error:
+            if error.code not in _MODEL_CORRECTABLE_ERRORS:
+                raise
+            raise ModelRetry(_MODEL_ERROR_MESSAGES[error.code]) from error
 
     async def read_file(
         self,
         path: str,
         *,
         offset: int = 0,
-        limit: "int | None" = None,
+        limit: int | None = None,
     ) -> str:
         """Read a text file with line numbers.
 
@@ -421,15 +213,16 @@ class _WorkspaceToolSurface:
         Returns:
             File content with line numbers, plus metadata header.
         """
-        session = await self._require_session()
-        return await session.read_file(path, offset=offset, limit=limit)
+        return await self._call(
+            self._require_session().read_file(path, offset=offset, limit=limit)
+        )
 
     async def write_file(
         self,
         path: str,
         content: str,
         *,
-        expected_hash: "str | None" = None,
+        expected_hash: str | None = None,
     ) -> str:
         """Create or overwrite a file with conflict detection.
 
@@ -442,8 +235,13 @@ class _WorkspaceToolSurface:
         Returns:
             Confirmation message with new hash.
         """
-        session = await self._require_session()
-        return await session.write_file(path, content, expected_hash=expected_hash)
+        return await self._call(
+            self._require_session().write_file(
+                path,
+                content,
+                expected_hash=expected_hash,
+            )
+        )
 
     async def edit_file(
         self,
@@ -451,7 +249,7 @@ class _WorkspaceToolSurface:
         old_text: str,
         new_text: str,
         *,
-        expected_hash: "str | None" = None,
+        expected_hash: str | None = None,
     ) -> str:
         """Edit a file by exact string replacement with conflict detection.
 
@@ -468,12 +266,13 @@ class _WorkspaceToolSurface:
         Returns:
             Summary with new hash for subsequent operations.
         """
-        session = await self._require_session()
-        return await session.edit_file(
-            path,
-            old_text,
-            new_text,
-            expected_hash=expected_hash,
+        return await self._call(
+            self._require_session().edit_file(
+                path,
+                old_text,
+                new_text,
+                expected_hash=expected_hash,
+            )
         )
 
     async def list_directory(self, path: str = ".") -> str:
@@ -485,15 +284,14 @@ class _WorkspaceToolSurface:
         Returns:
             A newline-separated listing with type indicators and sizes.
         """
-        session = await self._require_session()
-        return await session.list_directory(path)
+        return await self._call(self._require_session().list_directory(path))
 
     async def search_files(
         self,
         pattern: str,
         *,
         path: str = ".",
-        include_glob: "str | None" = None,
+        include_glob: str | None = None,
     ) -> str:
         """Search file contents using a regular expression.
 
@@ -505,19 +303,15 @@ class _WorkspaceToolSurface:
         Returns:
             str: Matching lines formatted as file:line_number:text.
         """
-        session = await self._require_session()
-        return await session.search_files(
-            pattern,
-            path=path,
-            include_glob=include_glob,
+        return await self._call(
+            self._require_session().search_files(
+                pattern,
+                path=path,
+                include_glob=include_glob,
+            )
         )
 
-    async def find_files(
-        self,
-        pattern: str,
-        *,
-        path: str = ".",
-    ) -> str:
+    async def find_files(self, pattern: str, *, path: str = ".") -> str:
         """Find files by glob pattern (name matching, not content search).
 
         Args:
@@ -528,8 +322,9 @@ class _WorkspaceToolSurface:
         Returns:
             Newline-separated list of matching file paths relative to root.
         """
-        session = await self._require_session()
-        return await session.find_files(pattern, path=path)
+        return await self._call(
+            self._require_session().find_files(pattern, path=path)
+        )
 
     async def create_directory(self, path: str) -> str:
         """Create a directory and any missing parents.
@@ -540,8 +335,7 @@ class _WorkspaceToolSurface:
         Returns:
             Confirmation message.
         """
-        session = await self._require_session()
-        return await session.create_directory(path)
+        return await self._call(self._require_session().create_directory(path))
 
     async def file_info(self, path: str) -> str:
         """Get metadata about a file or directory.
@@ -552,14 +346,13 @@ class _WorkspaceToolSurface:
         Returns:
             Formatted metadata including size, type, and permissions.
         """
-        session = await self._require_session()
-        return await session.file_info(path)
+        return await self._call(self._require_session().file_info(path))
 
     async def run_command(
         self,
         command: str,
         *,
-        timeout_seconds: "float | None" = None,
+        timeout_seconds: float | None = None,
     ) -> str:
         """Execute a shell command and return its output.
 
@@ -570,8 +363,12 @@ class _WorkspaceToolSurface:
         Returns:
             Labeled stdout/stderr output with exit code on non-zero exit.
         """
-        session = await self._require_session()
-        return await session.run_command(command, timeout_seconds=timeout_seconds)
+        return await self._call(
+            self._require_session().run_command(
+                command,
+                timeout_seconds=timeout_seconds,
+            )
+        )
 
     async def start_command(self, command: str) -> str:
         """Start a long-running command in the background (e.g. a server or watcher).
@@ -585,8 +382,7 @@ class _WorkspaceToolSurface:
         Returns:
             A message containing the unique command ID for later check/stop calls.
         """
-        session = await self._require_session()
-        return await session.start_command(command)
+        return await self._call(self._require_session().start_command(command))
 
     async def check_command(self, command_id: str) -> str:
         """Check the status and recent output of a background command.
@@ -597,8 +393,7 @@ class _WorkspaceToolSurface:
         Returns:
             Status and recent output of the background command.
         """
-        session = await self._require_session()
-        return await session.check_command(command_id)
+        return await self._call(self._require_session().check_command(command_id))
 
     async def stop_command(self, command_id: str) -> str:
         """Stop a background command and return its final output.
@@ -609,62 +404,43 @@ class _WorkspaceToolSurface:
         Returns:
             Final output and exit status of the stopped command.
         """
-        session = await self._require_session()
-        return await session.stop_command(command_id)
+        return await self._call(self._require_session().stop_command(command_id))
+
 
 class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
     def __init__(
         self,
-        sandbox: Sandbox,
         selected_tool_names: tuple[str, ...],
-        *,
-        access: "WorkspaceAccess | None" = None,
+        session: SandboxSession | None,
     ) -> None:
-        super().__init__()
-        self._sandbox = sandbox
-        self._selected_tool_names = selected_tool_names
-        self._access = access
-        surface = _WorkspaceToolSurface(access)
+        super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
+        surface = _WorkspaceToolSurface(session)
         for name in selected_tool_names:
             self.add_tool(_workspace_tool(surface, name))
 
-    async def for_run(
-        self,
-        ctx: "PydanticRunContext[AgentContext[object]]",
-    ) -> "_WorkspaceSandboxToolset":
-        session = (
-            await self._sandbox._open_for_run(ctx)
-            if isinstance(self._sandbox, _LocalSandbox)
-            else await self._sandbox.open()
-        )
-        access = WorkspaceAccess(self._sandbox, session=session)
-        return _WorkspaceSandboxToolset(
-            self._sandbox,
-            self._selected_tool_names,
-            access=access,
-        )
 
-    async def __aexit__(self, *args: Any) -> "bool | None":
-        access = self._access
-        if access is None:
-            return None
-        primary_error = (
-            args[1]
-            if len(args) > 1 and isinstance(args[1], BaseException)
-            else None
-        )
-        await access._close(primary_error)
-        return None
+class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
+    def __init__(
+        self,
+        selected_tool_names: tuple[str, ...],
+        session: SandboxSession | None,
+    ) -> None:
+        self.id = _WORKSPACE_SANDBOX_CAPABILITY_ID
+        self._selected_tool_names = selected_tool_names
+        self._session = session
+
+    def get_toolset(self) -> _WorkspaceSandboxToolset:
+        return _WorkspaceSandboxToolset(self._selected_tool_names, self._session)
 
 
 def workspace_tool_contributions(
     workspace: Workspace,
-) -> "tuple[CapabilityContribution[object], ...]":
-    """Return LinkTools-owned stable workspace tool compiler candidates."""
+) -> tuple[CapabilityContribution[object], ...]:
+    """Return the stable workspace tool definitions used by the compiler."""
     del workspace
     surface = _WorkspaceToolSurface(None)
-    result = []
-    for name in _LEGACY_WORKSPACE_TOOL_NAMES:
+    result: list[CapabilityContribution[object]] = []
+    for name in _WORKSPACE_TOOL_NAMES:
         tool = _workspace_tool(surface, name)
         semantic = contribution_semantic_contract("tool", name, tool)
         result.append(
@@ -681,60 +457,41 @@ def workspace_tool_contributions(
 def workspace_capabilities(
     workspace: Workspace,
     selected_tool_names: Sequence[str],
-) -> "tuple[AbstractCapability[AgentContext[object]], ...]":
-    """Materialize selected workspace tools through one per-run SandboxSession."""
+    *,
+    session: SandboxSession | None = None,
+) -> tuple[AbstractCapability[AgentContext[object]], ...]:
+    """Adapt selected tools to a caller-owned, already-opened session."""
+    del workspace
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
     if unknown:
         raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
     if not selected:
         return ()
+    if session is None:
+        raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
     ordered = tuple(name for name in _WORKSPACE_TOOL_NAMES if name in selected)
-    sandbox = (
-        workspace.sandbox
-        if workspace.sandbox is not None
-        else _LocalSandbox(workspace.root)
-    )
-    toolset = _WorkspaceSandboxToolset(
-        sandbox,
+    _logger.debug(
+        "workspace capability materialized: tools=%s session_open=%s",
         ordered,
+        session is not None,
     )
-    return (Toolset(toolset, id=_WORKSPACE_SANDBOX_CAPABILITY_ID),)
+    return (_WorkspaceCapability(ordered, session),)
 
 
-def workspace_tool_class(tool: Tool) -> "str | None":
+def workspace_tool_class(tool: Tool[Any]) -> str | None:
+    if not isinstance(tool, Tool):
+        return None
+    expected = _WORKSPACE_TOOL_CLASSES.get(tool.name)
+    if expected is None:
+        return None
     metadata = tool.tool_def.metadata or {}
-    value = metadata.get(_WORKSPACE_METADATA_KEY)
-    return value if isinstance(value, str) else None
+    if metadata.get(_WORKSPACE_METADATA_KEY) != expected:
+        return None
+    return expected
 
 
-def workspace_tool_path_fields(tool: Tool) -> tuple[str, ...]:
-    """Return the trusted Workspace path fields carried by a built-in tool."""
-    metadata = tool.tool_def.metadata or {}
-    return workspace_tool_path_fields_from_metadata(metadata)
-
-
-def workspace_tool_path_fields_from_metadata(
-    metadata: Mapping[str, object] | None,
-) -> tuple[str, ...]:
-    """Read capability-owned trusted path fields from a tool definition."""
-    value = {} if metadata is None else metadata.get(_WORKSPACE_PATH_FIELDS_KEY)
-    if not isinstance(value, list | tuple):
-        return ()
-    return tuple(item for item in value if isinstance(item, str))
-
-
-def workspace_tool_path_metadata(fields: Sequence[str]) -> dict[str, object]:
-    """Create metadata for a capability-owned trusted path surface."""
-    values = tuple(fields)
-    if not values or any(not isinstance(field, str) or not field for field in values):
-        raise ValueError("workspace path fields must be non-empty strings")
-    if len(values) != len(set(values)):
-        raise ValueError("workspace path fields must be unique")
-    return {_WORKSPACE_PATH_FIELDS_KEY: list(values)}
-
-
-def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool:
+def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool[Any]:
     tool_class = (
         "filesystem.read"
         if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
@@ -742,11 +499,15 @@ def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool:
         if name in WORKSPACE_FILESYSTEM_TOOL_NAMES
         else "shell"
     )
-    function = getattr(surface, name)
     metadata: dict[str, object] = {_WORKSPACE_METADATA_KEY: tool_class}
     if tool_class in {"filesystem.read", "filesystem.write"}:
         metadata.update(workspace_tool_path_metadata(("path",)))
-    return Tool(function, takes_ctx=False, name=name, metadata=metadata)
+    return Tool(
+        cast(Any, getattr(surface, name)),
+        takes_ctx=False,
+        name=name,
+        metadata=metadata,
+    )
 
 
 __all__ = [

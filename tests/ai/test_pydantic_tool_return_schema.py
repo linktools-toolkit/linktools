@@ -5,14 +5,12 @@
 import warnings
 
 from linktools.ai.capability import (
-    SkillCapability,
+    LinkToolsSkills,
+    LinkToolsSubagents,
     SkillDefinition,
     SkillSourceRegistry,
-    SubagentCapability,
 )
 from linktools.ai.core import JsonValue
-from linktools.ai.runtime._skill_adapter import _PydanticSkillCapability
-from linktools.ai.runtime._subagent_adapter import _PydanticSubagentCapability
 from linktools.ai.spec import SkillSpec, SubagentRef
 
 
@@ -30,15 +28,11 @@ def test_pydantic_capability_tool_return_schemas_are_constrained() -> None:
             "output": {"value": True},
         }
 
-    skill = _PydanticSkillCapability(
-        SkillCapability(
-            (SkillDefinition(SkillSpec("skill", content="instructions")),),
-            SkillSourceRegistry(),
-        )
+    skill = LinkToolsSkills(
+        (SkillDefinition(SkillSpec("skill", content="instructions")),),
+        SkillSourceRegistry(),
     )
-    subagent = _PydanticSubagentCapability(
-        SubagentCapability((SubagentRef("agent", "child"),), delegate)
-    )
+    subagent = LinkToolsSubagents((SubagentRef("agent", "child"),), delegate)
 
     with warnings.catch_warnings():
         warnings.filterwarnings(

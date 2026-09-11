@@ -654,6 +654,10 @@ def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
         return False
     if query.kind is not None and record.kind != query.kind:
         return False
+    if query.sort_key_prefix is not None and not record.sort_key.startswith(
+        query.sort_key_prefix
+    ):
+        return False
     return query.states is None or record.state in query.states
 
 

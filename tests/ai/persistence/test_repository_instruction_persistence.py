@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""V1 persistence regressions for repository instruction and approval pins."""
+"""V1 persistence regressions for instruction and deferred-work pins."""
 
 from copy import deepcopy
 from datetime import datetime, timezone
 
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
-from linktools.ai.runtime.state import (
-    ExecutionRecord,
-    PendingApprovalContinuation,
-    RecoveryCheckpointState,
-    RecoveryHandoffPhase,
-    RecoveryStateRecord,
-    RuntimeDomain,
-    RuntimePayloadRef,
-    iter_runtime_object_refs,
-)
+from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, canonical_sha256
+from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import (
-    RecoveryExecutionInput,
-    RecoveryIdempotencyInput,
+    ExecutionRecord,
+    PendingDeferredCall,
+    PendingToolContinuation,
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
+    RuntimePayloadRef,
     RuntimeStorageContract,
     StoredUserInput,
 )
+from linktools.ai.runtime.state._codec import iter_runtime_object_refs
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
 
@@ -34,7 +31,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"route_id": "model", "model_identity": "test:model"},
+        base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -78,107 +75,90 @@ def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRe
         planning=False,
         thinking=False,
         binding=binding,
-        repository_instructions=repository_instructions,
-    )
-
-
-def _recovery(repository_instructions: RuntimePayloadRef | None) -> RecoveryExecutionInput:
-    binding = _binding()
-    return RecoveryExecutionInput(
-        user_input=StoredUserInput(1, "text", StoredPayload.inline_text("prompt")),
         principal_id="principal",
         principal_kind="service",
-        session_id=None,
-        memory_scope=None,
-        binding_digest=binding.binding_digest,
-        lineage_kind=ExecutionLineageKind.RUN.value,
-        parent_execution_id=None,
-        root_execution_id="execution",
-        source_execution_id=None,
-        base_execution_id=None,
-        conversation_step_run_id=None,
-        idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
-        mode="run",
-        planning=False,
-        thinking=False,
-        binding=binding,
+        stored_user_input=StoredUserInput(
+            1,
+            "text",
+            StoredPayload.inline_text("prompt"),
+        ),
         storage_contract=RuntimeStorageContract(1, (), (), ()),
         repository_instructions=repository_instructions,
     )
 
 
-def test_older_v1_execution_and_recovery_payloads_default_instruction_pin_to_none() -> None:
-    execution_wire = deepcopy(encode_domain(_execution(None)))
-    recovery_wire = deepcopy(encode_domain(_recovery(None)))
-    assert isinstance(execution_wire, dict)
-    assert isinstance(recovery_wire, dict)
-    execution_wire["fields"].pop("repository_instructions", None)
-    recovery_wire["fields"].pop("repository_instructions", None)
-
-    execution = decode_domain(execution_wire, ExecutionRecord)
-    recovery = decode_domain(recovery_wire, RecoveryExecutionInput)
-    assert execution.repository_instructions is None
-    assert recovery.repository_instructions is None
-
-
-def test_instruction_aware_execution_and_recovery_remain_v1_and_round_trip_exact_pin() -> None:
-    reference = _instruction_ref()
-    execution = _execution(reference)
-    recovery = _recovery(reference)
-    execution_wire = encode_domain(execution)
-    recovery_wire = encode_domain(recovery)
-
-    assert isinstance(execution_wire, dict)
-    assert isinstance(recovery_wire, dict)
-    assert execution_wire["$dataclass"] == "execution_record"
-    assert recovery_wire["$dataclass"] == "recovery_execution_input"
-    decoded_execution = decode_domain(execution_wire, ExecutionRecord)
-    decoded_recovery = decode_domain(recovery_wire, RecoveryExecutionInput)
-    assert decoded_execution.repository_instructions == reference
-    assert decoded_recovery.repository_instructions == reference
-    assert decoded_execution.repository_instructions == decoded_recovery.repository_instructions
+def _continuation() -> PendingToolContinuation:
+    arguments = StoredPayload.inline_json({"path": "file.txt"})
+    call = PendingDeferredCall(
+        "call-1",
+        "read_file",
+        arguments,
+        arguments.digest,
+        {"kind": "workspace_approval"},
+    )
+    return PendingToolContinuation(
+        "step-1",
+        canonical_sha256({"call_id": call.tool_call_id}),
+        approvals=(call,),
+    )
 
 
-def test_older_v1_recovery_state_defaults_pending_approval_to_none() -> None:
+def _checkpoint(pending_tools: PendingToolContinuation | None) -> RecoveryCheckpoint:
     now = datetime.now(timezone.utc)
-    current = RecoveryStateRecord(
+    waiting = pending_tools is not None
+    return RecoveryCheckpoint(
         execution_id="execution",
         tenant_id="tenant",
-        step_run_id="run-1",
-        agent_run_sequence=1,
-        state=RecoveryCheckpointState.ACTIVE,
-        handoff_phase=RecoveryHandoffPhase.NONE,
-        terminal_handoff=None,
-        pending_operation_id=None,
+        step_run_id="step-1" if waiting else None,
+        agent_run_sequence=1 if waiting else 0,
+        state=(
+            RecoveryCheckpointState.WAITING
+            if waiting
+            else RecoveryCheckpointState.ADMITTED
+        ),
         revision=1,
+        created_at=now,
         updated_at=now,
-    )
-    wire = deepcopy(encode_domain(current))
-    assert isinstance(wire, dict)
-    wire["fields"].pop("pending_approval", None)
-    assert decode_domain(wire, RecoveryStateRecord).pending_approval is None
-
-
-def test_pending_approval_recovery_state_round_trips_without_schema_version_bump() -> None:
-    now = datetime.now(timezone.utc)
-    continuation = PendingApprovalContinuation("c" * 64, "run-1")
-    current = RecoveryStateRecord(
-        execution_id="execution",
-        tenant_id="tenant",
-        step_run_id="run-1",
-        agent_run_sequence=1,
-        state=RecoveryCheckpointState.WAITING,
+        pending_tools=pending_tools,
         handoff_phase=RecoveryHandoffPhase.NONE,
-        terminal_handoff=None,
-        pending_operation_id=None,
-        revision=2,
-        updated_at=now,
-        pending_approval=continuation,
     )
-    wire = encode_domain(current)
+
+
+def test_older_v1_execution_defaults_instruction_pin_to_none() -> None:
+    wire = deepcopy(encode_domain(_execution(None)))
     assert isinstance(wire, dict)
-    assert wire["$dataclass"] == "recovery_state"
-    assert decode_domain(wire, RecoveryStateRecord) == current
+    wire["fields"].pop("repository_instructions", None)
+
+    decoded = decode_domain(wire, ExecutionRecord)
+    assert decoded.repository_instructions is None
+
+
+def test_instruction_aware_execution_round_trips_exact_pin() -> None:
+    reference = _instruction_ref()
+    wire = encode_domain(_execution(reference))
+
+    assert isinstance(wire, dict)
+    assert wire["$dataclass"] == "execution_record"
+    decoded = decode_domain(wire, ExecutionRecord)
+    assert decoded.repository_instructions == reference
+
+
+def test_older_v1_checkpoint_defaults_deferred_frontier_to_none() -> None:
+    wire = deepcopy(encode_domain(_checkpoint(None)))
+    assert isinstance(wire, dict)
+    wire["fields"].pop("pending_tools", None)
+
+    decoded = decode_domain(wire, RecoveryCheckpoint)
+    assert decoded.pending_tools is None
+
+
+def test_deferred_frontier_round_trips_without_schema_version_bump() -> None:
+    current = _checkpoint(_continuation())
+    wire = encode_domain(current)
+
+    assert isinstance(wire, dict)
+    assert wire["$dataclass"] == "recovery_checkpoint"
+    assert decode_domain(wire, RecoveryCheckpoint) == current
 
 
 def test_object_ref_traversal_finds_repository_instruction_object() -> None:
@@ -190,5 +170,4 @@ def test_object_ref_traversal_finds_repository_instruction_object() -> None:
             default_domain=RuntimeDomain.EXECUTION,
         )
     )
-    assert len(refs) == 1
-    assert refs[0] == (RuntimeDomain.EXECUTION, reference.payload.ref)
+    assert refs == ((RuntimeDomain.EXECUTION, reference.payload.ref),)

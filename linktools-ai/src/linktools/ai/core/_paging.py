@@ -34,13 +34,12 @@ class CursorPayload:
     expires_at: int
     include_deleted: bool = False
     history_id: "str | None" = None
-    snapshot_message_count: "int | None" = None
     next_message_index: "int | None" = None
-    next_projected_item_offset: "int | None" = None
-    emitted_item_count: "int | None" = None
-    snapshot_history_item_count: "int | None" = None
-    next_history_item_offset: "int | None" = None
-    history_view_version: "int | None" = None
+    intra_message_item_offset: "int | None" = None
+    projection_version: "int | None" = None
+    source_execution_id: "str | None" = None
+    segment_sequence: "int | None" = None
+    source_event_sequence: "int | None" = None
 
     def as_json(self) -> dict[str, JsonValue]:
         value: dict[str, JsonValue] = {
@@ -55,20 +54,18 @@ class CursorPayload:
         }
         if self.history_id is not None:
             value["history_id"] = self.history_id
-        if self.snapshot_message_count is not None:
-            value["snapshot_message_count"] = self.snapshot_message_count
         if self.next_message_index is not None:
             value["next_message_index"] = self.next_message_index
-        if self.next_projected_item_offset is not None:
-            value["next_projected_item_offset"] = self.next_projected_item_offset
-        if self.emitted_item_count is not None:
-            value["emitted_item_count"] = self.emitted_item_count
-        if self.snapshot_history_item_count is not None:
-            value["snapshot_history_item_count"] = self.snapshot_history_item_count
-        if self.next_history_item_offset is not None:
-            value["next_history_item_offset"] = self.next_history_item_offset
-        if self.history_view_version is not None:
-            value["history_view_version"] = self.history_view_version
+        if self.intra_message_item_offset is not None:
+            value["intra_message_item_offset"] = self.intra_message_item_offset
+        if self.projection_version is not None:
+            value["projection_version"] = self.projection_version
+        if self.source_execution_id is not None:
+            value["source_execution_id"] = self.source_execution_id
+        if self.segment_sequence is not None:
+            value["segment_sequence"] = self.segment_sequence
+        if self.source_event_sequence is not None:
+            value["source_event_sequence"] = self.source_event_sequence
         return value
 
 
@@ -118,13 +115,14 @@ class HmacCursorSigner:
                 int(value["expires_at"]),
                 value["include_deleted"],
                 None if value.get("history_id") is None else str(value["history_id"]),
-                _optional_nonnegative_int(value.get("snapshot_message_count")),
                 _optional_nonnegative_int(value.get("next_message_index")),
-                _optional_nonnegative_int(value.get("next_projected_item_offset")),
-                _optional_nonnegative_int(value.get("emitted_item_count")),
-                _optional_nonnegative_int(value.get("snapshot_history_item_count")),
-                _optional_nonnegative_int(value.get("next_history_item_offset")),
-                _optional_nonnegative_int(value.get("history_view_version")),
+                _optional_nonnegative_int(value.get("intra_message_item_offset")),
+                _optional_nonnegative_int(value.get("projection_version")),
+                None
+                if value.get("source_execution_id") is None
+                else str(value["source_execution_id"]),
+                _optional_nonnegative_int(value.get("segment_sequence")),
+                _optional_nonnegative_int(value.get("source_event_sequence")),
             )
             if payload.expires_at < int(time.time()):
                 raise ValueError("expired")

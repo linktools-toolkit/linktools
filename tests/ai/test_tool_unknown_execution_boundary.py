@@ -7,8 +7,7 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import _tool as tool_module
-from linktools.ai.runtime._capabilities import ToolOperationDecision
-from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.runtime.state._durability import DurableCommitResult, DurableCommitState
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 

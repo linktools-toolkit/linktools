@@ -7,6 +7,11 @@ from types import FrameType
 
 import pytest
 
+pytest_plugins = (
+    "tests.ai.test_metrics_server_read_integrity",
+    "tests.ai.test_metrics_sql_server_sums",
+)
+
 _TIMEOUT_SECONDS = 90
 
 

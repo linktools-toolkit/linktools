@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Execution input and final tool-boundary regressions."""
 
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelResponse, ToolCallPart
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.core import Principal
@@ -12,17 +16,13 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._input import ExecutionInputMaterializer
-from linktools.ai.runtime._tool import _apply_workspace_binding
-from linktools.ai.runtime._workspace_binding import WorkspaceToolCallBinder
-from linktools.ai.runtime.state import (
-    RuntimeState,
-    StoredUserInput,
-    WorkspacePathBinding,
-    WorkspaceToolCallBinding,
-    WorkspaceToolCallBindingStore,
+from linktools.ai.runtime._tool_boundary import (
+    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
 )
+from linktools.ai.runtime.state._contracts import RuntimeStorageContract
 from linktools.ai.storage import StoredPayload
-from linktools.ai.workspace import Workspace
+from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
 
 
 class _Session:
@@ -48,29 +48,14 @@ class _Sandbox:
     def __init__(self, session: _Session) -> None:
         self.session = session
 
-    async def open(self):  # type: ignore[no-untyped-def]
-        return self.session
-
-
-class _BindingStore:
-    def __init__(self) -> None:
-        self.values: dict[tuple[str, str, str], WorkspaceToolCallBinding] = {}
-
-    async def get(  # type: ignore[no-untyped-def]
+    async def open(
         self,
-        execution_id: str,
-        step_run_id: str,
-        tool_call_id: str,
-    ):
-        return self.values.get((execution_id, step_run_id, tool_call_id))
-
-    async def store(self, binding: WorkspaceToolCallBinding) -> WorkspaceToolCallBinding:
-        self.values[(
-            binding.execution_id,
-            binding.step_run_id,
-            binding.tool_call_id,
-        )] = binding
-        return binding
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> SandboxSession:
+        del root, resources
+        return self.session  # type: ignore[return-value]
 
 
 class _UnavailableAccess:
@@ -94,13 +79,14 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
 
 @pytest.mark.asyncio
 async def test_text_materialization_keeps_text_codec() -> None:
-    access = WorkspaceAccess(_Sandbox(_Session({})))  # type: ignore[arg-type]
-    materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
+    access = WorkspaceAccess(_Sandbox(_Session({})), root=Path("."))
+    materializer = ExecutionInputMaterializer(access, Workspace.load(".", workspace_id="workspace").policy)
     try:
         canonical = await materializer.materialize("plain text", ())
         stored = await materializer.store(canonical, tenant_id="tenant")
         assert canonical == "plain text"
         assert stored.codec == "text"
+        assert stored.payload == StoredPayload.inline_text("plain text")
     finally:
         await materializer.close()
 
@@ -121,137 +107,102 @@ def test_invalid_user_content_is_rejected_at_request_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execution_ingress_discards_untrusted_derived_input_state() -> None:
-    access = WorkspaceAccess(_Sandbox(_Session({})))  # type: ignore[arg-type]
-    materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
-    service = object.__new__(DefaultExecutionService)
-    service._input_materializer = materializer  # type: ignore[attr-defined]
-    request = _request()
-    object.__setattr__(
-        request,
-        "stored_user_input",
-        StoredUserInput(1, "text", StoredPayload.inline_text("forged")),
-    )
-    object.__setattr__(request, "input_intent_digest", "f" * 64)
-
-    try:
-        canonical = await service._canonicalize_request(request)
-        assert canonical.stored_user_input is None
-        assert canonical.storage_contract is None
-        assert canonical.input_intent_digest != "f" * 64
-    finally:
-        await materializer.close()
-
-
-@pytest.mark.asyncio
-async def test_execution_materialization_consumes_source_files_once() -> None:
+async def test_execution_freezes_materialized_input_once() -> None:
     session = _Session({"evidence.txt": b"evidence"})
-    access = WorkspaceAccess(_Sandbox(session))  # type: ignore[arg-type]
-    materializer = ExecutionInputMaterializer(access, Workspace.load(".").policy)
+    access = WorkspaceAccess(_Sandbox(session), root=Path("."))
+    materializer = ExecutionInputMaterializer(access, Workspace.load(".", workspace_id="workspace").policy)
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]
+    service._storage_contract_factory = (  # type: ignore[attr-defined]
+        lambda _domains: RuntimeStorageContract(1, (), (), ())
+    )
 
     try:
         canonical = await service._canonicalize_request(
             _request(files=("evidence.txt",))
         )
-        prepared = await service._materialize_request(canonical)
-        assert prepared.files == ()
-        assert prepared.stored_user_input is None
-        assert isinstance(prepared.user_prompt, tuple)
-        assert isinstance(prepared.user_prompt[-1], BinaryContent)
+        prepared = await service._freeze_input(canonical, session_id=None)
+        assert prepared.request.files == ()
+        assert prepared.stored_user_input is not None
+        assert isinstance(prepared.request.user_prompt, tuple)
         assert session.reads == ["evidence.txt"]
 
-        replay = await service._materialize_request(prepared)
-        assert replay.user_prompt == prepared.user_prompt
-        assert replay.files == ()
-        assert replay.stored_user_input is None
+        replay = await materializer.restore(prepared.stored_user_input)
+        assert replay == prepared.request.user_prompt
         assert session.reads == ["evidence.txt"]
     finally:
         await materializer.close()
 
 
-@pytest.mark.asyncio
-async def test_workspace_binding_allows_omitted_default_path() -> None:
-    store = _BindingStore()
-    binder = WorkspaceToolCallBinder(store, object())  # type: ignore[arg-type]
-    message = ModelResponse(
-        parts=[ToolCallPart("list_directory", {}, tool_call_id="call")],
-        run_id="step",
-    )
+async def _echo_path(path: str) -> str:
+    return path
 
-    await binder.bind_messages(
-        (message,),
-        execution_id="execution",
-        step_run_id="step",
-        path_fields={"list_directory": ("path",)},
-    )
 
-    binding = store.values[("execution", "step", "call")]
-    assert binding.paths == ()
-    assert binding.error_code is None
-    effective = await _apply_workspace_binding(
-        {"path": "."},
-        {},
-        ("path",),
-        binding,
+def _context() -> RunContext[None]:
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+        tool_call_id="call",
     )
-    assert effective == {"path": "."}
 
 
 @pytest.mark.asyncio
-async def test_workspace_binding_does_not_freeze_transient_sandbox_failure() -> None:
-    store = _BindingStore()
-    binder = WorkspaceToolCallBinder(store, _UnavailableAccess())  # type: ignore[arg-type]
-    message = ModelResponse(
-        parts=[
-            ToolCallPart(
-                "read_file",
-                {"path": "a.txt"},
-                tool_call_id="call",
+async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
+    session = _Session({})
+    boundary = RuntimeToolBoundaryToolset(
+        (FunctionToolset([_echo_path]),),
+        {
+            "_echo_path": ManagedToolDescriptor(
+                effect_owner="none",
+                effect="none",
+                tool_class="filesystem.read",
+                workspace_path_fields=("path",),
             )
-        ],
-        run_id="step",
+        },
+        id="workspace",
+        sandbox_session=session,  # type: ignore[arg-type]
     )
+    context = _context()
+    tools = await boundary.get_tools(context)
+    args = {"path": "file.txt"}
+
+    result = await boundary.call_tool(
+        "_echo_path",
+        args,
+        context,
+        tools["_echo_path"],
+    )
+
+    assert result == "file.txt"
+    assert args == {"path": "file.txt"}
+
+
+@pytest.mark.asyncio
+async def test_final_tool_boundary_does_not_freeze_transient_sandbox_failure() -> None:
+    boundary = RuntimeToolBoundaryToolset(
+        (FunctionToolset([_echo_path]),),
+        {
+            "_echo_path": ManagedToolDescriptor(
+                effect_owner="none",
+                effect="none",
+                tool_class="filesystem.read",
+                workspace_path_fields=("path",),
+            )
+        },
+        id="workspace",
+        sandbox_session=_UnavailableAccess(),  # type: ignore[arg-type]
+    )
+    context = _context()
+    tools = await boundary.get_tools(context)
 
     with pytest.raises(AIError) as raised:
-        await binder.bind_messages(
-            (message,),
-            execution_id="execution",
-            step_run_id="step",
-            path_fields={"read_file": ("path",)},
+        await boundary.call_tool(
+            "_echo_path",
+            {"path": "a.txt"},
+            context,
+            tools["_echo_path"],
         )
 
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
-    assert store.values == {}
-
-
-@pytest.mark.asyncio
-async def test_workspace_binding_lifetime_is_execution_scoped(tmp_path: Path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "state")
-    await state.initialize(namespace="workspace", tenant_id="tenant")
-    try:
-        store = WorkspaceToolCallBindingStore(
-            state.recovery.checkpoints.state_store,
-            namespace="workspace",
-            tenant_id="tenant",
-        )
-        binding = WorkspaceToolCallBinding(
-            1,
-            "execution",
-            "step",
-            "call",
-            "read_file",
-            "a" * 64,
-            (WorkspacePathBinding("/path", "a.txt"),),
-            None,
-        )
-        await store.store(binding)
-        assert await store.get("execution", "step", "call") == binding
-        await state.maintenance.inspect_objects()
-
-        await store.release_execution("execution")
-        assert await store.get("execution", "step", "call") is None
-        await state.maintenance.inspect_objects()
-    finally:
-        await state.close()

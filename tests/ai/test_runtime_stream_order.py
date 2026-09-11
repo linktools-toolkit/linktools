@@ -39,6 +39,7 @@ from linktools.ai.runtime.state._contracts import (
     ResultRecord,
 )
 from linktools.ai.spec import AgentSpec
+from ._runtime_test_helpers import execution_owner_fields
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -46,7 +47,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("default", model="default"),
-        model={"route_id": "default", "model_identity": "test:model"},
+        base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
@@ -84,6 +85,7 @@ def _execution(
         planning=False,
         thinking=False,
         binding=_binding_snapshot(),
+        **execution_owner_fields(),
     )
 
 
@@ -167,11 +169,11 @@ async def test_live_semantic_events_keep_agent_source_order() -> None:
     items = [item async for item in live]
     assert isinstance(items[0], ExecutionDelta) and items[0].content == "before"
     assert isinstance(items[1], _LiveEvent)
-    assert items[1].event_type is ExecutionEventType.TOOL_CALL_STARTED
+    assert items[1].event_type == ExecutionEventType.TOOL_CALL_STARTED
     assert items[1].durable_sequence == 2
     assert isinstance(items[2], ExecutionDelta) and items[2].content == "after"
     assert isinstance(items[3], _LiveEvent)
-    assert items[3].event_type is ExecutionEventType.EXECUTION_SUCCEEDED
+    assert items[3].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
     assert items[3].durable_sequence == 3
 
 
@@ -352,6 +354,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     backend._execution = SimpleNamespace(executions=_ExecutionReader(_execution()))
     backend._live_broker = broker
     backend._runtime_commands = commands
+    backend._metric_recorder = None
     commit = ExecutionCancelRequestCommit(
         "execution",
         "tenant",
@@ -382,7 +385,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     await live.close()
     assert isinstance(first, _LiveEvent) and first.durable_sequence == 1
     assert isinstance(second, _LiveEvent)
-    assert second.event_type is ExecutionEventType.CANCEL_REQUESTED
+    assert second.event_type == ExecutionEventType.CANCEL_REQUESTED
     assert second.durable_sequence == 2
 
 
@@ -452,9 +455,11 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
+    backend._execution_durable_tasks = {}
     backend._live_broker = broker
     backend._runtime_commands = commands
     backend._terminal_events = {}
+    backend._metric_recorder = None
     live = broker.subscribe("execution")
     task = asyncio.create_task(backend.commit_terminal_checkpoint(commit, session_id=None))
     await commands.started.wait()
@@ -475,7 +480,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
     await live.close()
     assert isinstance(first, _LiveEvent) and first.durable_sequence == 1
     assert isinstance(second, _LiveEvent)
-    assert second.event_type is ExecutionEventType.EXECUTION_FAILED
+    assert second.event_type == ExecutionEventType.EXECUTION_FAILED
     assert second.durable_sequence == 2
 
 
@@ -513,7 +518,7 @@ async def test_second_subscriber_pins_buffer_during_durable_prefix() -> None:
     assert streamed[1].durable_sequence is None
     assert streamed[1].payload["text"] == "live"
     assert streamed[2].durable_sequence == 2
-    assert streamed[2].event_type is ExecutionEventType.EXECUTION_SUCCEEDED
+    assert streamed[2].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 
 @pytest.mark.asyncio
@@ -647,7 +652,7 @@ async def test_reconnect_aligns_to_confirmed_cursor_before_replaying_deltas() ->
     broker.complete("execution")
     terminal = await asyncio.wait_for(anext(iterator), timeout=1.0)
     assert terminal.durable_sequence == 3
-    assert terminal.event_type is ExecutionEventType.EXECUTION_SUCCEEDED
+    assert terminal.event_type == ExecutionEventType.EXECUTION_SUCCEEDED
     with pytest.raises(StopAsyncIteration):
         await anext(iterator)
 

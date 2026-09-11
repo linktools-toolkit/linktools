@@ -16,7 +16,7 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetSkillResourceSource,
     LocalSkillResourceSource,
-    SkillCapability,
+    LinkToolsSkills,
     SkillDefinition,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -31,7 +31,7 @@ from linktools.ai.workspace import LocalRuleCatalog, Workspace, WorkspacePolicy
 async def test_workspace_declaration_discovery_ignores_noise_without_restricting_ids(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     root = workspace.storage_root
     (root / "agents" / "__pycache__").mkdir(parents=True)
     (root / "agents" / "nested").mkdir()
@@ -123,7 +123,7 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
     (package / "__MACOSX" / "metadata").write_bytes(b"noise")
 
     source = LocalSkillResourceSource("local", skills_root)
-    capability = SkillCapability(
+    capability = LinkToolsSkills(
         (
             SkillDefinition(
                 SkillSpec("review", "pinned"),

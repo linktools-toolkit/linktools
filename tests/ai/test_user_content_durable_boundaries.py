@@ -11,8 +11,7 @@ from linktools.ai.core import ExecutionLineageKind, Principal
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import _request_digest
 from linktools.ai.runtime._input import input_intent
-from linktools.ai.runtime.state import StoredUserInput
-from linktools.ai.runtime.state._contracts import RecoveryExecutionInput
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 
@@ -21,7 +20,7 @@ def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
-        model={"route_id": "model", "model_identity": "test:model"},
+        base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode="text",
@@ -75,8 +74,8 @@ def test_stored_user_input_has_one_versioned_owner() -> None:
     assert stored.digest == StoredUserInput(1, "text", stored.payload).digest
 
 
-def test_recovery_input_requires_storage_contract() -> None:
-    parameter = signature(RecoveryExecutionInput).parameters["storage_contract"]
+def test_execution_record_requires_storage_contract() -> None:
+    parameter = signature(ExecutionRecord).parameters["storage_contract"]
     assert parameter.default is Parameter.empty
 
 
