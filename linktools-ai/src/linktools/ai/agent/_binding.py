@@ -78,10 +78,7 @@ class SemanticPin:
 
     @classmethod
     def from_payload(cls, value: object) -> "SemanticPin":
-        if (
-            not isinstance(value, Mapping)
-            or set(value) != _PIN_FIELDS
-        ):
+        if not isinstance(value, Mapping) or set(value) != _PIN_FIELDS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         kind = value["kind"]
         identity = value["id"]
@@ -157,6 +154,15 @@ class AgentBindingSnapshot:
     @property
     def subagent_ids(self) -> "tuple[str, ...]":
         return tuple(item.id for item in self.subagents)
+
+    @property
+    def binding_digest(self) -> str:
+        return canonical_sha256(
+            {
+                "contract": "agent-binding-v1",
+                "snapshot": self.to_payload(),
+            }
+        )
 
     def to_payload(self) -> "dict[str, JsonValue]":
         payload: dict[str, JsonValue] = {
@@ -236,6 +242,7 @@ class AgentBinding:
             not isinstance(self.definition, AgentDefinition)
             or not isinstance(self.output_binding, OutputBinding)
             or not isinstance(self.snapshot, AgentBindingSnapshot)
+            or self.digest != self.snapshot.binding_digest
             or AgentSpecCodec().to_payload(self.definition.spec)
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
             or dict(self.definition.model.semantic_payload)
