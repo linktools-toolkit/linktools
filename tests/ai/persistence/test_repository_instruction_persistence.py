@@ -9,6 +9,7 @@ from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, canonical_sha256
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._codec import (
+    _encode_persisted_domain,
     decode_domain,
     encode_domain,
     iter_runtime_object_refs,
@@ -147,7 +148,7 @@ def test_object_ref_traversal_finds_repository_instruction_object() -> None:
     execution = _execution(reference)
     refs = tuple(
         iter_runtime_object_refs(
-            encode_domain(execution),
+            _encode_persisted_domain(execution),
             default_domain=RuntimeDomain.EXECUTION,
         )
     )
