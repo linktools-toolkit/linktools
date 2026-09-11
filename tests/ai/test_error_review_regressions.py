@@ -74,16 +74,19 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
 
 
 @pytest.mark.asyncio
-async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure() -> (
+async def test_agent_executor_cancellation_captures_usage_without_replacing_cancel() -> (
     None
 ):
     executor = AgentExecutor(SkillSourceRegistry(), metrics=None)
+    captured = False
 
     async def cancelled(*args: object, **kwargs: object) -> None:
         del args, kwargs
         raise asyncio.CancelledError
 
-    async def usage_sink(_usage: object) -> None:
+    def usage_sink(_usage: object) -> None:
+        nonlocal captured
+        captured = True
         raise RuntimeError("usage sink failed")
 
     executor._execute = cancelled  # type: ignore[method-assign]
@@ -103,9 +106,7 @@ async def test_agent_executor_cancellation_is_not_replaced_by_usage_sink_failure
     with pytest.raises(asyncio.CancelledError):
         await executor.execute(scope)  # type: ignore[arg-type]
 
-    pending = executor.pending_background_tasks
-    assert len(pending) == 1
-    await asyncio.gather(*pending, return_exceptions=True)
+    assert captured is True
 
 
 @pytest.mark.asyncio
@@ -228,9 +229,6 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         return execution
 
     async def resolve_cancel_race(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-
-    async def verify_terminal(*args: object, **kwargs: object) -> None:
         del args, kwargs
 
     service._load_authorized = load_authorized
