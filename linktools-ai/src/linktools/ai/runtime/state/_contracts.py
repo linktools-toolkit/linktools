@@ -63,7 +63,7 @@ from ...task import (
     TaskTerminalRecord,
 )
 from ...workspace import normalize_workspace_path
-from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
     from .._tool import ToolStateRepository
@@ -187,94 +187,6 @@ class StoredUserInput:
                 "payload_size": self.payload.size,
             }
         )
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeStorageResource:
-    domain: RuntimeDomain
-    backend: str
-    retention: RuntimeRetentionMode
-    object_store_id: str | None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.domain, RuntimeDomain):
-            raise TypeError("storage resource domain is invalid")
-        if not isinstance(self.backend, str) or not self.backend:
-            raise ValueError("storage resource backend is required")
-        if not isinstance(self.retention, RuntimeRetentionMode):
-            raise TypeError("storage resource retention is invalid")
-        if self.object_store_id is not None and (
-            not isinstance(self.object_store_id, str) or not self.object_store_id
-        ):
-            raise ValueError("storage resource object store id is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeStorageContract:
-    version: int
-    resources: tuple[RuntimeStorageResource, ...]
-    state_groups: tuple[tuple[str, ...], ...]
-    object_groups: tuple[tuple[str, ...], ...]
-
-    def __post_init__(self) -> None:
-        if self.version != 1:
-            raise ValueError("storage contract version must be 1")
-        resources = tuple(self.resources)
-        if any(not isinstance(item, RuntimeStorageResource) for item in resources):
-            raise TypeError("storage contract resources are invalid")
-        domains = tuple(item.domain.value for item in resources)
-        if domains != tuple(sorted(domains)) or len(domains) != len(set(domains)):
-            raise ValueError("storage contract resources must be sorted and unique")
-        state_groups = _normalize_storage_groups(self.state_groups)
-        object_groups = _normalize_storage_groups(self.object_groups)
-        resource_domains = frozenset(domains)
-        if any(
-            not set(group) <= resource_domains
-            for group in (*state_groups, *object_groups)
-        ):
-            raise ValueError("storage contract groups reference unknown domains")
-        object.__setattr__(self, "resources", resources)
-        object.__setattr__(self, "state_groups", state_groups)
-        object.__setattr__(self, "object_groups", object_groups)
-
-    @property
-    def digest(self) -> str:
-        return canonical_sha256(
-            {
-                "version": self.version,
-                "resources": [
-                    {
-                        "domain": item.domain.value,
-                        "backend": item.backend,
-                        "retention": item.retention.value,
-                        "object_store_id": item.object_store_id,
-                    }
-                    for item in self.resources
-                ],
-                "state_groups": [list(group) for group in self.state_groups],
-                "object_groups": [list(group) for group in self.object_groups],
-            }
-        )
-
-
-def _normalize_storage_groups(
-    groups: Sequence[Sequence[str]],
-) -> tuple[tuple[str, ...], ...]:
-    result = tuple(tuple(sorted(group)) for group in groups)
-    if any(
-        not group
-        or any(not isinstance(item, str) or not item for item in group)
-        for group in result
-    ):
-        raise ValueError("storage contract groups are invalid")
-    if any(len(group) != len(set(group)) for group in result):
-        raise ValueError("storage contract group members are duplicated")
-    if result != tuple(sorted(result)):
-        raise ValueError("storage contract groups must be sorted")
-    members = tuple(item for group in result for item in group)
-    if len(members) != len(set(members)):
-        raise ValueError("storage contract group domains are duplicated")
-    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -573,7 +485,6 @@ class ExecutionRecord:
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
-    storage_contract: RuntimeStorageContract
     parent_invocation_id: str | None = None
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
@@ -615,8 +526,6 @@ class ExecutionRecord:
             raise TypeError("execution principal kind is invalid")
         if not isinstance(self.stored_user_input, StoredUserInput):
             raise TypeError("execution stored user input is invalid")
-        if not isinstance(self.storage_contract, RuntimeStorageContract):
-            raise TypeError("execution storage contract is invalid")
         if self.error_diagnostics is not None and not isinstance(
             self.error_diagnostics, ErrorDiagnostics
         ):
