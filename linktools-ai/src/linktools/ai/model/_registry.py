@@ -26,6 +26,7 @@ class ModelRegistry:
         cls,
         *,
         model: str,
+        provider_instance: "str | None" = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -37,6 +38,7 @@ class ModelRegistry:
         registry.register_openai(
             "default",
             model=model,
+            provider_instance=provider_instance,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
@@ -58,6 +60,7 @@ class ModelRegistry:
         route_id: str,
         *,
         model: str,
+        provider_instance: "str | None" = None,
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         timeout: "int | float | None" = None,
@@ -69,6 +72,7 @@ class ModelRegistry:
             _OpenAIModelBinding(
                 route_id=route_id,
                 model=model,
+                provider_instance=provider_instance,
                 base_url=base_url,
                 api_key=api_key,
                 timeout=timeout,
