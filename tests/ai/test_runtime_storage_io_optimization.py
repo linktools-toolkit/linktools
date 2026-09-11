@@ -16,9 +16,7 @@ from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._store import FactQuery
 from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.runtime.state._approval_repository import (
-    ApprovalAdmissionRepositoryImpl,
-)
+from linktools.ai.runtime.state._repositories import ApprovalRepositoryImpl
 from linktools.ai.runtime.state._contracts import (
     ApprovalRecord,
     ContextProjection,
@@ -233,7 +231,7 @@ async def test_approval_cancel_batches_known_record_sql(
     await provision_database(engine)
     store = SqlStateStore(engine)
     await store.initialize()
-    repository = ApprovalAdmissionRepositoryImpl(
+    repository = ApprovalRepositoryImpl(
         store,
         namespace="io-approval",
         tenant_id="tenant",
