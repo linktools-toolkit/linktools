@@ -877,14 +877,13 @@ class ExternalCallRecord:
     supplied_at: datetime | None
     resolution_kind: str | None = None
     result_payload: StoredPayload | None = None
-    result_digest: str | None = None
     resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.resolution_kind not in {None, "succeeded", "retry", "failed"}:
             raise ValueError("external resolution kind is invalid")
         if self.status is ExternalCallStatus.SUPPLIED:
-            if self.resolution_kind is None or self.result_digest is None:
+            if self.resolution_kind is None:
                 raise ValueError("supplied external call is incomplete")
         elif self.resolution_kind is not None or self.result_payload is not None:
             raise ValueError("pending external call cannot have a resolution")
@@ -1645,7 +1644,6 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
         idempotency_key_digest: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
-        result_digest: str,
         resolution_metadata: Mapping[str, JsonValue],
         supplied_at: datetime,
     ) -> ExternalCallRecord: ...

@@ -3323,7 +3323,6 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         idempotency_key_digest: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
-        result_digest: str,
         resolution_metadata: Mapping[str, JsonValue],
         supplied_at: datetime,
     ) -> ExternalCallRecord:
@@ -3342,7 +3341,6 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
                 idempotency_key_digest=idempotency_key_digest,
                 resolution_kind=resolution_kind,
                 result_payload=result_payload,
-                result_digest=result_digest,
                 resolution_metadata=resolution_metadata,
                 supplied_at=supplied_at,
             )

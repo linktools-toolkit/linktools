@@ -136,7 +136,6 @@ class _ExternalCalls:
         idempotency_key_digest: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
-        result_digest: str,
         resolution_metadata: dict[str, object],
         supplied_at: datetime,
     ) -> ExternalCallRecord:
@@ -153,7 +152,6 @@ class _ExternalCalls:
             supplied_at=supplied_at,
             resolution_kind=resolution_kind,
             result_payload=result_payload,
-            result_digest=result_digest,
             resolution_metadata=resolution_metadata,
         )
         return self.record
