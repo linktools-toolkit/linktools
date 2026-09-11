@@ -144,6 +144,7 @@ def _backend() -> LocalExecutionBackend:
     backend._captured_usage = {}
     backend._worker_failures = {}
     backend._worker_cancel_requests = set()
+    backend._worker_shutdown_requests = set()
     backend._terminal_events = {}
     backend._pending_audit_events = {}
     backend._pending_audit_locks = {}
