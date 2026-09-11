@@ -235,15 +235,15 @@ class ExecutionTraceItem:
             or self.payload.get("kind") != "MODEL_RESPONSE"
         ):
             return
-        if "token_usage" not in self.payload:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         status = self.payload.get("status")
-        usage = self.payload["token_usage"]
         if status == "FAILED":
-            if usage is not None:
+            if self.payload.get("token_usage") is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
-        if status != "SUCCEEDED" or not isinstance(usage, Mapping):
+        if status != "SUCCEEDED":
+            return
+        usage = self.payload.get("token_usage")
+        if not isinstance(usage, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         required = {
             "input_tokens",
@@ -251,9 +251,11 @@ class ExecutionTraceItem:
             "cache_read_tokens",
             "cache_write_tokens",
         }
-        if set(usage) != required or any(
-            not isinstance(value, int) or isinstance(value, bool) or value < 0
-            for value in usage.values()
+        if not required.issubset(usage) or any(
+            not isinstance(usage[name], int)
+            or isinstance(usage[name], bool)
+            or usage[name] < 0
+            for name in required
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
