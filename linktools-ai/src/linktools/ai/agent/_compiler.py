@@ -15,7 +15,7 @@ from ..capability import (
     mcp_server_namespace,
     mcp_server_selector,
 )
-from ..core import JsonValue, canonical_sha256
+from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
 from ..spec import AgentSpec, AgentSpecCodec, MCPServerSpecCodec, SubagentRef
@@ -128,13 +128,6 @@ class AgentCompiler:
         subagents: Sequence[SubagentRef],
     ) -> AgentBinding:
         output_binding = bind_output(output)
-        durable_subagents = tuple(subagents)
-        digest = _binding_digest(
-            definition.digest,
-            output_binding.fingerprint,
-            definition.selected_subagents,
-            durable_subagents,
-        )
         snapshot = AgentBindingSnapshot(
             version=1,
             agent_spec=AgentSpecCodec().from_payload(
@@ -143,11 +136,16 @@ class AgentCompiler:
             base_model=dict(definition.model.semantic_payload),
             selected=tuple(_pin(candidate) for candidate in _semantic_candidates(definition)),
             selected_subagents=definition.selected_subagents,
-            subagents=durable_subagents,
+            subagents=tuple(subagents),
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
         )
-        return AgentBinding(digest, definition, output_binding, snapshot)
+        return AgentBinding(
+            snapshot.binding_digest,
+            definition,
+            output_binding,
+            snapshot,
+        )
 
     def restore(self, snapshot: AgentBindingSnapshot) -> AgentBinding:
         """Restore exact historical semantics without expanding current selectors."""
@@ -182,13 +180,12 @@ class AgentCompiler:
             }:
                 raise
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
-        digest = _binding_digest(
-            definition.digest,
-            output_binding.fingerprint,
-            cast("tuple[str, ...]", snapshot.selected_subagents),
-            snapshot.subagents,
+        return AgentBinding(
+            snapshot.binding_digest,
+            definition,
+            output_binding,
+            snapshot,
         )
-        return AgentBinding(digest, definition, output_binding, snapshot)
 
     def _restore_selected(
         self,
@@ -420,40 +417,6 @@ def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
     if pin.fingerprint != candidate.fingerprint:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return pin
-
-
-def _binding_digest(
-    agent_definition_digest: str,
-    output_fingerprint: str,
-    selected_subagents: Sequence[str],
-    subagents: Sequence[SubagentRef],
-) -> str:
-    effective_ids = tuple(ref.id for ref in subagents)
-    selected_ids = tuple(selected_subagents)
-    payload: dict[str, JsonValue] = {
-        "contract": "agent-binding-v1",
-        "agent_definition_digest": agent_definition_digest,
-        "output_fingerprint": output_fingerprint,
-    }
-    if selected_ids != effective_ids:
-        payload["delegation"] = {
-            "selected_subagents": list(selected_ids),
-            "effective_subagents": list(effective_ids),
-        }
-    if any(ref.description is not None for ref in subagents):
-        payload["subagent_discovery"] = [
-            {
-                "kind": "agent",
-                "id": ref.id,
-                **(
-                    {"description": ref.description}
-                    if ref.description is not None
-                    else {}
-                ),
-            }
-            for ref in subagents
-        ]
-    return canonical_sha256(payload)
 
 
 __all__ = ["AgentCompiler"]
