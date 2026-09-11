@@ -78,7 +78,6 @@ def _snapshot() -> AgentBindingSnapshot:
 
 def _execution(
     *,
-    binding_digest: str | None = None,
     binding: AgentBindingSnapshot | None = None,
     planning: bool = False,
     thinking: bool = False,
@@ -231,8 +230,6 @@ def test_restored_binding_uses_only_snapshot_semantics() -> None:
     assert restored.output_type is not _SchemaTwinA
 
 
-def test_execution_requires_exact_binding_snapshot() -> None:
+def test_execution_binding_digest_is_derived_from_snapshot() -> None:
     value = _execution(planning=True, thinking=True)
-    assert value.binding.binding_digest == value.binding_digest
-    with pytest.raises(ValueError, match="execution binding snapshot"):
-        _execution(binding_digest="c" * 64, binding=_snapshot())
+    assert value.binding_digest == value.binding.binding_digest

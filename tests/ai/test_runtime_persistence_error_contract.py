@@ -161,14 +161,10 @@ def _transcript_chunk_data() -> dict[str, object]:
     )
 
 
-def test_generic_tolerance_does_not_guess_missing_agent_identity() -> None:
+def test_current_session_wire_rejects_missing_agent_identity() -> None:
     with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(
-            _precomposition_session_data(), SessionRecord
-        ).resolved_agent_id()
-
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-
+        _decode_enveloped_domain(_precomposition_session_data(), SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 def test_persisted_explicit_null_schema_is_integrity_error() -> None:
     data = copy.deepcopy(_transcript_chunk_data())

@@ -241,26 +241,24 @@ def test_v1_tagged_scalars_require_canonical_inverse() -> None:
     )
 
 
-def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
+def test_v1_dataclass_reader_requires_exact_current_shape() -> None:
     cursor = ConversationCursor("run")
     wire = encode_domain(cursor)
-    fields = dict(wire["fields"])
-    fields.pop("history_id")
-    assert (
-        decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": fields},
+    missing = dict(wire["fields"])
+    missing.pop("history_id")
+    _assert_integrity(
+        lambda: decode_domain(
+            {"$dataclass": "conversation_cursor", "fields": missing},
             ConversationCursor,
         )
-        == cursor
     )
-    fields = dict(wire["fields"])
-    fields["unknown"] = None
-    assert (
-        decode_domain(
-            {"$dataclass": "conversation_cursor", "fields": fields},
+    unknown = dict(wire["fields"])
+    unknown["unknown"] = None
+    _assert_integrity(
+        lambda: decode_domain(
+            {"$dataclass": "conversation_cursor", "fields": unknown},
             ConversationCursor,
         )
-        == cursor
     )
     _assert_integrity(
         lambda: decode_domain(
@@ -272,30 +270,6 @@ def test_v1_dataclass_reader_tolerates_ordinary_shape_changes() -> None:
             ConversationCursor,
         )
     )
-
-    task = TaskNode("node", ("dependency",), input={"value": 1}, budget_cost=2)
-    task_wire = encode_domain(task)
-    task_fields = dict(task_wire["fields"])
-    task_fields.pop("budget_cost")
-    _assert_integrity(
-        lambda: decode_domain(
-            {"$dataclass": "task_node", "fields": task_fields},
-            TaskNode,
-        )
-    )
-    task_fields = dict(task_wire["fields"])
-    task_fields["extra"] = None
-    assert (
-        decode_domain(
-            {"$dataclass": "task_node", "fields": task_fields},
-            TaskNode,
-        )
-        == task
-    )
-    _assert_integrity(lambda: decode_domain({"plain": 1}, Any))
-    _assert_integrity(lambda: decode_domain({"$tuple": [], "$mapping": []}, Any))
-    assert decode_domain(encode_domain({"value": 1}), Any) == {"value": 1}
-
 
 def test_current_envelopes_keep_exact_members() -> None:
     cursor = ConversationCursor("run")

@@ -243,9 +243,7 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
         ),
     )
     assert record.stored_user_input.payload.decode() == "prompt"
-
-    with pytest.raises(ValueError):
-        replace(record, binding_digest="e" * 64)
+    assert record.binding_digest == snapshot.binding_digest
 
 
 def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> None:
