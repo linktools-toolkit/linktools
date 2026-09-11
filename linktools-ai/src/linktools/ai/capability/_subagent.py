@@ -17,7 +17,7 @@ from ..spec import SubagentRef
 from ._context import AgentContext
 from ._workspace import workspace_tool_path_metadata
 
-SUBAGENT_CAPABILITY_ID = "linktools-subagent"
+SUBAGENT_CAPABILITY_ID = "linktools.ai.subagents"
 
 
 class SubagentDelegate(Protocol):
