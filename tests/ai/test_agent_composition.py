@@ -40,7 +40,7 @@ def test_runtime_bound_agent_does_not_expose_compile_or_registration() -> None:
     assert "define" not in Agent.__dict__
 
 
-def test_agent_binding_snapshot_persists_only_final_v1_identity_contract() -> None:
+def test_agent_binding_snapshot_persists_only_semantic_inputs() -> None:
     snapshot = AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec("agent", model="model"),
@@ -49,7 +49,6 @@ def test_agent_binding_snapshot_persists_only_final_v1_identity_contract() -> No
         subagents=(),
         output_mode="structured",
         output_schema={"type": "object", "properties": {"value": {"type": "string"}}},
-        binding_digest="a" * 64,
     )
 
     payload = snapshot.to_payload()
@@ -62,21 +61,15 @@ def test_agent_binding_snapshot_persists_only_final_v1_identity_contract() -> No
         "subagents",
         "output_mode",
         "output_schema",
-        "binding_digest",
     }
-    assert "agent_digest" not in payload
-    assert "output_schema_id" not in payload
-    assert "output_schema_revision" not in payload
-    assert "output_schema_fingerprint" not in payload
-    assert "binding_fingerprint" not in payload
-    assert "runtime_capabilities" not in payload
+    assert "binding_digest" not in payload
+    assert len(snapshot.binding_digest) == 64
 
 
-def test_semantic_pin_persists_historical_source_without_fingerprint() -> None:
+def test_semantic_pin_persists_contract_once() -> None:
     pin = SemanticPin(
         "capability",
         "guardrail",
-        1,
         {"version": 1, "semantic_revision": 3},
     )
     payload = pin.to_payload()
@@ -84,18 +77,14 @@ def test_semantic_pin_persists_historical_source_without_fingerprint() -> None:
     assert payload == {
         "kind": "capability",
         "id": "guardrail",
-        "contract_version": 1,
         "contract": {"version": 1, "semantic_revision": 3},
     }
     assert SemanticPin.from_payload(payload) == pin
     assert len(pin.fingerprint) == 64
 
-    legacy = dict(payload)
-    legacy["fingerprint"] = pin.fingerprint
-    decoded = SemanticPin.from_payload(legacy)
-    assert decoded == pin
-    assert decoded.fingerprint == pin.fingerprint
-    assert decoded.to_payload() == legacy
+    with pytest.raises(AIError) as error:
+        SemanticPin.from_payload({**payload, "fingerprint": pin.fingerprint})
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_agent_binding_snapshot_rejects_unknown_version() -> None:
@@ -107,7 +96,6 @@ def test_agent_binding_snapshot_rejects_unknown_version() -> None:
         subagents=(),
         output_mode="text",
         output_schema={"type": "object"},
-        binding_digest="a" * 64,
     ).to_payload()
     snapshot["version"] = 3
 
@@ -192,18 +180,10 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recovery_binding_digest_mismatch_fails_closed() -> None:
-    snapshot = SimpleNamespace(binding_digest="a" * 64)
+async def test_missing_recovery_execution_fails_closed() -> None:
     checkpoint = SimpleNamespace(
         execution_id="execution",
         state=RecoveryCheckpointState.ADMITTED,
-        input=SimpleNamespace(
-            binding_digest="a" * 64,
-            mode="run",
-            planning=False,
-            thinking=False,
-            binding=snapshot,
-        ),
     )
 
     async def _list_recoverable_page(**kwargs: object) -> object:
@@ -220,12 +200,7 @@ async def test_recovery_binding_digest_mismatch_fails_closed() -> None:
         ),
         execution=SimpleNamespace(executions=SimpleNamespace(get=_get_execution)),
     )
-    compiler = SimpleNamespace(
-        restore=lambda value: SimpleNamespace(
-            digest="b" * 64,
-            definition=SimpleNamespace(spec=SimpleNamespace(id="agent")),
-        )
-    )
+    compiler = SimpleNamespace(restore=lambda value: value)
     catalog = SimpleNamespace(
         register_definition=lambda value: value,
         register_binding=lambda value: value,
@@ -249,30 +224,32 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
             execution_id=execution_id,
             state=RecoveryCheckpointState.ADMITTED,
         )
-        for execution_id, digest in (
-            ("available", "a" * 64),
-            ("unavailable", "b" * 64),
-        )
+        for execution_id in ("available", "unavailable")
     )
     registered: list[str] = []
 
-    async def _list_recoverable_page(**kwargs: object) -> object:
-        del kwargs
-        return SimpleNamespace(items=checkpoints, next_cursor=None)
-
-    executions = {
+    snapshots = {
         execution_id: SimpleNamespace(
-            execution_id=execution_id,
+            agent_spec=SimpleNamespace(id=execution_id),
             binding_digest=digest,
-            binding=SimpleNamespace(
-                agent_spec=SimpleNamespace(id=execution_id),
-            ),
         )
         for execution_id, digest in (
             ("available", "a" * 64),
             ("unavailable", "b" * 64),
         )
     }
+    executions = {
+        execution_id: SimpleNamespace(
+            execution_id=execution_id,
+            binding_digest=snapshot.binding_digest,
+            binding=snapshot,
+        )
+        for execution_id, snapshot in snapshots.items()
+    }
+
+    async def _list_recoverable_page(**kwargs: object) -> object:
+        del kwargs
+        return SimpleNamespace(items=checkpoints, next_cursor=None)
 
     async def _get_execution(
         execution_id: str,
@@ -287,7 +264,7 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
         if execution_id == "unavailable":
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return SimpleNamespace(
-            digest="a" * 64,
+            digest=snapshot.binding_digest,
             definition=SimpleNamespace(spec=SimpleNamespace(id=execution_id)),
         )
 
