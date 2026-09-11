@@ -62,6 +62,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         agent_id: str,
         journal: ModelRequestJournal | None = None,
     ) -> None:
+        self.id = "linktools.ai.model-observation"
         self._recorder = recorder
         self._source_namespace = source_namespace
         self._tenant_id = tenant_id
