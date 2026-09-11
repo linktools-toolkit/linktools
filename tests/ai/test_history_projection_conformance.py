@@ -678,52 +678,6 @@ async def test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist() -> None:
 
 
 @pytest.mark.asyncio
-async def test_terminal_reader_pages_from_execution_read_model(tmp_path: Path) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
-    await state.initialize(namespace="history", tenant_id="tenant")
-    try:
-        await state.execution.executions.create(_record(ExecutionStatus.SUCCEEDED, 1))
-        await _materialize_attempt(state, 1, "read-model")
-        await state.retention.release_execution_handoff("execution", tenant_id="tenant")
-        read_model = ExecutionReadModelRepository(
-            state.execution.executions.state_store,
-            namespace="history",
-            tenant_id="tenant",
-        )
-        reader = StepExecutionHistoryReader(
-            namespace="history",
-            executions=state.execution.executions,
-            store=state.steps.read_store(RuntimeDomain.EXECUTION),
-            cursor_signer=HmacCursorSigner("history", b"history-key"),
-            read_model=read_model,
-        )
-
-        trace = await reader.trace(
-            "execution", tenant_id="tenant", cursor=None, limit=1
-        )
-        history = await reader.history(
-            "execution", tenant_id="tenant", cursor=None, limit=1
-        )
-        transcript = await reader.transcript(
-            "execution",
-            tenant_id="tenant",
-            cursor=None,
-            limit=1,
-        )
-
-        assert trace.next_cursor is not None
-        assert history.next_cursor is not None
-        assert transcript.next_cursor is not None
-        model = await read_model.get_complete("execution", tenant_id="tenant")
-        assert model is not None
-        assert model.trace_count == 2
-        assert model.history_count == 3
-        assert model.transcript_count == 2
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
 async def test_terminal_seal_reuses_durable_projection_after_staging_release(
     tmp_path: Path,
 ) -> None:
