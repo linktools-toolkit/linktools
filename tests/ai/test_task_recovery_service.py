@@ -17,7 +17,7 @@ from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.task import (
     CancelGraphRequest,
-    DefaultTaskService,
+    DefaultTaskGraphService,
     RecoverGraphRequest,
     TaskGraph,
     TaskGraphAdmission,
@@ -86,20 +86,20 @@ async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
     await state.initialize(namespace="task-service-recovery", tenant_id="tenant")
     try:
         request = await _recovery_graph(state, "boundary")
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             state.task,
             TenantAuthorizationPolicy("tenant"),
             _Launcher(),
         )
 
-        result = await service.wait_graph(
+        result = await service.wait(
             "boundary",
             principal=request.principal,
             timeout_seconds=1,
         )
         events = [
             event
-            async for event in service.stream_graph_events(
+            async for event in service.stream_events(
                 "boundary",
                 principal=request.principal,
             )
@@ -121,13 +121,13 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
     try:
         request = await _recovery_graph(state, "resume")
         launcher = _Launcher()
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             state.task,
             TenantAuthorizationPolicy("tenant"),
             launcher,
         )
 
-        result = await service.recover_graph(
+        result = await service.recover(
             "resume",
             RecoverGraphRequest(request.principal, "recover:resume"),
         )
@@ -154,13 +154,13 @@ async def test_cancel_intent_stays_pending_until_recovery_settles_it() -> None:
     try:
         request = await _recovery_graph(state, "cancel")
         launcher = _Launcher()
-        service = DefaultTaskService(
+        service = DefaultTaskGraphService(
             state.task,
             TenantAuthorizationPolicy("tenant"),
             launcher,
         )
 
-        deferred = await service.cancel_graph(
+        deferred = await service.cancel(
             "cancel",
             CancelGraphRequest(request.principal, "cancel:intent"),
         )
@@ -181,7 +181,7 @@ async def test_cancel_intent_stays_pending_until_recovery_settles_it() -> None:
         assert cancel_operation.status is OperationStatus.RUNNING
         assert any(item.operation_id == cancel_operation.operation_id for item in pending)
 
-        result = await service.recover_graph(
+        result = await service.recover(
             "cancel",
             RecoverGraphRequest(request.principal, "recover:cancel"),
         )
