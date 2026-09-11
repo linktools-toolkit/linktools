@@ -30,15 +30,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import (
-    CancelGraphRequest,
-    TaskEvent,
-    TaskEventType,
-    TaskGraphRequest,
-    TaskGraphResult,
-    TaskGraphSnapshot,
-    TaskGraphView,
-)
+from ..task import TaskEvent
 from ._input_contract import validate_user_input
 from ._snapshot import RunSnapshot
 from .recovery import (
@@ -870,47 +862,6 @@ class SessionService(Protocol):
     ) -> SessionView: ...
 
 
-class TaskService(Protocol):
-    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult: ...
-    async def run_graph(
-        self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None
-    ) -> TaskGraphResult: ...
-    async def inspect_graph(
-        self, graph_id: str, *, principal: Principal
-    ) -> TaskGraphView: ...
-    async def snapshot_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> TaskGraphSnapshot: ...
-    async def list_graph_events(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-        limit: int = 100,
-    ) -> Page[TaskEvent]: ...
-    def stream_graph_events(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-        after_sequence: int = 0,
-    ) -> "AsyncIterator[TaskEvent]": ...
-    async def wait_graph(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-        timeout_seconds: "float | None" = None,
-    ) -> TaskGraphResult: ...
-    async def cancel_graph(
-        self, graph_id: str, request: CancelGraphRequest
-    ) -> TaskGraphView: ...
-
-
 class EvaluationService(Protocol):
     async def start(
         self, binding_digest: str, request: StartEvaluationRequest
@@ -987,7 +938,6 @@ __all__ = [
     "ArtifactView",
     "CancelExecutionRequest",
     "CancelExecutionResult",
-    "CancelGraphRequest",
     "CloseSessionRequest",
     "CompareEvaluationRequest",
     "CreateSessionRequest",
@@ -1029,10 +979,7 @@ __all__ = [
     "SessionService",
     "SessionView",
     "StartEvaluationRequest",
-    "TaskEvent",
-    "TaskEventType",
     "TaskGraphRunEvent",
-    "TaskService",
     "TranscriptItem",
     "UpdateSessionRequest",
 ]
