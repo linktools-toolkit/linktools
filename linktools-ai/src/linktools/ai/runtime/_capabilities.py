@@ -336,6 +336,7 @@ async def compose_platform_capabilities(
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     persistence = _RuntimeStepPersistence(
+        id="linktools.ai.step-persistence",
         store=HarnessStepStoreAdapter(step_store, execution_id=execution_id),
         agent_name=agent_name,
         run_id=step_run_id,
