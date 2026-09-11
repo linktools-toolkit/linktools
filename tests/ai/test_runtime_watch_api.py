@@ -50,8 +50,8 @@ class _ExecutionService:
         return values()
 
 
-class _TaskService:
-    async def snapshot_graph(self, graph_id: str, *, principal: Principal):
+class _TaskGraphService:
+    async def snapshot(self, graph_id: str, *, principal: Principal):
         del principal
 
         class Snapshot:
@@ -60,7 +60,7 @@ class _TaskService:
         assert graph_id == "graph"
         return Snapshot()
 
-    def stream_graph_events(
+    def stream_events(
         self,
         graph_id: str,
         *,
@@ -108,7 +108,7 @@ class _TaskService:
 class _Runtime:
     def __init__(self) -> None:
         self.execution = _ExecutionService()
-        self.task = _TaskService()
+        self.graph = _TaskGraphService()
 
 
 def _watch_tree(execution_id, *, principal, after_sequences=None):
