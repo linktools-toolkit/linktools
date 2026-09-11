@@ -67,7 +67,7 @@ class _SchemaTwinB(BaseModel):
         return value
 
 
-def _snapshot(*, binding_digest: str = "a" * 64) -> AgentBindingSnapshot:
+def _snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
@@ -77,23 +77,23 @@ def _snapshot(*, binding_digest: str = "a" * 64) -> AgentBindingSnapshot:
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest=binding_digest,
     )
 
 
 def _execution(
     *,
-    binding_digest: str = "a" * 64,
+    binding_digest: str | None = None,
     binding: AgentBindingSnapshot | None = None,
     planning: bool = False,
     thinking: bool = False,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
+    snapshot = _snapshot() if binding is None else binding
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest=binding_digest,
+        binding_digest=snapshot.binding_digest if binding_digest is None else binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -110,7 +110,7 @@ def _execution(
         mode="run",
         planning=planning,
         thinking=thinking,
-        binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
+        binding=snapshot,
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(
@@ -169,18 +169,8 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     assert first_snapshot.resolve("default") is first
 
 
-def test_current_binding_snapshot_persists_only_v1_semantic_inputs() -> None:
-    output = bind_output()
-    snapshot = AgentBindingSnapshot(
-        version=1,
-        agent_spec=AgentSpec("agent"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
-        selected=(),
-        subagents=(),
-        output_mode=output.mode,
-        output_schema=output.schema_definition,
-        binding_digest="a" * 64,
-    )
+def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
+    snapshot = _snapshot()
 
     assert set(snapshot.to_payload()) == {
         "version",
@@ -190,8 +180,8 @@ def test_current_binding_snapshot_persists_only_v1_semantic_inputs() -> None:
         "subagents",
         "output_mode",
         "output_schema",
-        "binding_digest",
     }
+    assert snapshot.binding_digest == snapshot.binding_digest
 
 
 def test_custom_output_materializes_from_durable_json_schema() -> None:
@@ -251,4 +241,4 @@ def test_execution_requires_exact_binding_snapshot() -> None:
     value = _execution(planning=True, thinking=True)
     assert value.binding.binding_digest == value.binding_digest
     with pytest.raises(ValueError, match="execution binding snapshot"):
-        _execution(binding_digest="c" * 64, binding=_snapshot(binding_digest="d" * 64))
+        _execution(binding_digest="c" * 64, binding=_snapshot())
