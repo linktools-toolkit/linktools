@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from inspect import Parameter, signature
+from inspect import signature
 
 import pytest
 from pydantic_ai.messages import BinaryContent
@@ -25,7 +25,6 @@ def _binding() -> AgentBindingSnapshot:
         subagents=(),
         output_mode="text",
         output_schema={},
-        binding_digest="a" * 64,
     )
 
 
@@ -74,9 +73,8 @@ def test_stored_user_input_has_one_versioned_owner() -> None:
     assert stored.digest == StoredUserInput(1, "text", stored.payload).digest
 
 
-def test_execution_record_requires_storage_contract() -> None:
-    parameter = signature(ExecutionRecord).parameters["storage_contract"]
-    assert parameter.default is Parameter.empty
+def test_execution_record_does_not_persist_runtime_storage_topology() -> None:
+    assert "storage_contract" not in signature(ExecutionRecord).parameters
 
 
 def test_text_request_digest_is_stable() -> None:
