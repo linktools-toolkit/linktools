@@ -84,7 +84,7 @@ def _boundary(
         (toolset,),
         {
             name: ManagedToolDescriptor(
-                effect_owner="intrinsic",
+                effect_owner="none",
                 effect="none",
                 tool_class="filesystem.read",
                 workspace_path_fields=path_fields,
