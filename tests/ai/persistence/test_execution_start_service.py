@@ -25,15 +25,12 @@ from linktools.ai.runtime._execution import (
     DefaultExecutionService,
     _ExecutionRuntimeBridge,
 )
-from linktools.ai.runtime.state._contracts import (
-    ExecutionRecord,
-    RuntimeStorageContract,
-)
+from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
-def _binding(digest: str) -> AgentBindingSnapshot:
+def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
@@ -43,13 +40,14 @@ def _binding(digest: str) -> AgentBindingSnapshot:
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest=digest,
     )
 
 
 class _DefinitionCatalog:
     def binding(self, digest: str) -> object:
-        return SimpleNamespace(digest=digest, snapshot=_binding(digest))
+        binding = _binding()
+        assert digest == binding.binding_digest
+        return SimpleNamespace(digest=binding.binding_digest, snapshot=binding)
 
 
 class _History:
@@ -172,12 +170,6 @@ def _service(
         runtime_bridge=runtime_bridge,
         live_broker=LiveExecutionEventBroker(),
         history_reader=_History(),
-        storage_contract_factory=lambda _domains: RuntimeStorageContract(
-            1,
-            (),
-            (),
-            (),
-        ),
         **kwargs,
     )
 
@@ -199,9 +191,10 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
             "same",
             memory_scope="test",
         )
+        binding_digest = _binding().binding_digest
         first, second = await asyncio.gather(
-            service.start("a" * 64, request),
-            service.start("a" * 64, request),
+            service.start(binding_digest, request),
+            service.start(binding_digest, request),
         )
         assert first.execution_id == second.execution_id
         assert launcher.calls == 1
@@ -235,7 +228,7 @@ async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
         handle = await service.start(
-            "b" * 64,
+            _binding().binding_digest,
             _request("hello", Principal("owner", "tenant"), "sql-start-key"),
         )
         started = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
@@ -253,7 +246,7 @@ async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) 
     try:
         service = _service(state, backend=_Launcher(state.execution.executions))
         handle = await service.start(
-            "c" * 64,
+            _binding().binding_digest,
             _request(
                 "hello",
                 Principal("owner", "tenant"),
@@ -312,7 +305,7 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
         service = _service(state, backend=_Launcher(state.execution.executions))
         principal = Principal("owner", "tenant")
         handle = await service.start(
-            "a" * 64,
+            _binding().binding_digest,
             _request("without memory", principal, "without-memory"),
         )
         execution = await state.execution.executions.get(
@@ -325,7 +318,7 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
         for value in ("", "  "):
             with pytest.raises(AIError) as error:
                 await service.start(
-                    "a" * 64,
+                    _binding().binding_digest,
                     _request(
                         "invalid memory",
                         principal,
