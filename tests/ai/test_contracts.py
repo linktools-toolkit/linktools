@@ -37,7 +37,6 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
-    RuntimeStorageContract,
     StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec, SubagentRef
@@ -60,11 +59,7 @@ class _JsonIntEnum(IntEnum):
     VALUE = 1
 
 
-def _binding_snapshot(
-    *,
-    agent_id: str = "default",
-    digest: str = "a" * 64,
-) -> AgentBindingSnapshot:
+def _binding_snapshot(*, agent_id: str = "default") -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         version=1,
         agent_spec=AgentSpec(agent_id, model="route"),
@@ -73,7 +68,6 @@ def _binding_snapshot(
         subagents=(),
         output_mode="text",
         output_schema={"type": "object", "properties": {"text": {"type": "string"}}},
-        binding_digest=digest,
     )
 
 
@@ -181,6 +175,7 @@ def _pending_tools() -> PendingToolContinuation:
 
 def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
     now = datetime.now(timezone.utc)
+
     def checkpoint(
         state: RecoveryCheckpointState,
         sequence: int,
@@ -216,7 +211,7 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
 
 
 def test_execution_record_owns_binding_and_durable_user_input() -> None:
-    snapshot = _binding_snapshot(digest="d" * 64)
+    snapshot = _binding_snapshot()
     now = datetime.now(timezone.utc)
     record = ExecutionRecord(
         execution_id="execution",
@@ -247,7 +242,6 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
     assert record.stored_user_input.payload.decode() == "prompt"
 
