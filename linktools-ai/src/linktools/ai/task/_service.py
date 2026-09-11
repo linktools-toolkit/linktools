@@ -19,7 +19,7 @@ from ._graph import (
 )
 
 
-class TaskQueryApi(Protocol):
+class TaskGraphQueryService(Protocol):
     async def inspect(
         self,
         graph_id: str,
@@ -60,7 +60,7 @@ class TaskQueryApi(Protocol):
     ) -> TaskGraphResult: ...
 
 
-class TaskApi(TaskQueryApi, Protocol):
+class TaskGraphService(TaskGraphQueryService, Protocol):
     async def start(self, request: TaskGraphRequest) -> TaskGraphResult: ...
 
     async def run(
@@ -91,4 +91,4 @@ class TaskGraphLauncher(Protocol):
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView: ...
 
 
-__all__ = ["TaskApi", "TaskGraphLauncher", "TaskQueryApi"]
+__all__ = ["TaskGraphLauncher", "TaskGraphQueryService", "TaskGraphService"]
