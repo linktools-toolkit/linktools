@@ -114,9 +114,26 @@ class _ModelRegistrySnapshot:
         binding = self._bindings.get(route_id)
         if binding is None:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        if dict(binding.semantic_payload) != dict(payload):
+        if not _semantic_payload_matches(binding, payload):
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return binding
+
+
+def _semantic_payload_matches(
+    binding: ModelBinding,
+    payload: Mapping[str, JsonValue],
+) -> bool:
+    current = dict(binding.semantic_payload)
+    historical = dict(payload)
+    if current == historical:
+        return True
+    if not isinstance(binding, _OpenAIModelBinding) or "provider_instance" in historical:
+        return False
+    if current.get("provider_instance") != "openai-public":
+        return False
+    legacy = dict(current)
+    legacy.pop("provider_instance", None)
+    return legacy == historical
 
 
 __all__ = ["ModelRegistry"]
