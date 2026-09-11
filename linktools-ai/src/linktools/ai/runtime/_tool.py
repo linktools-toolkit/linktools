@@ -95,10 +95,6 @@ class ToolOperationBridge(Protocol):
 
     async def list_operations(self) -> tuple[ToolOperationRecord, ...]: ...
 
-    def owns_call(self, tool_call_id: str) -> bool: ...
-
-    def result_digest(self, tool_call_id: str) -> "str | None": ...
-
 
 class ToolStateRepository(Protocol):
     async def admit(self, request: ToolOperationAdmission) -> ToolOperationRecord: ...
@@ -285,8 +281,6 @@ class RuntimeToolOperationBridge:
         self._terminal_commands = terminal_commands
         self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
         self._decision_fingerprints: dict[tuple[str, str], tuple[str, str]] = {}
-        self._operation_call_ids: dict[str, str] = {}
-        self._result_digests: dict[str, str] = {}
         self._lease_seconds = 60
 
     async def begin(
@@ -354,7 +348,6 @@ class RuntimeToolOperationBridge:
             existing = await self._repository.admit(admission)
         if existing.tool_call_id != call.tool_call_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._operation_call_ids[operation_id] = call.tool_call_id
         decision = await self._decision_from_record(existing, replay_safe)
         self._decisions[key] = decision
         self._decision_fingerprints[key] = fingerprint
@@ -384,12 +377,6 @@ class RuntimeToolOperationBridge:
             tenant_id=self._tenant_id,
         )
 
-    def owns_call(self, tool_call_id: str) -> bool:
-        return tool_call_id in self._operation_call_ids.values()
-
-    def result_digest(self, tool_call_id: str) -> "str | None":
-        return self._result_digests.get(tool_call_id)
-
     async def _decision_from_record(
         self,
         existing: ToolOperationRecord,
@@ -400,7 +387,6 @@ class RuntimeToolOperationBridge:
         if existing.status is ToolOperationStatus.COMPLETED:
             if existing.result_payload is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._result_digests[existing.tool_call_id] = existing.result_payload.digest
             return ToolOperationDecision(
                 existing.tool_operation_id,
                 self._owner,
@@ -480,17 +466,12 @@ class RuntimeToolOperationBridge:
                 result_payload=payload,
             )
 
-        cancelled = await self._finish_with_readback(
+        return await self._finish_with_readback(
             finish,
             decision,
             expected_status=ToolOperationStatus.COMPLETED,
             expected_payload=payload,
         )
-        call_id = self._operation_call_ids.get(decision.operation_id)
-        if call_id is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._result_digests[call_id] = payload.digest
-        return cancelled
 
     async def fail(
         self,
