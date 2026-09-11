@@ -48,8 +48,8 @@ MEMORY_TOOL_NAMES = (
 )
 MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
 PLANNING_TOOL_NAMES = ("write_plan",)
-_MEMORY_CAPABILITY_ID = "linktools-memory"
-_PLANNING_CAPABILITY_ID = "linktools-planning"
+_MEMORY_CAPABILITY_ID = "linktools.ai.memory"
+_PLANNING_CAPABILITY_ID = "linktools.ai.planning"
 
 
 def _tool_name_allowed(name: str, allow_tools: tuple[str, ...]) -> bool:
