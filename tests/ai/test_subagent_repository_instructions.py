@@ -25,18 +25,14 @@ from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory
-from linktools.ai.runtime.state._contracts import (
-    ExecutionRecord,
-    RuntimePayloadRef,
-    RuntimeStorageContract,
-)
+from linktools.ai.runtime.state._contracts import ExecutionRecord, RuntimePayloadRef
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import PayloadPolicy, StoredPayload
 from linktools.ai.workspace import RepositoryInstructionDocument, RepositoryInstructions
 from ._runtime_test_helpers import execution_owner_fields
 
 
-def _binding(digest: str) -> AgentBindingSnapshot:
+def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
         version=1,
@@ -46,13 +42,14 @@ def _binding(digest: str) -> AgentBindingSnapshot:
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest=digest,
     )
 
 
 class _Catalog:
     def binding(self, digest: str) -> object:
-        return SimpleNamespace(digest=digest, snapshot=_binding(digest))
+        binding = _binding()
+        assert digest == binding.binding_digest
+        return SimpleNamespace(digest=binding.binding_digest, snapshot=binding)
 
 
 class _History:
@@ -138,11 +135,12 @@ def _pin(content: str) -> tuple[RepositoryInstructions, RuntimePayloadRef]:
 
 def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
+    binding = _binding()
     return ExecutionRecord(
         execution_id="parent",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
+        binding_digest=binding.binding_digest,
         parent_execution_id=None,
         root_execution_id="parent",
         source_execution_id=None,
@@ -159,7 +157,7 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding("a" * 64),
+        binding=binding,
         repository_instructions=pin,
         **execution_owner_fields(),
     )
@@ -192,12 +190,6 @@ def _service(
         live_broker=LiveExecutionEventBroker(),
         operation_ids=iter(ids).__next__,
         history_reader=_History(),
-        storage_contract_factory=lambda _domains: RuntimeStorageContract(
-            1,
-            (),
-            (),
-            (),
-        ),
         **kwargs,
     )
 
@@ -212,7 +204,7 @@ async def test_new_child_inherits_exact_parent_structured_pin_without_live_resol
         resolver = _Resolver(_pin("live-root")[0])
         service = _service(state, resolver=resolver, ids=("child",))
         handle = await service.start_subagent(
-            "a" * 64,
+            _binding().binding_digest,
             _request("child-key"),
             parent_execution_id="parent",
             root_execution_id="parent",
@@ -236,7 +228,7 @@ async def test_instruction_aware_child_resolves_root_when_parent_pin_is_none() -
         resolver = _Resolver(root)
         service = _service(state, resolver=resolver, ids=("child",))
         handle = await service.start_subagent(
-            "a" * 64,
+            _binding().binding_digest,
             _request("child-key"),
             parent_execution_id="parent",
             root_execution_id="parent",
@@ -260,7 +252,7 @@ async def test_standalone_service_without_resolver_never_assigns_child_pin(with_
         await state.execution.executions.create(_parent(parent_pin))
         service = _service(state, resolver=None, ids=("child",))
         handle = await service.start_subagent(
-            "a" * 64,
+            _binding().binding_digest,
             _request("child-key"),
             parent_execution_id="parent",
             root_execution_id="parent",
@@ -284,7 +276,7 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
         service = _service(state, resolver=resolver, ids=("child", "unused"))
         request = _request("child-key")
         first_handle = await service.start_subagent(
-            "a" * 64,
+            _binding().binding_digest,
             request,
             parent_execution_id="parent",
             root_execution_id="parent",
@@ -295,7 +287,7 @@ async def test_subagent_idempotent_replay_keeps_first_persisted_pin_after_live_r
         first_pin = first_child.repository_instructions
         resolver.instructions = _pin("changed")[0]
         replay = await service.start_subagent(
-            "a" * 64,
+            _binding().binding_digest,
             request,
             parent_execution_id="parent",
             root_execution_id="parent",
