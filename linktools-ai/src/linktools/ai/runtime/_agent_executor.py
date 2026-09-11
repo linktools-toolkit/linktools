@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping, Sequence
-from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -126,6 +125,7 @@ from ._tool_return_codec import (
 from .state._step_contracts import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
+_SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +145,7 @@ EventSink = Callable[[AgentEmission], Awaitable[None]]
 
 
 class UsageSink(Protocol):
-    async def __call__(self, usage: UsageMetrics) -> None: ...
+    def __call__(self, usage: UsageMetrics) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,11 +221,6 @@ class AgentExecutor:
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
         self._metrics = metrics
-        self._detached_tasks: set[asyncio.Task[Any]] = set()
-
-    @property
-    def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
-        return tuple(task for task in self._detached_tasks if not task.done())
 
     async def execute(self, scope: _RunScope) -> AgentExecutionOutcome:
         binding = scope.binding
@@ -266,11 +261,19 @@ class AgentExecutor:
                 primary_error = error
                 raise
             except AIError as error:
-                primary_error = error
-                raise
+                mapped = _with_sandbox_cleanup_diagnostic(error, error)
+                primary_error = mapped
+                if mapped is error:
+                    raise
+                raise mapped from error
             except Exception as error:
-                mapped = _execution_error(
-                    error, usage_limits=usage_limits, run_usage=run_usage
+                mapped = _with_sandbox_cleanup_diagnostic(
+                    _execution_error(
+                        error,
+                        usage_limits=usage_limits,
+                        run_usage=run_usage,
+                    ),
+                    error,
                 )
                 primary_error = mapped
                 raise mapped from error
@@ -288,23 +291,16 @@ class AgentExecutor:
                     if isinstance(result, AgentExecutionResult)
                     else _usage_metrics(run_usage)
                 )
-                if isinstance(primary_error, asyncio.CancelledError):
-                    task = asyncio.create_task(
-                        scope.usage_sink(usage),
-                        name=f"agent-usage-{scope.step_run_id}",
+                try:
+                    scope.usage_sink(usage)
+                except Exception:
+                    if primary_error is None:
+                        raise
+                    _logger.error(
+                        "usage sink failed after agent execution failure: step=%s",
+                        scope.step_run_id,
+                        exc_info=False,
                     )
-                    self._detach_task(task, scope.step_run_id, scope.background_tasks)
-                else:
-                    try:
-                        await scope.usage_sink(usage)
-                    except Exception:
-                        if primary_error is None:
-                            raise
-                        _logger.error(
-                            "usage sink failed after agent execution failure: step=%s",
-                            scope.step_run_id,
-                            exc_info=False,
-                        )
 
     def _record_agent_run(
         self,
@@ -364,28 +360,6 @@ class AgentExecutor:
         except Exception:
             _logger.exception("agent metric observation rejected")
 
-    def _detach_task(
-        self,
-        task: asyncio.Task[Any],
-        step_run_id: str,
-        background_tasks: set[asyncio.Task[object]],
-    ) -> None:
-        background_tasks.add(cast("asyncio.Task[object]", task))
-        self._detached_tasks.add(task)
-
-        def consume(done: asyncio.Task[Any]) -> None:
-            try:
-                done.result()
-            except asyncio.CancelledError:
-                pass
-            except BaseException:
-                _logger.exception("detached usage sink failed: step=%s", step_run_id)
-            finally:
-                background_tasks.discard(cast("asyncio.Task[object]", done))
-                self._detached_tasks.discard(done)
-
-        task.add_done_callback(consume)
-
     async def _execute_with_sandbox(
         self,
         scope: _RunScope,
@@ -410,51 +384,46 @@ class AgentExecutor:
             )
         sandbox = scope.context.workspace.sandbox
         backend = sandbox if sandbox is not None else LocalSandbox()
-        primary_error: BaseException | None = None
-        async with AsyncExitStack() as stack:
-            session = await backend.open(
-                root=scope.context.workspace.root,
-                resources=resources,
+        session = await backend.open(
+            root=scope.context.workspace.root,
+            resources=resources,
+        )
+        try:
+            resource_paths = {
+                skill_id: session.resource_path(key)
+                for skill_id, key in resource_keys.items()
+            }
+            _logger.debug(
+                "workspace sandbox opened for agent run: step=%s tools=%s resources=%s",
+                scope.step_run_id,
+                selected,
+                tuple(resource_paths),
             )
-
-            async def close_session() -> None:
-                nonlocal primary_error
-                try:
-                    await session.close()
-                except BaseException as error:
-                    if primary_error is None:
-                        if isinstance(error, asyncio.CancelledError):
-                            raise
-                        raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
-                    _logger.exception(
-                        "workspace sandbox cleanup failed after agent error: step=%s",
-                        scope.step_run_id,
-                    )
-
-            stack.push_async_callback(close_session)
+            result = await self._execute(
+                replace(
+                    scope,
+                    sandbox_session=session,
+                    skill_resource_paths=resource_paths,
+                ),
+                run_usage=run_usage,
+                usage_limits=usage_limits,
+            )
+        except BaseException as primary_error:
             try:
-                resource_paths = {
-                    skill_id: session.resource_path(key)
-                    for skill_id, key in resource_keys.items()
-                }
-                _logger.debug(
-                    "workspace sandbox opened for agent run: step=%s tools=%s resources=%s",
+                await _close_sandbox_session(session)
+            except asyncio.CancelledError as cleanup_cancel:
+                if cleanup_cancel.__cause__ is not None:
+                    raise primary_error from cleanup_cancel.__cause__
+                raise primary_error
+            except AIError as cleanup_error:
+                _logger.exception(
+                    "workspace sandbox cleanup failed after agent error: step=%s",
                     scope.step_run_id,
-                    selected,
-                    tuple(resource_paths),
                 )
-                return await self._execute(
-                    replace(
-                        scope,
-                        sandbox_session=session,
-                        skill_resource_paths=resource_paths,
-                    ),
-                    run_usage=run_usage,
-                    usage_limits=usage_limits,
-                )
-            except BaseException as error:
-                primary_error = error
-                raise
+                raise primary_error from cleanup_error
+            raise
+        await _close_sandbox_session(session)
+        return result
 
     async def _execute(
         self,
@@ -507,10 +476,7 @@ class AgentExecutor:
             )
         capabilities = (
             *capabilities,
-            _event_stream_capability(
-                cast(EventSink, scope.event_sink),
-                scope.tool_operations,
-            ),
+            _event_stream_capability(cast(EventSink, scope.event_sink)),
         )
         _logger.debug(
             "agent execution started: agent=%s definition=%s step=%s mode=%s planning=%s thinking=%s runtime_tools=%s",
@@ -584,6 +550,19 @@ class AgentExecutor:
         return AgentExecutionResult(
             final_result.run_id, payload, final_result.all_messages(), usage
         )
+
+
+async def _close_sandbox_session(session: SandboxSession) -> None:
+    try:
+        await session.close()
+    except asyncio.CancelledError:
+        raise
+    except AIError as error:
+        if error.code is ErrorCode.SANDBOX_CLEANUP_FAILED:
+            raise
+        raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
+    except BaseException as error:
+        raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
 
 
 async def _skill_sandbox_resources(
@@ -1019,14 +998,13 @@ def _assistant_text_output(value: str) -> AssistantTextOutput:
 
 def _event_stream_capability(
     sink: EventSink,
-    tool_operations: "ToolOperationBridge | None" = None,
 ) -> ProcessEventStream[AgentContext[object]]:
     async def forward(
         _ctx: PydanticRunContext[AgentContext[object]],
         events: AsyncIterable[AgentStreamEvent],
     ) -> None:
         async for event in events:
-            emission = _map_event(event, tool_operations)
+            emission = _map_event(event)
             if emission is None:
                 event_type = type(event)
                 _logger.debug(
@@ -1080,10 +1058,7 @@ def _validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
         )
 
 
-def _map_event(
-    event: object,
-    tool_operations: "ToolOperationBridge | None" = None,
-) -> "AgentEmission | None":
+def _map_event(event: object) -> "AgentEmission | None":
     if (
         isinstance(event, PartStartEvent)
         and isinstance(event.part, TextPart)
@@ -1148,26 +1123,14 @@ def _map_event(
         part = event.part
         if isinstance(part, ToolReturnPart):
             success = part.outcome == "success"
-            result_digest = None
-            if success:
-                if tool_operations is not None and tool_operations.owns_call(
-                    part.tool_call_id
-                ):
-                    result_digest = tool_operations.result_digest(part.tool_call_id)
-                    if result_digest is None:
-                        _logger.warning(
-                            "tool operation result digest unavailable: call=%s tool=%s",
-                            part.tool_call_id,
-                            part.tool_name,
-                        )
-                else:
-                    result_digest = tool_return_content_digest(part.content)
             return DurableBoundary(
                 ExecutionEventType.TOOL_CALL_FINISHED,
                 {
                     "call_id": part.tool_call_id,
                     "tool_name": part.tool_name,
-                    "result_digest": result_digest,
+                    "result_digest": (
+                        tool_return_content_digest(part.content) if success else None
+                    ),
                     "status": "SUCCEEDED" if success else "FAILED",
                 },
             )
@@ -1183,6 +1146,29 @@ def _map_event(
                 },
             )
     return None
+
+
+def _sandbox_cleanup_cause(error: BaseException) -> "AIError | None":
+    cause = error.__cause__
+    if isinstance(cause, AIError) and cause.code is ErrorCode.SANDBOX_CLEANUP_FAILED:
+        return cause
+    return None
+
+
+def _with_sandbox_cleanup_diagnostic(error: AIError, source: BaseException) -> AIError:
+    if _sandbox_cleanup_cause(source) is None:
+        return error
+    details = dict(error.safe_details)
+    details[_SECONDARY_ERROR_CODE_KEY] = ErrorCode.SANDBOX_CLEANUP_FAILED.value
+    return AIError(
+        error.code,
+        str(error),
+        category=error.category,
+        retryable=error.retryable,
+        operation_id=error.operation_id,
+        safe_details=details,
+        diagnostics=error.diagnostics,
+    )
 
 
 def _model_http_error_code(status_code: int) -> ErrorCode:
