@@ -26,14 +26,9 @@ from linktools.ai.runtime._planner import _cancel_execution
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-from linktools.ai.runtime.state._contracts import (
-    ExecutionRecord,
-    RuntimeStorageContract,
-    StoredUserInput,
-)
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import StorageOverlay
-from linktools.ai.storage import StoredPayload
+from linktools.ai.storage import StorageOverlay, StoredPayload
 from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 
@@ -94,7 +89,6 @@ def _binding() -> AgentBindingSnapshot:
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
 
 
@@ -130,7 +124,6 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 
