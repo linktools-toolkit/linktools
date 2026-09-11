@@ -412,15 +412,12 @@ class DefaultSessionService:
                 correlation=request.correlation,
                 files=request.files,
             )
-            try:
-                return await self._execution.start_for_session(
-                    agent_id,
-                    binding_digest,
-                    session_id,
-                    execution_request,
-                )
-            except AttributeError as error:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+            return await self._execution.start_for_session(
+                agent_id,
+                binding_digest,
+                session_id,
+                execution_request,
+            )
 
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
