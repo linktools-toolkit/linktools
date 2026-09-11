@@ -19,6 +19,7 @@
   "base_model": {
     "model_identity": "openai:gpt-test",
     "provider": "openai",
+    "provider_instance": "openai-public",
     "settings": {},
     "version": 1
   },
@@ -37,5 +38,5 @@
     "required": ["text"],
     "type": "object"
   },
-  "binding_digest": "c5347a83f77fb5f78a0adfc7f3b59ed04d5397625d8c1084729e64f95826203c"
+  "binding_digest": "5b9028995cb764f7aa0030c137f0f9d8d4db39fce27f438eeaf104d72cd22130"
 }
