@@ -40,7 +40,7 @@ from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import AgentSpec
 from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
-from ..task import LocalTaskGraphLauncher, TaskNodeHandler
+from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import LocalRepositoryInstructionResolver, LocalRuleCatalog, Workspace
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
@@ -57,7 +57,7 @@ from ._local import LocalExecutionBackend
 from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
-from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
+from ._planner import RuntimeTaskNodeRunner
 from ._recovery_task import RecoveryRuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
@@ -79,7 +79,7 @@ class _RuntimeComponents:
     compiler: AgentCompiler
     execution: DefaultExecutionService
     session: DefaultSessionService
-    task: DefaultTaskService
+    graph: DefaultTaskGraphService
     evaluation: DefaultEvaluationService
     approval: DefaultApprovalService
     external: DefaultExternalService
@@ -518,7 +518,7 @@ async def _build_local_components(
         )
 
     task_launcher: LocalTaskGraphLauncher | None = None
-    task_service: DefaultTaskService | None = None
+    graph_service: DefaultTaskGraphService | None = None
     try:
         backend = LocalExecutionBackend(
             state.conversation,
@@ -589,7 +589,7 @@ async def _build_local_components(
             task_runner,
             owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
         )
-        task_service = DefaultTaskService(
+        graph_service = DefaultTaskGraphService(
             state.task,
             authorization,
             task_launcher,
@@ -646,10 +646,10 @@ async def _build_local_components(
             execution_tree_broker,
         )
         close_actions: list[Callable[[], Awaitable[None]]] = [
-            task_service.drain_owned_finalizers,
-            task_service.preflight_close,
+            graph_service.drain_owned_finalizers,
+            graph_service.preflight_close,
             task_launcher.shutdown,
-            task_service.drain_metric_projector,
+            graph_service.drain_metric_projector,
             execution.preflight_close,
             backend.close,
         ]
@@ -663,12 +663,12 @@ async def _build_local_components(
         await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
-        await task_service.recover_pending()
+        await graph_service.recover_pending()
     except BaseException:
         if task_launcher is not None:
             await task_launcher.shutdown()
-        if task_service is not None:
-            await task_service.drain_metric_projector()
+        if graph_service is not None:
+            await graph_service.drain_metric_projector()
         if backend is not None:
             await backend.close()
         if metric_buffer is not None:
@@ -679,7 +679,7 @@ async def _build_local_components(
         compiler=compiler,
         execution=execution,
         session=session,
-        task=task_service,
+        graph=graph_service,
         evaluation=evaluation,
         approval=approval,
         external=external,
