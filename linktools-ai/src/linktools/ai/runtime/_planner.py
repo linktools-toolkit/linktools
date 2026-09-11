@@ -31,7 +31,6 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..task import (
-    DefaultTaskService,
     TaskDependency,
     TaskDependencyResult,
     TaskGraph,
@@ -1161,4 +1160,4 @@ async def _cancel_execution(
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
 
-__all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner"]
+__all__ = ["RuntimeTaskNodeRunner"]
