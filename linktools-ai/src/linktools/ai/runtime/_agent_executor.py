@@ -119,6 +119,10 @@ from ._tool_boundary import (
     RuntimeToolBoundaryToolset,
 )
 from ._tool_metrics import _ToolMetricContext
+from ._tool_return_codec import (
+    rehydrate_deferred_tool_results,
+    tool_return_content_digest,
+)
 from .state._step_contracts import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
@@ -498,7 +502,7 @@ class AgentExecutor:
             capabilities = (
                 *capabilities,
                 ReinjectSystemPrompt(
-                    replace_existing=True, id="linktools-reinject-system-prompt"
+                    replace_existing=True, id="linktools.ai.reinject-system-prompt"
                 ),
             )
         capabilities = (
@@ -518,7 +522,9 @@ class AgentExecutor:
         user_prompt = scope.user_prompt
         deferred_kwargs: dict[str, object] = {}
         if scope.deferred_tool_results is not None:
-            deferred_kwargs["deferred_tool_results"] = scope.deferred_tool_results
+            deferred_kwargs["deferred_tool_results"] = rehydrate_deferred_tool_results(
+                scope.deferred_tool_results
+            )
         final_result = await agent.run(
             user_prompt,
             deps=scope.context,
@@ -1017,10 +1023,17 @@ def _event_stream_capability(
     ) -> None:
         async for event in events:
             emission = _map_event(event)
-            if emission is not None:
-                await sink(emission)
+            if emission is None:
+                event_type = type(event)
+                _logger.debug(
+                    "pydantic event not projected: type=%s:%s",
+                    event_type.__module__,
+                    event_type.__qualname__,
+                )
+                continue
+            await sink(emission)
 
-    return ProcessEventStream(forward)
+    return ProcessEventStream(forward, id="linktools.ai.event-stream")
 
 
 class _RuntimeThinking(Thinking):
@@ -1042,7 +1055,7 @@ class _RuntimeThinking(Thinking):
 
 
 def _thinking_capability(thinking: ThinkingValue) -> Thinking:
-    return _RuntimeThinking(effort=thinking, id="linktools-thinking")
+    return _RuntimeThinking(effort=thinking, id="linktools.ai.thinking")
 
 
 def _validate_thinking_model(model: Model, thinking: ThinkingValue) -> None:
@@ -1133,7 +1146,7 @@ def _map_event(event: object) -> "AgentEmission | None":
                 {
                     "call_id": part.tool_call_id,
                     "tool_name": part.tool_name,
-                    "result_digest": canonical_sha256(str(part.content))
+                    "result_digest": tool_return_content_digest(part.content)
                     if success
                     else None,
                     "status": "SUCCEEDED" if success else "FAILED",
