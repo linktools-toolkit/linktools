@@ -52,7 +52,7 @@ class _OpenAIModelBinding:
         object.__setattr__(
             self,
             "provider_instance",
-            _normalize_provider_instance(self.provider_instance, base_url=base_url),
+            _normalize_provider_instance(self.provider_instance, custom=base_url is not None),
         )
         if self.api_key is not None and not self.api_key.strip():
             object.__setattr__(self, "api_key", None)
@@ -124,15 +124,11 @@ class _OpenAIModelBinding:
         return _RetryingModel(model, self.max_retries, self.retry_delay)
 
 
-def _normalize_provider_instance(
-    value: "str | None",
-    *,
-    base_url: "str | None",
-) -> str:
+def _normalize_provider_instance(value: "str | None", *, custom: bool) -> str:
     if value is None:
-        if base_url is None:
-            return "openai-public"
-        return f"openai-endpoint-{canonical_sha256(base_url)[:16]}"
+        if custom:
+            raise ValueError("provider_instance is required when base_url is configured")
+        return "openai-public"
     if (
         not isinstance(value, str)
         or not value
