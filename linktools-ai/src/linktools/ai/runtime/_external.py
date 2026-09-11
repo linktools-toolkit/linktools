@@ -23,6 +23,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
+from ._tool_return_codec import encode_tool_return_content
 from .service_api import (
     ExternalCallFailed,
     ExternalCallRetry,
@@ -154,9 +155,7 @@ class DefaultExternalService:
         )
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
-        payload, resolution_kind = await self._resolution_payload(
-            request,
-        )
+        payload, resolution_kind = await self._resolution_payload(request)
         resolution_metadata = dict(request.metadata)
         result_digest = canonical_sha256(
             {
@@ -227,22 +226,19 @@ class DefaultExternalService:
     ) -> tuple[StoredPayload | None, str]:
         resolution = request.resolution
         if isinstance(resolution, ExternalCallSucceeded):
-            try:
-                value = normalize_json_value(resolution.value)
-                raw = canonical_json_bytes(value)
-                inline = StoredPayload.inline_json(value)
-                if payload_fits_inline(inline, self._payload_policy):
-                    return inline, "succeeded"
-                reference = await put_runtime_object(
-                    self._objects,
-                    self._object_key_factory,
-                    RuntimeDomain.RECOVERY,
-                    request.principal.tenant_id,
-                    raw,
-                )
-                return StoredPayload.object(reference), "succeeded"
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT) from error
+            value = encode_tool_return_content(resolution.value)
+            raw = canonical_json_bytes(value)
+            inline = StoredPayload.inline_json(value)
+            if payload_fits_inline(inline, self._payload_policy):
+                return inline, "succeeded"
+            reference = await put_runtime_object(
+                self._objects,
+                self._object_key_factory,
+                RuntimeDomain.RECOVERY,
+                request.principal.tenant_id,
+                raw,
+            )
+            return StoredPayload.object(reference), "succeeded"
         if isinstance(resolution, ExternalCallRetry):
             return StoredPayload.inline_text(resolution.message), "retry"
         if isinstance(resolution, ExternalCallFailed):
