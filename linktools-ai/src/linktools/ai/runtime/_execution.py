@@ -1546,14 +1546,7 @@ class DefaultExecutionService:
                 )
             raise
         except BaseException as error:
-            worker_installed = False
-            try:
-                worker_installed = self._backend.worker_installed(
-                    launch_record.execution_id
-                )
-            except AttributeError:
-                pass
-            if worker_installed:
+            if self._backend.worker_installed(launch_record.execution_id):
                 _logger.warning(
                     "execution launch raised after worker installation: execution=%s",
                     execution.execution_id,
