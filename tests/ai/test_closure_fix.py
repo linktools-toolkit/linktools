@@ -35,12 +35,13 @@ from linktools.ai.task._local import (
     TaskNodeRunResult,
     _LeaseState,
 )
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
+
 
 class _StepStore:
     def __init__(self) -> None:
@@ -243,12 +244,9 @@ def test_managed_tool_descriptor_rejects_effect_free_mismatch() -> None:
         )
 
 
-@pytest.mark.parametrize("replay_safe", [True, False])
 @pytest.mark.asyncio
-async def test_model_retry_is_known_failure_regardless_of_replay_safety(
-    replay_safe: bool,
-) -> None:
-    bridge = _ToolBridge(ToolOperationDecision("operation", "owner", 1, replay_safe))
+async def test_replay_safe_model_retry_is_a_known_failure() -> None:
+    bridge = _ToolBridge(ToolOperationDecision("operation", "owner", 1, True))
 
     async def retry_tool() -> None:
         raise ModelRetry("retry")
@@ -258,7 +256,7 @@ async def test_model_retry_is_known_failure_regardless_of_replay_safety(
         {
             "retry_tool": ManagedToolDescriptor(
                 effect_owner="tool_operation",
-                effect=("replay_safe" if replay_safe else "non_replay_safe"),
+                effect="replay_safe",
                 tool_class="business",
             )
         },
@@ -275,6 +273,37 @@ async def test_model_retry_is_known_failure_regardless_of_replay_safety(
             tools["retry_tool"],
         )
     assert bridge.calls == ["begin", "fail"]
+
+
+@pytest.mark.asyncio
+async def test_non_replay_safe_model_retry_requires_effect_verification() -> None:
+    bridge = _ToolBridge(ToolOperationDecision("operation", "owner", 1, False))
+
+    async def retry_tool() -> None:
+        raise ModelRetry("retry")
+
+    boundary = RuntimeToolBoundaryToolset(
+        (FunctionToolset([retry_tool]),),
+        {
+            "retry_tool": ManagedToolDescriptor(
+                effect_owner="tool_operation",
+                effect="non_replay_safe",
+                tool_class="business",
+            )
+        },
+        id="business",
+        tool_operations=bridge,  # type: ignore[arg-type]
+    )
+    context = _context()
+    tools = await boundary.get_tools(context)
+    with pytest.raises(ToolFailed, match="TOOL_EFFECT_UNKNOWN"):
+        await boundary.call_tool(
+            "retry_tool",
+            {},
+            context,
+            tools["retry_tool"],
+        )
+    assert bridge.calls == ["begin", "unknown"]
 
 
 class _TaskRepository:

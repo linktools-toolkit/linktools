@@ -259,6 +259,8 @@ def _local_definition_refs(value: object) -> "dict[str, tuple[str, ...]]":
         if isinstance(node, Mapping):
             for key, child in node.items():
                 if key == "$defs":
+                    if owner != "":
+                        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
                     continue
                 if key in _LITERAL_JSON_KEYWORDS or key == "dependentRequired":
                     continue

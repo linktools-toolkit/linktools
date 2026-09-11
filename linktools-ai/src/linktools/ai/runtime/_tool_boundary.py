@@ -266,7 +266,10 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             ToolFailed,
             ToolFailedError,
         ) as error:
-            if not replay_safe:
+            if (
+                not replay_safe
+                and not _is_workspace_pre_effect_retry(error, descriptor)
+            ):
                 await unknown_after_leaf(error)
             cancelled = await bridge.fail(decision, error)
             if cancelled:
@@ -381,6 +384,21 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             else:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return result
+
+
+def _is_workspace_pre_effect_retry(
+    error: BaseException,
+    descriptor: ManagedToolDescriptor,
+) -> bool:
+    return (
+        isinstance(error, ModelRetry)
+        and descriptor.tool_class in {
+            "filesystem.read",
+            "filesystem.write",
+            "shell",
+        }
+        and isinstance(error.__cause__, AIError)
+    )
 
 
 __all__ = [
