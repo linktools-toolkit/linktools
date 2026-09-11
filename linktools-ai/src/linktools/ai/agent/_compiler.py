@@ -146,7 +146,6 @@ class AgentCompiler:
             subagents=durable_subagents,
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
-            binding_digest=digest,
         )
         return AgentBinding(digest, definition, output_binding, snapshot)
 
@@ -171,7 +170,7 @@ class AgentCompiler:
                 selected_skills=selected["skill"],
                 selected_mcp=selected["mcp"],
                 selected_capabilities=selected["capability"],
-                selected_subagents=snapshot.selected_subagents,
+                selected_subagents=cast("tuple[str, ...]", snapshot.selected_subagents),
                 ordinary_policy=ordinary_policy,
                 mcp_policy=mcp_policy,
             )
@@ -189,8 +188,6 @@ class AgentCompiler:
             cast("tuple[str, ...]", snapshot.selected_subagents),
             snapshot.subagents,
         )
-        if digest != snapshot.binding_digest:
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return AgentBinding(digest, definition, output_binding, snapshot)
 
     def _restore_selected(
@@ -415,15 +412,10 @@ def _semantic_candidates(
 
 
 def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
-    contract = candidate.semantic_contract
-    version = contract.get("version", 1) if candidate.kind == "skill" else 1
-    if not isinstance(version, int) or isinstance(version, bool):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     pin = SemanticPin(
         cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
         candidate.id,
-        version,
-        contract,
+        candidate.semantic_contract,
     )
     if pin.fingerprint != candidate.fingerprint:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
