@@ -34,7 +34,6 @@ _logger = environ.get_logger("ai.model.openai")
 class _OpenAIModelBinding:
     route_id: str
     model: str
-    provider_instance: "str | None" = None
     base_url: "str | None" = None
     api_key: "str | None" = field(default=None, repr=False, compare=False)
     timeout: "int | float | None" = None
@@ -46,14 +45,8 @@ class _OpenAIModelBinding:
         model = self.model.strip().removeprefix("openai:")
         if not self.route_id.strip() or not model:
             raise ValueError("OpenAI model binding is incomplete")
-        base_url = _normalize_base_url(self.base_url)
         object.__setattr__(self, "model", model)
-        object.__setattr__(self, "base_url", base_url)
-        object.__setattr__(
-            self,
-            "provider_instance",
-            _normalize_provider_instance(self.provider_instance, custom=base_url is not None),
-        )
+        object.__setattr__(self, "base_url", _normalize_base_url(self.base_url))
         if self.api_key is not None and not self.api_key.strip():
             object.__setattr__(self, "api_key", None)
         _validate_positive_number("timeout", self.timeout)
@@ -74,13 +67,9 @@ class _OpenAIModelBinding:
         settings: dict[str, JsonValue] = {}
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
-        provider_instance = self.provider_instance
-        if provider_instance is None:
-            raise RuntimeError("provider instance was not normalized")
         return {
             "version": 1,
             "provider": self.provider,
-            "provider_instance": provider_instance,
             "model_identity": self.model_identity,
             "settings": settings,
         }
@@ -115,30 +104,12 @@ class _OpenAIModelBinding:
                 },
             ) from error
         _logger.debug(
-            "OpenAI model materialized: route=%s provider_instance=%s model=%s credential=%s",
+            "OpenAI model materialized: route=%s model=%s credential=%s",
             self.route_id,
-            self.provider_instance,
             self.model,
             self.api_key is not None,
         )
         return _RetryingModel(model, self.max_retries, self.retry_delay)
-
-
-def _normalize_provider_instance(value: "str | None", *, custom: bool) -> str:
-    if value is None:
-        if custom:
-            raise ValueError("provider_instance is required when base_url is configured")
-        return "openai-public"
-    if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or len(value) > 128
-        or not value[0].isalnum()
-        or any(not (character.isalnum() or character in "._-") for character in value)
-    ):
-        raise ValueError("provider_instance is invalid")
-    return value
 
 
 def _validate_positive_number(name: str, value: "int | float | None") -> None:
