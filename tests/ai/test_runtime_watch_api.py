@@ -110,12 +110,13 @@ class _Runtime:
         self.execution = _ExecutionService()
         self.task = _TaskService()
 
-    def _watch_execution_tree(self, execution_id, *, principal, after_sequences=None):
-        return self.execution.stream(
-            execution_id,
-            principal=principal,
-            after_sequences=after_sequences,
-        )
+
+def _watch_tree(execution_id, *, principal, after_sequences=None):
+    return _ExecutionService().stream(
+        execution_id,
+        principal=principal,
+        after_sequences=after_sequences,
+    )
 
 
 @pytest.mark.asyncio
@@ -126,6 +127,7 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
         "execution",
         "binding",
         Principal("owner", "tenant"),
+        _watch_tree,
     )
     values = [item async for item in execution.watch()]
     assert len(values) == 1
@@ -134,7 +136,12 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
 
 @pytest.mark.asyncio
 async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
-    run = TaskGraphRun(_Runtime(), "graph", Principal("owner", "tenant"))
+    run = TaskGraphRun(
+        _Runtime(),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
     values = [item async for item in run.watch()]
     assert all(isinstance(item, TaskGraphRunEvent) for item in values)
     assert [type(item.event) for item in values].count(TaskEvent) == 3

@@ -6,7 +6,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from ..core import Principal
 from ..errors import AIError, ErrorCode
@@ -25,11 +25,22 @@ if TYPE_CHECKING:
 AppT = TypeVar("AppT")
 
 
+class _ExecutionTreeWatcher(Protocol):
+    def __call__(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class TaskGraphRun(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     graph_id: str
     _principal: Principal
+    _watch_tree: _ExecutionTreeWatcher
 
     async def wait(
         self,
@@ -123,7 +134,7 @@ class TaskGraphRun(Generic[AppT]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return
             execution_ids[node_id] = execution_id
-            stream = self._runtime._watch_execution_tree(
+            stream = self._watch_tree(
                 execution_id,
                 principal=self._principal,
                 after_sequences=after_execution_sequences.get(node_id),

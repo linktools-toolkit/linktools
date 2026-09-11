@@ -445,7 +445,13 @@ class Runtime(Generic[AppT]):
             resolved_planning,
             resolved_thinking,
         )
-        return Execution(self, handle.execution_id, binding.digest, resolved_principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding.digest,
+            resolved_principal,
+            self._watch_execution_tree,
+        )
 
     async def _retry_execution(
         self,
@@ -467,7 +473,13 @@ class Runtime(Generic[AppT]):
             files=_request_files(files),
         )
         handle = await self.execution.retry(binding_digest, execution_id, request)
-        return Execution(self, handle.execution_id, binding_digest, principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding_digest,
+            principal,
+            self._watch_execution_tree,
+        )
 
     async def _fork_execution(
         self,
@@ -489,7 +501,13 @@ class Runtime(Generic[AppT]):
             files=_request_files(files),
         )
         handle = await self.execution.fork(binding_digest, execution_id, request)
-        return Execution(self, handle.execution_id, binding_digest, principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding_digest,
+            principal,
+            self._watch_execution_tree,
+        )
 
     async def cancel(
         self,
@@ -629,7 +647,13 @@ class Runtime(Generic[AppT]):
             snapshot_id,
             request,
         )
-        return Execution(self, handle.execution_id, binding.digest, request.principal)
+        return Execution(
+            self,
+            handle.execution_id,
+            binding.digest,
+            request.principal,
+            self._watch_execution_tree,
+        )
 
     def _task_for_agent(
         self,
@@ -684,7 +708,12 @@ class Runtime(Generic[AppT]):
             correlation=correlation,
         )
         await self.task.start_graph(request)
-        return TaskGraphRun(self, graph.graph_id, request.principal)
+        return TaskGraphRun(
+            self,
+            graph.graph_id,
+            request.principal,
+            self._watch_execution_tree,
+        )
 
     async def run_graph(
         self,
