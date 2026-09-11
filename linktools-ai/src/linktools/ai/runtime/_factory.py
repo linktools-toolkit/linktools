@@ -69,7 +69,6 @@ from .state._contracts import (
 )
 from .state._readmodel import ExecutionReadModelRepository
 from .state import RuntimeStatePlan, RuntimeStateRoute
-from .state._steps import StateStepArchive
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -200,28 +199,6 @@ async def compose_runtime_components(
             tenant_id=effective_tenant_id,
         )
         initialized = True
-        if workspace.policy.tool_permissions.requires_approval:
-            if (
-                selected_state.plan.route(RuntimeDomain.EXECUTION).retention
-                is not RuntimeRetentionMode.DURABLE
-                or selected_state.plan.route(RuntimeDomain.RECOVERY).retention
-                is not RuntimeRetentionMode.DURABLE
-            ):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            recovery_steps = selected_state.steps.read_store(RuntimeDomain.RECOVERY)
-            if not isinstance(recovery_steps, StateStepArchive):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            approval_group = (
-                selected_state.execution.executions.state_store.storage_group
-            )
-            if (
-                selected_state.recovery.checkpoints.state_store.storage_group
-                is not approval_group
-                or selected_state.recovery.approvals.state_store.storage_group
-                is not approval_group
-                or recovery_steps.state_store.storage_group is not approval_group
-            ):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
         instruction_resolver = LocalRepositoryInstructionResolver(
             workspace.root,
@@ -237,11 +214,6 @@ async def compose_runtime_components(
             object_store=selected_state.object_store(RuntimeDomain.EXECUTION),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
-        )
-        session_execution_ready = (
-            not workspace.policy.tool_permissions.requires_approval
-            or selected_state.plan.route(RuntimeDomain.CONVERSATION).retention
-            is RuntimeRetentionMode.DURABLE
         )
         owned_workspace_close = (
             None
@@ -280,7 +252,7 @@ async def compose_runtime_components(
                 {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}
             ),
             storage_contract_factory=selected_state.storage_contract,
-            session_execution_ready=session_execution_ready,
+            session_execution_ready=True,
             metrics=metrics,
             owned_workspace_close=owned_workspace_close,
         )

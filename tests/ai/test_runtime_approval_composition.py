@@ -51,8 +51,12 @@ class _ToolModels:
         return _ToolModelBinding()
 
 
+@pytest.mark.parametrize("backend", ("memory", "filesystem"))
 @pytest.mark.asyncio
-async def test_composed_runtime_ask_enters_durable_approval_wait(tmp_path: Path) -> None:
+async def test_composed_runtime_ask_enters_approval_wait(
+    tmp_path: Path,
+    backend: str,
+) -> None:
     agent_path = tmp_path / ".linktools" / "agents" / "default"
     agent_path.parent.mkdir(parents=True)
     agent_path.write_bytes(
@@ -67,7 +71,11 @@ async def test_composed_runtime_ask_enters_durable_approval_wait(tmp_path: Path)
             tool_permissions=WorkspaceToolPermissionPolicy(default="ask")
         ),
     )
-    state = RuntimeState.filesystem(tmp_path / "runtime-state")
+    state = (
+        RuntimeState.in_memory()
+        if backend == "memory"
+        else RuntimeState.filesystem(tmp_path / "runtime-state")
+    )
 
     async with Runtime.open(
         workspace,

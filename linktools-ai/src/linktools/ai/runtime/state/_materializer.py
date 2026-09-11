@@ -24,7 +24,6 @@ from ...storage import (
     create_sql_storage_context,
     namespace_digest,
 )
-from ._approval_repository import ApprovalAdmissionRepositoryImpl
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -324,11 +323,6 @@ async def materialize_runtime_state(
             for domain in RuntimeDomain
             if domain is not RuntimeDomain.TASK
         }
-        bundles[RuntimeDomain.RECOVERY]["approvals"] = ApprovalAdmissionRepositoryImpl(
-            stores[RuntimeDomain.RECOVERY],
-            namespace=namespace,
-            tenant_id=tenant_id,
-        )
         task_store = stores[RuntimeDomain.TASK]
         bundles[RuntimeDomain.TASK] = {
             "operations": OperationLedgerRepository(

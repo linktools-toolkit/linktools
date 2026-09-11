@@ -21,7 +21,6 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
-from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._plan import PlanItem, RuntimePlanStore
 from .state._step_contracts import (
@@ -30,6 +29,7 @@ from .state._step_contracts import (
     StepEvent,
     StepStore,
 )
+
 
 class HarnessPlanStoreAdapter:
     """Expose the Runtime plan store through Harness' public PlanStore contract."""
@@ -43,7 +43,7 @@ class HarnessPlanStoreAdapter:
         values = await self._store.get_items()
         return [
             HarnessPlanItem(
-                id=_plan_item_id(index, item),
+                id=_plan_item_id(index),
                 content=item.content,
                 status=TaskStatus(item.status),
             )
@@ -51,11 +51,7 @@ class HarnessPlanStoreAdapter:
         ]
 
     async def set_items(self, items: list[HarnessPlanItem]) -> None:
-        values = _runtime_plan_items(items)
-        current = await self._store.get_items()
-        if current == values:
-            return
-        await self._store.write_plan(values)
+        await self._store.write_plan(_runtime_plan_items(items))
 
     async def get_item(self, item_id: str) -> HarnessPlanItem | None:
         return next(
@@ -121,14 +117,8 @@ def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
     return values
 
 
-def _plan_item_id(index: int, item: PlanItem) -> str:
-    return canonical_sha256(
-        {
-            "index": index,
-            "content": item.content,
-            "status": item.status,
-        }
-    )[:8]
+def _plan_item_id(index: int) -> str:
+    return f"item-{index + 1}"
 
 
 class HarnessStepStoreAdapter:
