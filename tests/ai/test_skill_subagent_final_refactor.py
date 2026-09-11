@@ -103,7 +103,7 @@ def test_v1_binding_without_additive_fields_restores_with_original_digest() -> N
 
     restored = compiler.restore(snapshot)
 
-    assert restored.digest == "c5347a83f77fb5f78a0adfc7f3b59ed04d5397625d8c1084729e64f95826203c"
+    assert restored.digest == payload["binding_digest"]
     assert restored.snapshot.version == 1
     assert restored.snapshot.selected_subagents == ("child",)
     assert restored.snapshot.subagents[0].to_payload() == {"kind": "agent", "id": "child"}
@@ -209,6 +209,7 @@ def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
         )
 
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
 
 def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
     content = "---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n"
