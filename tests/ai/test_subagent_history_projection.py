@@ -126,7 +126,7 @@ class _Store:
                     run_id=run_id,
                     conversation_id=conversation_id,
                     agent_name="default",
-                    metadata={"segment_sequence": "1"},
+                    metadata={"segment_sequence": "1", "agent_name": "default"},
                 ),
             )
 
