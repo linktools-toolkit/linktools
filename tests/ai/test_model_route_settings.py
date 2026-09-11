@@ -53,12 +53,22 @@ def test_openai_provider_instance_changes_durable_identity() -> None:
     assert first.fingerprint != second.fingerprint
 
 
-def test_openai_custom_endpoint_requires_provider_instance() -> None:
-    with pytest.raises(ValueError, match="provider_instance"):
-        ModelRegistry.openai(
-            model="gpt-test",
-            base_url="https://gateway.example/v1",
-        )
+def test_openai_custom_endpoint_gets_conservative_instance_identity() -> None:
+    first = ModelRegistry.openai(
+        model="gpt-test",
+        base_url="https://first.example/v1",
+    ).snapshot().resolve("default")
+    second = ModelRegistry.openai(
+        model="gpt-test",
+        base_url="https://second.example/v1",
+    ).snapshot().resolve("default")
+
+    first_instance = dict(first.semantic_payload)["provider_instance"]
+    second_instance = dict(second.semantic_payload)["provider_instance"]
+    assert isinstance(first_instance, str) and first_instance.startswith("openai-endpoint-")
+    assert isinstance(second_instance, str) and second_instance.startswith("openai-endpoint-")
+    assert first_instance != second_instance
+    assert first.fingerprint != second.fingerprint
 
 
 def test_openai_public_provider_has_stable_default_instance() -> None:
