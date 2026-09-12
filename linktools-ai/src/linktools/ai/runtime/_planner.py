@@ -110,7 +110,6 @@ class _AgentTaskNodeHandler:
         compiler: AgentCompiler,
         *,
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
-        request_terminal_handoff: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._execution = execution
         self._catalog = catalog
@@ -119,11 +118,6 @@ class _AgentTaskNodeHandler:
             _noop_async_callback
             if release_dependency_hold is None
             else release_dependency_hold
-        )
-        self._request_terminal_handoff = (
-            _noop_async_callback
-            if request_terminal_handoff is None
-            else request_terminal_handoff
         )
         self._detached_tasks: set[asyncio.Task[object]] = set()
         self._cancelled_tasks: set[asyncio.Task[object]] = set()
@@ -272,7 +266,6 @@ class _AgentTaskNodeHandler:
                     launch_task,
                     key,
                     control,
-                    principal,
                 ),
                 name=f"task-execution-handoff-after-launch-{graph_id}-{node.node_id}",
             )
@@ -290,7 +283,6 @@ class _AgentTaskNodeHandler:
             control,
             handle.execution_id,
             key=key,
-            principal=principal,
         )
         wait_task = asyncio.create_task(
             self._execution.wait(handle.execution_id, principal=principal),
@@ -299,19 +291,6 @@ class _AgentTaskNodeHandler:
         try:
             await asyncio.shield(wait_task)
         except asyncio.CancelledError:
-            continuation = asyncio.create_task(
-                self._finish_handoff_wait(
-                    wait_task,
-                    handle.execution_id,
-                    key,
-                    principal,
-                ),
-                name=f"task-execution-handoff-wait-{graph_id}-{node.node_id}",
-            )
-            self._detach(
-                cast("asyncio.Task[object]", continuation),
-                f"task execution handoff wait graph={graph_id} task={node.node_id}",
-            )
             if not wait_task.done():
                 wait_task.cancel()
                 self._detach_cancelled(
@@ -498,7 +477,6 @@ class _AgentTaskNodeHandler:
         execution_id: str,
         *,
         key: tuple[str, str, str],
-        principal: Principal,
     ) -> None:
         task = asyncio.create_task(
             control.handoff_execution(execution_id),
@@ -512,7 +490,6 @@ class _AgentTaskNodeHandler:
                     task,
                     execution_id,
                     key,
-                    principal,
                 ),
                 name=f"task-execution-handoff-settle-{key[1]}-{key[2]}",
             )
@@ -534,21 +511,15 @@ class _AgentTaskNodeHandler:
         task: asyncio.Task[None],
         execution_id: str,
         key: tuple[str, str, str],
-        principal: Principal,
     ) -> None:
         handoff_succeeded = False
         try:
             await task
             handoff_succeeded = True
-            wait_task = asyncio.create_task(
-                self._execution.wait(execution_id, principal=principal),
-                name=f"task-execution-detached-wait-{key[1]}-{key[2]}",
-            )
-            await self._finish_handoff_wait(
-                wait_task,
+            await self._release_dependency_hold(
                 execution_id,
-                key,
-                principal,
+                tenant_id=key[0],
+                hold_id=f"task:{key[1]}:{key[2]}",
             )
         except asyncio.CancelledError:
             if not handoff_succeeded:
@@ -594,7 +565,6 @@ class _AgentTaskNodeHandler:
         launch_task: asyncio.Task[ExecutionHandle],
         key: tuple[str, str, str],
         control: TaskNodeRunControl,
-        principal: Principal,
     ) -> None:
         try:
             handle = await launch_task
@@ -604,7 +574,11 @@ class _AgentTaskNodeHandler:
                 control,
                 handle.execution_id,
                 key=key,
-                principal=principal,
+            )
+            await self._release_dependency_hold(
+                handle.execution_id,
+                tenant_id=key[0],
+                hold_id=f"task:{key[1]}:{key[2]}",
             )
         except asyncio.CancelledError:
             raise
@@ -629,49 +603,6 @@ class _AgentTaskNodeHandler:
         finally:
             if self._active_launch_tasks.get(key) is launch_task:
                 self._active_launch_tasks.pop(key, None)
-
-    async def _finish_handoff_wait(
-        self,
-        wait_task: asyncio.Task[ExecutionResult],
-        execution_id: str,
-        key: tuple[str, str, str],
-        principal: Principal,
-    ) -> None:
-        try:
-            await wait_task
-            await self._execution.result(
-                execution_id,
-                principal=principal,
-            )
-        except asyncio.CancelledError:
-            raise
-        except BaseException as error:  # noqa: BLE001
-            raise self._record_background_failure(
-                key,
-                error,
-                phase="task_execution_handoff_wait",
-            ) from error
-        else:
-            try:
-                await self._finish_handoff(execution_id, key)
-            except BaseException as error:  # noqa: BLE001
-                raise self._record_background_failure(
-                    key,
-                    error,
-                    phase="task_execution_handoff_release",
-                ) from error
-
-    async def _finish_handoff(
-        self,
-        execution_id: str,
-        key: tuple[str, str, str],
-    ) -> None:
-        await self._release_dependency_hold(
-            execution_id,
-            tenant_id=key[0],
-            hold_id=f"task:{key[1]}:{key[2]}",
-        )
-        await self._request_terminal_handoff(execution_id, tenant_id=key[0])
 
     def _record_background_failure(
         self,
@@ -826,7 +757,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         handlers: Sequence[TaskNodeHandler[AppT]] = (),
         expanders: Sequence[TaskExpander] = (),
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
-        request_terminal_handoff: Callable[..., Awaitable[None]] | None = None,
         task_durable: bool = False,
         execution_durable: bool = True,
         recovery_durable: bool = True,
@@ -844,7 +774,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             catalog,
             compiler,
             release_dependency_hold=release_dependency_hold,
-            request_terminal_handoff=request_terminal_handoff,
         )
         values: dict[tuple[str, int], TaskNodeHandler[AppT]] = {}
         for handler in handlers:
