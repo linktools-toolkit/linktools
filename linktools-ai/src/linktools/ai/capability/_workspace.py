@@ -3,14 +3,16 @@
 """Adapt one opened workspace session to Pydantic AI tools."""
 
 import asyncio
+import mimetypes
 from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.messages import BinaryContent, ToolReturn
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..errors import AIError, ErrorCode
@@ -19,6 +21,7 @@ from ..workspace import (
     Sandbox,
     SandboxSession,
     Workspace,
+    WorkspacePolicy,
     normalize_workspace_path,
 )
 from ._context import AgentContext
@@ -28,7 +31,10 @@ from ._group import (
     contribution_semantic_contract,
 )
 
+_ResultT = TypeVar("_ResultT")
+
 _BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (
+    "attach_files",
     "create_directory",
     "edit_file",
     "file_info",
@@ -39,6 +45,7 @@ _BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "write_file",
 )
 _BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
+    "attach_files",
     "file_info",
     "find_files",
     "list_directory",
@@ -179,8 +186,14 @@ def workspace_tool_path_metadata(fields: Sequence[str]) -> dict[str, object]:
 
 
 class _WorkspaceToolSurface:
-    def __init__(self, session: SandboxSession | None) -> None:
+    def __init__(
+        self,
+        session: SandboxSession | None,
+        policy: WorkspacePolicy,
+    ) -> None:
         self._session = session
+        self._policy = policy
+        self._mime = mimetypes.MimeTypes(filenames=())
 
     def _require_session(self) -> SandboxSession:
         if self._session is None:
@@ -188,13 +201,68 @@ class _WorkspaceToolSurface:
         return self._session
 
     @staticmethod
-    async def _call(operation: Awaitable[str]) -> str:
+    async def _call(operation: Awaitable[_ResultT]) -> _ResultT:
         try:
             return await operation
         except AIError as error:
             if error.code not in _MODEL_CORRECTABLE_ERRORS:
                 raise
             raise ModelRetry(_MODEL_ERROR_MESSAGES[error.code]) from error
+
+    async def attach_files(self, paths: list[str]) -> ToolReturn:
+        """Attach Workspace files to the next model request.
+
+        Args:
+            paths: File paths relative to the root directory.
+
+        Returns:
+            Lightweight file metadata plus the file content for the next model request.
+        """
+        return await self._call(self._attach_files(paths))
+
+    async def _attach_files(self, paths: list[str]) -> ToolReturn:
+        if not paths:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        unique_paths = tuple(dict.fromkeys(paths))
+        if len(unique_paths) > self._policy.max_binary_input_parts:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        session = self._require_session()
+        total_bytes = 0
+        metadata: list[dict[str, object]] = []
+        content: list[object] = []
+        for path in unique_paths:
+            media_type, _ = self._mime.guess_type(path, strict=False)
+            if not media_type:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            remaining = self._policy.max_binary_input_bytes - total_bytes
+            if remaining < 0:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            body = await session.read_bytes(path, max_bytes=remaining)
+            total_bytes += len(body)
+            if total_bytes > self._policy.max_binary_input_bytes:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            metadata.append(
+                {
+                    "path": path,
+                    "media_type": media_type,
+                    "size": len(body),
+                }
+            )
+            content.extend(
+                (
+                    f"Workspace file: {path}",
+                    BinaryContent(
+                        data=body,
+                        media_type=media_type,
+                        identifier=Path(path).name,
+                    ),
+                )
+            )
+        return ToolReturn(
+            return_value={"files": metadata},
+            content=cast(Any, content),
+        )
 
     async def read_file(
         self,
@@ -297,11 +365,11 @@ class _WorkspaceToolSurface:
 
         Args:
             pattern: Regex pattern to search for.
-            path: Directory to search in, relative to the root directory.
-            include_glob: If provided, only search files matching this glob (e.g. '*.py').
+            path: Directory to search in, relative to root.
+            include_glob: If provided, only search files matching this glob.
 
         Returns:
-            str: Matching lines formatted as file:line_number:text.
+            Matching lines formatted as file:line_number:text.
         """
         return await self._call(
             self._require_session().search_files(
@@ -315,9 +383,8 @@ class _WorkspaceToolSurface:
         """Find files by glob pattern (name matching, not content search).
 
         Args:
-            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
-                '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to the root directory.
+            pattern: Glob pattern to match, relative to `path`.
+            path: Directory to search in, relative to root.
 
         Returns:
             Newline-separated list of matching file paths relative to root.
@@ -412,9 +479,10 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         self,
         selected_tool_names: tuple[str, ...],
         session: SandboxSession | None,
+        policy: WorkspacePolicy,
     ) -> None:
         super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
-        surface = _WorkspaceToolSurface(session)
+        surface = _WorkspaceToolSurface(session, policy)
         for name in selected_tool_names:
             self.add_tool(_workspace_tool(surface, name))
 
@@ -424,21 +492,26 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         self,
         selected_tool_names: tuple[str, ...],
         session: SandboxSession | None,
+        policy: WorkspacePolicy,
     ) -> None:
         self.id = _WORKSPACE_SANDBOX_CAPABILITY_ID
         self._selected_tool_names = selected_tool_names
         self._session = session
+        self._policy = policy
 
     def get_toolset(self) -> _WorkspaceSandboxToolset:
-        return _WorkspaceSandboxToolset(self._selected_tool_names, self._session)
+        return _WorkspaceSandboxToolset(
+            self._selected_tool_names,
+            self._session,
+            self._policy,
+        )
 
 
 def workspace_tool_contributions(
     workspace: Workspace,
 ) -> tuple[CapabilityContribution[object], ...]:
     """Return the stable workspace tool definitions used by the compiler."""
-    del workspace
-    surface = _WorkspaceToolSurface(None)
+    surface = _WorkspaceToolSurface(None, workspace.policy)
     result: list[CapabilityContribution[object]] = []
     for name in _WORKSPACE_TOOL_NAMES:
         tool = _workspace_tool(surface, name)
@@ -461,7 +534,6 @@ def workspace_capabilities(
     session: SandboxSession | None = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened session."""
-    del workspace
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
     if unknown:
@@ -476,7 +548,7 @@ def workspace_capabilities(
         ordered,
         session is not None,
     )
-    return (_WorkspaceCapability(ordered, session),)
+    return (_WorkspaceCapability(ordered, session, workspace.policy),)
 
 
 def workspace_tool_class(tool: Tool[Any]) -> str | None:
@@ -501,7 +573,8 @@ def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool[Any]:
     )
     metadata: dict[str, object] = {_WORKSPACE_METADATA_KEY: tool_class}
     if tool_class in {"filesystem.read", "filesystem.write"}:
-        metadata.update(workspace_tool_path_metadata(("path",)))
+        fields = ("paths",) if name == "attach_files" else ("path",)
+        metadata.update(workspace_tool_path_metadata(fields))
     return Tool(
         cast(Any, getattr(surface, name)),
         takes_ctx=False,
