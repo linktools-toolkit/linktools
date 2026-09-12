@@ -43,7 +43,7 @@ def _binding() -> AgentBindingSnapshot:
 def _instruction_ref(*, object_backed: bool = False) -> RuntimePayloadRef:
     if object_backed:
         payload = StoredPayload.object(
-            ObjectRef("execution", "repository/instructions", "b" * 64, 17)
+            ObjectRef("runtime", "repository/instructions", "b" * 64, 17)
         )
     else:
         payload = StoredPayload.inline_json({"version": 1, "documents": []})
