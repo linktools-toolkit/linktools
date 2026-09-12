@@ -141,8 +141,8 @@ async def test_attach_files_uses_boundary_paths_and_deduplicates_reads(tmp_path:
         ]
     }
     assert result.content is not None
-    assert len(result.content) == 1
-    assert isinstance(result.content[0], BinaryContent)
+    binary = [item for item in result.content if isinstance(item, BinaryContent)]
+    assert len(binary) == 1
     assert session.canonicalized == ["evidence.png", "evidence.png"]
     assert session.reads == ["evidence.png"]
     assert repository.path_fields == ("paths",)
@@ -163,10 +163,20 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
     )
 
     assert isinstance(result, ToolReturn)
-    assert result.return_value["files"][0]["path"] == path
+    assert result.return_value == {
+        "files": [
+            {
+                "path": path,
+                "media_type": "image/png",
+                "size": 3,
+                "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
+            }
+        ]
+    }
     assert result.content is not None
-    assert all(isinstance(item, BinaryContent) for item in result.content)
-    assert all("\n" not in item.identifier for item in result.content)
+    binary = [item for item in result.content if isinstance(item, BinaryContent)]
+    assert len(binary) == 1
+    assert "\n" not in binary[0].identifier
 
 
 @pytest.mark.asyncio
