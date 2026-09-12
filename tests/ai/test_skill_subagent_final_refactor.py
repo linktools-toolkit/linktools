@@ -148,7 +148,7 @@ def test_skill_and_agent_use_first_formal_v1_contracts() -> None:
     assert plain_definition.digest == described_definition.digest
 
 
-def test_parent_binding_keeps_one_logical_subagent_set_and_rejects_unknown_fields() -> None:
+def test_parent_binding_keeps_one_logical_subagent_set_and_ignores_unknown_fields() -> None:
     parent = AgentSpec("parent", allow_subagents=("child",))
     child = AgentSpec("child", allow_subagents=(), description="Child worker")
     compiler = _compiler({"parent": parent, "child": child})
@@ -163,12 +163,12 @@ def test_parent_binding_keeps_one_logical_subagent_set_and_rejects_unknown_field
 
     payload = binding.snapshot.to_payload()
     assert "selected_subagents" not in payload
-    invalid = {**payload, "future_metadata": {"display": "ignored"}}
-    with pytest.raises(AIError) as error:
-        AgentBindingSnapshot.from_payload(invalid)
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    additive = {**payload, "future_metadata": {"display": "ignored"}}
+    decoded = AgentBindingSnapshot.from_payload(additive)
+    assert decoded == binding.snapshot
+    assert "future_metadata" not in decoded.to_payload()
 
-    restored = compiler.restore(AgentBindingSnapshot.from_payload(payload))
+    restored = compiler.restore(decoded)
     assert restored.digest == binding.digest
     assert restored.snapshot.subagents == binding.snapshot.subagents
 
@@ -187,7 +187,7 @@ def test_future_semantic_pin_version_is_not_misclassified_as_corruption() -> Non
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_agent_task_recovery_rejects_unknown_binding_fields() -> None:
+def test_agent_task_recovery_accepts_unknown_binding_fields() -> None:
     binding = _load_json("agent_binding_subagent_v1_golden.json")
     binding["future"] = 2
     body = {
@@ -197,18 +197,31 @@ def test_agent_task_recovery_rejects_unknown_binding_fields() -> None:
         "planning": False,
         "thinking": False,
     }
-    handler = object.__new__(_AgentTaskNodeHandler)
-    handler._catalog = None
-    handler._compiler = None
+    parent = AgentSpec("parent", allow_subagents=("child",))
+    child = AgentSpec("child", allow_subagents=())
+    compiler = _compiler({"parent": parent, "child": child})
+    catalog = AgentCatalog(
+        {
+            "parent": compiler.compile(parent),
+            "child": compiler.compile(child),
+        }
+    )
+    handler = _AgentTaskNodeHandler(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        catalog,
+        compiler,
+    )
 
-    with pytest.raises(AIError) as error:
-        handler.validate_recovery(
-            body,  # type: ignore[arg-type]
-            graph_id="graph",
-            node_id="node",
-        )
+    normalized = handler.validate_recovery(
+        body,  # type: ignore[arg-type]
+        graph_id="graph",
+        node_id="node",
+    )
 
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    normalized_binding = normalized["binding"]
+    assert isinstance(normalized_binding, dict)
+    assert "future" not in normalized_binding
+    assert AgentBindingSnapshot.from_payload(normalized_binding).subagent_ids == ("child",)
 
 
 def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
