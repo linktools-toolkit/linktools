@@ -90,12 +90,24 @@ class _TaskGraphService:
                 "node",
                 "worker",
                 1,
-                "execution",
             )
             yield TaskEvent(
                 1,
                 graph_id,
                 after_sequence + 3,
+                TaskEventType.NODE_CHANGED,
+                now,
+                TaskStatus.WAITING,
+                TaskStatus.RUNNING,
+                "node",
+                None,
+                1,
+                "execution",
+            )
+            yield TaskEvent(
+                1,
+                graph_id,
+                after_sequence + 4,
                 TaskEventType.GRAPH_CHANGED,
                 now,
                 TaskStatus.SUCCEEDED,
@@ -145,7 +157,7 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
     )
     values = [item async for item in run.watch()]
     assert all(isinstance(item, TaskGraphRunEvent) for item in values)
-    assert [type(item.event) for item in values].count(TaskEvent) == 3
+    assert [type(item.event) for item in values].count(TaskEvent) == 4
     execution = [
         item for item in values if isinstance(item.event, ExecutionTreeEvent)
     ]
