@@ -80,7 +80,6 @@ class _Checkpoints:
             execution_id="execution",
             tenant_id="tenant",
             step_run_id="step",
-            agent_run_sequence=1,
             state=RecoveryCheckpointState.WAITING,
             revision=0,
             created_at=datetime.now(timezone.utc),

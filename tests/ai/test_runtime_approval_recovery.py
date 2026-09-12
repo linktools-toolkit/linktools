@@ -99,7 +99,6 @@ def _checkpoint(now: datetime) -> RecoveryCheckpoint:
         execution_id="execution",
         tenant_id="tenant",
         step_run_id="step-1",
-        agent_run_sequence=1,
         state=RecoveryCheckpointState.ACTIVE,
         revision=0,
         created_at=now,

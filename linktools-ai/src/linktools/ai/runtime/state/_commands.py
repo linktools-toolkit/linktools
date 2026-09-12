@@ -253,8 +253,6 @@ class RuntimeStateCommands:
                     or current_checkpoint.state is not RecoveryCheckpointState.ACTIVE
                     or current_checkpoint.step_run_id
                     != continuation.source_step_run_id
-                    or current_checkpoint.agent_run_sequence
-                    != expected_agent_run_sequence
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 for record in approval_values:
@@ -611,7 +609,6 @@ class RuntimeStateCommands:
                         checkpoint,
                         state=RecoveryCheckpointState.ACTIVE,
                         step_run_id=next_run_id,
-                        agent_run_sequence=next_sequence,
                         pending_tools=None,
                         revision=expected_recovery_revision + 1,
                         updated_at=updated_execution.updated_at,
@@ -1035,7 +1032,6 @@ class RuntimeStateCommands:
             updated_recovery = replace(
                 current_recovery,
                 step_run_id=next_run_id,
-                agent_run_sequence=next_sequence,
                 state=RecoveryCheckpointState.ACTIVE,
                 revision=current_recovery.revision + 1,
                 updated_at=updated_execution.updated_at,
@@ -1077,7 +1073,6 @@ class RuntimeStateCommands:
                 and recovery.revision == claim.expected_recovery_revision + 1
                 and recovery.state is RecoveryCheckpointState.ACTIVE
                 and recovery.step_run_id == next_run_id
-                and recovery.agent_run_sequence == next_sequence
             )
             execution_predecessor = (
                 execution is not None
@@ -1089,7 +1084,6 @@ class RuntimeStateCommands:
                 and recovery.revision == claim.expected_recovery_revision
                 and recovery.state is claim.expected_recovery_state
                 and recovery.step_run_id is None
-                and recovery.agent_run_sequence == claim.expected_agent_run_sequence
             )
             if execution_target and recovery_target:
                 _logger.warning(
@@ -2467,7 +2461,6 @@ class RuntimeStateCommands:
                 actual is None
                 or actual.execution_id != recovery_checkpoint.execution_id
                 or actual.tenant_id != recovery_checkpoint.tenant_id
-                or actual.agent_run_sequence != 0
                 or actual.step_run_id is not None
                 or actual.state is not RecoveryCheckpointState.ADMITTED
                 or actual.handoff_phase is not RecoveryHandoffPhase.NONE

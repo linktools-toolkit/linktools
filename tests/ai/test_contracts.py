@@ -177,7 +177,6 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
 
     def checkpoint(
         state: RecoveryCheckpointState,
-        sequence: int,
         step_run_id: str | None,
         pending_tools: PendingToolContinuation | None = None,
     ) -> RecoveryCheckpoint:
@@ -185,7 +184,6 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
             execution_id="execution",
             tenant_id="tenant",
             step_run_id=step_run_id,
-            agent_run_sequence=sequence,
             state=state,
             revision=0,
             created_at=now,
@@ -195,13 +193,12 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
         )
 
     with pytest.raises(ValueError):
-        checkpoint(RecoveryCheckpointState.ADMITTED, 1, None)
+        checkpoint(RecoveryCheckpointState.ADMITTED, "step-1")
     with pytest.raises(ValueError):
-        checkpoint(RecoveryCheckpointState.ACTIVE, 0, None)
-    assert checkpoint(RecoveryCheckpointState.COMPLETED, 0, None).agent_run_sequence == 0
+        checkpoint(RecoveryCheckpointState.ACTIVE, None)
+    assert checkpoint(RecoveryCheckpointState.COMPLETED, None).step_run_id is None
     waiting = checkpoint(
         RecoveryCheckpointState.WAITING,
-        1,
         "step-1",
         _pending_tools(),
     )

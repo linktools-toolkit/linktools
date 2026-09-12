@@ -171,7 +171,6 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy() -> No
     assert checkpoint is not None
     assert checkpoint.execution_id == execution.execution_id
     assert checkpoint.state.value == "admitted"
-    assert checkpoint.agent_run_sequence == execution.agent_run_sequence
     assert checkpoint.pending_tools is None
 
 

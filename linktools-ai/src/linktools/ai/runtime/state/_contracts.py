@@ -979,7 +979,6 @@ class RecoveryCheckpoint:
     execution_id: str
     tenant_id: str
     step_run_id: str | None
-    agent_run_sequence: int
     state: RecoveryCheckpointState
     revision: int
     created_at: datetime
@@ -992,11 +991,8 @@ class RecoveryCheckpoint:
     pending_operation_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.agent_run_sequence < 0:
-            raise ValueError("recovery checkpoint sequence must be non-negative")
         if self.state is RecoveryCheckpointState.ADMITTED and (
-            self.agent_run_sequence != 0
-            or self.step_run_id is not None
+            self.step_run_id is not None
             or self.pending_operation_id is not None
             or self.pending_tools is not None
         ):
@@ -1004,7 +1000,7 @@ class RecoveryCheckpoint:
         if self.state in {
             RecoveryCheckpointState.ACTIVE,
             RecoveryCheckpointState.WAITING,
-        } and (self.agent_run_sequence < 1 or self.step_run_id is None):
+        } and self.step_run_id is None:
             raise ValueError("active recovery checkpoint requires an attempt")
         if self.state is RecoveryCheckpointState.WAITING:
             if (

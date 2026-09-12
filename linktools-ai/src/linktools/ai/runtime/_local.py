@@ -821,7 +821,6 @@ class _RecoveryCoordinator:
             current.status is not ExecutionStatus.STARTED
             or checkpoint.state is not RecoveryCheckpointState.ACTIVE
             or checkpoint.step_run_id != step_run_id
-            or checkpoint.agent_run_sequence != current.agent_run_sequence
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         metadata = requests.metadata
@@ -1268,7 +1267,6 @@ class _RecoveryCoordinator:
             or recovery != checkpoint
             or recovery.state is not RecoveryCheckpointState.WAITING
             or recovery.pending_tools is None
-            or recovery.agent_run_sequence != current.agent_run_sequence
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         deferred_results = DeferredToolResults()
@@ -1882,7 +1880,6 @@ class LocalExecutionBackend:
                     checkpoint is None
                     or checkpoint.state is not RecoveryCheckpointState.WAITING
                     or checkpoint.pending_tools is None
-                    or checkpoint.agent_run_sequence != current.agent_run_sequence
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (
@@ -1980,7 +1977,6 @@ class LocalExecutionBackend:
             execution_id=execution.execution_id,
             tenant_id=execution.tenant_id,
             step_run_id=None,
-            agent_run_sequence=execution.agent_run_sequence,
             state=RecoveryCheckpointState.ADMITTED,
             revision=0,
             created_at=now,
@@ -3860,7 +3856,6 @@ class LocalExecutionBackend:
             if (
                 current.status is not ExecutionStatus.STARTED
                 or checkpoint.step_run_id is None
-                or checkpoint.agent_run_sequence != current.agent_run_sequence
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             binding = self._catalog.binding(current.binding_digest)
@@ -5873,7 +5868,6 @@ def _admission_matches(
         existing.execution_id == candidate.execution_id
         and existing.tenant_id == candidate.tenant_id
         and existing.step_run_id is None
-        and existing.agent_run_sequence == candidate.agent_run_sequence
         and existing.state is RecoveryCheckpointState.ADMITTED
         and existing.handoff_phase is RecoveryHandoffPhase.NONE
         and existing.terminal_handoff is None

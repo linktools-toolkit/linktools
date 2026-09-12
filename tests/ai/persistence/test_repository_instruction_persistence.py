@@ -106,7 +106,6 @@ def _checkpoint(pending_tools: PendingToolContinuation | None) -> RecoveryCheckp
         execution_id="execution",
         tenant_id="tenant",
         step_run_id="step-1" if waiting else None,
-        agent_run_sequence=1 if waiting else 0,
         state=(
             RecoveryCheckpointState.WAITING
             if waiting
