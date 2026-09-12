@@ -1,0 +1,40 @@
+name: Durable model patch 2
+
+on:
+  push:
+    branches:
+      - refactor/ai-durable-contract-convergence
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-durable-contract-convergence
+          fetch-depth: 64
+      - name: Apply durable contract convergence
+        run: python .github/durable_model_patch.py
+      - name: Validate patch
+        run: |
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/state/_contracts.py \
+            linktools-ai/src/linktools/ai/runtime/state/_history.py \
+            linktools-ai/src/linktools/ai/runtime/state/_codec.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py
+          git diff --check
+      - name: Commit patch and restore CI
+        run: |
+          git show 125eaa6f38a0aaf893bcdeaab98f88680a3073af:.github/workflows/python-check.yml > .github/workflows/python-check.yml
+          rm -f \
+            .github/workflows/durable-model-patch.yml \
+            .github/workflows/durable-model-patch2.yml \
+            .github/durable_model_patch.py
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'refactor(ai): derive remaining durable facts'
+          git push origin HEAD:refactor/ai-durable-contract-convergence
