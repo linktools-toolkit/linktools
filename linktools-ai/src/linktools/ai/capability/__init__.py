@@ -37,6 +37,7 @@ from ._workspace import (
     workspace_capabilities,
     workspace_tool_class,
     workspace_tool_contributions,
+    workspace_tool_path_fields_from_metadata,
 )
 
 __all__ = [
@@ -72,4 +73,5 @@ __all__ = [
     "workspace_capabilities",
     "workspace_tool_class",
     "workspace_tool_contributions",
+    "workspace_tool_path_fields_from_metadata",
 ]
