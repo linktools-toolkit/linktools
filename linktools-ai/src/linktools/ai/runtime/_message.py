@@ -20,6 +20,8 @@ from pydantic_ai.messages import (
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 
+_CONSUMED_BINARY_MARKER = "[binary content already consumed]"
+
 
 def _json_value(value: object, *, reading: bool) -> JsonValue:
     if value is None or isinstance(value, (bool, int, str)):
@@ -47,13 +49,6 @@ def _json_value(value: object, *, reading: bool) -> JsonValue:
     if reading:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raise TypeError("model message persistence contains a non-JSON value")
-
-
-def _consumed_binary_marker(value: BinaryContent) -> str:
-    details = [value.media_type]
-    if value.identifier:
-        details.append(f"identifier={value.identifier}")
-    return f"[binary content already consumed: {', '.join(details)}]"
 
 
 def project_transient_binary_content(
@@ -85,7 +80,7 @@ def project_transient_binary_content(
             part_changed = False
             for item in part.content:
                 if isinstance(item, BinaryContent):
-                    content.append(_consumed_binary_marker(item))
+                    content.append(_CONSUMED_BINARY_MARKER)
                     part_changed = True
                 else:
                     content.append(item)
