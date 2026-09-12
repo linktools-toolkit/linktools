@@ -40,7 +40,7 @@ async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -
             result_digest="0" * 64,
         )
 
-        view = await state.task.tasks.reconcile_graph(
+        view = await state.task.tasks.scheduler_snapshot(
             request.graph.graph_id,
             tenant_id="tenant",
         )

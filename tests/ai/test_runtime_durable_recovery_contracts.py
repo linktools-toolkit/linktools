@@ -95,7 +95,7 @@ def test_recovered_pending_event_preserves_execution_and_fence() -> None:
         sequence=2,
         event_type=TaskEventType.NODE_CHANGED,
         occurred_at=datetime.now(timezone.utc),
-        status=TaskStatus.PENDING,
+        status=TaskStatus.WAITING,
         previous_status=TaskStatus.RECOVERY_REQUIRED,
         node_id="node",
         fence=3,

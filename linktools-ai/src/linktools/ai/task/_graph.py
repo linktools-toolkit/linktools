@@ -67,11 +67,31 @@ def _normalize_json_value(value: object) -> JsonValue:
     raise TypeError(f"unsupported task node input value: {type(value).__name__}")
 
 
+_TASK_EXPANDER_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskExpanderRef:
+    id: str
+    version: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.id, str)
+            or _TASK_EXPANDER_ID.fullmatch(self.id) is None
+            or not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version < 1
+        ):
+            raise ValueError("task expander reference is invalid")
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class TaskNode:
     node_id: str
     dependencies: tuple[str, ...]
     budget_cost: int
+    expander: "TaskExpanderRef | None"
     _input: bytes = field(repr=False)
 
     def __init__(
@@ -81,6 +101,7 @@ class TaskNode:
         *,
         input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
+        expander: "TaskExpanderRef | None" = None,
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
             raise TypeError("task node dependencies are invalid")
@@ -99,6 +120,10 @@ class TaskNode:
             or not isinstance(budget_cost, int)
             or isinstance(budget_cost, bool)
             or budget_cost < 1
+            or (
+                expander is not None
+                and not isinstance(expander, TaskExpanderRef)
+            )
         ):
             raise ValueError("task node identity is invalid")
         values: Mapping[str, JsonValue] = {} if input is None else input
@@ -108,6 +133,7 @@ class TaskNode:
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "dependencies", normalized_dependencies)
         object.__setattr__(self, "budget_cost", budget_cost)
+        object.__setattr__(self, "expander", expander)
         object.__setattr__(self, "_input", canonical_json_bytes(normalized))
 
     @property
@@ -168,6 +194,17 @@ class TaskNodeView:
             or not self.error_code.strip()
         ):
             raise ValueError("recovery-required task node state is invalid")
+        if self.status is TaskStatus.WAITING and (
+            self.execution_id is None
+            or not self.execution_id.strip()
+            or self.owner is not None
+            or self.lease_expires_at is not None
+            or self.fence < 1
+            or self.result_digest is not None
+            or self.error_code is not None
+            or self.error_digest is not None
+        ):
+            raise ValueError("waiting task node state is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,8 +223,9 @@ class TaskGraph:
             for dependency in node.dependencies
         ):
             raise TaskGraphValidationError(
-                ErrorCode.TASK_DEPENDENCY_UNKNOWN,
+                ErrorCode.TASK_DAG_INVALID,
                 "task graph contains an unknown dependency",
+                safe_details={"reason": "dependency_unknown"},
             )
         self._topological_order()
 
@@ -209,8 +247,9 @@ class TaskGraph:
                     heapq.heappush(ready, dependent)
         if len(order) != len(self.nodes):
             raise TaskGraphValidationError(
-                ErrorCode.TASK_GRAPH_CYCLE,
+                ErrorCode.TASK_DAG_INVALID,
                 "task graph contains a cycle",
+                safe_details={"reason": "cycle"},
             )
         return tuple(order)
 
@@ -232,15 +271,21 @@ class TaskGraph:
 
 
 class TaskGraphValidationError(AIError, ValueError):
-    def __init__(self, code: ErrorCode, message: str) -> None:
-        AIError.__init__(self, code, message)
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        safe_details: "Mapping[str, JsonValue] | None" = None,
+    ) -> None:
+        AIError.__init__(self, code, message, safe_details=safe_details)
         ValueError.__init__(self, message)
 
 
 @dataclass(frozen=True, slots=True)
 class TaskTerminalRecord:
     node_id: str
-    owner: str
+    owner: "str | None"
     fence: int
     status: TaskStatus
     result_digest: "str | None"
@@ -250,108 +295,15 @@ class TaskTerminalRecord:
     execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        try:
-            validate_lease_owner(self.owner)
-        except AIError as error:
-            raise ValueError("task terminal identity is invalid") from error
+        if self.owner is not None:
+            try:
+                validate_lease_owner(self.owner)
+            except AIError as error:
+                raise ValueError("task terminal identity is invalid") from error
+        if self.fence < 1:
+            raise ValueError("task terminal fence is invalid")
         if self.completed_at.tzinfo is None:
             raise ValueError("task terminal time must be timezone-aware")
-
-
-class TaskCompletionLedger:
-    """Apply terminal task transitions with owner and fence idempotency."""
-
-    def __init__(self) -> None:
-        self._records: dict[str, TaskTerminalRecord] = {}
-
-    def complete(
-        self,
-        node_id: str,
-        owner: str,
-        fence: int,
-        result_digest: str,
-        execution_id: "str | None" = None,
-    ) -> TaskTerminalRecord:
-        if not result_digest:
-            raise ValueError("result digest is required")
-        return self._apply(
-            TaskTerminalRecord(
-                node_id,
-                owner,
-                fence,
-                TaskStatus.SUCCEEDED,
-                result_digest,
-                None,
-                None,
-                execution_id=execution_id,
-            )
-        )
-
-    def fail(
-        self,
-        node_id: str,
-        owner: str,
-        fence: int,
-        error_code: str,
-        error_digest: str,
-        execution_id: "str | None" = None,
-    ) -> TaskTerminalRecord:
-        if not error_code or not error_digest:
-            raise ValueError("failure code and digest are required")
-        return self._apply(
-            TaskTerminalRecord(
-                node_id,
-                owner,
-                fence,
-                TaskStatus.FAILED,
-                None,
-                error_code,
-                error_digest,
-                execution_id=execution_id,
-            )
-        )
-
-    def get(self, node_id: str) -> "TaskTerminalRecord | None":
-        return self._records.get(node_id)
-
-    def _apply(self, candidate: TaskTerminalRecord) -> TaskTerminalRecord:
-        if candidate.fence < 1 or not candidate.node_id or not candidate.owner:
-            if (
-                candidate.fence < 1
-                and candidate.node_id
-                and candidate.owner
-                and candidate.node_id in self._records
-            ):
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
-            raise ValueError("task terminal identity is invalid")
-        previous = self._records.get(candidate.node_id)
-        if previous is None:
-            self._records[candidate.node_id] = candidate
-            return candidate
-        if candidate.fence < previous.fence:
-            raise AIError(ErrorCode.TASK_FENCE_STALE)
-        if candidate.fence == previous.fence:
-            if candidate.owner != previous.owner:
-                raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
-            if _same_terminal_result(candidate, previous):
-                return previous
-            if candidate.status is not previous.status:
-                raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
-            raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
-        raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
-
-
-def _same_terminal_result(left: TaskTerminalRecord, right: TaskTerminalRecord) -> bool:
-    return (
-        left.node_id == right.node_id
-        and left.owner == right.owner
-        and left.fence == right.fence
-        and left.status is right.status
-        and left.result_digest == right.result_digest
-        and left.error_code == right.error_code
-        and left.error_digest == right.error_digest
-        and left.execution_id == right.execution_id
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -383,6 +335,14 @@ def _task_graph_request_digest(
                     "dependencies": sorted(node.dependencies),
                     "input": node.input,
                     "budget_cost": node.budget_cost,
+                    "expander": (
+                        None
+                        if node.expander is None
+                        else {
+                            "id": node.expander.id,
+                            "version": node.expander.version,
+                        }
+                    ),
                 }
                 for node in sorted(graph.nodes, key=lambda item: item.node_id)
             ],
@@ -398,12 +358,14 @@ def _task_graph_request_digest(
 
 @dataclass(frozen=True, slots=True)
 class TaskGraphLaunch:
-    graph: TaskGraph
+    graph_id: str
     principal: Principal
     limits: TaskGraphLimits
     correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
+            raise ValueError("task graph id is required")
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
 
@@ -414,7 +376,7 @@ class TaskGraphAdmission:
     principal: Principal
     limits: TaskGraphLimits
     operation_id: str
-    request_digest: str
+    initial_request_digest: str
     correlation: CorrelationData = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -425,7 +387,7 @@ class TaskGraphAdmission:
             or not isinstance(self.graph_id, str)
             or not self.graph_id.strip()
             or re.fullmatch(r"[0-9a-f]{64}", self.operation_id) is None
-            or re.fullmatch(r"[0-9a-f]{64}", self.request_digest) is None
+            or re.fullmatch(r"[0-9a-f]{64}", self.initial_request_digest) is None
         ):
             raise ValueError("task graph admission is invalid")
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
@@ -444,21 +406,25 @@ class TaskGraphAdmission:
             request.correlation,
         )
 
-    def bind(self, graph: TaskGraph) -> TaskGraphLaunch:
+    def launch(self) -> TaskGraphLaunch:
         if self.version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        try:
-            if graph.graph_id != self.graph_id:
-                raise ValueError("task graph admission graph mismatch")
-            graph.validate_limits(self.limits)
-            if (
-                _task_graph_request_digest(graph, self.principal, self.limits)
-                != self.request_digest
-            ):
-                raise ValueError("task graph admission digest mismatch")
-        except (AIError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return TaskGraphLaunch(graph, self.principal, self.limits, self.correlation)
+        return TaskGraphLaunch(
+            self.graph_id,
+            self.principal,
+            self.limits,
+            self.correlation,
+        )
+
+    def validate_graph(self, graph: TaskGraph) -> None:
+        if graph.graph_id != self.graph_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        graph.validate_limits(self.limits)
+        if (
+            _task_graph_request_digest(graph, self.principal, self.limits)
+            != self.initial_request_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 @dataclass(frozen=True, slots=True)
@@ -520,7 +486,7 @@ class TaskDependencyResult:
 @dataclass(frozen=True, slots=True)
 class TaskGraphHandle:
     graph_id: str
-    workflow_id: str
+    handle_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +552,8 @@ def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
         return TaskStatus.CANCELLED
     if TaskStatus.RUNNING in statuses:
         return TaskStatus.RUNNING
+    if TaskStatus.WAITING in statuses:
+        return TaskStatus.WAITING
     return TaskStatus.PENDING
 
 
@@ -622,7 +590,6 @@ def ready_nodes(
 __all__ = [
     "CancelGraphRequest",
     "RecoverGraphRequest",
-    "TaskCompletionLedger",
     "TaskDependencyResult",
     "TaskGraph",
     "TaskGraphAdmission",
@@ -636,6 +603,7 @@ __all__ = [
     "TaskGraphView",
     "TaskLease",
     "TaskNode",
+    "TaskExpanderRef",
     "TaskNodeResult",
     "TaskNodeView",
     "TaskResultRecord",

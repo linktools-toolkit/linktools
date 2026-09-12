@@ -86,7 +86,7 @@ async def test_cached_task_failure_rethrows_full_metadata() -> None:
     }
     request = SimpleNamespace(
         principal=SimpleNamespace(tenant_id="tenant"),
-        graph=SimpleNamespace(graph_id="graph"),
+        graph_id="graph",
     )
 
     with pytest.raises(AIError) as captured:

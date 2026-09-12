@@ -188,7 +188,7 @@ async def test_explicit_cancel_cleans_running_node_without_local_scheduler_owner
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
         launch = TaskGraphLaunch(
-            graph,
+            graph.graph_id,
             Principal("task-test", "tenant"),
             TaskGraphLimits(),
         )
@@ -232,10 +232,12 @@ async def test_heartbeat_lease_loss_cancels_runner_without_terminal_write(
         monkeypatch.setattr(task_local, "_HEARTBEAT_SECONDS", 0.01)
         monkeypatch.setattr(repository, "renew", fail_renew)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
-        await launcher.start(TaskGraphLaunch(graph, principal, TaskGraphLimits()))
+        await launcher.start(
+            TaskGraphLaunch(graph.graph_id, principal, TaskGraphLimits())
+        )
 
         await asyncio.wait_for(runner.entered.wait(), 1)
-        await asyncio.wait_for(runner.cancelled.wait(), 1)
+        await asyncio.wait_for(runner.cancelled.wait(), 2)
         await asyncio.sleep(0)
 
         snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
@@ -302,11 +304,10 @@ async def test_inflight_node_does_not_suppress_durable_terminal_recheck(
         graph = TaskGraph("inflight-terminal-recheck", (TaskNode("node"),))
         await admit_graph(state, graph)
         runner = _BlockingRunner()
-        monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
-                graph,
+                graph.graph_id,
                 trusted_workspace_principal("tenant"),
                 TaskGraphLimits(),
             )
@@ -314,7 +315,7 @@ async def test_inflight_node_does_not_suppress_durable_terminal_recheck(
 
         await asyncio.wait_for(runner.entered.wait(), 1)
         await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-        await asyncio.wait_for(runner.cancelled.wait(), 1)
+        await asyncio.wait_for(runner.cancelled.wait(), 2)
 
         snapshot = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
         assert snapshot is not None
@@ -390,11 +391,10 @@ async def test_inflight_node_does_not_suppress_expired_foreign_lease_reclaim(
             lease_seconds=1,
         )
         runner = ReclaimRunner()
-        monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
-                graph,
+                graph.graph_id,
                 trusted_workspace_principal("tenant"),
                 TaskGraphLimits(max_concurrency=2),
             )
@@ -416,7 +416,7 @@ async def test_inflight_node_does_not_suppress_expired_foreign_lease_reclaim(
         assert foreign.owner is None
 
         await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-        await asyncio.wait_for(runner.local_cancelled.wait(), 1)
+        await asyncio.wait_for(runner.local_cancelled.wait(), 2)
     finally:
         if launcher is not None:
             await launcher.shutdown()
@@ -447,11 +447,10 @@ async def test_event_stream_rechecks_foreign_update_while_local_node_is_inflight
         )
         principal = trusted_workspace_principal("tenant")
         runner = _BlockingRunner()
-        monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
-                graph,
+                graph.graph_id,
                 principal,
                 TaskGraphLimits(max_concurrency=2),
             )
@@ -484,7 +483,7 @@ async def test_event_stream_rechecks_foreign_update_while_local_node_is_inflight
             result_digest="b" * 64,
         )
 
-        event = await asyncio.wait_for(pending, 1)
+        event = await asyncio.wait_for(pending, 2)
         assert event.node_id == "foreign"
         assert event.previous_status is TaskStatus.RUNNING
         assert event.status is TaskStatus.SUCCEEDED
@@ -494,6 +493,6 @@ async def test_event_stream_rechecks_foreign_update_while_local_node_is_inflight
             await stream.aclose()
         if launcher is not None:
             await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-            await asyncio.wait_for(runner.cancelled.wait(), 1)
+            await asyncio.wait_for(runner.cancelled.wait(), 2)
             await launcher.shutdown()
         await state.close()

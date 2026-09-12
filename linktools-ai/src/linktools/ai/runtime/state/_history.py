@@ -18,7 +18,6 @@ from .._message import decode_model_messages, encode_model_messages
 from ._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
-    encode_domain,
     encode_envelope,
 )
 from ._contracts import (

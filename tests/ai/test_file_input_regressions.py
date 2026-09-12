@@ -78,8 +78,9 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
 
 @pytest.mark.asyncio
 async def test_text_materialization_keeps_text_codec() -> None:
-    access = WorkspaceAccess(_Sandbox(_Session({})), root=Path("."))
-    materializer = ExecutionInputMaterializer(access, Workspace.load(".", workspace_id="workspace").policy)
+    workspace = Workspace.load(".")
+    access = WorkspaceAccess(_Sandbox(_Session({})), root=workspace.root)
+    materializer = ExecutionInputMaterializer(access, workspace.policy)
     try:
         canonical = await materializer.materialize("plain text", ())
         stored = await materializer.store(canonical, tenant_id="tenant")
@@ -108,8 +109,9 @@ def test_invalid_user_content_is_rejected_at_request_boundary() -> None:
 @pytest.mark.asyncio
 async def test_execution_freezes_materialized_input_once() -> None:
     session = _Session({"evidence.txt": b"evidence"})
-    access = WorkspaceAccess(_Sandbox(session), root=Path("."))
-    materializer = ExecutionInputMaterializer(access, Workspace.load(".", workspace_id="workspace").policy)
+    workspace = Workspace.load(".")
+    access = WorkspaceAccess(_Sandbox(session), root=workspace.root)
+    materializer = ExecutionInputMaterializer(access, workspace.policy)
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]
 

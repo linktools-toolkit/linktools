@@ -26,6 +26,7 @@ from ..capability import (
     CapabilityGroup,
     LocalSkillResourceSource,
     SkillSourceRegistry,
+    TaskExpander,
     WorkspaceAccess,
     workspace_tool_contributions,
 )
@@ -58,7 +59,6 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
-from ._recovery_task import RecoveryRuntimeTaskNodeRunner
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
@@ -160,6 +160,11 @@ async def compose_runtime_components(
             for candidate in frozen
             if candidate.kind == "task"
         )
+        task_expanders = tuple(
+            cast(TaskExpander, candidate.value)
+            for candidate in frozen
+            if candidate.kind == "task_expander"
+        )
 
         agents = {
             candidate.id: cast(AgentSpec, candidate.value)
@@ -175,7 +180,7 @@ async def compose_runtime_components(
             candidates=tuple(
                 candidate
                 for candidate in frozen
-                if candidate.kind not in {"agent", "task"}
+                if candidate.kind not in {"agent", "task", "task_expander"}
             ),
             agents=agents,
         )
@@ -226,6 +231,7 @@ async def compose_runtime_components(
             workspace=workspace,
             app=app,
             task_handlers=task_handlers,
+            task_expanders=task_expanders,
             history_reader=_execution_history_reader(
                 workspace,
                 selected_state,
@@ -414,6 +420,7 @@ async def _build_local_components(
     workspace: Workspace,
     app: AppT,
     task_handlers: Sequence[TaskNodeHandler[AppT]],
+    task_expanders: Sequence[TaskExpander],
     history_reader: ExecutionHistoryReader,
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
@@ -560,7 +567,7 @@ async def _build_local_components(
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )
-        task_runner = RecoveryRuntimeTaskNodeRunner(
+        task_runner = RuntimeTaskNodeRunner(
             execution,
             catalog,
             compiler,
@@ -570,11 +577,29 @@ async def _build_local_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             handlers=task_handlers,
+            expanders=task_expanders,
+            acquire_dependency_hold=execution.acquire_dependency_hold,
+            release_dependency_hold=execution.release_dependency_hold,
+            request_terminal_handoff=execution.request_terminal_handoff,
+            task_durable=(
+                state.plan.route(RuntimeDomain.TASK).retention
+                is RuntimeRetentionMode.DURABLE
+            ),
+            execution_durable=(
+                state.plan.route(RuntimeDomain.EXECUTION).retention
+                is RuntimeRetentionMode.DURABLE
+            ),
+            recovery_durable=(
+                state.plan.route(RuntimeDomain.RECOVERY).retention
+                is RuntimeRetentionMode.DURABLE
+            ),
         )
         task_launcher = LocalTaskGraphLauncher(
             state.task.tasks,
             task_runner,
             owner=f"runtime:{tenant_id}:{uuid.uuid4().hex}",
+            acquire_execution_hold=execution.acquire_dependency_hold,
+            release_execution_hold=execution.release_dependency_hold,
         )
         graph_service = DefaultTaskGraphService(
             state.task,

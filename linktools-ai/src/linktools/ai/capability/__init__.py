@@ -28,6 +28,7 @@ from ._skill_source import (
     SkillSourceRegistry,
 )
 from ._subagent import LinkToolsSubagents, SubagentDelegate
+from ._task import TaskExpander, TaskExpansionContext
 from ._workspace import (
     WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
@@ -59,6 +60,8 @@ __all__ = [
     "SKILL_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
     "SubagentDelegate",
+    "TaskExpander",
+    "TaskExpansionContext",
     "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",

@@ -79,7 +79,7 @@ async def test_scheduler_retries_transient_reconcile_conflict(
         repository = state.task.tasks
         graph = TaskGraph("reconcile-retry", (TaskNode("node"),))
         await admit_graph(state, graph)
-        original_reconcile = repository.reconcile_graph
+        original_reconcile = repository.scheduler_snapshot
         attempts = 0
 
         async def reconcile(graph_id: str, *, tenant_id: str):
@@ -89,12 +89,12 @@ async def test_scheduler_retries_transient_reconcile_conflict(
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return await original_reconcile(graph_id, tenant_id=tenant_id)
 
-        monkeypatch.setattr(repository, "reconcile_graph", reconcile)
+        monkeypatch.setattr(repository, "scheduler_snapshot", reconcile)
         runner = _BlockingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
-                graph,
+                graph.graph_id,
                 trusted_workspace_principal("tenant"),
                 TaskGraphLimits(),
             )
@@ -166,11 +166,10 @@ async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
             )
 
         monkeypatch.setattr(task_local.asyncio, "wait", boundary_wait)
-        monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
-                graph,
+                graph.graph_id,
                 trusted_workspace_principal("tenant"),
                 TaskGraphLimits(max_concurrency=2),
             )
@@ -220,9 +219,10 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
         await admit_graph(state, graph)
         principal = trusted_workspace_principal("tenant")
         runner = _BlockingRunner()
-        monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
-        await launcher.start(TaskGraphLaunch(graph, principal, TaskGraphLimits()))
+        await launcher.start(
+            TaskGraphLaunch(graph.graph_id, principal, TaskGraphLimits())
+        )
         await asyncio.wait_for(runner.entered.wait(), 1)
         await asyncio.sleep(0.05)
 
@@ -278,7 +278,7 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
             await stream.aclose()
         if launcher is not None:
             await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-            await asyncio.wait_for(runner.cancelled.wait(), 1)
+            await asyncio.wait_for(runner.cancelled.wait(), 2)
             await launcher.shutdown()
         await state.close()
 
@@ -309,11 +309,10 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
         )
         principal = trusted_workspace_principal("tenant")
         runner = _BlockingRunner()
-        monkeypatch.setattr(task_local, "_SCHEDULER_RECHECK_SECONDS", 0.01)
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
-                graph,
+                graph.graph_id,
                 principal,
                 TaskGraphLimits(max_concurrency=2),
             )
@@ -346,7 +345,7 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
             result_digest="b" * 64,
         )
 
-        event = await asyncio.wait_for(pending, 1)
+        event = await asyncio.wait_for(pending, 2)
         assert event.node_id == "foreign"
         assert event.previous_status is TaskStatus.RUNNING
         assert event.status is TaskStatus.SUCCEEDED
@@ -356,6 +355,6 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
             await stream.aclose()
         if launcher is not None:
             await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-            await asyncio.wait_for(runner.cancelled.wait(), 1)
+            await asyncio.wait_for(runner.cancelled.wait(), 2)
             await launcher.shutdown()
         await state.close()

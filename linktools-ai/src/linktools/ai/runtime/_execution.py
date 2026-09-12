@@ -578,15 +578,19 @@ class DefaultExecutionService:
         tenant_id: str,
         hold_id: str,
     ) -> None:
-        if not hold_id:
+        if not isinstance(hold_id, str) or not hold_id.strip():
             raise ValueError("execution dependency hold id is required")
+        key = (tenant_id, execution_id)
         async with self._handoff_condition:
-            state = self._handoff_states.setdefault(
-                (tenant_id, execution_id), _ExecutionHandoffState()
-            )
-            while state.release_in_progress:
+            while True:
+                state = self._handoff_states.get(key)
+                if state is None:
+                    state = _ExecutionHandoffState()
+                    self._handoff_states[key] = state
+                if not state.release_in_progress:
+                    state.dependency_holds.add(hold_id)
+                    return
                 await self._handoff_condition.wait()
-            state.dependency_holds.add(hold_id)
 
     async def release_dependency_hold(
         self,
@@ -701,13 +705,18 @@ class DefaultExecutionService:
                 await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
     async def start(
-        self, binding_digest: str, request: ExecutionRequest
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
             request,
             scope="execution.run",
             prepare_local_stream=True,
+            dependency_hold_id=dependency_hold_id,
         )
 
     async def resolve_existing(
@@ -929,6 +938,7 @@ class DefaultExecutionService:
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -945,6 +955,7 @@ class DefaultExecutionService:
                 lineage_kind=lineage_kind,
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
             return await self._start_unlocked(
@@ -961,6 +972,7 @@ class DefaultExecutionService:
                 lineage_kind=lineage_kind,
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id,
             )
 
     async def _start_unlocked(
@@ -979,6 +991,7 @@ class DefaultExecutionService:
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1064,6 +1077,7 @@ class DefaultExecutionService:
                         scope=scope,
                         idempotency_key_digest=idempotency_key_digest,
                         prepare_local_stream=prepare_local_stream,
+                        dependency_hold_id=dependency_hold_id,
                     )
                     return ExecutionHandle(existing.resource_id)
                 if (
@@ -1079,6 +1093,7 @@ class DefaultExecutionService:
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
                 )
                 return ExecutionHandle(existing.resource_id)
             if existing.status is IdempotencyStatus.FAILED:
@@ -1102,11 +1117,19 @@ class DefaultExecutionService:
                     ExecutionStatus.CANCELLED,
                 }:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await self._acquire_start_dependency_hold(
+                    started,
+                    dependency_hold_id,
+                )
                 return ExecutionHandle(existing.resource_id)
             if existing.status is IdempotencyStatus.STARTED and started.status in {
                 ExecutionStatus.WAITING_DEFERRED,
                 ExecutionStatus.FINALIZING,
             }:
+                await self._acquire_start_dependency_hold(
+                    started,
+                    dependency_hold_id,
+                )
                 return ExecutionHandle(existing.resource_id)
             if started.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1117,6 +1140,7 @@ class DefaultExecutionService:
                 scope=scope,
                 idempotency_key_digest=idempotency_key_digest,
                 prepare_local_stream=prepare_local_stream,
+                dependency_hold_id=dependency_hold_id,
             )
             return ExecutionHandle(existing.resource_id)
 
@@ -1230,11 +1254,16 @@ class DefaultExecutionService:
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
                     prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
                 )
             elif (
                 reservation.idempotency.status is IdempotencyStatus.STARTED
                 and reservation.execution.status is ExecutionStatus.WAITING_DEFERRED
             ):
+                await self._acquire_start_dependency_hold(
+                    reservation.execution,
+                    dependency_hold_id,
+                )
                 return ExecutionHandle(reservation.execution.execution_id)
             elif (
                 reservation.idempotency.status is IdempotencyStatus.STARTED
@@ -1256,6 +1285,7 @@ class DefaultExecutionService:
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     prepare_local_stream=prepare_local_stream,
+                    dependency_hold_id=dependency_hold_id,
                 )
             elif (
                 reservation.execution.status is ExecutionStatus.START_UNKNOWN
@@ -1275,6 +1305,7 @@ class DefaultExecutionService:
             idempotency_key_digest=idempotency_key_digest,
             request_digest=request_digest,
             prepare_local_stream=prepare_local_stream,
+            dependency_hold_id=dependency_hold_id,
         )
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
@@ -1310,29 +1341,61 @@ class DefaultExecutionService:
         idempotency_key_digest: str,
         request_digest: str,
         prepare_local_stream: bool = False,
+        dependency_hold_id: "str | None" = None,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        hold_acquired = await self._acquire_start_dependency_hold(
+            execution,
+            dependency_hold_id,
+        )
         identity = ExecutionStartIdentity(scope, idempotency_key_digest, request_digest)
         try:
-            started = await self._backend.prepare_start(request, execution, identity)
-        except AIError as error:
-            if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
-                await self._reject_pending_start(
+            try:
+                started = await self._backend.prepare_start(
+                    request,
                     execution,
-                    identity=identity,
-                    error=error,
+                    identity,
+                )
+            except AIError as error:
+                if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
+                    await self._reject_pending_start(
+                        execution,
+                        identity=identity,
+                        error=error,
+                    )
+                raise
+            if started is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._launch_started(
+                request,
+                started,
+                scope=scope,
+                idempotency_key_digest=idempotency_key_digest,
+                prepare_local_stream=prepare_local_stream,
+            )
+        except BaseException:
+            if hold_acquired:
+                await self.release_dependency_hold(
+                    execution.execution_id,
+                    tenant_id=execution.tenant_id,
+                    hold_id=dependency_hold_id or "",
                 )
             raise
-        if started is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._launch_started(
-            request,
-            started,
-            scope=scope,
-            idempotency_key_digest=idempotency_key_digest,
-            prepare_local_stream=prepare_local_stream,
+
+    async def _acquire_start_dependency_hold(
+        self,
+        execution: ExecutionRecord,
+        hold_id: "str | None",
+    ) -> bool:
+        if hold_id is None:
+            return False
+        await self.acquire_dependency_hold(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+            hold_id=hold_id,
         )
+        return True
 
     async def _reject_pending_start(
         self,
@@ -1460,6 +1523,37 @@ class DefaultExecutionService:
         return terminal
 
     async def _launch_started(
+        self,
+        request: ExecutionRequest,
+        execution: ExecutionRecord,
+        *,
+        scope: str,
+        idempotency_key_digest: str,
+        prepare_local_stream: bool = False,
+        dependency_hold_id: "str | None" = None,
+    ) -> None:
+        hold_acquired = await self._acquire_start_dependency_hold(
+            execution,
+            dependency_hold_id,
+        )
+        try:
+            await self._launch_started_impl(
+                request,
+                execution,
+                scope=scope,
+                idempotency_key_digest=idempotency_key_digest,
+                prepare_local_stream=prepare_local_stream,
+            )
+        except BaseException:
+            if hold_acquired:
+                await self.release_dependency_hold(
+                    execution.execution_id,
+                    tenant_id=execution.tenant_id,
+                    hold_id=dependency_hold_id or "",
+                )
+            raise
+
+    async def _launch_started_impl(
         self,
         request: ExecutionRequest,
         execution: ExecutionRecord,
@@ -1673,6 +1767,7 @@ class DefaultExecutionService:
             )
             self._live_broker.abandon_prepared_local_producer(execution_id)
             status = execution.status
+            poll_backoff = 1.0
             while True:
                 if status is ExecutionStatus.RECOVERY_REQUIRED:
                     raise _execution_recovery_error(execution)
@@ -1722,13 +1817,17 @@ class DefaultExecutionService:
                         execution_id,
                         tenant_id=principal.tenant_id,
                     )
+                    poll_backoff = 1.0
                 else:
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(poll_backoff)
+                    poll_backoff = min(30.0, poll_backoff * 2)
                 execution = await self._load_authorized(
                     execution_id,
                     principal,
                     AuthorizationAction.EXECUTION_READ,
                 )
+                if execution.status is not status:
+                    poll_backoff = 1.0
                 status = execution.status
 
         try:

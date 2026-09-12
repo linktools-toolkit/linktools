@@ -45,7 +45,8 @@
           ]
         ]
       },
-      "node_id": "node"
+      "node_id": "node",
+      "expander": null
     },
     "schema": 1
   }

@@ -93,7 +93,7 @@ async def test_task_scheduler_arm_preserves_classified_ai_error() -> None:
     )
     launch = SimpleNamespace(
         principal=SimpleNamespace(tenant_id="tenant"),
-        graph=SimpleNamespace(graph_id="graph"),
+        graph_id="graph",
     )
     with pytest.raises(AIError) as captured:
         await service._arm_graph(launch)  # type: ignore[arg-type]

@@ -12,6 +12,7 @@ from ..errors import AIError, ErrorCode
 
 class TaskEventType(str, Enum):
     GRAPH_ADMITTED = "GRAPH_ADMITTED"
+    GRAPH_EXPANDED = "GRAPH_EXPANDED"
     GRAPH_CHANGED = "GRAPH_CHANGED"
     NODE_CHANGED = "NODE_CHANGED"
 
@@ -40,6 +41,8 @@ class TaskEvent:
     result_digest: "str | None" = None
     error_code: "str | None" = None
     error_digest: "str | None" = None
+    source_node_id: "str | None" = None
+    added_node_ids: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
         if (
@@ -60,6 +63,10 @@ class TaskEvent:
             raise ValueError("task event sequence must be positive")
         if not isinstance(self.event_type, TaskEventType):
             raise TypeError("task event type is invalid")
+        if self.source_node_id is not None and not isinstance(
+            self.source_node_id, str
+        ):
+            raise ValueError("task event source node id is invalid")
         if (
             not isinstance(self.occurred_at, datetime)
             or self.occurred_at.utcoffset() is None
@@ -85,6 +92,13 @@ class TaskEvent:
             not isinstance(self.error_code, str) or not self.error_code.strip()
         ):
             raise ValueError("task event error code is invalid")
+        added_node_ids = tuple(self.added_node_ids)
+        if any(
+            not isinstance(node_id, str) or not node_id.strip()
+            for node_id in added_node_ids
+        ) or tuple(sorted(set(added_node_ids))) != added_node_ids:
+            raise ValueError("task event added node ids are invalid")
+        object.__setattr__(self, "added_node_ids", added_node_ids)
 
         if self.event_type is TaskEventType.GRAPH_ADMITTED:
             if self.status not in {TaskStatus.PENDING, TaskStatus.SUCCEEDED}:
@@ -93,6 +107,18 @@ class TaskEvent:
                 raise ValueError(
                     "task graph admission event cannot have previous status"
                 )
+            self._validate_graph_only_fields()
+            return
+
+        if self.event_type is TaskEventType.GRAPH_EXPANDED:
+            if (
+                not isinstance(self.source_node_id, str)
+                or not self.source_node_id.strip()
+                or not added_node_ids
+                or self.previous_status is not None
+                or self.status is TaskStatus.READY
+            ):
+                raise ValueError("task graph expansion event identity is invalid")
             self._validate_graph_only_fields()
             return
 
@@ -110,6 +136,8 @@ class TaskEvent:
 
         if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise ValueError("task node event requires a node id")
+        if self.source_node_id is not None or self.added_node_ids:
+            raise ValueError("task node event cannot carry expansion identity")
         if self.previous_status is None:
             raise ValueError("task node event requires previous status")
         if self.owner is not None:
@@ -135,11 +163,16 @@ class TaskEvent:
             or self.error_digest is not None
         ):
             raise ValueError("task graph event cannot carry node state")
+        if self.event_type is not TaskEventType.GRAPH_EXPANDED and (
+            self.source_node_id is not None or self.added_node_ids
+        ):
+            raise ValueError("task graph event cannot carry expansion identity")
 
     def _validate_node_state_fields(self) -> None:
         if self.status in {TaskStatus.PENDING, TaskStatus.READY}:
             if (
                 self.owner is not None
+                or self.execution_id is not None
                 or self.result_digest is not None
                 or self.error_code is not None
                 or self.error_digest is not None
@@ -155,6 +188,18 @@ class TaskEvent:
                 or self.error_digest is not None
             ):
                 raise ValueError("running task event state is invalid")
+            return
+        if self.status is TaskStatus.WAITING:
+            if (
+                self.owner is not None
+                or self.fence < 1
+                or self.execution_id is None
+                or not self.execution_id.strip()
+                or self.result_digest is not None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("waiting task event state is invalid")
             return
         if self.status is TaskStatus.RECOVERY_REQUIRED:
             if (

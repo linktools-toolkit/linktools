@@ -48,7 +48,7 @@ from ...core import (
     validate_resource_id,
     validate_tenant_id,
 )
-from ...errors import AIError, ErrorCode, ErrorDiagnostics
+from ...errors import AIError, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskEvent,
@@ -58,6 +58,7 @@ from ...task import (
     TaskGraphSnapshot,
     TaskGraphView,
     TaskLease,
+    TaskNode,
     TaskNodeView,
     TaskResultRecord,
     TaskTerminalRecord,
@@ -1774,9 +1775,9 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def latest_event(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskEvent | None: ...
-    async def reconcile_graph(
+    async def scheduler_snapshot(
         self, graph_id: str, *, tenant_id: str
-    ) -> TaskGraphView: ...
+    ) -> TaskGraphSnapshot: ...
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def claim(
         self,
@@ -1790,26 +1791,31 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def renew(
         self, lease: TaskLease, *, tenant_id: str, lease_seconds: int
     ) -> TaskLease: ...
-    async def bind_execution(
+    async def handoff_execution(
         self, lease: TaskLease, *, tenant_id: str, execution_id: str
     ) -> TaskNodeView: ...
     async def complete(
         self,
-        lease: TaskLease,
+        lease: TaskLease | None,
         *,
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
         result_payload: StoredPayload | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        expanded_nodes: tuple[TaskNode, ...] = (),
     ) -> TaskTerminalRecord: ...
     async def fail(
         self,
-        lease: TaskLease,
+        lease: TaskLease | None,
         *,
         tenant_id: str,
         error_code: str,
         error_digest: str,
         execution_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
     ) -> TaskTerminalRecord: ...
     async def list_nodes(
         self, graph_id: str, *, tenant_id: str

@@ -579,9 +579,11 @@ class DefaultEventService:
                         return
 
             replay_cursor = after_sequence if after_sequence > base_sequence else None
+            poll_backoff = 1.0
             async for item in live:
                 if replay_cursor is not None:
                     if isinstance(item, ExecutionDelta):
+                        poll_backoff = 1.0
                         continue
                     while item.durable_sequence is None:
                         if self._live.is_completed(execution_id):
@@ -589,10 +591,13 @@ class DefaultEventService:
                         try:
                             await asyncio.wait_for(
                                 self._live.wait_for_activity(execution_id),
-                                timeout=1.0,
+                                timeout=poll_backoff,
                             )
                         except TimeoutError:
-                            pass
+                            poll_backoff = min(30.0, poll_backoff * 2)
+                        else:
+                            poll_backoff = 1.0
+                    poll_backoff = 1.0
                     if item.durable_sequence <= replay_cursor:
                         if item.event_type in _TERMINAL_EVENT_TYPES:
                             return
@@ -601,6 +606,7 @@ class DefaultEventService:
                         continue
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if isinstance(item, ExecutionDelta):
+                    poll_backoff = 1.0
                     yield ExecutionStreamEvent(
                         item.execution_id,
                         None,
@@ -609,6 +615,7 @@ class DefaultEventService:
                     )
                     continue
                 if item.durable_sequence is not None:
+                    poll_backoff = 1.0
                     if item.durable_sequence <= after_sequence:
                         if item.event_type in _TERMINAL_EVENT_TYPES:
                             return
@@ -649,6 +656,7 @@ class DefaultEventService:
         after_sequence: int,
     ) -> AsyncIterator[ExecutionStreamEvent]:
         cursor = after_sequence
+        poll_backoff = 1.0
         while True:
             page = await self._read_durable(
                 execution_id,
@@ -657,6 +665,7 @@ class DefaultEventService:
                 limit=200,
             )
             if page.items:
+                poll_backoff = 1.0
                 for event in page.items:
                     if event.sequence != cursor + 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -683,10 +692,12 @@ class DefaultEventService:
             try:
                 await asyncio.wait_for(
                     self._live.wait_for_activity(execution_id),
-                    timeout=1.0,
+                    timeout=poll_backoff,
                 )
             except TimeoutError:
-                pass
+                poll_backoff = min(30.0, poll_backoff * 2)
+            else:
+                poll_backoff = 1.0
 
     async def _authorize_stream(self, execution_id: str, principal: Principal) -> None:
         header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)

@@ -35,15 +35,15 @@ class _Launcher:
         self.cancelled: list[str] = []
 
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
-        self.started.append(launch.graph.graph_id)
-        return TaskGraphHandle(launch.graph.graph_id, f"test:{launch.graph.graph_id}")
+        self.started.append(launch.graph_id)
+        return TaskGraphHandle(launch.graph_id, f"test:{launch.graph_id}")
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
-        self.cancelled.append(launch.graph.graph_id)
+        self.cancelled.append(launch.graph_id)
         return TaskGraphView(
-            launch.graph.graph_id,
+            launch.graph_id,
             TaskStatus.RECOVERY_REQUIRED,
-            launch.graph.nodes,
+            (),
         )
 
 
@@ -132,9 +132,9 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
             RecoverGraphRequest(request.principal, "recover:resume"),
         )
 
-        assert result.status is TaskStatus.PENDING
+        assert result.status is TaskStatus.WAITING
         assert launcher.started == ["resume"]
-        assert result.node_results[0].status is TaskStatus.READY
+        assert result.node_results[0].status is TaskStatus.WAITING
         assert result.node_results[0].execution_id == "execution"
         operation = await state.task.operations.get(
             idempotency_key_digest("recover:resume"),

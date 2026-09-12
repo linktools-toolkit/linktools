@@ -219,6 +219,62 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_start_holds_immediate_terminal_execution_before_return() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="service-start-handoff", tenant_id="tenant")
+    release_started = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    class ImmediateTerminalLauncher(_Launcher):
+        service: DefaultExecutionService
+
+        async def launch(
+            self,
+            request: ExecutionRequest,
+            execution: ExecutionRecord,
+        ) -> None:
+            await super().launch(request, execution)
+            await self.service.request_terminal_handoff(
+                execution.execution_id,
+                tenant_id=execution.tenant_id,
+            )
+
+    async def release_terminal(execution_id: str, *, tenant_id: str) -> None:
+        del execution_id, tenant_id
+        release_started.set()
+        await release_finished.wait()
+
+    try:
+        launcher = ImmediateTerminalLauncher(state.execution.executions)
+        service = _service(state, backend=launcher)
+        service._release_terminal = release_terminal
+        launcher.service = service
+        hold_id = "task:immediate-terminal:node"
+        handle = await service.start(
+            _binding().binding_digest,
+            _request("hello", Principal("owner", "tenant"), "handoff-key"),
+            dependency_hold_id=hold_id,
+        )
+        await asyncio.sleep(0)
+        assert not release_started.is_set()
+        handoff_state = service._handoff_states[("tenant", handle.execution_id)]
+        assert handoff_state.dependency_holds == {hold_id}
+
+        cleanup = asyncio.create_task(
+            service.release_dependency_hold(
+                handle.execution_id,
+                tenant_id="tenant",
+                hold_id=hold_id,
+            )
+        )
+        await release_started.wait()
+        release_finished.set()
+        await cleanup
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)

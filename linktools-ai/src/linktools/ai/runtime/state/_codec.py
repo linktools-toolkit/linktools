@@ -67,6 +67,7 @@ from ...task import (
     TaskGraphLimits,
     TaskGraphView,
     TaskLease,
+    TaskExpanderRef,
     TaskNode,
     TaskNodeView,
     TaskResultRecord,
@@ -210,6 +211,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("task_graph_view", TaskGraphView),
     ("task_lease", TaskLease),
     ("task_node", TaskNode),
+    ("task_expander_ref", TaskExpanderRef),
     ("task_node_view", TaskNodeView),
     ("task_result", TaskResultRecord),
     ("task_terminal", TaskTerminalRecord),
@@ -296,6 +298,7 @@ def _encode_v1_task_node(
         "budget_cost": _encode_domain(
             value.budget_cost, codec, persisted=persisted
         ),
+        "expander": _encode_domain(value.expander, codec, persisted=persisted),
     }
 
 
@@ -312,6 +315,7 @@ def _decode_v1_task_node(
                 "dependencies",
                 "input",
                 "budget_cost",
+                "expander",
             }
         ),
         persisted=persisted,
@@ -336,6 +340,168 @@ def _decode_v1_task_node(
             _decode_domain(
                 raw_fields["budget_cost"], int, codec, persisted=persisted
             )
+        ),
+        expander=cast(
+            TaskExpanderRef | None,
+            _decode_domain(
+                raw_fields["expander"],
+                TaskExpanderRef | None,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+    )
+
+
+def _encode_v1_task_graph_view(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskGraphView):
+        raise TypeError("V1 task_graph_view encoder received the wrong type")
+    fields: dict[str, JsonValue] = {
+        "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
+        "status": _encode_domain(value.status, codec, persisted=persisted),
+    }
+    if not persisted:
+        fields["nodes"] = _encode_domain(value.nodes, codec, persisted=persisted)
+    return fields
+
+
+def _decode_v1_task_graph_view(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> TaskGraphView:
+    expected = frozenset({"graph_id", "status"}) if persisted else frozenset(
+        {"graph_id", "status", "nodes"}
+    )
+    _require_contract_fields(raw_fields, expected, persisted=persisted)
+    nodes = () if persisted else tuple(
+        _decode_domain(raw_fields["nodes"], tuple[TaskNode, ...], codec, persisted=persisted)
+    )
+    return TaskGraphView(
+        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
+        cast(
+            TaskStatus,
+            _decode_domain(raw_fields["status"], TaskStatus, codec, persisted=persisted),
+        ),
+        nodes,
+    )
+
+
+def _encode_v1_task_node_view(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskNodeView):
+        raise TypeError("V1 task_node_view encoder received the wrong type")
+    fields: dict[str, JsonValue] = {
+        "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
+        "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
+        "status": _encode_domain(value.status, codec, persisted=persisted),
+        "execution_id": _encode_domain(value.execution_id, codec, persisted=persisted),
+        "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
+        "error_code": _encode_domain(value.error_code, codec, persisted=persisted),
+        "error_digest": _encode_domain(value.error_digest, codec, persisted=persisted),
+    }
+    if not persisted:
+        fields.update(
+            dependencies=_encode_domain(
+                value.dependencies,
+                codec,
+                persisted=persisted,
+            ),
+            owner=_encode_domain(value.owner, codec, persisted=persisted),
+            fence=_encode_domain(value.fence, codec, persisted=persisted),
+            lease_expires_at=_encode_domain(
+                value.lease_expires_at,
+                codec,
+                persisted=persisted,
+            ),
+        )
+    return fields
+
+
+def _decode_v1_task_node_view(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> TaskNodeView:
+    expected = {
+        "graph_id",
+        "node_id",
+        "status",
+        "execution_id",
+        "result_digest",
+        "error_code",
+        "error_digest",
+    }
+    if not persisted:
+        expected.update({"dependencies", "owner", "fence", "lease_expires_at"})
+    _require_contract_fields(raw_fields, frozenset(expected), persisted=persisted)
+    return TaskNodeView(
+        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
+        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
+        ()
+        if persisted
+        else tuple(
+            _decode_domain(
+                raw_fields["dependencies"],
+                tuple[str, ...],
+                codec,
+                persisted=persisted,
+            )
+        ),
+        cast(
+            TaskStatus,
+            _decode_domain(raw_fields["status"], TaskStatus, codec, persisted=persisted),
+        ),
+        None
+        if persisted
+        else cast(
+            str | None,
+            _decode_domain(raw_fields["owner"], str | None, codec, persisted=persisted),
+        ),
+        1
+        if persisted
+        else int(_decode_domain(raw_fields["fence"], int, codec, persisted=persisted)),
+        None
+        if persisted
+        else cast(
+            datetime | None,
+            _decode_domain(
+                raw_fields["lease_expires_at"],
+                datetime | None,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+        cast(
+            str | None,
+            _decode_domain(
+                raw_fields["result_digest"], str | None, codec, persisted=persisted
+            ),
+        ),
+        cast(
+            str | None,
+            _decode_domain(
+                raw_fields["error_code"], str | None, codec, persisted=persisted
+            ),
+        ),
+        cast(
+            str | None,
+            _decode_domain(
+                raw_fields["error_digest"], str | None, codec, persisted=persisted
+            ),
+        ),
+        cast(
+            str | None,
+            _decode_domain(
+                raw_fields["execution_id"], str | None, codec, persisted=persisted
+            ),
         ),
     )
 
@@ -460,7 +626,9 @@ def _decode_v1_stored_user_input(
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "object_ref": _encode_v1_object_ref,
+        "task_graph_view": _encode_v1_task_graph_view,
         "task_node": _encode_v1_task_node,
+        "task_node_view": _encode_v1_task_node_view,
         "task_result": _encode_v1_task_result,
     }
 )
@@ -468,7 +636,9 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
         "object_ref": _decode_v1_object_ref,
         "stored_user_input": _decode_v1_stored_user_input,
+        "task_graph_view": _decode_v1_task_graph_view,
         "task_node": _decode_v1_task_node,
+        "task_node_view": _decode_v1_task_node_view,
         "task_result": _decode_v1_task_result,
     }
 )
@@ -1781,11 +1951,19 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 enum type registry is incomplete")
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
         raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
-    custom_encoders = {"object_ref", "task_node", "task_result"}
+    custom_encoders = {
+        "object_ref",
+        "task_graph_view",
+        "task_node",
+        "task_node_view",
+        "task_result",
+    }
     custom_decoders = {
         "object_ref",
         "stored_user_input",
+        "task_graph_view",
         "task_node",
+        "task_node_view",
         "task_result",
     }
     if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
@@ -1805,6 +1983,7 @@ def _validate_v1_codec_definition() -> None:
         "node_id",
         "dependencies",
         "budget_cost",
+        "expander",
         "_input",
     ):
         raise RuntimeError("Runtime v1 task_node source contract changed")

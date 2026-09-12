@@ -40,7 +40,7 @@ async def test_reconcile_propagates_transitive_blocked_state(
         )
         repository = state.task.tasks
         await admit_graph(state, graph)
-        await repository.reconcile_graph("graph", tenant_id="tenant")
+        await repository.scheduler_snapshot("graph", tenant_id="tenant")
         lease = await repository.claim(
             "graph",
             "c",
@@ -55,7 +55,7 @@ async def test_reconcile_propagates_transitive_blocked_state(
             error_digest=canonical_sha256({"node": "c"}),
         )
 
-        view = await repository.reconcile_graph("graph", tenant_id="tenant")
+        view = await repository.scheduler_snapshot("graph", tenant_id="tenant")
 
         assert view.status is TaskStatus.FAILED
         nodes = {

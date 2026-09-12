@@ -19,7 +19,11 @@ from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import MCPServerSpec
-from linktools.ai.task import DefaultTaskGraphService
+from linktools.ai.task import (
+    DefaultTaskGraphService,
+    TaskGraphLaunch,
+    TaskGraphLimits,
+)
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.workspace import trusted_workspace_principal
 
@@ -79,6 +83,43 @@ async def test_execution_handoff_cleanup_restores_state_before_cancellation() ->
 
     assert state.release_in_progress is False
     assert state.release_requested is True
+
+
+@pytest.mark.asyncio
+async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> None:
+    service = object.__new__(DefaultExecutionService)
+    service._handoff_condition = asyncio.Condition()
+    service._handoff_states = {}
+    release_started = asyncio.Event()
+    release_finished = asyncio.Event()
+
+    async def release_terminal(execution_id: str, *, tenant_id: str) -> None:
+        del execution_id, tenant_id
+        release_started.set()
+        await release_finished.wait()
+
+    service._release_terminal = release_terminal
+    await service.acquire_dependency_hold(
+        "execution",
+        tenant_id="tenant",
+        hold_id="task:graph:node",
+    )
+    cleanup = asyncio.create_task(
+        service.request_terminal_handoff("execution", tenant_id="tenant")
+    )
+    await asyncio.sleep(0)
+    assert not release_started.is_set()
+
+    release_hold = asyncio.create_task(
+        service.release_dependency_hold(
+            "execution",
+            tenant_id="tenant",
+            hold_id="task:graph:node",
+        )
+    )
+    await release_started.wait()
+    release_finished.set()
+    await asyncio.gather(cleanup, release_hold)
 
 
 @pytest.mark.asyncio
@@ -146,7 +187,7 @@ async def test_task_runner_cancellation_does_not_business_cancel_running_executi
         def __init__(self) -> None:
             self.bound: list[str] = []
 
-        async def bind_execution(self, execution_id: str) -> None:
+        async def handoff_execution(self, execution_id: str) -> None:
             self.bound.append(execution_id)
 
     execution = Execution()
@@ -206,7 +247,7 @@ async def test_task_runner_binds_execution_that_finishes_launch_after_caller_can
             self.bound = asyncio.Event()
             self.execution_id: str | None = None
 
-        async def bind_execution(self, execution_id: str) -> None:
+        async def handoff_execution(self, execution_id: str) -> None:
             self.execution_id = execution_id
             self.bound.set()
 
@@ -261,7 +302,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
             raise AssertionError("wait must not start after unknown launch")
 
     class Control:
-        async def bind_execution(self, execution_id: str) -> None:
+        async def handoff_execution(self, execution_id: str) -> None:
             del execution_id
             raise AssertionError("unknown launch must not bind execution")
 
@@ -318,9 +359,10 @@ async def test_task_scheduler_arm_cancellation_detaches_pending_launcher() -> No
 
     launcher = Launcher()
     service = DefaultTaskGraphService(SimpleNamespace(), SimpleNamespace(), launcher)
-    launch = SimpleNamespace(
-        principal=trusted_workspace_principal("tenant"),
-        graph=SimpleNamespace(graph_id="graph"),
+    launch = TaskGraphLaunch(
+        "graph",
+        trusted_workspace_principal("tenant"),
+        TaskGraphLimits(),
     )
     task = asyncio.create_task(service._arm_graph(launch))
     await launcher.started.wait()
@@ -472,9 +514,10 @@ async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
     launcher._repository = SimpleNamespace()
     launcher._runner = runner
     run = SimpleNamespace(
-        request=SimpleNamespace(
-            principal=trusted_workspace_principal("tenant"),
-            graph=SimpleNamespace(graph_id="graph"),
+        request=TaskGraphLaunch(
+            "graph",
+            trusted_workspace_principal("tenant"),
+            TaskGraphLimits(),
             correlation={},
         ),
         condition=asyncio.Condition(),

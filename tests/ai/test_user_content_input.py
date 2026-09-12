@@ -54,7 +54,7 @@ class _CountingSandbox:
 
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
-    workspace = Workspace.load(".", workspace_id="workspace")
+    workspace = Workspace.load(".")
     access = WorkspaceAccess(_CountingSandbox(session), root=workspace.root)
     return ExecutionInputMaterializer(access, workspace.policy), session
 
