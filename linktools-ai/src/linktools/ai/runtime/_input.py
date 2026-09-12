@@ -9,7 +9,6 @@ import json
 import mimetypes
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, TypeAlias, cast
 
 from linktools.core import environ
@@ -191,7 +190,6 @@ class ExecutionInputMaterializer:
                     BinaryContent(
                         data=body,
                         media_type=media_type,
-                        identifier=Path(path).name,
                     ),
                 )
             )
