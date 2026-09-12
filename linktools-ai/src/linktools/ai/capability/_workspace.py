@@ -264,7 +264,6 @@ class _WorkspaceToolSurface:
                     BinaryContent(
                         data=body,
                         media_type=media_type,
-                        identifier=Path(path).name,
                     ),
                 )
             )
