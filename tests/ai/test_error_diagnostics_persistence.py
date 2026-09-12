@@ -249,7 +249,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
         await reopened.close()
 
 
-def test_execution_without_diagnostics_field_is_integrity_error() -> None:
+def test_execution_without_defaulted_diagnostics_field_uses_default() -> None:
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError("legacy"))
     _started, _result, commit = _failed_terminal(
         datetime.now(timezone.utc),
@@ -257,12 +257,15 @@ def test_execution_without_diagnostics_field_is_integrity_error() -> None:
     )
     payload = _encode_persisted_domain(commit.execution)
     payload["fields"].pop("error_diagnostics")
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(
-            encode_envelope({"type": "execution_record", "payload": payload}),
-            ExecutionRecord,
-        )
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    decoded = _decode_enveloped_domain(
+        encode_envelope({"type": "execution_record", "payload": payload}),
+        ExecutionRecord,
+    )
+
+    assert decoded.error_diagnostics is None
+    assert decoded.status is ExecutionStatus.FAILED
+    assert decoded.error_code == ErrorCode.INTERNAL_ERROR.value
 
 
 @pytest.mark.asyncio
