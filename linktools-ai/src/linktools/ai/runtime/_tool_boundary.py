@@ -189,9 +189,11 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         path_fields = descriptor.workspace_path_fields
         if descriptor.tool_class.startswith("filesystem"):
-            path_fields = workspace_tool_path_fields_from_metadata(tool.tool_def.metadata)
-            if not path_fields:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            declared_fields = workspace_tool_path_fields_from_metadata(
+                tool.tool_def.metadata
+            )
+            if declared_fields:
+                path_fields = declared_fields
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
         final_args = await self._canonicalize_args(tool_args, path_fields)
         call_id = ctx.tool_call_id
