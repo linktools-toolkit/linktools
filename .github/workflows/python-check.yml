@@ -28,6 +28,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: refactor/ai-durable-contract-convergence
+          fetch-depth: 3
       - name: Remove physical ObjectStore identity from Runtime persistence
         shell: bash
         run: |
@@ -163,7 +164,7 @@ jobs:
       - name: Commit Runtime object ref convergence
         shell: bash
         run: |
-          git show HEAD^:.github/workflows/python-check.yml > .github/workflows/python-check.yml
+          git show ddd4305506959f0a9cac83d19f80a5a3b87c8b56:.github/workflows/python-check.yml > .github/workflows/python-check.yml
           if git diff --quiet; then
             exit 0
           fi
