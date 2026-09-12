@@ -163,7 +163,7 @@ class ExecutionInputMaterializer:
         canonical_files: Sequence[str],
     ) -> CanonicalUserInput:
         canonical = validate_user_input(value)
-        files = tuple(dict.fromkeys(_require_canonical_files(canonical_files)))
+        files = _require_canonical_files(canonical_files)
         direct_binary = _binary_parts(canonical)
         if len(direct_binary) > self._policy.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -187,7 +187,7 @@ class ExecutionInputMaterializer:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             additions.extend(
                 (
-                    f"Workspace file: {path}",
+                    f"Workspace file path: {json.dumps(path)}",
                     BinaryContent(
                         data=body,
                         media_type=media_type,
@@ -201,8 +201,7 @@ class ExecutionInputMaterializer:
             materialized = (*canonical, *additions)
         validate_user_content(materialized)
         _logger.info(
-            "execution input materialized: files=%s distinct_files=%s binary_bytes=%s",
-            len(files),
+            "execution input materialized: files=%s binary_bytes=%s",
             len(files),
             total_bytes,
         )
