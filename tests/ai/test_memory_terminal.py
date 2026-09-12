@@ -117,7 +117,7 @@ async def test_in_memory_terminal_commit_validates_success_result(
         await state.execution.executions.create(execution)
         await state.execution.idempotency.reserve(identity)
 
-        result_ref = ObjectRef("memory", "result", "c" * 64, 0)
+        result_ref = ObjectRef("runtime", "result", "c" * 64, 0)
         result_payload = (
             StoredPayload.inline_json({"text": "result"})
             if payload_kind == "inline"
