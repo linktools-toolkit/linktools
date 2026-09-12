@@ -20,7 +20,6 @@ except ModuleNotFoundError:
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,
-    ExecutionStatus,
     JsonValue,
     Principal,
     validate_memory_scope,
@@ -131,20 +130,17 @@ class ACPAgent:
             session_id=session_id,
             memory_scope=self._memory_scope,
         )
+        stop_reason = "end_turn"
         async for item in execution.watch():
             if item.depth != 0:
                 continue
             event = item.event
+            if event.event_type == ExecutionEventType.EXECUTION_CANCELLED.value:
+                stop_reason = "cancelled"
             if self._connection is not None:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:
                     await self._connection.session_update(session_id, update)
-        result = await execution.wait()
-        stop_reason = (
-            "cancelled"
-            if result.status is ExecutionStatus.CANCELLED
-            else "end_turn"
-        )
         return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
