@@ -12,16 +12,9 @@ from linktools.ai.core import (
     ExecutionDeltaType,
     ExecutionEventType,
     ExecutionLineageKind,
-    ExecutionStatus,
     Principal,
-    UsageMetrics,
 )
-from linktools.ai.errors import ErrorCode
-from linktools.ai.runtime import (
-    ExecutionResult,
-    ExecutionStreamEvent,
-    ExecutionTreeEvent,
-)
+from linktools.ai.runtime import ExecutionStreamEvent, ExecutionTreeEvent
 from linktools.cli import CommandError
 from linktools.commands.ai.run import _emit_result
 
@@ -49,50 +42,11 @@ def _tree_event(
     )
 
 
-def _succeeded_result() -> ExecutionResult:
-    return ExecutionResult(
-        "execution",
-        ExecutionStatus.SUCCEEDED,
-        {"text": "done"},
-        "a" * 64,
-        UsageMetrics(),
-    )
-
-
-def _failed_result() -> ExecutionResult:
-    return ExecutionResult(
-        "execution",
-        ExecutionStatus.FAILED,
-        None,
-        None,
-        UsageMetrics(),
-        ErrorCode.MODEL_API_ERROR.value,
-        {"provider": "test"},
-    )
-
-
-def _cancelled_result() -> ExecutionResult:
-    return ExecutionResult(
-        "execution",
-        ExecutionStatus.CANCELLED,
-        None,
-        None,
-        UsageMetrics(),
-        ErrorCode.EXECUTION_CANCELLED.value,
-        {},
-    )
-
-
 class _StreamingExecution:
     execution_id = "execution"
 
-    def __init__(
-        self,
-        events: tuple[ExecutionTreeEvent, ...],
-        result: ExecutionResult,
-    ) -> None:
+    def __init__(self, events: tuple[ExecutionTreeEvent, ...]) -> None:
         self._events = events
-        self._result = result
 
     def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
         async def values() -> AsyncIterator[ExecutionTreeEvent]:
@@ -101,18 +55,10 @@ class _StreamingExecution:
 
         return values()
 
-    async def wait(self) -> ExecutionResult:
-        return self._result
-
 
 class _StreamingAgent:
-    def __init__(
-        self,
-        events: tuple[ExecutionTreeEvent, ...],
-        result: ExecutionResult,
-    ) -> None:
+    def __init__(self, events: tuple[ExecutionTreeEvent, ...]) -> None:
         self._events = events
-        self._result = result
 
     async def start(
         self,
@@ -124,20 +70,15 @@ class _StreamingAgent:
         thinking: bool,
     ) -> _StreamingExecution:
         del prompt, session_id, memory_scope, planning, thinking
-        return _StreamingExecution(self._events, self._result)
+        return _StreamingExecution(self._events)
 
 
 class _StreamingRuntime:
-    def __init__(
-        self,
-        events: tuple[ExecutionTreeEvent, ...],
-        result: ExecutionResult,
-    ) -> None:
+    def __init__(self, events: tuple[ExecutionTreeEvent, ...]) -> None:
         self._events = events
-        self._result = result
 
     def agent(self) -> _StreamingAgent:
-        return _StreamingAgent(self._events, self._result)
+        return _StreamingAgent(self._events)
 
 
 @pytest.mark.asyncio
@@ -171,7 +112,7 @@ async def test_cli_stream_consumes_string_event_types(
     )
 
     result = await _emit_result(
-        _StreamingRuntime(events, _succeeded_result()),  # type: ignore[arg-type]
+        _StreamingRuntime(events),  # type: ignore[arg-type]
         "prompt",
         "session",
         "memory",
@@ -190,32 +131,32 @@ async def test_cli_stream_consumes_string_event_types(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("event_type", "terminal", "expected_status"),
+    ("event_type", "payload", "expected_status"),
     (
         (
             ExecutionEventType.EXECUTION_FAILED.value,
-            _failed_result,
+            {
+                "error_code": "MODEL_API_ERROR",
+                "safe_error_details": {"provider": "test"},
+            },
             "FAILED",
         ),
         (
             ExecutionEventType.EXECUTION_CANCELLED.value,
-            _cancelled_result,
+            {
+                "error_code": "EXECUTION_CANCELLED",
+                "safe_error_details": {},
+            },
             "CANCELLED",
         ),
     ),
 )
-async def test_cli_stream_uses_terminal_result_as_authoritative_truth(
+async def test_cli_stream_reads_string_terminal_failure(
     event_type: str,
-    terminal: object,
+    payload: dict[str, object],
     expected_status: str,
 ) -> None:
-    result_factory = terminal
-    assert callable(result_factory)
-    result = result_factory()
-    runtime = _StreamingRuntime(
-        (_tree_event(event_type, {}, sequence=1),),
-        result,
-    )
+    runtime = _StreamingRuntime((_tree_event(event_type, payload, sequence=1),))
 
     with pytest.raises(CommandError) as raised:
         await _emit_result(
@@ -229,7 +170,7 @@ async def test_cli_stream_uses_terminal_result_as_authoritative_truth(
         )
 
     assert f"status={expected_status}" in str(raised.value)
-    assert str(result.error_code) in str(raised.value)
+    assert str(payload["error_code"]) in str(raised.value)
 
 
 class _ACPSchema:
@@ -309,8 +250,7 @@ def test_acp_ignores_unknown_additive_stream_event() -> None:
 class _ACPExecution:
     execution_id = "execution"
 
-    def __init__(self, result: ExecutionResult, event_type: str) -> None:
-        self._result = result
+    def __init__(self, event_type: str) -> None:
         self._event_type = event_type
 
     def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
@@ -318,9 +258,6 @@ class _ACPExecution:
             yield _tree_event(self._event_type, {}, sequence=1)
 
         return values()
-
-    async def wait(self) -> ExecutionResult:
-        return self._result
 
 
 class _ACPAgentRuntime:
@@ -353,29 +290,19 @@ class _ACPAgentRuntime:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("result", "event_type", "expected_stop_reason"),
+    ("event_type", "expected_stop_reason"),
     (
-        (
-            _succeeded_result(),
-            ExecutionEventType.EXECUTION_SUCCEEDED.value,
-            "end_turn",
-        ),
-        (
-            _cancelled_result(),
-            ExecutionEventType.EXECUTION_CANCELLED.value,
-            "cancelled",
-        ),
+        (ExecutionEventType.EXECUTION_SUCCEEDED.value, "end_turn"),
+        (ExecutionEventType.EXECUTION_CANCELLED.value, "cancelled"),
     ),
 )
-async def test_acp_prompt_uses_authoritative_terminal_stop_reason(
+async def test_acp_prompt_uses_string_terminal_stop_reason(
     monkeypatch: pytest.MonkeyPatch,
-    result: ExecutionResult,
     event_type: str,
     expected_stop_reason: str,
 ) -> None:
-    runtime = _ACPAgentRuntime(_ACPExecution(result, event_type))
     agent = ACPAgent(
-        runtime,  # type: ignore[arg-type]
+        _ACPAgentRuntime(_ACPExecution(event_type)),  # type: ignore[arg-type]
         principal=Principal("principal", "tenant", "service"),
         memory_scope="memory",
     )
