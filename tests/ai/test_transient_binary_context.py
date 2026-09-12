@@ -63,8 +63,9 @@ def test_consumed_binary_is_removed_without_mutating_raw_transcript() -> None:
     assert isinstance(projected_request, ModelRequest)
     content = projected_request.parts[0].content  # type: ignore[attr-defined]
     assert "Workspace file: a.png" in content
-    assert any(
-        isinstance(item, str) and "binary content already consumed" in item
+    assert "[binary content already consumed]" in content
+    assert not any(
+        isinstance(item, str) and "identifier=" in item
         for item in content
     )
 
