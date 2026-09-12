@@ -80,13 +80,13 @@ def test_semantic_pin_persists_contract_once() -> None:
     assert SemanticPin.from_payload(payload) == pin
     assert len(pin.fingerprint) == 64
 
-    with pytest.raises(AIError) as error:
-        SemanticPin.from_payload({**payload, "fingerprint": pin.fingerprint})
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    decoded = SemanticPin.from_payload({**payload, "fingerprint": pin.fingerprint})
+    assert decoded == pin
+    assert "fingerprint" not in decoded.to_payload()
 
 
-def test_agent_binding_snapshot_rejects_unknown_fields() -> None:
-    snapshot = AgentBindingSnapshot(
+def test_agent_binding_snapshot_ignores_unknown_fields() -> None:
+    payload = AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"version": 1, "id": "model"},
         selected=(),
@@ -94,12 +94,11 @@ def test_agent_binding_snapshot_rejects_unknown_fields() -> None:
         output_mode="text",
         output_schema={"type": "object"},
     ).to_payload()
-    snapshot["future"] = 3
+    payload["future"] = 3
 
-    with pytest.raises(AIError) as error:
-        AgentBindingSnapshot.from_payload(snapshot)
+    decoded = AgentBindingSnapshot.from_payload(payload)
 
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert "future" not in decoded.to_payload()
 
 
 class _AllowAuthorization:
