@@ -397,10 +397,6 @@ class SessionForkResultRecord:
     operation_id: str
     source_session_id: str
     source_history_id: str
-    source_session_revision: int
-    source_transcript_revision: int
-    source_local_message_count: int
-    source_prefix_index_head_id: str | None
     inherited_message_count: int
     target_session_id: str
     target_history_id: str
@@ -409,16 +405,8 @@ class SessionForkResultRecord:
     result_digest: str
 
     def __post_init__(self) -> None:
-        if any(
-            value < 0
-            for value in (
-                self.source_session_revision,
-                self.source_transcript_revision,
-                self.source_local_message_count,
-                self.inherited_message_count,
-            )
-        ):
-            raise ValueError("session fork result counts cannot be negative")
+        if self.inherited_message_count < 0:
+            raise ValueError("session fork inherited count cannot be negative")
         if not all(
             value
             for value in (

@@ -1186,19 +1186,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if target_stored is not None or child_stored is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             fork_result = SessionForkResultRecord(
-                operation.operation_id,
-                source.session_id,
-                source.history_id,
-                source.revision,
-                source_head.revision,
-                local_messages,
-                source_history.prefix_index_head_id,
-                inherited,
-                expected_target.session_id,
-                child.history_id,
-                child.prefix_index_head_id,
-                operation.request_digest,
-                operation.result_digest or "",
+                operation_id=operation.operation_id,
+                source_session_id=source.session_id,
+                source_history_id=source.history_id,
+                inherited_message_count=inherited,
+                target_session_id=expected_target.session_id,
+                target_history_id=child.history_id,
+                target_prefix_index_head_id=child.prefix_index_head_id,
+                request_digest=operation.request_digest,
+                result_digest=operation.result_digest or "",
             )
             if not fork_result.result_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
