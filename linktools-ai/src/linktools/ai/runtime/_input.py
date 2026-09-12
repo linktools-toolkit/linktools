@@ -130,7 +130,6 @@ class ExecutionInputMaterializer:
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
         raw_files = _require_files(files)
         result: list[str] = []
-        seen: set[str] = set()
         for path in raw_files:
             try:
                 canonical = normalize_workspace_path(
@@ -143,9 +142,6 @@ class ExecutionInputMaterializer:
                     ErrorCode.REQUEST_FIELD_INVALID,
                     safe_details={"field": "files", "reason": "path_invalid"},
                 ) from error
-            if canonical in seen:
-                continue
-            seen.add(canonical)
             result.append(canonical)
         return tuple(result)
 
@@ -163,7 +159,7 @@ class ExecutionInputMaterializer:
         canonical_files: Sequence[str],
     ) -> CanonicalUserInput:
         canonical = validate_user_input(value)
-        files = tuple(dict.fromkeys(_require_canonical_files(canonical_files)))
+        files = _require_canonical_files(canonical_files)
         direct_binary = _binary_parts(canonical)
         if len(direct_binary) > self._policy.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -175,26 +171,23 @@ class ExecutionInputMaterializer:
         if not files:
             return canonical
 
-        additions: list[UserContent] = []
+        bodies: dict[str, BinaryContent] = {}
         for path in files:
-            media_type = self._media_type(path)
-            remaining = self._policy.max_binary_input_bytes - total_bytes
-            if remaining < 0:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            body = await self._access.read_bytes(path, max_bytes=remaining)
-            total_bytes += len(body)
-            if total_bytes > self._policy.max_binary_input_bytes:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            additions.extend(
-                (
-                    f"Workspace file: {path}",
-                    BinaryContent(
-                        data=body,
-                        media_type=media_type,
-                        identifier=Path(path).name,
-                    ),
+            if path not in bodies:
+                media_type = self._media_type(path)
+                remaining = self._policy.max_binary_input_bytes - total_bytes
+                if remaining < 0:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                body = await self._access.read_bytes(path, max_bytes=remaining)
+                total_bytes += len(body)
+                if total_bytes > self._policy.max_binary_input_bytes:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                bodies[path] = BinaryContent(
+                    data=body,
+                    media_type=media_type,
+                    identifier=Path(path).name,
                 )
-            )
+        additions = tuple(bodies[path] for path in files)
         if isinstance(canonical, str):
             materialized: CanonicalUserInput = (canonical, *additions)
         else:
@@ -203,7 +196,7 @@ class ExecutionInputMaterializer:
         _logger.info(
             "execution input materialized: files=%s distinct_files=%s binary_bytes=%s",
             len(files),
-            len(files),
+            len(bodies),
             total_bytes,
         )
         return materialized

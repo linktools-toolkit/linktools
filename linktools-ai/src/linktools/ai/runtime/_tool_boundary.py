@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
@@ -30,8 +30,6 @@ from ..errors import AIError, ErrorCode
 from ..workspace import SandboxSession, WorkspaceToolPermissionPolicy
 from ._tool import ToolOperationBridge
 from ._tool_metrics import _ToolMetricContext
-
-_WORKSPACE_PATH_FIELDS_KEY = "linktools.ai.workspace_path_fields"
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -189,13 +187,6 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         descriptor = self._descriptors.get(name, self._default_descriptor)
         if descriptor is None or tool.toolset is not self:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if descriptor.tool_class.startswith("filesystem"):
-            path_fields = (tool.tool_def.metadata or {}).get(_WORKSPACE_PATH_FIELDS_KEY)
-            if isinstance(path_fields, (list, tuple)):
-                descriptor = replace(
-                    descriptor,
-                    workspace_path_fields=tuple(path_fields),
-                )
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
         final_args = await self._canonicalize_args(tool_args, descriptor)
         call_id = ctx.tool_call_id
