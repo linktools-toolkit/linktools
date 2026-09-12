@@ -94,7 +94,7 @@ def test_persisted_generic_writer_uses_current_schema() -> None:
 
 
 def test_context_projection_persisted_writer_round_trips() -> None:
-    projection = ContextProjection((), "d" * 64)
+    projection = ContextProjection(())
     payload = _encode_persisted_domain(projection)
 
     assert (
@@ -110,7 +110,6 @@ def test_context_projection_rejects_runtime_type_mismatch_at_construction() -> N
     with pytest.raises(TypeError):
         ContextProjection(
             cast("tuple[ContextProjectionItem, ...]", ("invalid",)),
-            "d" * 64,
         )
 
 

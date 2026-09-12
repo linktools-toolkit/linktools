@@ -214,20 +214,7 @@ class _ContextProjector:
                     )
                 )
             index = end
-        digest = self._digest(items)
-        return ContextProjection(tuple(items), digest)
-
-    def _digest(
-        self,
-        items: Sequence[TranscriptSpanRef | InlineContextBlock],
-    ) -> str:
-        return hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "items": encode_domain(tuple(items)),
-                }
-            )
-        ).hexdigest()
+        return ContextProjection(tuple(items))
 
 
 class TranscriptRepository:
@@ -643,8 +630,7 @@ class TranscriptRepository:
             changed = True
         if not changed:
             return projection
-        digest = self._projector._digest(items)
-        return ContextProjection(tuple(items), digest)
+        return ContextProjection(tuple(items))
 
     def history_stream(self, history_id: str) -> bytes:
         return stream_digest(

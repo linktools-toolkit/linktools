@@ -157,7 +157,7 @@ def test_custom_wire_v1_fixture() -> None:
 
 
 def test_generic_v1_envelope_round_trips_current_shape() -> None:
-    value = ContextProjection((), "d" * 64)
+    value = ContextProjection(())
     payload = runtime_codec._encode_persisted_domain(value)
     canonical_json_bytes(payload)
     decoded = runtime_codec._decode_enveloped_domain(

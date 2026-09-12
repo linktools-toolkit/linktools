@@ -78,7 +78,6 @@ from ._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     ResultRecord,
-    SessionForkResultRecord,
     SessionRecord,
     ToolOperationAdmission,
     TranscriptHeadRecord,
@@ -1069,7 +1068,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         target = _ensure_session_history(replace(target, history_id=None))
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
-            operation_record, replayed = await _append_operation(
+            _, replayed = await _append_operation(
                 transaction,
                 self,
                 operation,
@@ -1079,8 +1078,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     transaction,
                     source_session_id=source_session_id,
                     target=target,
-                    operation=operation,
-                    operation_record=operation_record,
                 )
             source_stored = await transaction.get_record(
                 self._key("session", source_session_id)
@@ -1185,19 +1182,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if target_stored is not None or child_stored is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            fork_result = SessionForkResultRecord(
-                operation_id=operation.operation_id,
-                source_session_id=source.session_id,
-                source_history_id=source.history_id,
-                inherited_message_count=inherited,
-                target_session_id=expected_target.session_id,
-                target_history_id=child.history_id,
-                target_prefix_index_head_id=child.prefix_index_head_id,
-                request_digest=operation.request_digest,
-                result_digest=operation.result_digest or "",
-            )
-            if not fork_result.result_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await transaction.insert_records(
                 (
                     self._stored(
@@ -1221,11 +1205,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         child.history_id,
                         _empty_conversation_transcript_head(child.history_id),
                     ),
-                    self._stored(
-                        "session_fork_result",
-                        operation.operation_id,
-                        fork_result,
-                    ),
                 )
             )
             await self._bump_list_generation(
@@ -1248,29 +1227,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         *,
         source_session_id: str,
         target: SessionRecord,
-        operation: OperationLedgerInput,
-        operation_record: OperationLedgerRecord,
     ) -> tuple[SessionRecord, bool]:
-        result_stored = await transaction.get_record(
-            self._key("session_fork_result", operation.operation_id)
-        )
-        if result_stored is None:
+        target_history_id = target.history_id
+        if target_history_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result = _decode_enveloped_domain(
-            result_stored.data,
-            SessionForkResultRecord,
-        )
-        if (
-            result.operation_id != operation.operation_id
-            or result.request_digest != operation.request_digest
-            or result.result_digest != operation_record.result_digest
-            or result.source_session_id != source_session_id
-            or operation.result_digest != result.result_digest
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        target_key = self._key("session", result.target_session_id)
-        child_key = self._key("conversation_history", result.target_history_id)
-        head_key = self._key("transcript_head", result.target_history_id)
+        target_key = self._key("session", target.session_id)
+        child_key = self._key("conversation_history", target_history_id)
+        head_key = self._key("transcript_head", target_history_id)
         related = await transaction.get_records((target_key, child_key, head_key))
         target_stored = related.get(target_key)
         child_stored = related.get(child_key)
@@ -1280,16 +1243,15 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         existing_target = await self._decode(target_stored, SessionRecord)
         child = await self._decode_history(child_stored)
         if (
-            existing_target.session_id != result.target_session_id
-            or existing_target.history_id != result.target_history_id
+            existing_target.session_id != target.session_id
+            or existing_target.history_id != target_history_id
             or existing_target.tenant_id != self._tenant_id
             or existing_target.owner_principal_id != target.owner_principal_id
             or existing_target.agent_id != target.agent_id
-            or child.session_id != result.target_session_id
+            or child.session_id != target.session_id
             or child.tenant_id != self._tenant_id
-            or child.parent_history_id != result.source_history_id
-            or child.prefix_index_head_id != result.target_prefix_index_head_id
-            or child.inherited_message_count != result.inherited_message_count
+            or child.parent_history_id
+            != _session_history_id(source_session_id, self._tenant_id)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = _decode_enveloped_domain(
@@ -1298,15 +1260,16 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
         if (
             head.owner_domain is not TranscriptOwnerDomain.CONVERSATION
-            or head.owner_id != result.target_history_id
+            or head.owner_id != target_history_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
-            "session fork replayed from first result: source=%s target=%s",
+            "session fork replayed: source=%s target=%s",
             source_session_id,
             existing_target.session_id,
         )
         return existing_target, True
+
 
     async def _visible_history_count_in_transaction(
         self,
@@ -4768,17 +4731,23 @@ def _canonical_record_identity(kind: str, value: object) -> object:
     raise TypeError(f"unsupported record kind: {kind}")
 
 
+def _session_history_id(session_id: str, tenant_id: str) -> str:
+    return canonical_sha256(
+        {
+            "kind": "conversation_history",
+            "session_id": session_id,
+            "tenant_id": tenant_id,
+        }
+    )
+
+
 def _ensure_session_history(value: SessionRecord) -> SessionRecord:
     if value.history_id is not None:
         return value
-    history_id = canonical_sha256(
-        {
-            "kind": "conversation_history",
-            "session_id": value.session_id,
-            "tenant_id": value.tenant_id,
-        }
+    return replace(
+        value,
+        history_id=_session_history_id(value.session_id, value.tenant_id),
     )
-    return replace(value, history_id=history_id)
 
 
 def _new_session_history(value: SessionRecord) -> ConversationHistoryRecord:

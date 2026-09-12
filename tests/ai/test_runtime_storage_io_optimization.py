@@ -121,7 +121,7 @@ async def test_session_model_context_reuses_observed_projection(
         tenant_id="tenant",
         runtime_domain=RuntimeDomain.CONVERSATION,
     )
-    projection = ContextProjection((), "projection")
+    projection = ContextProjection(())
     expected = LoadedModelContext(())
     projection_reads = 0
 

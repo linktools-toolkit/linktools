@@ -41,7 +41,6 @@
     "resource_ref",
     "result_record",
     "session_record",
-    "session_fork_result",
     "stored_step_snapshot",
     "object_ref",
     "stored_payload",

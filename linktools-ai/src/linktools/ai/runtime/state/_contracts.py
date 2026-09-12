@@ -295,7 +295,6 @@ ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
 @dataclass(frozen=True, slots=True)
 class ContextProjection:
     items: tuple[ContextProjectionItem, ...]
-    digest: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.items, tuple) or any(
@@ -303,8 +302,47 @@ class ContextProjection:
             for item in self.items
         ):
             raise TypeError("context projection items are invalid")
-        if not isinstance(self.digest, str) or not self.digest:
-            raise ValueError("context projection digest is invalid")
+
+    @property
+    def digest(self) -> str:
+        identities: list[JsonValue] = []
+        for item in self.items:
+            if isinstance(item, TranscriptSpanRef):
+                identities.append(
+                    {
+                        "kind": "transcript",
+                        "source_domain": item.source_domain.value,
+                        "owner_id": item.owner_id,
+                        "start": item.start,
+                        "end": item.end,
+                    }
+                )
+                continue
+            payload = item.content.payload
+            payload_identity: dict[str, JsonValue] = {
+                "kind": payload.kind,
+                "encoding": payload.encoding,
+                "digest": payload.digest,
+                "size": payload.size,
+            }
+            if payload.kind == "inline":
+                payload_identity["value"] = payload.value
+            elif payload.ref is not None:
+                payload_identity["key"] = payload.ref.key
+            identities.append(
+                {
+                    "kind": "inline",
+                    "source_domain": (
+                        None
+                        if item.content.source_domain is None
+                        else item.content.source_domain.value
+                    ),
+                    "payload": payload_identity,
+                }
+            )
+        return canonical_sha256(
+            {"contract": "context-projection-v1", "items": identities}
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,34 +430,6 @@ class SessionRecord:
         if self.history_quality not in {"complete", "conservative"}:
             raise ValueError("session history quality summary is invalid")
 
-@dataclass(frozen=True, slots=True)
-class SessionForkResultRecord:
-    operation_id: str
-    source_session_id: str
-    source_history_id: str
-    inherited_message_count: int
-    target_session_id: str
-    target_history_id: str
-    target_prefix_index_head_id: str | None
-    request_digest: str
-    result_digest: str
-
-    def __post_init__(self) -> None:
-        if self.inherited_message_count < 0:
-            raise ValueError("session fork inherited count cannot be negative")
-        if not all(
-            value
-            for value in (
-                self.operation_id,
-                self.source_session_id,
-                self.source_history_id,
-                self.target_session_id,
-                self.target_history_id,
-                self.request_digest,
-                self.result_digest,
-            )
-        ):
-            raise ValueError("session fork result identity cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,10 +764,16 @@ class ArtifactRecord:
     tenant_id: str
     producer: str
     media_type: str
-    size: int
-    digest: str
     object_ref: ObjectRef
     created_at: datetime
+
+    @property
+    def size(self) -> int:
+        return self.object_ref.size
+
+    @property
+    def digest(self) -> str:
+        return self.object_ref.digest
 
 
 @dataclass(frozen=True, slots=True)
