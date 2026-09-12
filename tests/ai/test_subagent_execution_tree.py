@@ -155,7 +155,7 @@ class _EventStreamer:
             yield ExecutionStreamEvent(
                 execution_id,
                 sequence,
-                ExecutionEventType.EXECUTION_SUCCEEDED,
+                ExecutionEventType.EXECUTION_SUCCEEDED.value,
                 {},
             )
 
@@ -193,7 +193,7 @@ def test_execution_tree_event_rejects_nested_depth() -> None:
     event = ExecutionStreamEvent(
         "child",
         1,
-        ExecutionEventType.EXECUTION_SUCCEEDED,
+        ExecutionEventType.EXECUTION_SUCCEEDED.value,
         {},
     )
     with pytest.raises(ValueError):
@@ -271,7 +271,7 @@ async def test_tree_stream_keeps_at_most_one_prefetched_event_per_execution() ->
                     yield ExecutionStreamEvent(
                         execution_id,
                         after_sequence + offset,
-                        ExecutionEventType.EXECUTION_STARTED,
+                        ExecutionEventType.EXECUTION_STARTED.value,
                         {},
                     )
 
@@ -315,7 +315,7 @@ async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> N
                     yield ExecutionStreamEvent(
                         execution_id,
                         after_sequence + 1,
-                        ExecutionEventType.EXECUTION_SUCCEEDED,
+                        ExecutionEventType.EXECUTION_SUCCEEDED.value,
                         {},
                     )
                 finally:
@@ -336,7 +336,7 @@ async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> N
 
     event = await anext(stream)
 
-    assert event.event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED
+    assert event.event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value
     assert events.closed is False
 
     await stream.aclose()
@@ -376,7 +376,7 @@ async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
                 yield ExecutionStreamEvent(
                     execution_id,
                     after_sequence + 1,
-                    ExecutionEventType.EXECUTION_SUCCEEDED,
+                    ExecutionEventType.EXECUTION_SUCCEEDED.value,
                     {},
                 )
 
