@@ -24,6 +24,7 @@ from .state._store import (
 _logger = environ.get_logger("ai.runtime.plan")
 _OWNER_KINDS = frozenset({"session", "execution"})
 _KIND = "agent_plan"
+_VERSION = 1
 
 PlanOwnerKind = Literal["session", "execution"]
 PlanStatus = Literal["pending", "in_progress", "completed", "cancelled"]
@@ -158,7 +159,10 @@ class RuntimePlanStore:
             lease_owner=None,
             lease_fence=0,
             lease_expires_at=None,
-            data={"items": [_item_payload(item) for item in items]},
+            data={
+                "version": _VERSION,
+                "items": [_item_payload(item) for item in items],
+            },
         )
 
 
@@ -173,8 +177,13 @@ def _decode_payload(record: StoredRecord | None) -> tuple[list[PlanItem], int]:
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     data = record.data
-    if not isinstance(data, Mapping) or set(data) != {"items"}:
+    if not isinstance(data, Mapping) or set(data) != {"version", "items"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = data["version"]
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != _VERSION:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     raw_items = data["items"]
     if not isinstance(raw_items, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
