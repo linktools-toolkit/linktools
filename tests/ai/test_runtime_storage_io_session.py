@@ -202,7 +202,7 @@ async def test_session_fork_replay_batches_known_record_sql(tmp_path: Path) -> N
         assert replayed is True
 
         record_selects = _record_selects(statements)
-        assert len(record_selects) == 2
+        assert len(record_selects) == 1
         batched = [
             parameters
             for statement, parameters in record_selects
