@@ -70,6 +70,12 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
             {"owner_principal_id": "different-owner"},
             {"agent_id": "different-agent"},
             {"history_id": "different-history"},
+            {
+                "created_at": datetime.fromtimestamp(
+                    admitted.created_at.timestamp() + 1,
+                    tz=timezone.utc,
+                )
+            },
         ):
             with pytest.raises(AIError) as identity_error:
                 await state.conversation.sessions.compare_and_swap(
