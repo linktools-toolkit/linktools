@@ -160,9 +160,16 @@ async def _emit_result(
             raise
         payload = _result_payload(result)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        _require_success(result)
+        if result.status is not ExecutionStatus.SUCCEEDED:
+            raise CommandError(
+                "execution failed: "
+                f"execution_id={result.execution_id} status={result.status.value} "
+                f"error_code={result.error_code} "
+                f"safe_error_details={dict(result.safe_error_details)}"
+            )
         return 0
 
+    succeeded = False
     execution = await agent.start(
         prompt,
         session_id=session_id,
@@ -170,6 +177,10 @@ async def _emit_result(
         planning=planning,
         thinking=thinking,
     )
+    execution_id = execution.execution_id
+    terminal_status = "UNKNOWN"
+    terminal_error_code: object = None
+    terminal_safe_details: object = {}
     try:
         async for item in execution.watch():
             if item.depth != 0:
@@ -187,25 +198,29 @@ async def _emit_result(
                 _write_stderr("[tool] " + _payload_text(event.payload))
             elif event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
                 _write_stderr("[tool] finished " + _payload_text(event.payload))
-        result = await execution.wait()
+            elif event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value:
+                succeeded = True
+                terminal_status = ExecutionStatus.SUCCEEDED.value
+            elif event_type in {
+                ExecutionEventType.EXECUTION_FAILED.value,
+                ExecutionEventType.EXECUTION_CANCELLED.value,
+            }:
+                terminal_status = event_type.removeprefix("EXECUTION_")
+                if isinstance(event.payload, dict):
+                    terminal_error_code = event.payload.get("error_code")
+                    terminal_safe_details = event.payload.get("safe_error_details", {})
     except asyncio.CancelledError:
         await _cancel_interrupted_execution(execution)
         raise
     sys.stdout.write("\n")
     sys.stdout.flush()
-    _require_success(result)
+    if not succeeded:
+        raise CommandError(
+            "execution failed: "
+            f"execution_id={execution_id} status={terminal_status} "
+            f"error_code={terminal_error_code} safe_error_details={terminal_safe_details}"
+        )
     return 0
-
-
-def _require_success(result: ExecutionResult) -> None:
-    if result.status is ExecutionStatus.SUCCEEDED:
-        return
-    raise CommandError(
-        "execution failed: "
-        f"execution_id={result.execution_id} status={result.status.value} "
-        f"error_code={result.error_code} "
-        f"safe_error_details={dict(result.safe_error_details)}"
-    )
 
 
 async def _cancel_interrupted_execution(execution: "Execution[object]") -> None:
