@@ -764,6 +764,7 @@ class Runtime(Generic[AppT]):
             TaskStatus.PENDING,
             TaskStatus.READY,
             TaskStatus.RUNNING,
+            TaskStatus.WAITING,
             TaskStatus.RECOVERY_REQUIRED,
         }:
             raise AIError(
