@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Persistence-backed Task API independent of Runtime composition."""
+"""Persistence-backed TaskGraph service independent of Runtime composition."""
 
 import asyncio
 from collections.abc import AsyncIterator
@@ -43,7 +43,7 @@ from ._graph import (
     TaskNodeView,
 )
 from ._metrics import _TaskMetricProjector
-from ._service import TaskApi, TaskGraphLauncher
+from ._service import TaskGraphLauncher, TaskGraphService
 
 _logger = environ.get_logger("ai.task.service")
 _GRAPH_OBSERVATION_RECHECK_SECONDS = 1.0
@@ -207,8 +207,8 @@ class TaskPersistence(Protocol):
     admissions: _TaskAdmissionPersistence
 
 
-class DefaultTaskService(TaskApi):
-    """Own durable Task submission, observation, recovery, and cancellation."""
+class DefaultTaskGraphService(TaskGraphService):
+    """Own durable TaskGraph submission, observation, recovery, and cancellation."""
 
     def __init__(
         self,
@@ -248,7 +248,7 @@ class DefaultTaskService(TaskApi):
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
-    async def start_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
+    async def start(self, request: TaskGraphRequest) -> TaskGraphResult:
         return await self._start_graph(request)
 
     async def _start_graph(
@@ -354,20 +354,20 @@ class DefaultTaskService(TaskApi):
             cursor = page.next_cursor
         _logger.info("task graph recovery scan completed: graphs=%s", recovered)
 
-    async def run_graph(
+    async def run(
         self,
         request: TaskGraphRequest,
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult:
         submitted = await self._start_graph(request)
-        return await self.wait_graph(
+        return await self.wait(
             submitted.graph_id,
             principal=request.principal,
             timeout_seconds=timeout_seconds,
         )
 
-    async def recover_graph(
+    async def recover(
         self,
         graph_id: str,
         request: RecoverGraphRequest,
@@ -588,7 +588,7 @@ class DefaultTaskService(TaskApi):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
 
-    async def inspect_graph(
+    async def inspect(
         self,
         graph_id: str,
         *,
@@ -613,7 +613,7 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return view
 
-    async def snapshot_graph(
+    async def snapshot(
         self,
         graph_id: str,
         *,
@@ -638,7 +638,7 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return snapshot
 
-    async def list_graph_events(
+    async def list_events(
         self,
         graph_id: str,
         *,
@@ -679,7 +679,7 @@ class DefaultTaskService(TaskApi):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return page
 
-    def stream_graph_events(
+    def stream_events(
         self,
         graph_id: str,
         *,
@@ -807,7 +807,7 @@ class DefaultTaskService(TaskApi):
             after_generation=after_generation,
         )
 
-    async def wait_graph(
+    async def wait(
         self,
         graph_id: str,
         *,
@@ -869,7 +869,7 @@ class DefaultTaskService(TaskApi):
                 safe_details={"graph_id": graph_id},
             ) from error
 
-    async def cancel_graph(
+    async def cancel(
         self,
         graph_id: str,
         request: CancelGraphRequest,
@@ -1560,4 +1560,4 @@ def _stable_operation_error(error_code: "str | None") -> AIError:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-__all__ = ["DefaultTaskService", "TaskPersistence"]
+__all__ = ["DefaultTaskGraphService", "TaskPersistence"]

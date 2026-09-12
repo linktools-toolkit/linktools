@@ -35,17 +35,17 @@ from linktools.ai.runtime.state._materializer import _RuntimeObjectRouter
 from linktools.ai.runtime.state._plan import RuntimeDomain
 from linktools.ai.runtime.state._retention import RuntimeRetentionController
 from linktools.ai.runtime.state._steps import RuntimeStepStore
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.task import (
+    DefaultTaskGraphService,
     TaskEvent,
     TaskEventType,
     TaskGraphSnapshot,
     TaskNode,
     TaskNodeView,
+    open_local_task_graph_service,
 )
-from linktools.ai.task._api import open_local_task_api
-from linktools.ai.task._service_impl import DefaultTaskService
-from linktools.ai.spec import AgentSpec
 from pydantic import BaseModel
 from pydantic_ai.capabilities import AbstractCapability
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -790,8 +790,8 @@ def _terminal_task_service(
     waiter: _TerminalTaskWaiter,
     *,
     tasks: "object | None" = None,
-) -> DefaultTaskService:
-    return DefaultTaskService(
+) -> DefaultTaskGraphService:
+    return DefaultTaskGraphService(
         SimpleNamespace(tasks=_TerminalTaskRepository() if tasks is None else tasks),
         _AllowAuthorization(),
         local_waiter=waiter,
@@ -803,7 +803,7 @@ async def test_task_wait_returns_current_terminal_snapshot_without_local_wait() 
     waiter = _TerminalTaskWaiter()
     service = _terminal_task_service(waiter)
 
-    result = await service.wait_graph(
+    result = await service.wait(
         "graph",
         principal=Principal("principal", "tenant", "service"),
         timeout_seconds=1,
@@ -819,7 +819,7 @@ async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> Non
     repository = _TransitionTaskRepository()
     service = _terminal_task_service(waiter, tasks=repository)
 
-    result = await service.wait_graph(
+    result = await service.wait(
         "graph",
         principal=Principal("principal", "tenant", "service"),
         timeout_seconds=1,
@@ -834,14 +834,14 @@ async def test_task_wait_prefers_terminal_truth_after_scheduler_failure() -> Non
 @pytest.mark.asyncio
 async def test_task_wait_uses_durable_recheck_after_local_owner_is_lost() -> None:
     persistence = SimpleNamespace(tasks=_RunningTaskRepository())
-    service = DefaultTaskService(
+    service = DefaultTaskGraphService(
         persistence,
         _AllowAuthorization(),
         local_waiter=_LostTaskWaiter(),
     )
 
     with pytest.raises(AIError) as error:
-        await service.wait_graph(
+        await service.wait(
             "graph",
             principal=Principal("principal", "tenant", "service"),
             timeout_seconds=0.05,
@@ -852,7 +852,7 @@ async def test_task_wait_uses_durable_recheck_after_local_owner_is_lost() -> Non
 
 @pytest.mark.asyncio
 async def test_task_service_preflight_blocks_pending_detached_finalizer() -> None:
-    service = DefaultTaskService(SimpleNamespace(), _AllowAuthorization())
+    service = DefaultTaskGraphService(SimpleNamespace(), _AllowAuthorization())
     release = asyncio.Event()
     task = asyncio.create_task(release.wait())
     service._detached_finalizers.add(task)
@@ -866,7 +866,7 @@ async def test_task_service_preflight_blocks_pending_detached_finalizer() -> Non
 
 
 @pytest.mark.asyncio
-async def test_standalone_task_api_preflights_before_launcher_shutdown(
+async def test_standalone_task_graph_service_preflights_before_launcher_shutdown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Launcher:
@@ -894,9 +894,9 @@ async def test_standalone_task_api_preflights_before_launcher_shutdown(
     import linktools.ai.task._api as api_module
 
     monkeypatch.setattr(api_module, "LocalTaskGraphLauncher", Launcher)
-    monkeypatch.setattr(api_module, "DefaultTaskService", Service)
+    monkeypatch.setattr(api_module, "DefaultTaskGraphService", Service)
     with pytest.raises(AIError) as error:
-        async with open_local_task_api(
+        async with open_local_task_graph_service(
             SimpleNamespace(tasks=object()),
             _AllowAuthorization(),
             runner=object(),

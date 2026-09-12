@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Generic TaskGraph contracts and local scheduling."""
 
-from ._api import open_local_task_api
+from ._api import open_local_task_graph_service
 from ._event import TaskEvent, TaskEventType
 from ._graph import (
     CancelGraphRequest,
@@ -36,15 +36,14 @@ from ._local import (
     TaskNodeRunner,
     TaskNodeRunResult,
 )
-from ._service import TaskApi, TaskGraphLauncher, TaskQueryApi
-from ._service_impl import DefaultTaskService, TaskPersistence
+from ._service import TaskGraphLauncher, TaskGraphQueryService, TaskGraphService
+from ._service_impl import DefaultTaskGraphService, TaskPersistence
 
 __all__ = [
     "CancelGraphRequest",
-    "DefaultTaskService",
+    "DefaultTaskGraphService",
     "LocalTaskGraphLauncher",
     "RecoverGraphRequest",
-    "TaskApi",
     "TaskCompletionLedger",
     "TaskDependency",
     "TaskDependencyResult",
@@ -57,8 +56,10 @@ __all__ = [
     "TaskGraphLaunch",
     "TaskGraphLauncher",
     "TaskGraphLimits",
+    "TaskGraphQueryService",
     "TaskGraphRequest",
     "TaskGraphResult",
+    "TaskGraphService",
     "TaskGraphSnapshot",
     "TaskGraphView",
     "TaskLease",
@@ -73,10 +74,9 @@ __all__ = [
     "TaskNodeRunner",
     "TaskNodeView",
     "TaskPersistence",
-    "TaskQueryApi",
     "TaskResultRecord",
     "TaskStatus",
     "TaskTerminalRecord",
-    "open_local_task_api",
+    "open_local_task_graph_service",
     "ready_nodes",
 ]

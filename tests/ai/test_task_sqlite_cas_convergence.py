@@ -27,6 +27,7 @@ from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import ObjectRef, StoredPayload
 from linktools.ai.task import (
     CancelGraphRequest,
+    DefaultTaskGraphService,
     TaskEvent,
     TaskEventType,
     TaskGraph,
@@ -43,7 +44,6 @@ from linktools.ai.task import (
     TaskNodeRunResult,
     TaskTerminalRecord,
 )
-from linktools.ai.task._service_impl import DefaultTaskService
 from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -294,7 +294,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
             )
         assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
         await asyncio.wait_for(started.wait(), timeout=1)
-        view = await runtime.task.cancel_graph(
+        view = await runtime.graph.cancel(
             graph.graph_id,
             CancelGraphRequest(runtime.default_principal, "cancel:timeout"),
         )
@@ -431,14 +431,14 @@ class _ReadOnlyTaskRepository:
 @pytest.mark.asyncio
 async def test_task_inspect_and_wait_are_read_only() -> None:
     tasks = _ReadOnlyTaskRepository(TaskGraphView("observed", TaskStatus.SUCCEEDED, ()))
-    service = DefaultTaskService(
+    service = DefaultTaskGraphService(
         SimpleNamespace(tasks=tasks),
         TenantAuthorizationPolicy("tenant"),
     )
     principal = Principal("tester", "tenant")
 
-    inspected = await service.inspect_graph("observed", principal=principal)
-    waited = await service.wait_graph("observed", principal=principal)
+    inspected = await service.inspect("observed", principal=principal)
+    waited = await service.wait("observed", principal=principal)
 
     assert inspected.status is TaskStatus.SUCCEEDED
     assert waited.status is TaskStatus.SUCCEEDED

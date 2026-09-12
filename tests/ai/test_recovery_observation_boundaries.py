@@ -142,8 +142,8 @@ async def test_durable_recovery_event_ends_restart_observation_cleanly() -> None
     assert replay == []
 
 
-class _RecoveryTaskService:
-    async def snapshot_graph(self, graph_id: str, *, principal: Principal):
+class _RecoveryTaskGraphService:
+    async def snapshot(self, graph_id: str, *, principal: Principal):
         assert graph_id == "graph"
         assert principal.tenant_id == "tenant"
         state = TaskNodeView(
@@ -172,7 +172,7 @@ async def test_recovery_required_task_result_is_not_ready_not_corrupt() -> None:
     runtime = object.__new__(Runtime)
     runtime._closed = False
     runtime._closing = False
-    runtime.task = _RecoveryTaskService()
+    runtime.graph = _RecoveryTaskGraphService()
     runtime._task_node_runtime = None
 
     with pytest.raises(AIError) as raised:

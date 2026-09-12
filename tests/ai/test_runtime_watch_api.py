@@ -11,7 +11,7 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.runtime import Execution, TaskGraphRunEvent
+from linktools.ai.runtime import Execution, Runtime, TaskGraphRunEvent
 from linktools.ai.runtime._task import TaskGraphRun
 from linktools.ai.runtime.service_api import (
     ExecutionStreamEvent,
@@ -21,7 +21,7 @@ from linktools.ai.task import TaskEvent, TaskEventType
 
 
 class _ExecutionService:
-    def stream_tree(
+    def stream(
         self,
         execution_id: str,
         *,
@@ -50,8 +50,8 @@ class _ExecutionService:
         return values()
 
 
-class _TaskService:
-    async def snapshot_graph(self, graph_id: str, *, principal: Principal):
+class _TaskGraphService:
+    async def snapshot(self, graph_id: str, *, principal: Principal):
         del principal
 
         class Snapshot:
@@ -60,7 +60,7 @@ class _TaskService:
         assert graph_id == "graph"
         return Snapshot()
 
-    def stream_graph_events(
+    def stream_events(
         self,
         graph_id: str,
         *,
@@ -108,14 +108,15 @@ class _TaskService:
 class _Runtime:
     def __init__(self) -> None:
         self.execution = _ExecutionService()
-        self.task = _TaskService()
+        self.graph = _TaskGraphService()
 
-    def stream_tree(self, execution_id, *, principal, after_sequences=None):
-        return self.execution.stream_tree(
-            execution_id,
-            principal=principal,
-            after_sequences=after_sequences,
-        )
+
+def _watch_tree(execution_id, *, principal, after_sequences=None):
+    return _ExecutionService().stream(
+        execution_id,
+        principal=principal,
+        after_sequences=after_sequences,
+    )
 
 
 @pytest.mark.asyncio
@@ -126,6 +127,7 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
         "execution",
         "binding",
         Principal("owner", "tenant"),
+        _watch_tree,
     )
     values = [item async for item in execution.watch()]
     assert len(values) == 1
@@ -134,7 +136,12 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
 
 @pytest.mark.asyncio
 async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
-    run = TaskGraphRun(_Runtime(), "graph", Principal("owner", "tenant"))
+    run = TaskGraphRun(
+        _Runtime(),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
     values = [item async for item in run.watch()]
     assert all(isinstance(item, TaskGraphRunEvent) for item in values)
     assert [type(item.event) for item in values].count(TaskEvent) == 3
@@ -144,6 +151,10 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
     assert len(execution) == 1
     assert execution[0].node_id == "node"
     assert execution[0].event.execution_id == "execution"
+
+
+def test_runtime_does_not_expose_stream_tree() -> None:
+    assert not hasattr(Runtime, "stream_tree")
 
 
 def test_task_run_event_rejects_execution_without_node() -> None:

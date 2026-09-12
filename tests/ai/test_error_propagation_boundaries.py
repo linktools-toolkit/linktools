@@ -20,7 +20,7 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
 )
-from linktools.ai.task._service_impl import DefaultTaskService
+from linktools.ai.task import DefaultTaskGraphService
 
 
 def _map_provider_error(error: Exception) -> AIError:
@@ -86,7 +86,7 @@ async def test_task_scheduler_arm_preserves_classified_ai_error() -> None:
                 diagnostics=diagnostics,
             )
 
-    service = DefaultTaskService(
+    service = DefaultTaskGraphService(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
         Launcher(),  # type: ignore[arg-type]
@@ -114,7 +114,7 @@ async def test_task_scheduler_arm_preserves_classified_ai_error() -> None:
 @pytest.mark.asyncio
 async def test_task_service_finalizer_preserves_classified_ai_error() -> None:
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError("task finalizer"))
-    service = DefaultTaskService(
+    service = DefaultTaskGraphService(
         object(),  # type: ignore[arg-type]
         object(),  # type: ignore[arg-type]
     )

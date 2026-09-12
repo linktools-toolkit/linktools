@@ -19,8 +19,8 @@ from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import MCPServerSpec
+from linktools.ai.task import DefaultTaskGraphService
 from linktools.ai.task._local import LocalTaskGraphLauncher
-from linktools.ai.task._service_impl import DefaultTaskService
 from linktools.ai.workspace import trusted_workspace_principal
 
 
@@ -317,7 +317,7 @@ async def test_task_scheduler_arm_cancellation_detaches_pending_launcher() -> No
             return object()
 
     launcher = Launcher()
-    service = DefaultTaskService(SimpleNamespace(), SimpleNamespace(), launcher)
+    service = DefaultTaskGraphService(SimpleNamespace(), SimpleNamespace(), launcher)
     launch = SimpleNamespace(
         principal=trusted_workspace_principal("tenant"),
         graph=SimpleNamespace(graph_id="graph"),

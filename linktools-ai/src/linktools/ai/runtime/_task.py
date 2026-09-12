@@ -6,7 +6,7 @@ import asyncio
 import secrets
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from ..core import Principal
 from ..errors import AIError, ErrorCode
@@ -25,31 +25,42 @@ if TYPE_CHECKING:
 AppT = TypeVar("AppT")
 
 
+class _ExecutionTreeWatcher(Protocol):
+    def __call__(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences: "Mapping[str, int] | None" = None,
+    ) -> AsyncIterator[ExecutionTreeEvent]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class TaskGraphRun(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     graph_id: str
     _principal: Principal
+    _watch_tree: _ExecutionTreeWatcher
 
     async def wait(
         self,
         *,
         timeout_seconds: "float | None" = None,
     ) -> TaskGraphResult:
-        return await self._runtime.task.wait_graph(
+        return await self._runtime.graph.wait(
             self.graph_id,
             principal=self._principal,
             timeout_seconds=timeout_seconds,
         )
 
     async def inspect(self) -> TaskGraphView:
-        return await self._runtime.task.inspect_graph(
+        return await self._runtime.graph.inspect(
             self.graph_id,
             principal=self._principal,
         )
 
     async def snapshot(self) -> TaskGraphSnapshot:
-        return await self._runtime.task.snapshot_graph(
+        return await self._runtime.graph.snapshot(
             self.graph_id,
             principal=self._principal,
         )
@@ -60,7 +71,7 @@ class TaskGraphRun(Generic[AppT]):
         idempotency_key: "str | None" = None,
         force: bool = False,
     ) -> TaskGraphView:
-        return await self._runtime.task.cancel_graph(
+        return await self._runtime.graph.cancel(
             self.graph_id,
             CancelGraphRequest(
                 self._principal,
@@ -103,7 +114,7 @@ class TaskGraphRun(Generic[AppT]):
         if set(after_execution_sequences) - set(states):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        graph_stream = self._runtime.task.stream_graph_events(
+        graph_stream = self._runtime.graph.stream_events(
             self.graph_id,
             principal=self._principal,
             after_sequence=after_graph_sequence,
@@ -123,7 +134,7 @@ class TaskGraphRun(Generic[AppT]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return
             execution_ids[node_id] = execution_id
-            stream = self._runtime.execution.stream_tree(
+            stream = self._watch_tree(
                 execution_id,
                 principal=self._principal,
                 after_sequences=after_execution_sequences.get(node_id),

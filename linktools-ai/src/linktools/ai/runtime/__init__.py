@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public runtime contracts and composition entry point."""
 
+from ..task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphService
 from ._agent import Agent, Execution, Session
 from ._runtime_service import Runtime
 from .recovery import (
@@ -23,7 +24,6 @@ from .service_api import (
     ArtifactView,
     CancelExecutionRequest,
     CancelExecutionResult,
-    CancelGraphRequest,
     CloseSessionRequest,
     CompareEvaluationRequest,
     CreateSessionRequest,
@@ -60,15 +60,12 @@ from .service_api import (
     ReplayEvaluationRequest,
     ResumeSessionRequest,
     RetryExecutionRequest,
-    RunEvaluationRequest,
     SessionHistoryItem,
     SessionHistoryReader,
     SessionService,
     SessionView,
-    TaskEvent,
-    TaskEventType,
+    StartEvaluationRequest,
     TaskGraphRunEvent,
-    TaskService,
     TranscriptItem,
     UpdateSessionRequest,
 )
@@ -133,7 +130,6 @@ __all__ = [
     "ResolveToolEffectRequest",
     "ResumeSessionRequest",
     "RetryExecutionRequest",
-    "RunEvaluationRequest",
     "RuntimeDomain",
     "RuntimeRetentionMode",
     "RuntimeState",
@@ -143,10 +139,11 @@ __all__ = [
     "SessionHistoryReader",
     "SessionService",
     "SessionView",
+    "StartEvaluationRequest",
     "TaskEvent",
     "TaskEventType",
     "TaskGraphRunEvent",
-    "TaskService",
+    "TaskGraphService",
     "ToolEffectApplied",
     "ToolEffectFailed",
     "ToolEffectNotApplied",
