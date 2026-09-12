@@ -31,6 +31,8 @@ from ..workspace import SandboxSession, WorkspaceToolPermissionPolicy
 from ._tool import ToolOperationBridge
 from ._tool_metrics import _ToolMetricContext
 
+_WORKSPACE_PATH_FIELDS_KEY = "linktools.ai.workspace_path_fields"
+
 
 class RepositoryInstructionBoundary(Protocol):
     def render(self) -> str: ...
@@ -188,7 +190,8 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         if descriptor is None or tool.toolset is not self:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
-        final_args = await self._canonicalize_args(tool_args, descriptor)
+        path_fields = _workspace_path_fields(tool.tool_def, descriptor)
+        final_args = await self._canonicalize_args(tool_args, path_fields)
         call_id = ctx.tool_call_id
         if not isinstance(call_id, str) or not call_id:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -198,7 +201,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
                 tool_name=name,
                 tool_call_id=call_id,
                 arguments=final_args,
-                path_fields=descriptor.workspace_path_fields,
+                path_fields=path_fields,
             )
         await self._authorize(
             name,
@@ -355,15 +358,15 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
     async def _canonicalize_args(
         self,
         args: dict[str, Any],
-        descriptor: ManagedToolDescriptor,
+        path_fields: tuple[str, ...],
     ) -> dict[str, Any]:
-        if not descriptor.workspace_path_fields:
+        if not path_fields:
             return dict(args)
         session = self._sandbox_session
         if session is None:
             raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
         result = dict(args)
-        for field in descriptor.workspace_path_fields:
+        for field in path_fields:
             if field not in result:
                 continue
             value = result[field]
@@ -382,6 +385,24 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             else:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return result
+
+
+def _workspace_path_fields(
+    tool_def: ToolDefinition,
+    descriptor: ManagedToolDescriptor,
+) -> tuple[str, ...]:
+    metadata = tool_def.metadata or {}
+    value = metadata.get(_WORKSPACE_PATH_FIELDS_KEY)
+    if value is None:
+        return descriptor.workspace_path_fields
+    if not isinstance(value, (list, tuple)) or any(
+        not isinstance(field, str) or not field for field in value
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    fields = tuple(value)
+    if len(fields) != len(set(fields)):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return fields
 
 
 def _is_workspace_pre_effect_retry(
