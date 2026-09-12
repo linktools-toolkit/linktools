@@ -130,15 +130,18 @@ class ACPAgent:
             session_id=session_id,
             memory_scope=self._memory_scope,
         )
+        stop_reason = "end_turn"
         async for item in execution.watch():
             if item.depth != 0:
                 continue
             event = item.event
+            if event.event_type == ExecutionEventType.EXECUTION_CANCELLED.value:
+                stop_reason = "cancelled"
             if self._connection is not None:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:
                     await self._connection.session_update(session_id, update)
-        return schema.PromptResponse(stopReason="end_turn")
+        return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
         loaded = await self._runtime.session.load(session_id, principal=self._principal)
@@ -194,18 +197,18 @@ def _require_acp() -> "tuple[ModuleType, ModuleType]":
 
 def _acp_update(
     schema: ModuleType,
-    event_type: "ExecutionEventType | ExecutionDeltaType",
+    event_type: str,
     payload: JsonValue,
 ) -> "JsonValue | None":
     if not isinstance(payload, dict):
         return None
-    if event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+    if event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
         return schema.AgentMessageChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_message_chunk")
-    if event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA:
+    if event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
         return schema.AgentThoughtChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_thought_chunk")
-    if event_type is ExecutionEventType.TOOL_CALL_STARTED:
+    if event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
         return schema.ToolCallStart(toolCallId=str(payload.get("call_id", "")), title=str(payload.get("tool_name", "tool")), kind="execute", status="in_progress", sessionUpdate="tool_call")
-    if event_type is ExecutionEventType.TOOL_CALL_FINISHED:
+    if event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
         return schema.ToolCallProgress(toolCallId=str(payload.get("call_id", "")), kind="execute", status="completed" if payload.get("status") == "SUCCEEDED" else "failed", sessionUpdate="tool_call_update")
     return None
 

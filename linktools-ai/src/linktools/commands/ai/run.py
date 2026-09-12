@@ -186,25 +186,26 @@ async def _emit_result(
             if item.depth != 0:
                 continue
             event = item.event
-            if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+            event_type = event.event_type
+            if event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
                 text = event.payload.get("text") if isinstance(event.payload, dict) else None
                 if isinstance(text, str):
                     sys.stdout.write(text)
                     sys.stdout.flush()
-            elif event.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA:
+            elif event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
                 _write_stderr("[thinking] " + _payload_text(event.payload))
-            elif event.event_type is ExecutionEventType.TOOL_CALL_STARTED:
+            elif event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
                 _write_stderr("[tool] " + _payload_text(event.payload))
-            elif event.event_type is ExecutionEventType.TOOL_CALL_FINISHED:
+            elif event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
                 _write_stderr("[tool] finished " + _payload_text(event.payload))
-            elif event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED:
+            elif event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value:
                 succeeded = True
                 terminal_status = ExecutionStatus.SUCCEEDED.value
-            elif event.event_type in {
-                ExecutionEventType.EXECUTION_FAILED,
-                ExecutionEventType.EXECUTION_CANCELLED,
+            elif event_type in {
+                ExecutionEventType.EXECUTION_FAILED.value,
+                ExecutionEventType.EXECUTION_CANCELLED.value,
             }:
-                terminal_status = event.event_type.value.removeprefix("EXECUTION_")
+                terminal_status = event_type.removeprefix("EXECUTION_")
                 if isinstance(event.payload, dict):
                     terminal_error_code = event.payload.get("error_code")
                     terminal_safe_details = event.payload.get("safe_error_details", {})
