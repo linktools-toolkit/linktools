@@ -27,6 +27,7 @@ class TaskExpansionContext(Protocol):
 
     def agent_task(
         self,
+        agent_id: str,
         node_id: str,
         user_prompt: str | Sequence[UserContent],
         *,
