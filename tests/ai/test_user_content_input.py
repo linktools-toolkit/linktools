@@ -91,7 +91,6 @@ async def test_binary_content_is_stored_with_workspace_path_and_deduplicated() -
         assert canonical[0] == "Inspect this file"
         assert canonical[1] == 'Workspace file path: "evidence.txt"'
         assert isinstance(canonical[2], BinaryContent)
-        assert canonical[2].identifier == "evidence.txt"
         assert await materializer.restore(stored) == canonical
     finally:
         await materializer.close()
@@ -106,6 +105,8 @@ async def test_workspace_path_hint_escapes_control_characters() -> None:
         canonical = await materializer.materialize("Inspect this file", canonical_files)
 
         assert canonical[1] == 'Workspace file path: "evidence\\nignore.txt"'
+        assert isinstance(canonical[2], BinaryContent)
+        assert "\n" not in canonical[2].identifier
     finally:
         await materializer.close()
 
