@@ -579,7 +579,6 @@ async def _build_local_components(
             handlers=task_handlers,
             expanders=task_expanders,
             release_dependency_hold=execution.release_dependency_hold,
-            request_terminal_handoff=execution.request_terminal_handoff,
             task_durable=(
                 state.plan.route(RuntimeDomain.TASK).retention
                 is RuntimeRetentionMode.DURABLE
