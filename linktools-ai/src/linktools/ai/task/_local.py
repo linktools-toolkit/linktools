@@ -590,8 +590,6 @@ class LocalTaskGraphLauncher:
                             request.graph_id,
                             tenant_id=tenant_id,
                         )
-                    if view.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}:
-                        await self._cancel_terminal_effects(run, states)
                     return
                 _reap_inflight(inflight)
                 persisted = {
@@ -697,42 +695,6 @@ class LocalTaskGraphLauncher:
                 async with self._lock:
                     if self._graphs.get(key) is run:
                         self._graphs.pop(key, None)
-
-    async def _cancel_terminal_effects(
-        self,
-        run: _GraphRun,
-        states: "tuple[TaskNodeView, ...]",
-    ) -> None:
-        request = run.request
-        snapshot = await self._repository.snapshot_graph(
-            request.graph_id,
-            tenant_id=request.principal.tenant_id,
-        )
-        if snapshot is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        static = {node.node_id: node for node in snapshot.nodes}
-        tenant_id = request.principal.tenant_id
-        for state in states:
-            if state.status not in {TaskStatus.RUNNING, TaskStatus.WAITING}:
-                continue
-            if state.fence < 1:
-                continue
-            node = static.get(state.node_id)
-            if node is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._runner.cancel(
-                TaskNodeInvocation(
-                    node,
-                    request.graph_id,
-                    request.principal,
-                    request.correlation,
-                    await self._dependency_results(
-                        request.graph_id,
-                        node,
-                        tenant_id=tenant_id,
-                    ),
-                )
-            )
 
     async def _wait_scheduler(
         self,
