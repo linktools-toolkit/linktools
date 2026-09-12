@@ -65,6 +65,20 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
             revision=admitted.revision + 1,
             updated_at=datetime.now(timezone.utc),
         )
+        with pytest.raises(AIError) as identity_error:
+            await state.conversation.sessions.compare_and_swap(
+                admitted.session_id,
+                tenant_id=admitted.tenant_id,
+                expected_revision=admitted.revision,
+                next_record=replace(
+                    admitted,
+                    revision=admitted.revision + 1,
+                    history_id="different-history",
+                    updated_at=datetime.now(timezone.utc),
+                ),
+            )
+        assert identity_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
         updated = await state.conversation.sessions.compare_and_swap(
             "session",
             tenant_id="tenant",

@@ -4913,11 +4913,36 @@ def _projected_record(
     value: object,
 ) -> StoredRecord:
     _require_tenant(value, repository._tenant_id)
+    if current.kind == "session" and isinstance(value, SessionRecord):
+        _require_session_identity(
+            _decode_enveloped_domain(current.data, SessionRecord),
+            value,
+        )
     identity = _canonical_record_identity(current.kind, value)
     projected = repository._stored(
         current.kind, identity, value, state=_record_state(value)
     )
     return replace(projected, storage_version=current.storage_version + 1)
+
+
+def _require_session_identity(
+    current: SessionRecord,
+    candidate: SessionRecord,
+) -> None:
+    if (
+        candidate.session_id,
+        candidate.tenant_id,
+        candidate.owner_principal_id,
+        candidate.agent_id,
+        candidate.history_id,
+    ) != (
+        current.session_id,
+        current.tenant_id,
+        current.owner_principal_id,
+        current.agent_id,
+        current.history_id,
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _require_explicit_session_agent_id(value: SessionRecord) -> None:
