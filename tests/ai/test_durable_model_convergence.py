@@ -4,6 +4,7 @@
 
 from datetime import datetime, timezone
 
+from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -60,3 +61,7 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
     }
     assert record.digest == reference.digest
     assert record.size == reference.size
+
+
+def test_session_fork_receipt_is_not_a_durable_wire_type() -> None:
+    assert "session_fork_result" not in runtime_codec._V1_DOMAIN_TYPES
