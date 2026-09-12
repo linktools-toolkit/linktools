@@ -82,6 +82,19 @@ def test_waiting_is_the_only_nonterminal_bound_execution_state() -> None:
     assert state.lease_expires_at is None
 
 
+def test_graph_event_rejects_node_only_waiting_status() -> None:
+    with pytest.raises(ValueError, match="node-only status"):
+        TaskEvent(
+            1,
+            "graph",
+            1,
+            TaskEventType.GRAPH_CHANGED,
+            datetime.now(timezone.utc),
+            TaskStatus.WAITING,
+            TaskStatus.RUNNING,
+        )
+
+
 def test_recovery_required_requires_error_digest() -> None:
     with pytest.raises(ValueError, match="recovery-required task node state is invalid"):
         TaskNodeView(
