@@ -133,7 +133,12 @@ def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -
         api_key="second-key",
     ).snapshot().resolve("default")
 
-    assert dict(plain.semantic_payload) == dict(prefixed.semantic_payload)
+    assert dict(plain.semantic_payload) == {
+        "provider": "openai",
+        "model_identity": "openai:gpt-test",
+        "settings": {},
+    }
+    assert dict(prefixed.semantic_payload) == dict(plain.semantic_payload)
     assert plain.fingerprint == prefixed.fingerprint
     assert plain.model_identity == "openai:gpt-test"
 

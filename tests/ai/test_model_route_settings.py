@@ -41,7 +41,6 @@ def test_openai_custom_endpoint_is_operational_configuration() -> None:
     ).snapshot().resolve("default")
 
     assert dict(binding.semantic_payload) == {
-        "version": 1,
         "provider": "openai",
         "model_identity": "openai:gpt-test",
         "settings": {},

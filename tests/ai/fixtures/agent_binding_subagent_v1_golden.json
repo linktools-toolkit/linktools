@@ -18,8 +18,7 @@
   "base_model": {
     "model_identity": "openai:gpt-test",
     "provider": "openai",
-    "settings": {},
-    "version": 1
+    "settings": {}
   },
   "selected": [],
   "subagents": [

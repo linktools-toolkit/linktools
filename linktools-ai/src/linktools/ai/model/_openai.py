@@ -68,7 +68,6 @@ class _OpenAIModelBinding:
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
         return {
-            "version": 1,
             "provider": self.provider,
             "model_identity": self.model_identity,
             "settings": settings,
