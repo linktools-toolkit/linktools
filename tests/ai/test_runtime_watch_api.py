@@ -42,7 +42,7 @@ class _ExecutionService:
                 ExecutionStreamEvent(
                     execution_id,
                     1,
-                    ExecutionEventType.EXECUTION_SUCCEEDED,
+                    ExecutionEventType.EXECUTION_SUCCEEDED.value,
                     {},
                 ),
             )
@@ -132,6 +132,7 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
     values = [item async for item in execution.watch()]
     assert len(values) == 1
     assert values[0].execution_id == "execution"
+    assert values[0].event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value
 
 
 @pytest.mark.asyncio
@@ -151,6 +152,10 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
     assert len(execution) == 1
     assert execution[0].node_id == "node"
     assert execution[0].event.execution_id == "execution"
+    assert (
+        execution[0].event.event.event_type
+        == ExecutionEventType.EXECUTION_SUCCEEDED.value
+    )
 
 
 def test_runtime_does_not_expose_stream_tree() -> None:
@@ -169,7 +174,7 @@ def test_task_run_event_rejects_execution_without_node() -> None:
         ExecutionStreamEvent(
             "execution",
             1,
-            ExecutionEventType.EXECUTION_SUCCEEDED,
+            ExecutionEventType.EXECUTION_SUCCEEDED.value,
             {},
         ),
     )
