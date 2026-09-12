@@ -93,6 +93,23 @@ def test_snapshot_context_projects_consumed_binary_even_without_compaction() -> 
     assert binary_content_usage(raw) == (1, 5)
 
 
+def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
+    adapter = HarnessStepStoreAdapter(object(), execution_id="execution")  # type: ignore[arg-type]
+    consumed_request = _request("old.png", b"old")
+    consumed_response = ModelResponse(parts=[TextPart("done")])
+    source = (consumed_request, consumed_response)
+    summary = ModelRequest(parts=[UserPromptPart(content="summary")])
+    adapter.remember_context_projection(source, (summary,))
+    pending = _request("new.png", b"new")
+
+    context = adapter.snapshot_context_messages((*source, pending))
+
+    assert context is not None
+    assert context[0] == summary
+    assert context[-1] == pending
+    assert binary_content_usage(context) == (1, 3)
+
+
 @pytest.mark.asyncio
 async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> None:
     store = StagingStepStore()
