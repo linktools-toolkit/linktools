@@ -42,7 +42,6 @@ from .state._contracts import (
     EvaluationState,
     ExecutionRepository,
 )
-from .state import RuntimeDomain
 from .state._contracts import (
     EvaluationRecord,
     IdempotencyRecord,
@@ -175,10 +174,7 @@ class DefaultEvaluationService:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if existing.status is IdempotencyStatus.FAILED:
                 raise _stable_error(existing.error_code)
-            if (
-                existing.runtime_domain is not RuntimeDomain.EVALUATION
-                or existing.resource_kind is not ResourceKind.EVALUATION
-            ):
+            if existing.resource_kind is not ResourceKind.EVALUATION:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             evaluation_id = existing.resource_id
             now = existing.created_at
@@ -187,7 +183,6 @@ class DefaultEvaluationService:
             await self._state.idempotency.reserve(
                 IdempotencyRecord(
                     tenant_id=request.principal.tenant_id,
-                    runtime_domain=RuntimeDomain.EVALUATION,
                     scope="evaluation.run",
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
@@ -279,7 +274,6 @@ class DefaultEvaluationService:
                 expected_status=IdempotencyStatus.RESERVED,
                 next_record=IdempotencyRecord(
                     tenant_id=request.principal.tenant_id,
-                    runtime_domain=RuntimeDomain.EVALUATION,
                     scope="evaluation.run",
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,

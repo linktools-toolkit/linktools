@@ -47,7 +47,6 @@ def _session(session_id: str = "session") -> SessionRecord:
         agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
-        resource_generation=0,
         cwd=None,
         metadata={},
         created_at=now,

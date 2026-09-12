@@ -80,14 +80,12 @@ class _Checkpoints:
             execution_id="execution",
             tenant_id="tenant",
             step_run_id="step",
-            agent_run_sequence=1,
             state=RecoveryCheckpointState.WAITING,
             revision=0,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
             pending_tools=PendingToolContinuation(
                 "step",
-                canonical_sha256({"pending": pending.tool_call_id}),
                 approvals=(pending,) if approvals else (),
                 calls=() if approvals else (pending,),
             ),
@@ -137,7 +135,6 @@ class _ExternalCalls:
         idempotency_key_digest: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
-        result_digest: str,
         resolution_metadata: dict[str, object],
         supplied_at: datetime,
     ) -> ExternalCallRecord:
@@ -154,7 +151,6 @@ class _ExternalCalls:
             supplied_at=supplied_at,
             resolution_kind=resolution_kind,
             result_payload=result_payload,
-            result_digest=result_digest,
             resolution_metadata=resolution_metadata,
         )
         return self.record
@@ -246,7 +242,6 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         "tool-call",
         "external_tool",
         StoredPayload.inline_json({"value": 1}),
-        StoredPayload.inline_json({"value": 1}).digest,
     )
     call_id = external_call_id_for_call("tenant", "execution", "step", pending.tool_call_id)
     calls = _ExternalCalls(
@@ -305,7 +300,6 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
         "approval-call",
         "approval_tool",
         StoredPayload.inline_json({"value": 1}),
-        StoredPayload.inline_json({"value": 1}).digest,
     )
     approval_id = approval_id_for_call(
         "tenant", "execution", "step", pending.tool_call_id

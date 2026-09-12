@@ -63,7 +63,7 @@ from ...task import (
     TaskTerminalRecord,
 )
 from ...workspace import normalize_workspace_path
-from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
     from .._tool import ToolStateRepository
@@ -165,13 +165,10 @@ class RuntimePayloadRef:
 
 @dataclass(frozen=True, slots=True)
 class StoredUserInput:
-    version: int
     codec: str
     payload: StoredPayload
 
     def __post_init__(self) -> None:
-        if self.version != 1:
-            raise ValueError("stored user input version must be 1")
         if self.codec not in {"text", "user-content-v1"}:
             raise ValueError("stored user input codec is invalid")
         if not isinstance(self.payload, StoredPayload):
@@ -181,100 +178,11 @@ class StoredUserInput:
     def digest(self) -> str:
         return canonical_sha256(
             {
-                "version": self.version,
                 "codec": self.codec,
                 "payload_digest": self.payload.digest,
                 "payload_size": self.payload.size,
             }
         )
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeStorageResource:
-    domain: RuntimeDomain
-    backend: str
-    retention: RuntimeRetentionMode
-    object_store_id: str | None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.domain, RuntimeDomain):
-            raise TypeError("storage resource domain is invalid")
-        if not isinstance(self.backend, str) or not self.backend:
-            raise ValueError("storage resource backend is required")
-        if not isinstance(self.retention, RuntimeRetentionMode):
-            raise TypeError("storage resource retention is invalid")
-        if self.object_store_id is not None and (
-            not isinstance(self.object_store_id, str) or not self.object_store_id
-        ):
-            raise ValueError("storage resource object store id is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeStorageContract:
-    version: int
-    resources: tuple[RuntimeStorageResource, ...]
-    state_groups: tuple[tuple[str, ...], ...]
-    object_groups: tuple[tuple[str, ...], ...]
-
-    def __post_init__(self) -> None:
-        if self.version != 1:
-            raise ValueError("storage contract version must be 1")
-        resources = tuple(self.resources)
-        if any(not isinstance(item, RuntimeStorageResource) for item in resources):
-            raise TypeError("storage contract resources are invalid")
-        domains = tuple(item.domain.value for item in resources)
-        if domains != tuple(sorted(domains)) or len(domains) != len(set(domains)):
-            raise ValueError("storage contract resources must be sorted and unique")
-        state_groups = _normalize_storage_groups(self.state_groups)
-        object_groups = _normalize_storage_groups(self.object_groups)
-        resource_domains = frozenset(domains)
-        if any(
-            not set(group) <= resource_domains
-            for group in (*state_groups, *object_groups)
-        ):
-            raise ValueError("storage contract groups reference unknown domains")
-        object.__setattr__(self, "resources", resources)
-        object.__setattr__(self, "state_groups", state_groups)
-        object.__setattr__(self, "object_groups", object_groups)
-
-    @property
-    def digest(self) -> str:
-        return canonical_sha256(
-            {
-                "version": self.version,
-                "resources": [
-                    {
-                        "domain": item.domain.value,
-                        "backend": item.backend,
-                        "retention": item.retention.value,
-                        "object_store_id": item.object_store_id,
-                    }
-                    for item in self.resources
-                ],
-                "state_groups": [list(group) for group in self.state_groups],
-                "object_groups": [list(group) for group in self.object_groups],
-            }
-        )
-
-
-def _normalize_storage_groups(
-    groups: Sequence[Sequence[str]],
-) -> tuple[tuple[str, ...], ...]:
-    result = tuple(tuple(sorted(group)) for group in groups)
-    if any(
-        not group
-        or any(not isinstance(item, str) or not item for item in group)
-        for group in result
-    ):
-        raise ValueError("storage contract groups are invalid")
-    if any(len(group) != len(set(group)) for group in result):
-        raise ValueError("storage contract group members are duplicated")
-    if result != tuple(sorted(result)):
-        raise ValueError("storage contract groups must be sorted")
-    members = tuple(item for group in result for item in group)
-    if len(members) != len(set(members)):
-        raise ValueError("storage contract group domains are duplicated")
-    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,17 +216,9 @@ class TranscriptHeadRecord:
     message_count: int
     chunk_count: int
     quality: HistoryQuality
-    revision: int
 
     def __post_init__(self) -> None:
-        if any(
-            value < 0
-            for value in (
-                self.message_count,
-                self.chunk_count,
-                self.revision,
-            )
-        ):
+        if self.message_count < 0 or self.chunk_count < 0:
             raise ValueError("transcript head counts cannot be negative")
         if not self.owner_id:
             raise ValueError("transcript head owner cannot be empty")
@@ -387,7 +287,6 @@ ContextProjectionItem = TranscriptSpanRef | InlineContextBlock
 @dataclass(frozen=True, slots=True)
 class ContextProjection:
     items: tuple[ContextProjectionItem, ...]
-    digest: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.items, tuple) or any(
@@ -395,8 +294,47 @@ class ContextProjection:
             for item in self.items
         ):
             raise TypeError("context projection items are invalid")
-        if not isinstance(self.digest, str) or not self.digest:
-            raise ValueError("context projection digest is invalid")
+
+    @property
+    def digest(self) -> str:
+        identities: list[JsonValue] = []
+        for item in self.items:
+            if isinstance(item, TranscriptSpanRef):
+                identities.append(
+                    {
+                        "kind": "transcript",
+                        "source_domain": item.source_domain.value,
+                        "owner_id": item.owner_id,
+                        "start": item.start,
+                        "end": item.end,
+                    }
+                )
+                continue
+            payload = item.content.payload
+            payload_identity: dict[str, JsonValue] = {
+                "kind": payload.kind,
+                "encoding": payload.encoding,
+                "digest": payload.digest,
+                "size": payload.size,
+            }
+            if payload.kind == "inline":
+                payload_identity["value"] = payload.value
+            elif payload.ref is not None:
+                payload_identity["key"] = payload.ref.key
+            identities.append(
+                {
+                    "kind": "inline",
+                    "source_domain": (
+                        None
+                        if item.content.source_domain is None
+                        else item.content.source_domain.value
+                    ),
+                    "payload": payload_identity,
+                }
+            )
+        return canonical_sha256(
+            {"contract": "context-projection-v1", "items": identities}
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -442,9 +380,6 @@ class ConversationHistoryRecord:
             raise ValueError("forked history with content requires a prefix head")
 
 
-SESSION_AGENT_ID_METADATA_KEY = "linktools.ai.agent_id"
-
-
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     session_id: str
@@ -452,19 +387,22 @@ class SessionRecord:
     owner_principal_id: str
     status: SessionStatus
     revision: int
-    resource_generation: int
     cwd: str | None
     metadata: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
     closed_at: datetime | None
     active_execution_id: str | None
+    agent_id: str
     continuation: ConversationCursor | None = None
     history_quality: str = "complete"
     history_id: str | None = None
-    agent_id: str | None = None
 
     def __post_init__(self) -> None:
+        try:
+            validate_agent_id(self.agent_id)
+        except (AIError, TypeError) as error:
+            raise ValueError("session agent id is invalid") from error
         if (
             self.active_execution_id is not None
             and not self.active_execution_id.strip()
@@ -484,67 +422,6 @@ class SessionRecord:
         if self.history_quality not in {"complete", "conservative"}:
             raise ValueError("session history quality summary is invalid")
 
-    def resolved_agent_id(self) -> str:
-        historical = self.metadata.get(SESSION_AGENT_ID_METADATA_KEY)
-        historical_id: str | None = None
-        if isinstance(historical, str):
-            try:
-                historical_id = validate_agent_id(historical)
-            except AIError:
-                historical_id = None
-        if self.agent_id is not None:
-            try:
-                resolved = validate_agent_id(self.agent_id)
-            except (AIError, TypeError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if historical_id is not None and historical_id != resolved:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return resolved
-        if historical_id is not None:
-            return historical_id
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-
-@dataclass(frozen=True, slots=True)
-class SessionForkResultRecord:
-    operation_id: str
-    source_session_id: str
-    source_history_id: str
-    source_session_revision: int
-    source_transcript_revision: int
-    source_local_message_count: int
-    source_prefix_index_head_id: str | None
-    inherited_message_count: int
-    target_session_id: str
-    target_history_id: str
-    target_prefix_index_head_id: str | None
-    request_digest: str
-    result_digest: str
-
-    def __post_init__(self) -> None:
-        if any(
-            value < 0
-            for value in (
-                self.source_session_revision,
-                self.source_transcript_revision,
-                self.source_local_message_count,
-                self.inherited_message_count,
-            )
-        ):
-            raise ValueError("session fork result counts cannot be negative")
-        if not all(
-            value
-            for value in (
-                self.operation_id,
-                self.source_session_id,
-                self.source_history_id,
-                self.target_session_id,
-                self.target_history_id,
-                self.request_digest,
-                self.result_digest,
-            )
-        ):
-            raise ValueError("session fork result identity cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,7 +429,6 @@ class ExecutionRecord:
     execution_id: str
     tenant_id: str
     session_id: str | None
-    binding_digest: str
     parent_execution_id: str | None
     root_execution_id: str
     source_execution_id: str | None
@@ -573,7 +449,6 @@ class ExecutionRecord:
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
-    storage_contract: RuntimeStorageContract
     parent_invocation_id: str | None = None
     memory_scope: str | None = None
     conversation_step_run_id: str | None = None
@@ -604,19 +479,14 @@ class ExecutionRecord:
                 raise ValueError("subagent execution lineage is invalid")
         elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
             raise ValueError("non-subagent execution cannot carry parent lineage")
-        if (
-            not isinstance(self.binding, AgentBindingSnapshot)
-            or self.binding.binding_digest != self.binding_digest
-        ):
-            raise ValueError("execution binding snapshot does not match binding digest")
+        if not isinstance(self.binding, AgentBindingSnapshot):
+            raise TypeError("execution binding snapshot is invalid")
         if not isinstance(self.principal_id, str) or not self.principal_id:
             raise TypeError("execution principal id is invalid")
         if not isinstance(self.principal_kind, str) or not self.principal_kind:
             raise TypeError("execution principal kind is invalid")
         if not isinstance(self.stored_user_input, StoredUserInput):
             raise TypeError("execution stored user input is invalid")
-        if not isinstance(self.storage_contract, RuntimeStorageContract):
-            raise TypeError("execution storage contract is invalid")
         if self.error_diagnostics is not None and not isinstance(
             self.error_diagnostics, ErrorDiagnostics
         ):
@@ -626,6 +496,10 @@ class ExecutionRecord:
             and self.error_diagnostics is not None
         ):
             raise ValueError("only failed execution can carry error diagnostics")
+
+    @property
+    def binding_digest(self) -> str:
+        return self.binding.binding_digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,19 +528,37 @@ class ExecutionRunSealHead:
 class ExecutionHistorySealRecord:
     execution_id: str
     tenant_id: str
-    seal_version: int
     run_heads: tuple[ExecutionRunSealHead, ...]
     execution_event_high_water: int
-    seal_digest: str
 
     def __post_init__(self) -> None:
-        if self.seal_version < 1 or self.execution_event_high_water < 0:
+        if self.execution_event_high_water < 0:
             raise ValueError("execution history seal values are invalid")
-        if not self.execution_id or not self.tenant_id or not self.seal_digest:
+        if not self.execution_id or not self.tenant_id:
             raise ValueError("execution history seal identity cannot be empty")
         run_ids = tuple(head.run_id for head in self.run_heads)
         if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
             raise ValueError("execution history seal heads must be sorted and unique")
+
+    @property
+    def seal_digest(self) -> str:
+        return canonical_sha256(
+            {
+                "execution_id": self.execution_id,
+                "tenant_id": self.tenant_id,
+                "run_heads": [
+                    {
+                        "run_id": head.run_id,
+                        "event_count": head.event_count,
+                        "snapshot_count": head.snapshot_count,
+                        "transcript_message_count": head.transcript_message_count,
+                        "projection_digest": head.projection_digest,
+                    }
+                    for head in self.run_heads
+                ],
+                "execution_event_high_water": self.execution_event_high_water,
+            }
+        )
 
 
 class ExecutionHistoryState(str, Enum):
@@ -761,7 +653,6 @@ class AgentAttemptClaim:
 @dataclass(frozen=True, slots=True)
 class IdempotencyRecord:
     tenant_id: str
-    runtime_domain: RuntimeDomain
     scope: str
     idempotency_key_digest: str
     request_digest: str
@@ -774,14 +665,6 @@ class IdempotencyRecord:
     updated_at: datetime
 
     def __post_init__(self) -> None:
-        expected = {
-            RuntimeDomain.EXECUTION: ResourceKind.EXECUTION,
-            RuntimeDomain.EVALUATION: ResourceKind.EVALUATION,
-        }.get(self.runtime_domain)
-        if expected is None or self.resource_kind is not expected:
-            raise ValueError(
-                "idempotency resource identity does not match runtime domain"
-            )
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("idempotency timestamps require timezone awareness")
 
@@ -873,10 +756,16 @@ class ArtifactRecord:
     tenant_id: str
     producer: str
     media_type: str
-    size: int
-    digest: str
     object_ref: ObjectRef
     created_at: datetime
+
+    @property
+    def size(self) -> int:
+        return self.object_ref.size
+
+    @property
+    def digest(self) -> str:
+        return self.object_ref.digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -1002,14 +891,13 @@ class ExternalCallRecord:
     supplied_at: datetime | None
     resolution_kind: str | None = None
     result_payload: StoredPayload | None = None
-    result_digest: str | None = None
     resolution_metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.resolution_kind not in {None, "succeeded", "retry", "failed"}:
             raise ValueError("external resolution kind is invalid")
         if self.status is ExternalCallStatus.SUPPLIED:
-            if self.resolution_kind is None or self.result_digest is None:
+            if self.resolution_kind is None:
                 raise ValueError("supplied external call is incomplete")
         elif self.resolution_kind is not None or self.result_payload is not None:
             raise ValueError("pending external call cannot have a resolution")
@@ -1028,29 +916,29 @@ class PendingDeferredCall:
     tool_call_id: str
     tool_name: str
     arguments_payload: StoredPayload
-    arguments_digest: str
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("deferred call identity is required")
-        if self.arguments_payload.digest != self.arguments_digest:
-            raise ValueError("deferred call arguments digest does not match payload")
         try:
             object.__setattr__(self, "metadata", dict(self.metadata))
         except (TypeError, ValueError) as error:
             raise ValueError("deferred call metadata is invalid") from error
 
+    @property
+    def arguments_digest(self) -> str:
+        return self.arguments_payload.digest
+
 
 @dataclass(frozen=True, slots=True)
 class PendingToolContinuation:
     source_step_run_id: str
-    requests_digest: str
     approvals: tuple[PendingDeferredCall, ...] = ()
     calls: tuple[PendingDeferredCall, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.source_step_run_id or not _is_sha256(self.requests_digest):
+        if not self.source_step_run_id:
             raise ValueError("deferred continuation identity is invalid")
         values = (*self.approvals, *self.calls)
         ids = tuple(item.tool_call_id for item in values)
@@ -1105,7 +993,6 @@ class RecoveryCheckpoint:
     execution_id: str
     tenant_id: str
     step_run_id: str | None
-    agent_run_sequence: int
     state: RecoveryCheckpointState
     revision: int
     created_at: datetime
@@ -1118,11 +1005,8 @@ class RecoveryCheckpoint:
     pending_operation_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.agent_run_sequence < 0:
-            raise ValueError("recovery checkpoint sequence must be non-negative")
         if self.state is RecoveryCheckpointState.ADMITTED and (
-            self.agent_run_sequence != 0
-            or self.step_run_id is not None
+            self.step_run_id is not None
             or self.pending_operation_id is not None
             or self.pending_tools is not None
         ):
@@ -1130,7 +1014,7 @@ class RecoveryCheckpoint:
         if self.state in {
             RecoveryCheckpointState.ACTIVE,
             RecoveryCheckpointState.WAITING,
-        } and (self.agent_run_sequence < 1 or self.step_run_id is None):
+        } and self.step_run_id is None:
             raise ValueError("active recovery checkpoint requires an attempt")
         if self.state is RecoveryCheckpointState.WAITING:
             if (
@@ -1770,7 +1654,6 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
         idempotency_key_digest: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
-        result_digest: str,
         resolution_metadata: Mapping[str, JsonValue],
         supplied_at: datetime,
     ) -> ExternalCallRecord: ...
@@ -1975,7 +1858,6 @@ class MemoryRepository(RuntimeRepository, Protocol):
         record: MemoryRecord,
         *,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[MemoryRecord | None, bool]: ...
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
@@ -1994,7 +1876,6 @@ class MemoryRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[bool, bool]: ...
 

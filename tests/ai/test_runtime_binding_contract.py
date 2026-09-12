@@ -2,19 +2,23 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for durable execution binding invariants."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from linktools.ai.agent import (
+    AgentBinding,
+    AgentBindingSnapshot,
+    AgentCatalog,
+    AgentCompiler,
+)
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime.state._contracts import (
-    ExecutionRecord,
-    RuntimeStorageContract,
-    StoredUserInput,
-)
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from pydantic import (
@@ -67,33 +71,30 @@ class _SchemaTwinB(BaseModel):
         return value
 
 
-def _snapshot(*, binding_digest: str = "a" * 64) -> AgentBindingSnapshot:
+def _snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest=binding_digest,
     )
 
 
 def _execution(
     *,
-    binding_digest: str = "a" * 64,
     binding: AgentBindingSnapshot | None = None,
     planning: bool = False,
     thinking: bool = False,
 ) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
+    snapshot = _snapshot() if binding is None else binding
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest=binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -110,15 +111,13 @@ def _execution(
         mode="run",
         planning=planning,
         thinking=thinking,
-        binding=_snapshot(binding_digest=binding_digest) if binding is None else binding,
+        binding=snapshot,
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 
@@ -133,18 +132,21 @@ def _compiler() -> AgentCompiler:
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
     plain = ModelRegistry.openai(
         model="gpt-test",
-        provider_instance="corp-openai-primary",
         base_url="https://first.example/v1",
         api_key="first-key",
     ).snapshot().resolve("default")
     prefixed = ModelRegistry.openai(
         model="openai:gpt-test",
-        provider_instance="corp-openai-primary",
         base_url="https://second.example/v1",
         api_key="second-key",
     ).snapshot().resolve("default")
 
-    assert dict(plain.semantic_payload) == dict(prefixed.semantic_payload)
+    assert dict(plain.semantic_payload) == {
+        "provider": "openai",
+        "model_identity": "openai:gpt-test",
+        "settings": {},
+    }
+    assert dict(prefixed.semantic_payload) == dict(plain.semantic_payload)
     assert plain.fingerprint == prefixed.fingerprint
     assert plain.model_identity == "openai:gpt-test"
 
@@ -152,7 +154,6 @@ def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -
 def test_model_registry_replaces_connection_binding_with_same_semantic_identity() -> None:
     registry = ModelRegistry.openai(
         model="gpt-test",
-        provider_instance="corp-openai-primary",
         base_url="https://first.example/v1",
         api_key="first-key",
     )
@@ -162,7 +163,6 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     registry.register_openai(
         "default",
         model="gpt-test",
-        provider_instance="corp-openai-primary",
         base_url="https://second.example/v1",
         api_key="second-key",
     )
@@ -173,29 +173,18 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     assert first_snapshot.resolve("default") is first
 
 
-def test_current_binding_snapshot_persists_only_v1_semantic_inputs() -> None:
-    output = bind_output()
-    snapshot = AgentBindingSnapshot(
-        version=1,
-        agent_spec=AgentSpec("agent"),
-        base_model={"route_id": "default", "model_identity": "test:model"},
-        selected=(),
-        subagents=(),
-        output_mode=output.mode,
-        output_schema=output.schema_definition,
-        binding_digest="a" * 64,
-    )
+def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
+    snapshot = _snapshot()
 
     assert set(snapshot.to_payload()) == {
-        "version",
         "agent_spec",
         "base_model",
         "selected",
         "subagents",
         "output_mode",
         "output_schema",
-        "binding_digest",
     }
+    assert snapshot.binding_digest == snapshot.binding_digest
 
 
 def test_custom_output_materializes_from_durable_json_schema() -> None:
@@ -251,8 +240,54 @@ def test_restored_binding_uses_only_snapshot_semantics() -> None:
     assert restored.output_type is not _SchemaTwinA
 
 
-def test_execution_requires_exact_binding_snapshot() -> None:
+def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
+    compiler = _compiler()
+    binding = compiler.bind(compiler.compile(AgentSpec("agent")))
+    mismatched_definition = replace(
+        binding.definition,
+        selected_tools=(
+            SimpleNamespace(
+                kind="tool",
+                id="unexpected-tool",
+                semantic_contract={"version": 1},
+            ),
+        ),
+    )
+
+    with pytest.raises(AIError) as raised:
+        AgentBinding(
+            binding.digest,
+            mismatched_definition,
+            binding.output_binding,
+            binding.snapshot,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_binding_preserves_selected_pin_version_error() -> None:
+    compiler = _compiler()
+    binding = compiler.bind(compiler.compile(AgentSpec("agent")))
+    invalid_definition = replace(
+        binding.definition,
+        selected_tools=(
+            SimpleNamespace(
+                kind="tool",
+                id="future-tool",
+                semantic_contract={"version": 2},
+            ),
+        ),
+    )
+
+    with pytest.raises(AIError) as raised:
+        AgentBinding(
+            binding.digest,
+            invalid_definition,
+            binding.output_binding,
+            binding.snapshot,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_execution_binding_digest_is_derived_from_snapshot() -> None:
     value = _execution(planning=True, thinking=True)
-    assert value.binding.binding_digest == value.binding_digest
-    with pytest.raises(ValueError, match="execution binding snapshot"):
-        _execution(binding_digest="c" * 64, binding=_snapshot(binding_digest="d" * 64))
+    assert value.binding_digest == value.binding.binding_digest

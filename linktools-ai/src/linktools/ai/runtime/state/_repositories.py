@@ -78,7 +78,6 @@ from ._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     ResultRecord,
-    SessionForkResultRecord,
     SessionRecord,
     ToolOperationAdmission,
     TranscriptHeadRecord,
@@ -711,7 +710,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                         0,
                         0,
                         HistoryQuality.COMPLETE,
-                        0,
                     ),
                 ),
             )
@@ -1069,7 +1067,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         target = _ensure_session_history(replace(target, history_id=None))
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
-            operation_record, replayed = await _append_operation(
+            _, replayed = await _append_operation(
                 transaction,
                 self,
                 operation,
@@ -1079,8 +1077,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     transaction,
                     source_session_id=source_session_id,
                     target=target,
-                    operation=operation,
-                    operation_record=operation_record,
                 )
             source_stored = await transaction.get_record(
                 self._key("session", source_session_id)
@@ -1185,23 +1181,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if target_stored is not None or child_stored is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            fork_result = SessionForkResultRecord(
-                operation.operation_id,
-                source.session_id,
-                source.history_id,
-                source.revision,
-                source_head.revision,
-                local_messages,
-                source_history.prefix_index_head_id,
-                inherited,
-                expected_target.session_id,
-                child.history_id,
-                child.prefix_index_head_id,
-                operation.request_digest,
-                operation.result_digest or "",
-            )
-            if not fork_result.result_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await transaction.insert_records(
                 (
                     self._stored(
@@ -1225,11 +1204,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         child.history_id,
                         _empty_conversation_transcript_head(child.history_id),
                     ),
-                    self._stored(
-                        "session_fork_result",
-                        operation.operation_id,
-                        fork_result,
-                    ),
                 )
             )
             await self._bump_list_generation(
@@ -1252,48 +1226,43 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         *,
         source_session_id: str,
         target: SessionRecord,
-        operation: OperationLedgerInput,
-        operation_record: OperationLedgerRecord,
     ) -> tuple[SessionRecord, bool]:
-        result_stored = await transaction.get_record(
-            self._key("session_fork_result", operation.operation_id)
-        )
-        if result_stored is None:
+        target_history_id = target.history_id
+        if target_history_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result = _decode_enveloped_domain(
-            result_stored.data,
-            SessionForkResultRecord,
+        source_key = self._key("session", source_session_id)
+        target_key = self._key("session", target.session_id)
+        child_key = self._key("conversation_history", target_history_id)
+        head_key = self._key("transcript_head", target_history_id)
+        related = await transaction.get_records(
+            (source_key, target_key, child_key, head_key)
         )
-        if (
-            result.operation_id != operation.operation_id
-            or result.request_digest != operation.request_digest
-            or result.result_digest != operation_record.result_digest
-            or result.source_session_id != source_session_id
-            or operation.result_digest != result.result_digest
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        target_key = self._key("session", result.target_session_id)
-        child_key = self._key("conversation_history", result.target_history_id)
-        head_key = self._key("transcript_head", result.target_history_id)
-        related = await transaction.get_records((target_key, child_key, head_key))
+        source_stored = related.get(source_key)
         target_stored = related.get(target_key)
         child_stored = related.get(child_key)
         head_stored = related.get(head_key)
-        if target_stored is None or child_stored is None or head_stored is None:
+        if (
+            source_stored is None
+            or target_stored is None
+            or child_stored is None
+            or head_stored is None
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = await self._decode(source_stored, SessionRecord)
         existing_target = await self._decode(target_stored, SessionRecord)
         child = await self._decode_history(child_stored)
         if (
-            existing_target.session_id != result.target_session_id
-            or existing_target.history_id != result.target_history_id
+            source.session_id != source_session_id
+            or source.tenant_id != self._tenant_id
+            or source.history_id is None
+            or existing_target.session_id != target.session_id
+            or existing_target.history_id != target_history_id
             or existing_target.tenant_id != self._tenant_id
             or existing_target.owner_principal_id != target.owner_principal_id
             or existing_target.agent_id != target.agent_id
-            or child.session_id != result.target_session_id
+            or child.session_id != target.session_id
             or child.tenant_id != self._tenant_id
-            or child.parent_history_id != result.source_history_id
-            or child.prefix_index_head_id != result.target_prefix_index_head_id
-            or child.inherited_message_count != result.inherited_message_count
+            or child.parent_history_id != source.history_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = _decode_enveloped_domain(
@@ -1302,15 +1271,16 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
         if (
             head.owner_domain is not TranscriptOwnerDomain.CONVERSATION
-            or head.owner_id != result.target_history_id
+            or head.owner_id != target_history_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
-            "session fork replayed from first result: source=%s target=%s",
+            "session fork replayed: source=%s target=%s",
             source_session_id,
             existing_target.session_id,
         )
         return existing_target, True
+
 
     async def _visible_history_count_in_transaction(
         self,
@@ -1649,7 +1619,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 status=next_status,
                 closed_at=closed_at,
                 revision=current.revision + 1,
-                resource_generation=current.resource_generation + 1,
                 updated_at=now,
             )
             await _replace_checked(
@@ -1747,7 +1716,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if release_execution
             else current.active_execution_id,
             revision=current.revision + 1,
-            resource_generation=current.resource_generation + 1,
             updated_at=now,
         )
         await _replace_checked(
@@ -1802,11 +1770,16 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             value_type=IdempotencyRecord,
         )
 
+    def _require_resource_kind(self, record: IdempotencyRecord) -> None:
+        if record.resource_kind is not self._resource_kind:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     def _identity_key(self, scope: str, key: str) -> list[str]:
         return [scope, key]
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         _require_tenant(record, self._tenant_id)
+        self._require_resource_kind(record)
         identity = self._identity_key(record.scope, record.idempotency_key_digest)
         try:
             await self._insert(
@@ -1858,6 +1831,7 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         _require_tenant(next_record, self._tenant_id)
+        self._require_resource_kind(next_record)
         identity = self._identity_key(scope, idempotency_key_digest)
 
         async def mutate(transaction: StateTransaction) -> IdempotencyRecord:
@@ -2031,6 +2005,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionStartReservationResult:
         _require_tenant(reservation.execution, self._tenant_id)
         _require_tenant(reservation.idempotency, self._tenant_id)
+        self._idempotency._require_resource_kind(reservation.idempotency)
 
         async def mutate(
             transaction: StateTransaction,
@@ -2154,7 +2129,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if idempotency_record is None:
             idempotency = IdempotencyRecord(
                 tenant_id=claim.tenant_id,
-                runtime_domain=RuntimeDomain.EXECUTION,
                 scope=claim.scope,
                 idempotency_key_digest=claim.idempotency_key_digest,
                 request_digest=claim.request_digest,
@@ -2183,18 +2157,17 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 not _same_idempotency(
                     idempotency,
                     IdempotencyRecord(
-                        claim.tenant_id,
-                        RuntimeDomain.EXECUTION,
-                        claim.scope,
-                        claim.idempotency_key_digest,
-                        claim.request_digest,
-                        ResourceKind.EXECUTION,
-                        claim.execution_id,
-                        idempotency.status,
-                        idempotency.result_digest,
-                        idempotency.error_code,
-                        idempotency.created_at,
-                        idempotency.updated_at,
+                        tenant_id=claim.tenant_id,
+                        scope=claim.scope,
+                        idempotency_key_digest=claim.idempotency_key_digest,
+                        request_digest=claim.request_digest,
+                        resource_kind=ResourceKind.EXECUTION,
+                        resource_id=claim.execution_id,
+                        status=idempotency.status,
+                        result_digest=idempotency.result_digest,
+                        error_code=idempotency.error_code,
+                        created_at=idempotency.created_at,
+                        updated_at=idempotency.updated_at,
                     ),
                 )
                 or idempotency.status is not IdempotencyStatus.RESERVED
@@ -3320,7 +3293,6 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
         idempotency_key_digest: str,
         resolution_kind: str,
         result_payload: StoredPayload | None,
-        result_digest: str,
         resolution_metadata: Mapping[str, JsonValue],
         supplied_at: datetime,
     ) -> ExternalCallRecord:
@@ -3339,7 +3311,6 @@ class ExternalCallRepositoryImpl(_ResourceRepository[ExternalCallRecord]):
                 idempotency_key_digest=idempotency_key_digest,
                 resolution_kind=resolution_kind,
                 result_payload=result_payload,
-                result_digest=result_digest,
                 resolution_metadata=resolution_metadata,
                 supplied_at=supplied_at,
             )
@@ -3629,7 +3600,6 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         record: MemoryRecord,
         *,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[MemoryRecord | None, bool]:
         _require_tenant(record, self._tenant_id)
@@ -3658,48 +3628,21 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             if current is None:
                 if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if expected_storage_version not in (None, 0):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                physical_version = operation_record.sequence
-                next_value = replace(
-                    record,
-                    revision=physical_version,
-                    metadata={
-                        **record.metadata,
-                        "storage_version": physical_version,
-                    },
-                )
+                next_value = replace(record, revision=1)
                 await transaction.insert_record(
-                    replace(
-                        self._stored("memory", record.memory_id, next_value),
-                        storage_version=physical_version,
-                    )
+                    self._stored("memory", record.memory_id, next_value)
                 )
             else:
                 value = await self._decode(current, MemoryRecord)
                 if (
                     isinstance(current.storage_version, bool)
-                    or current.storage_version < 1
-                    or value.revision != current.storage_version
+                    or current.storage_version < 0
+                    or value.revision < 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if expected_revision != value.revision:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if (
-                    expected_storage_version is None
-                    or expected_storage_version != current.storage_version
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if operation_record.sequence <= current.storage_version:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                next_value = replace(
-                    record,
-                    revision=value.revision + 1,
-                    metadata={
-                        **record.metadata,
-                        "storage_version": current.storage_version + 1,
-                    },
-                )
+                next_value = replace(record, revision=value.revision + 1)
                 await _replace_checked(
                     transaction,
                     _projected_record(self, current, next_value),
@@ -3748,7 +3691,6 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
         *,
         tenant_id: str,
         expected_revision: int | None,
-        expected_storage_version: int | None,
         operation: OperationLedgerInput,
     ) -> tuple[bool, bool]:
         if tenant_id != self._tenant_id:
@@ -3774,10 +3716,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             key = self._key("memory", memory_id)
             current = await transaction.get_record(key)
             if current is None:
-                if expected_revision not in (None, 0) or expected_storage_version not in (
-                    None,
-                    0,
-                ):
+                if expected_revision not in (None, 0):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await _insert_operation(
                     transaction,
@@ -3787,13 +3726,12 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 )
                 return False, False
             # A zero revision represents a completed missing-read observation.
-            if expected_revision == 0 and expected_storage_version in (None, 0):
+            if expected_revision == 0:
                 value = await self._decode(current, MemoryRecord)
                 if (
                     isinstance(current.storage_version, bool)
-                    or current.storage_version < 1
-                    or value.revision != current.storage_version
-                    or operation_record.sequence <= current.storage_version
+                    or current.storage_version < 0
+                    or value.revision < 1
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await _insert_operation(
@@ -3806,19 +3744,12 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
             value = await self._decode(current, MemoryRecord)
             if (
                 isinstance(current.storage_version, bool)
-                or current.storage_version < 1
-                or value.revision != current.storage_version
+                or current.storage_version < 0
+                or value.revision < 1
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if expected_revision is None or value.revision != expected_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if (
-                expected_storage_version is None
-                or current.storage_version != expected_storage_version
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if operation_record.sequence <= current.storage_version:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if not await transaction.delete_record(
                 key,
                 expected_storage_version=current.storage_version,
@@ -4811,17 +4742,23 @@ def _canonical_record_identity(kind: str, value: object) -> object:
     raise TypeError(f"unsupported record kind: {kind}")
 
 
+def _session_history_id(session_id: str, tenant_id: str) -> str:
+    return canonical_sha256(
+        {
+            "kind": "conversation_history",
+            "session_id": session_id,
+            "tenant_id": tenant_id,
+        }
+    )
+
+
 def _ensure_session_history(value: SessionRecord) -> SessionRecord:
     if value.history_id is not None:
         return value
-    history_id = canonical_sha256(
-        {
-            "kind": "conversation_history",
-            "session_id": value.session_id,
-            "tenant_id": value.tenant_id,
-        }
+    return replace(
+        value,
+        history_id=_session_history_id(value.session_id, value.tenant_id),
     )
-    return replace(value, history_id=history_id)
 
 
 def _new_session_history(value: SessionRecord) -> ConversationHistoryRecord:
@@ -4846,7 +4783,6 @@ def _empty_conversation_transcript_head(
         0,
         0,
         HistoryQuality.COMPLETE,
-        0,
     )
 
 
@@ -4975,17 +4911,38 @@ def _projected_record(
     value: object,
 ) -> StoredRecord:
     _require_tenant(value, repository._tenant_id)
-    if isinstance(value, SessionRecord):
-        if value.agent_id is None:
-            current_value = _decode_enveloped_domain(current.data, SessionRecord)
-            value = replace(value, agent_id=current_value.resolved_agent_id())
-        else:
-            value.resolved_agent_id()
+    if current.kind == "session" and isinstance(value, SessionRecord):
+        _require_session_identity(
+            _decode_enveloped_domain(current.data, SessionRecord),
+            value,
+        )
     identity = _canonical_record_identity(current.kind, value)
     projected = repository._stored(
         current.kind, identity, value, state=_record_state(value)
     )
     return replace(projected, storage_version=current.storage_version + 1)
+
+
+def _require_session_identity(
+    current: SessionRecord,
+    candidate: SessionRecord,
+) -> None:
+    if (
+        candidate.session_id,
+        candidate.tenant_id,
+        candidate.owner_principal_id,
+        candidate.agent_id,
+        candidate.history_id,
+        candidate.created_at,
+    ) != (
+        current.session_id,
+        current.tenant_id,
+        current.owner_principal_id,
+        current.agent_id,
+        current.history_id,
+        current.created_at,
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _require_explicit_session_agent_id(value: SessionRecord) -> None:
@@ -5197,7 +5154,6 @@ def _same_idempotency_identity(
     """Compare only the immutable request identity, never a candidate resource id."""
     return (
         left.tenant_id == right.tenant_id
-        and left.runtime_domain is right.runtime_domain
         and left.scope == right.scope
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.request_digest == right.request_digest

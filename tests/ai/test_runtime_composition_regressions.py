@@ -26,14 +26,9 @@ from linktools.ai.runtime._planner import _cancel_execution
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
-from linktools.ai.runtime.state._contracts import (
-    ExecutionRecord,
-    RuntimeStorageContract,
-    StoredUserInput,
-)
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import StorageOverlay
-from linktools.ai.storage import StoredPayload
+from linktools.ai.storage import StorageOverlay, StoredPayload
 from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 
@@ -87,14 +82,12 @@ class _UncertainExecution:
 def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
 
 
@@ -105,7 +98,6 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest=selected.binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -126,11 +118,9 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 

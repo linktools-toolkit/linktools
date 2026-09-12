@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Systemic compatibility contract for Runtime persisted values."""
+"""Current Runtime persistence shape contracts."""
 
 import copy
 from dataclasses import replace
@@ -30,9 +30,7 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskNode
-from linktools.ai.runtime.state._step_contracts import (
-    RunRecord,
-)
+from linktools.ai.runtime.state._step_contracts import RunRecord
 
 
 def _session() -> SessionRecord:
@@ -44,7 +42,6 @@ def _session() -> SessionRecord:
         agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
-        resource_generation=0,
         cwd=None,
         metadata={},
         created_at=now,
@@ -72,41 +69,33 @@ def _envelope(
 def _binding_snapshot_payload() -> dict[str, object]:
     output = bind_output()
     snapshot = AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
     return snapshot.to_payload()
 
 
 def test_current_generic_dataclass_round_trip() -> None:
-    cursor = _session()
-    encoded = encode_domain(cursor)
+    session = _session()
+    encoded = encode_domain(session)
     assert encoded["$dataclass"] == "session_record"
     assert "schema" not in encoded
-    assert decode_domain(encoded, SessionRecord) == cursor
+    assert decode_domain(encoded, SessionRecord) == session
 
 
 def test_persisted_generic_writer_uses_current_schema() -> None:
     session = _session()
     payload = _encode_persisted_domain(session)
     assert payload["schema"] == 1
-    assert (
-        _decode_enveloped_domain(
-            _envelope(payload),
-            SessionRecord,
-        )
-        == session
-    )
+    assert _decode_enveloped_domain(_envelope(payload), SessionRecord) == session
 
 
 def test_context_projection_persisted_writer_round_trips() -> None:
-    projection = ContextProjection((), "d" * 64)
+    projection = ContextProjection(())
     payload = _encode_persisted_domain(projection)
 
     assert (
@@ -122,7 +111,6 @@ def test_context_projection_rejects_runtime_type_mismatch_at_construction() -> N
     with pytest.raises(TypeError):
         ContextProjection(
             cast("tuple[ContextProjectionItem, ...]", ("invalid",)),
-            "d" * 64,
         )
 
 
@@ -160,17 +148,11 @@ def test_missing_required_session_field_is_integrity_error() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_unknown_historical_field_is_ignored() -> None:
+def test_unknown_session_field_is_ignored() -> None:
     session = _session()
     payload = copy.deepcopy(_encode_persisted_domain(session))
-    payload["fields"]["removed_field"] = {"not": "decoded"}
-    assert (
-        _decode_enveloped_domain(
-            _envelope(payload),
-            SessionRecord,
-        )
-        == session
-    )
+    payload["fields"]["future_metadata"] = {"future": True}
+    assert _decode_enveloped_domain(_envelope(payload), SessionRecord) == session
 
 
 def test_malformed_known_field_is_integrity_error() -> None:
@@ -181,13 +163,12 @@ def test_malformed_known_field_is_integrity_error() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_generic_payload_without_or_with_current_schema_is_readable() -> None:
-    session = _session()
-    with_schema = _envelope(_encode_persisted_domain(session))
-    without_schema = copy.deepcopy(with_schema)
-    without_schema["value"]["payload"].pop("schema")
-    assert _decode_enveloped_domain(with_schema, SessionRecord) == session
-    assert _decode_enveloped_domain(without_schema, SessionRecord) == session
+def test_persisted_generic_payload_requires_schema() -> None:
+    payload = copy.deepcopy(_encode_persisted_domain(_session()))
+    payload.pop("schema")
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(_envelope(payload), SessionRecord)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.parametrize("schema", [True, 0, -1, "1"])
@@ -254,7 +235,7 @@ def test_envelope_metadata_is_not_accepted() -> None:
 def test_typed_envelope_rejects_extra_framing_field() -> None:
     value = _envelope(_encode_persisted_domain(_session()))
     typed = cast("dict[str, object]", value["value"])
-    typed["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
+    typed["future_metadata"] = {"future": True}
     with pytest.raises(AIError) as raised:
         _validate_enveloped_value(value)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -271,32 +252,41 @@ def test_current_enum_value_round_trip_and_unknown_value_boundary() -> None:
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_explicit_custom_task_node_tolerates_additive_field() -> None:
+def test_non_persisted_custom_task_node_remains_exact() -> None:
     node = TaskNode("node", (), input={"key": "value"}, budget_cost=1)
     payload = encode_domain(node)
     payload["fields"]["extra"] = {"must": "not be decoded"}
-    assert decode_domain(payload, TaskNode) == node
+    with pytest.raises(AIError) as raised:
+        decode_domain(payload, TaskNode)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_agent_binding_snapshot_preserves_unknown_ordinary_field() -> None:
+def test_persisted_custom_task_node_ignores_additive_field() -> None:
+    node = TaskNode("node", (), input={"key": "value"}, budget_cost=1)
+    payload = copy.deepcopy(_encode_persisted_domain(node))
+    payload["fields"]["future_metadata"] = {"future": True}
+    assert _decode_enveloped_domain(
+        _envelope(payload, wire_id="task_node"),
+        TaskNode,
+    ) == node
+
+
+def test_agent_binding_snapshot_ignores_unknown_field() -> None:
     payload = _binding_snapshot_payload()
-    payload["future_metadata"] = {"$future_v2": ["must", "not", "be", "interpreted"]}
+    payload["future_metadata"] = {"future": True}
     decoded = AgentBindingSnapshot.from_payload(payload)
-    assert decoded.to_payload() == payload
-    assert decoded.binding_digest == "a" * 64
+    assert decoded.to_payload() == _binding_snapshot_payload()
 
 
 @pytest.mark.parametrize(
     "missing",
     (
-        "version",
         "agent_spec",
         "base_model",
         "selected",
         "subagents",
         "output_mode",
         "output_schema",
-        "binding_digest",
     ),
 )
 def test_agent_binding_snapshot_requires_current_fields(missing: str) -> None:
@@ -321,9 +311,16 @@ def test_low_level_record_shape_remains_strict() -> None:
         "lease": {"owner": None, "fence": 0, "expires_at": None},
         "data": {"value": record.to_json()},
     }
-    stored.pop("kind")
+    missing = copy.deepcopy(stored)
+    missing.pop("kind")
     with pytest.raises(AIError) as raised:
-        decode_record(stored)
+        decode_record(missing)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    extra = copy.deepcopy(stored)
+    extra["legacy"] = True
+    with pytest.raises(AIError) as raised:
+        decode_record(extra)
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 

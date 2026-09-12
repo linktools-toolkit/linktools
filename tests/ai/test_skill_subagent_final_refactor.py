@@ -77,7 +77,7 @@ def test_v1_skill_wire_and_semantic_pin_fingerprint_are_stable() -> None:
     pin_payload = fixture["pin"]
     assert isinstance(pin_payload, dict)
     pin = SemanticPin.from_payload(pin_payload)
-    assert pin.contract_version == 1
+    assert pin.contract["version"] == 1
     assert pin.fingerprint == fixture["fingerprint"]
     definition = SkillDefinition.from_semantic_contract(pin.contract)
     assert definition.semantic_contract == {
@@ -91,7 +91,7 @@ def test_v1_skill_wire_and_semantic_pin_fingerprint_are_stable() -> None:
     )
 
 
-def test_v1_binding_without_additive_fields_restores_with_original_digest() -> None:
+def test_v1_binding_restores_from_current_semantic_snapshot() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
     snapshot = AgentBindingSnapshot.from_payload(payload)
     compiler = _compiler(
@@ -103,9 +103,8 @@ def test_v1_binding_without_additive_fields_restores_with_original_digest() -> N
 
     restored = compiler.restore(snapshot)
 
-    assert restored.digest == payload["binding_digest"]
-    assert restored.snapshot.version == 1
-    assert restored.snapshot.selected_subagents == ("child",)
+    assert restored.digest == snapshot.binding_digest
+    assert restored.snapshot.subagent_ids == ("child",)
     assert restored.snapshot.subagents[0].to_payload() == {"kind": "agent", "id": "child"}
     assert restored.snapshot.to_payload() == payload
 
@@ -149,14 +148,13 @@ def test_skill_and_agent_use_first_formal_v1_contracts() -> None:
     assert plain_definition.digest == described_definition.digest
 
 
-def test_parent_binding_v1_keeps_logical_subagent_refs_and_round_trips() -> None:
+def test_parent_binding_keeps_one_logical_subagent_set_and_ignores_unknown_fields() -> None:
     parent = AgentSpec("parent", allow_subagents=("child",))
     child = AgentSpec("child", allow_subagents=(), description="Child worker")
     compiler = _compiler({"parent": parent, "child": child})
     binding = compiler.bind(compiler.compile(parent))
 
-    assert binding.snapshot.version == 1
-    assert binding.snapshot.selected_subagents == ("child",)
+    assert binding.snapshot.subagent_ids == ("child",)
     assert binding.snapshot.subagents[0].to_payload() == {
         "kind": "agent",
         "id": "child",
@@ -165,11 +163,14 @@ def test_parent_binding_v1_keeps_logical_subagent_refs_and_round_trips() -> None
 
     payload = binding.snapshot.to_payload()
     assert "selected_subagents" not in payload
-    payload["future_metadata"] = {"display": "ignored"}
-    restored = compiler.restore(AgentBindingSnapshot.from_payload(payload))
+    additive = {**payload, "future_metadata": {"display": "ignored"}}
+    decoded = AgentBindingSnapshot.from_payload(additive)
+    assert decoded == binding.snapshot
+    assert "future_metadata" not in decoded.to_payload()
+
+    restored = compiler.restore(decoded)
     assert restored.digest == binding.digest
     assert restored.snapshot.subagents == binding.snapshot.subagents
-    assert restored.snapshot.to_payload()["future_metadata"] == {"display": "ignored"}
 
 
 def test_future_semantic_pin_version_is_not_misclassified_as_corruption() -> None:
@@ -177,7 +178,6 @@ def test_future_semantic_pin_version_is_not_misclassified_as_corruption() -> Non
         SemanticPin(
             "skill",
             "review",
-            2,
             {
                 "version": 2,
                 "id": "review",
@@ -187,9 +187,9 @@ def test_future_semantic_pin_version_is_not_misclassified_as_corruption() -> Non
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
+def test_agent_task_recovery_accepts_unknown_binding_fields() -> None:
     binding = _load_json("agent_binding_subagent_v1_golden.json")
-    binding["version"] = 2
+    binding["future"] = 2
     body = {
         "binding": binding,
         "user_prompt": {"kind": "text", "text": "work"},
@@ -197,18 +197,31 @@ def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
         "planning": False,
         "thinking": False,
     }
-    handler = object.__new__(_AgentTaskNodeHandler)
-    handler._catalog = None
-    handler._compiler = None
+    parent = AgentSpec("parent", allow_subagents=("child",))
+    child = AgentSpec("child", allow_subagents=())
+    compiler = _compiler({"parent": parent, "child": child})
+    catalog = AgentCatalog(
+        {
+            "parent": compiler.compile(parent),
+            "child": compiler.compile(child),
+        }
+    )
+    handler = _AgentTaskNodeHandler(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        catalog,
+        compiler,
+    )
 
-    with pytest.raises(AIError) as error:
-        handler.validate_recovery(
-            body,  # type: ignore[arg-type]
-            graph_id="graph",
-            node_id="node",
-        )
+    normalized = handler.validate_recovery(
+        body,  # type: ignore[arg-type]
+        graph_id="graph",
+        node_id="node",
+    )
 
-    assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    normalized_binding = normalized["binding"]
+    assert isinstance(normalized_binding, dict)
+    assert "future" not in normalized_binding
+    assert AgentBindingSnapshot.from_payload(normalized_binding).subagent_ids == ("child",)
 
 
 def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
@@ -603,7 +616,6 @@ def test_child_description_changes_parent_binding_identity_without_pinning_defin
     old_binding = old_compiler.bind(old_compiler.compile(parent))
     new_binding = new_compiler.bind(new_compiler.compile(parent))
 
-    assert old_binding.snapshot.version == 1
     assert old_binding.snapshot.subagents[0].to_payload() == {
         "kind": "agent",
         "id": "child",
@@ -753,7 +765,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
 
 
 @pytest.mark.asyncio
-async def test_child_binding_keeps_declared_grandchildren_but_disables_nested_delegation() -> None:
+async def test_child_binding_removes_nested_delegation_from_effective_definition() -> None:
     parent = AgentSpec("parent", allow_subagents=("child",))
     child = AgentSpec("child", allow_subagents=("grandchild",), description="Child")
     grandchild = AgentSpec("grandchild", allow_subagents=())
@@ -789,15 +801,14 @@ async def test_child_binding_keeps_declared_grandchildren_but_disables_nested_de
     assert result["status"] == ExecutionStatus.SUCCEEDED.value
     assert execution.binding_digest is not None
     child_binding = catalog.binding(execution.binding_digest)
-    assert child_binding.definition.digest == child_definition.digest
-    assert child_binding.definition.selected_subagents == ("grandchild",)
-    assert child_binding.snapshot.selected_subagents == ("grandchild",)
+    assert child_binding.definition.digest != child_definition.digest
+    assert child_binding.definition.selected_subagents == ()
     assert child_binding.snapshot.subagents == ()
-    assert child_binding.snapshot.to_payload()["selected_subagents"] == ["grandchild"]
+    assert "selected_subagents" not in child_binding.snapshot.to_payload()
 
     restored = current_compiler.restore(child_binding.snapshot)
     assert restored.digest == child_binding.digest
-    assert restored.definition.digest == child_definition.digest
+    assert restored.definition.selected_subagents == ()
 
 
 @pytest.mark.asyncio

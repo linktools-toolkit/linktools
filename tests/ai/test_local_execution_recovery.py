@@ -15,23 +15,20 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import CancelEffectOutcome, ExecutionStartIdentity
 from linktools.ai.runtime._local import LocalExecutionBackend, _is_infrastructure_error
-from linktools.ai.runtime.state._contracts import ExecutionRecord, RuntimeStorageContract
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StoredPayload
-from linktools.ai.runtime.state._contracts import StoredUserInput
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("default"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
 
 
@@ -63,11 +60,11 @@ def _request() -> ExecutionRequest:
 
 def _record() -> ExecutionRecord:
     now = datetime.now(timezone.utc)
+    snapshot = _binding_snapshot()
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -84,15 +81,13 @@ def _record() -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding_snapshot(),
+        binding=snapshot,
         principal_id="principal",
         principal_kind="service",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 
@@ -137,8 +132,6 @@ def _backend() -> LocalExecutionBackend:
     backend._accepting = True
     backend._recovery_enabled = False
     backend._tenant_id = "tenant"
-    backend._storage_contract = RuntimeStorageContract(1, (), (), ())
-    backend._storage_contract_factory = None
     backend._namespace = "test"
     backend._tasks = {}
     backend._captured_usage = {}
@@ -177,7 +170,6 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy() -> No
     assert checkpoint is not None
     assert checkpoint.execution_id == execution.execution_id
     assert checkpoint.state.value == "admitted"
-    assert checkpoint.agent_run_sequence == execution.agent_run_sequence
     assert checkpoint.pending_tools is None
 
 

@@ -29,7 +29,6 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
-    RuntimeStorageContract,
     StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec
@@ -39,23 +38,21 @@ from linktools.ai.storage import StoredPayload
 def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("default", model="default"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="a" * 64,
     )
 
 
 def _execution(now: datetime) -> ExecutionRecord:
+    binding = _binding()
     return ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -72,15 +69,13 @@ def _execution(now: datetime) -> ExecutionRecord:
         mode="run",
         planning=False,
         thinking=False,
-        binding=_binding(),
+        binding=binding,
         principal_id="owner",
         principal_kind="user",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
 
 
@@ -90,12 +85,10 @@ def _continuation() -> PendingToolContinuation:
         "call-1",
         "read_file",
         payload,
-        payload.digest,
         {"source": "workspace"},
     )
     return PendingToolContinuation(
         "step-1",
-        canonical_sha256({"call_id": call.tool_call_id}),
         approvals=(call,),
     )
 
@@ -105,7 +98,6 @@ def _checkpoint(now: datetime) -> RecoveryCheckpoint:
         execution_id="execution",
         tenant_id="tenant",
         step_run_id="step-1",
-        agent_run_sequence=1,
         state=RecoveryCheckpointState.ACTIVE,
         revision=0,
         created_at=now,

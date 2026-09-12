@@ -93,7 +93,7 @@ def test_custom_output_restore_uses_persisted_schema() -> None:
     assert restored.output_type is not _RegisteredOutput
 
 
-def test_custom_output_restore_rejects_missing_or_tampered_schema() -> None:
+def test_custom_output_restore_requires_complete_persisted_schema() -> None:
     compiler = _compiler()
     binding = compiler.bind(compiler.compile(_spec()), output=_RegisteredOutput)
     snapshot = binding.snapshot
@@ -105,13 +105,12 @@ def test_custom_output_restore_rejects_missing_or_tampered_schema() -> None:
         AgentBindingSnapshot.from_payload(missing_payload)
     assert missing_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-    tampered_schema = dict(snapshot.output_schema)
-    tampered_schema["title"] = "TamperedOutput"
-    tampered = replace(snapshot, output_schema=tampered_schema)
-    with pytest.raises(AIError) as tampered_error:
-        fresh.restore(tampered)
-    assert tampered_error.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-
+    changed_schema = dict(snapshot.output_schema)
+    changed_schema["title"] = "PersistedOutput"
+    changed = replace(snapshot, output_schema=changed_schema)
+    restored = fresh.restore(changed)
+    assert restored.snapshot == changed
+    assert restored.output_binding.schema_definition == changed_schema
 
 def test_custom_output_rejects_non_durable_schema_at_bind_time() -> None:
     with pytest.raises(AIError) as error:

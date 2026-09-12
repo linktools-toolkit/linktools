@@ -24,7 +24,6 @@ def _session() -> SessionRecord:
         agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
-        resource_generation=0,
         cwd=None,
         metadata={},
         created_at=now,
@@ -49,7 +48,6 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
         )
         assert admitted.active_execution_id == "execution-1"
         assert admitted.revision == original.revision
-        assert admitted.resource_generation == original.resource_generation
         assert admitted.updated_at == original.updated_at
 
         with pytest.raises(AIError) as busy:
@@ -65,9 +63,48 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
             admitted,
             metadata={"key": "value"},
             revision=admitted.revision + 1,
-            resource_generation=admitted.resource_generation + 1,
             updated_at=datetime.now(timezone.utc),
         )
+        for identity_change in (
+            {"session_id": "different-session"},
+            {"owner_principal_id": "different-owner"},
+            {"agent_id": "different-agent"},
+            {"history_id": "different-history"},
+            {
+                "created_at": datetime.fromtimestamp(
+                    admitted.created_at.timestamp() + 1,
+                    tz=timezone.utc,
+                )
+            },
+        ):
+            with pytest.raises(AIError) as identity_error:
+                await state.conversation.sessions.compare_and_swap(
+                    admitted.session_id,
+                    tenant_id=admitted.tenant_id,
+                    expected_revision=admitted.revision,
+                    next_record=replace(
+                        admitted,
+                        revision=admitted.revision + 1,
+                        updated_at=datetime.now(timezone.utc),
+                        **identity_change,
+                    ),
+                )
+            assert identity_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+        with pytest.raises(AIError) as tenant_error:
+            await state.conversation.sessions.compare_and_swap(
+                admitted.session_id,
+                tenant_id=admitted.tenant_id,
+                expected_revision=admitted.revision,
+                next_record=replace(
+                    admitted,
+                    tenant_id="different-tenant",
+                    revision=admitted.revision + 1,
+                    updated_at=datetime.now(timezone.utc),
+                ),
+            )
+        assert tenant_error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+
         updated = await state.conversation.sessions.compare_and_swap(
             "session",
             tenant_id="tenant",
@@ -139,32 +176,38 @@ async def test_memory_session_admission_contract() -> None:
 async def test_sql_session_admission_contract(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
     await provision_database(engine)
+    state = RuntimeState.sql(engine)
     try:
-        await _assert_admission_contract(RuntimeState.sql(engine))
+        await _assert_admission_contract(state)
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_memory_admission_is_single_owner() -> None:
+async def test_concurrent_admission_has_single_owner() -> None:
     state = RuntimeState.in_memory()
-    await state.initialize(namespace="admission-race", tenant_id="tenant")
+    await state.initialize(namespace="admission-concurrent", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
 
-        async def attempt(execution_id: str) -> ErrorCode | None:
+        async def admit(execution_id: str):
             try:
-                await state.conversation.sessions.admit_execution(
+                return await state.conversation.sessions.admit_execution(
                     "session",
                     tenant_id="tenant",
                     execution_id=execution_id,
                     expected=None,
                 )
             except AIError as error:
-                return error.code
-            return None
+                return error
 
-        outcomes = await asyncio.gather(attempt("execution-1"), attempt("execution-2"))
-        assert sorted(outcomes, key=lambda item: item is not None) == [None, ErrorCode.SESSION_BUSY]
+        first, second = await asyncio.gather(admit("execution-1"), admit("execution-2"))
+        values = (first, second)
+        successes = [value for value in values if isinstance(value, SessionRecord)]
+        failures = [value for value in values if isinstance(value, AIError)]
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert failures[0].code is ErrorCode.SESSION_BUSY
+        assert successes[0].active_execution_id in {"execution-1", "execution-2"}
     finally:
         await state.close()

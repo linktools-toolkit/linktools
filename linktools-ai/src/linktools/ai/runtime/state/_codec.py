@@ -118,9 +118,6 @@ from ._contracts import (
     RepositoryInstructionBarrier,
     ResultRecord,
     RuntimePayloadRef,
-    RuntimeStorageContract,
-    RuntimeStorageResource,
-    SessionForkResultRecord,
     SessionRecord,
     StoredStepSnapshot,
     StoredUserInput,
@@ -188,7 +185,6 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("resource_ref", ResourceRef),
     ("result_record", ResultRecord),
     ("session_record", SessionRecord),
-    ("session_fork_result", SessionForkResultRecord),
     ("stored_step_snapshot", StoredStepSnapshot),
     ("object_ref", ObjectRef),
     ("stored_payload", StoredPayload),
@@ -197,8 +193,6 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("loaded_context_message", LoadedContextMessage),
     ("loaded_model_context", LoadedModelContext),
     ("runtime_payload_ref", RuntimePayloadRef),
-    ("runtime_storage_contract", RuntimeStorageContract),
-    ("runtime_storage_resource", RuntimeStorageResource),
     ("stored_user_input", StoredUserInput),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
@@ -310,7 +304,7 @@ def _decode_v1_task_node(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskNode:
-    _require_fields(
+    _require_contract_fields(
         raw_fields,
         frozenset(
             {
@@ -320,6 +314,7 @@ def _decode_v1_task_node(
                 "budget_cost",
             }
         ),
+        persisted=persisted,
     )
     return TaskNode(
         str(_decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -365,9 +360,10 @@ def _decode_v1_task_result(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskResultRecord:
-    _require_fields(
+    _require_contract_fields(
         raw_fields,
         frozenset({"graph_id", "node_id", "result_digest", "payload"}),
+        persisted=persisted,
     )
     return TaskResultRecord(
         cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
@@ -383,107 +379,94 @@ def _decode_v1_task_result(
     )
 
 
+_RUNTIME_OBJECT_STORE_ID = "runtime"
+
+
+def _encode_v1_object_ref(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, ObjectRef):
+        raise TypeError("V1 object_ref encoder received the wrong type")
+    encoded: dict[str, JsonValue] = {
+        "key": _encode_domain(value.key, codec, persisted=persisted),
+        "digest": _encode_domain(value.digest, codec, persisted=persisted),
+        "size": _encode_domain(value.size, codec, persisted=persisted),
+    }
+    if not persisted:
+        encoded["store_id"] = _encode_domain(
+            value.store_id, codec, persisted=persisted
+        )
+    return encoded
+
+
+def _decode_v1_object_ref(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> ObjectRef:
+    expected = (
+        frozenset({"key", "digest", "size"})
+        if persisted
+        else frozenset({"store_id", "key", "digest", "size"})
+    )
+    _require_contract_fields(raw_fields, expected, persisted=persisted)
+    store_id = (
+        _RUNTIME_OBJECT_STORE_ID
+        if persisted
+        else cast(
+            str,
+            _decode_domain(
+                raw_fields["store_id"], str, codec, persisted=persisted
+            ),
+        )
+    )
+    return ObjectRef(
+        store_id,
+        cast(str, _decode_domain(raw_fields["key"], str, codec, persisted=persisted)),
+        cast(
+            str,
+            _decode_domain(raw_fields["digest"], str, codec, persisted=persisted),
+        ),
+        cast(int, _decode_domain(raw_fields["size"], int, codec, persisted=persisted)),
+    )
+
+
 def _decode_v1_stored_user_input(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
 ) -> StoredUserInput:
-    _require_fields(raw_fields, frozenset({"version", "codec", "payload"}))
-    version = _decode_domain(
-        raw_fields["version"], int, codec, persisted=persisted
+    _require_contract_fields(
+        raw_fields,
+        frozenset({"codec", "payload"}),
+        persisted=persisted,
     )
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
     )
-    if version != 1 or codec_name not in {"text", "user-content-v1"}:
+    if codec_name not in {"text", "user-content-v1"}:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     payload = _decode_domain(
         raw_fields["payload"], StoredPayload, codec, persisted=persisted
     )
     try:
-        return StoredUserInput(version, codec_name, payload)
+        return StoredUserInput(codec_name, payload)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-def _encode_v1_optional_error_diagnostics(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    encoded = {
-        field.name: _encode_domain(
-            attrgetter(field.name)(value),
-            codec,
-            persisted=persisted,
-        )
-        for field in fields(value)
-        if field.name != "error_diagnostics"
-    }
-    diagnostics = attrgetter("error_diagnostics")(value)
-    if diagnostics is not None:
-        encoded["error_diagnostics"] = _encode_domain(
-            diagnostics,
-            codec,
-            persisted=persisted,
-        )
-    return encoded
-
-
-def _encode_v1_execution_record(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, ExecutionRecord):
-        raise TypeError("V1 execution_record encoder received the wrong type")
-    encoded = dict(_encode_v1_optional_error_diagnostics(value, codec, persisted))
-    if not value.correlation:
-        encoded.pop("correlation", None)
-    return encoded
-
-
-def _encode_v1_task_graph_admission(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, TaskGraphAdmission):
-        raise TypeError("V1 task_graph_admission encoder received the wrong type")
-    encoded = {
-        field.name: _encode_domain(
-            attrgetter(field.name)(value),
-            codec,
-            persisted=persisted,
-        )
-        for field in fields(value)
-    }
-    if not value.correlation:
-        encoded.pop("correlation", None)
-    return encoded
-
-
-def _encode_v1_recovery_terminal_outcome(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, RecoveryTerminalOutcome):
-        raise TypeError("V1 recovery_terminal_outcome encoder received the wrong type")
-    return _encode_v1_optional_error_diagnostics(value, codec, persisted)
-
-
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
-        "execution_record": _encode_v1_execution_record,
-        "recovery_terminal_outcome": _encode_v1_recovery_terminal_outcome,
-        "task_graph_admission": _encode_v1_task_graph_admission,
+        "object_ref": _encode_v1_object_ref,
         "task_node": _encode_v1_task_node,
         "task_result": _encode_v1_task_result,
     }
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
+        "object_ref": _decode_v1_object_ref,
         "stored_user_input": _decode_v1_stored_user_input,
         "task_node": _decode_v1_task_node,
         "task_result": _decode_v1_task_result,
@@ -525,19 +508,22 @@ class CanonicalEnvelope:
     value: Mapping[str, JsonValue]
 
 
-def _require_fields(
-    value: Mapping[str, object],
-    required: frozenset[str],
-) -> None:
-    if not required.issubset(value):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
 def _require_exact_keys(
     value: Mapping[str, object],
     expected: frozenset[str],
 ) -> None:
     if set(value.keys()) != expected:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _require_contract_fields(
+    value: Mapping[str, object],
+    required: frozenset[str],
+    *,
+    persisted: bool,
+) -> None:
+    keys = set(value.keys())
+    if not required.issubset(keys) or (not persisted and keys != required):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -618,7 +604,7 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
 def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_fields(
+    _require_exact_keys(
         value,
         frozenset(
             {
@@ -638,7 +624,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
     lease = value["lease"]
     if not isinstance(lease, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_fields(lease, frozenset({"owner", "fence", "expires_at"}))
+    _require_exact_keys(lease, frozenset({"owner", "fence", "expires_at"}))
     data = value["data"]
     if not isinstance(data, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -681,7 +667,7 @@ def encode_fact(fact: StoredFact) -> dict[str, JsonValue]:
 def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_fields(
+    _require_exact_keys(
         value,
         frozenset(
             {"stream", "sequence", "owner", "kind", "subject", "state", "data"}
@@ -718,7 +704,7 @@ def encode_operation(operation: StoredOperation) -> dict[str, JsonValue]:
 def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_fields(
+    _require_exact_keys(
         value,
         frozenset({"key", "stream", "sequence", "state", "compactable", "data"}),
     )
@@ -748,7 +734,7 @@ def encode_alias(alias: StoredAlias) -> dict[str, JsonValue]:
 def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_fields(value, frozenset({"alias", "record"}))
+    _require_exact_keys(value, frozenset({"alias", "record"}))
     try:
         return StoredAlias(
             _digest_wire(_string(value, "alias")),
@@ -834,6 +820,8 @@ def _decode_external(
     value: object,
     target: type[object],
     codec: _VersionCodec,
+    *,
+    persisted: bool,
 ) -> object:
     if target not in codec.external_schema_types:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -858,7 +846,7 @@ def _decode_external(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if target is IdempotencyTerminalUpdate:
-        _require_fields(
+        _require_contract_fields(
             value,
             frozenset(
                 {
@@ -871,6 +859,7 @@ def _decode_external(
                     "error_code",
                 }
             ),
+            persisted=persisted,
         )
         return IdempotencyTerminalUpdate(
             scope=cast(str, _decode_domain(value["scope"], str, codec)),
@@ -902,7 +891,7 @@ def _decode_external(
             ),
         )
     if target is OperationTerminalUpdate:
-        _require_fields(
+        _require_contract_fields(
             value,
             frozenset(
                 {
@@ -914,6 +903,7 @@ def _decode_external(
                     "error_code",
                 }
             ),
+            persisted=persisted,
         )
         return OperationTerminalUpdate(
             operation_id=cast(
@@ -1368,7 +1358,12 @@ def _decode_domain(
             )
         return result
     if isinstance(target, type) and target in codec.external_schema_types:
-        return _decode_external(value, target, codec)
+        return _decode_external(
+            value,
+            target,
+            codec,
+            persisted=persisted,
+        )
     if isinstance(target, type) and is_dataclass(target):
         return _decode_dataclass(value, target, codec, persisted=persisted)
     if target is float:
@@ -1430,13 +1425,10 @@ def _decode_dataclass(
 ) -> object:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    keys = frozenset(value)
     if persisted:
-        if keys not in {
-            frozenset({"$dataclass", "fields"}),
-            frozenset({"$dataclass", "schema", "fields"}),
-        }:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_exact_keys(
+            value, frozenset({"$dataclass", "schema", "fields"})
+        )
     else:
         _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
 
@@ -1453,7 +1445,7 @@ def _decode_dataclass(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     if persisted:
-        schema = value.get("schema", CURRENT_DATA_VERSION)
+        schema = value["schema"]
         if isinstance(schema, bool) or not isinstance(schema, int) or schema < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if schema != CURRENT_DATA_VERSION:
@@ -1473,11 +1465,9 @@ def _decode_dataclass(
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
     declared_fields = tuple(fields(target))
-    declared_names = {field.name for field in declared_fields}
-    unknown_fields = tuple(
-        sorted(str(name) for name in set(raw_fields) - declared_names)
-    )
-    defaulted_fields: list[str] = []
+    declared_names = frozenset(field.name for field in declared_fields)
+    if not persisted:
+        _require_exact_keys(raw_fields, declared_names)
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
     for field in declared_fields:
@@ -1486,8 +1476,6 @@ def _decode_dataclass(
                 field.default is MISSING and field.default_factory is MISSING
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if field.init:
-                defaulted_fields.append(field.name)
             continue
         try:
             decoded = _decode_domain(
@@ -1504,14 +1492,6 @@ def _decode_dataclass(
             kwargs[field.name] = decoded
         else:
             post_init_fields[field.name] = decoded
-    if unknown_fields or defaulted_fields:
-        _logger.debug(
-            "Runtime generic dataclass decode tolerated shape change: "
-            "wire_id=%s ignored_fields=%s defaulted_fields=%s",
-            wire_id,
-            unknown_fields,
-            tuple(defaulted_fields),
-        )
     try:
         result = target(**kwargs)
     except (KeyError, TypeError, ValueError) as error:
@@ -1801,14 +1781,13 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 enum type registry is incomplete")
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
         raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
-    custom_encoders = {
-        "execution_record",
-        "recovery_terminal_outcome",
-        "task_graph_admission",
+    custom_encoders = {"object_ref", "task_node", "task_result"}
+    custom_decoders = {
+        "object_ref",
+        "stored_user_input",
         "task_node",
         "task_result",
     }
-    custom_decoders = {"stored_user_input", "task_node", "task_result"}
     if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
         raise RuntimeError("Runtime v1 dataclass encoder mapping is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_decoders:

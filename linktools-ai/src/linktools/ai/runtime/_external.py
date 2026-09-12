@@ -157,13 +157,6 @@ class DefaultExternalService:
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
         payload, resolution_kind = await self._resolution_payload(request)
         resolution_metadata = dict(request.metadata)
-        result_digest = canonical_sha256(
-            {
-                "resolution_kind": resolution_kind,
-                "result": None if payload is None else payload.to_json(),
-                "metadata": resolution_metadata,
-            }
-        )
         key_digest = idempotency_key_digest(request.idempotency_key)
         try:
             updated = await self._calls.supply(
@@ -173,7 +166,6 @@ class DefaultExternalService:
                 idempotency_key_digest=key_digest,
                 resolution_kind=resolution_kind,
                 result_payload=payload,
-                result_digest=result_digest,
                 resolution_metadata=resolution_metadata,
                 supplied_at=datetime.now(timezone.utc),
             )
@@ -189,7 +181,7 @@ class DefaultExternalService:
                 execution_id=execution_id,
                 idempotency_key_digest=key_digest,
                 resolution_kind=resolution_kind,
-                result_digest=result_digest,
+                result_payload=payload,
                 metadata=resolution_metadata,
             ):
                 raise
@@ -306,7 +298,7 @@ def _is_exact_replay(
     execution_id: str,
     idempotency_key_digest: str,
     resolution_kind: str,
-    result_digest: str,
+    result_payload: StoredPayload | None,
     metadata: Mapping[str, JsonValue],
 ) -> bool:
     return bool(
@@ -315,7 +307,7 @@ def _is_exact_replay(
         and record.status is ExternalCallStatus.SUPPLIED
         and record.idempotency_key_digest == idempotency_key_digest
         and record.resolution_kind == resolution_kind
-        and record.result_digest == result_digest
+        and record.result_payload == result_payload
         and dict(record.resolution_metadata) == dict(metadata)
     )
 

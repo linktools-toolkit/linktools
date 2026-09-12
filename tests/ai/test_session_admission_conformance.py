@@ -28,11 +28,7 @@ from linktools.ai.runtime._execution import (
     _ExecutionRuntimeBridge,
 )
 from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._contracts import (
-    ConversationCursor,
-    RuntimeStorageContract,
-    SessionRecord,
-)
+from linktools.ai.runtime.state._contracts import ConversationCursor, SessionRecord
 from linktools.ai.spec import AgentSpec
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -46,7 +42,6 @@ def _session() -> SessionRecord:
         agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
-        resource_generation=0,
         cwd=None,
         metadata={},
         created_at=now,
@@ -86,7 +81,6 @@ async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
         current = await state.conversation.sessions.get("session", tenant_id="tenant")
         assert current is not None
         assert current.revision == 0
-        assert current.resource_generation == 0
         owner = current.active_execution_id
         assert owner is not None
 
@@ -97,7 +91,6 @@ async def test_memory_admission_is_atomic_and_cas_preserves_token() -> None:
             next_record=replace(
                 current,
                 revision=1,
-                resource_generation=1,
                 metadata={"key": "value"},
                 active_execution_id="stale-caller-value",
             ),
@@ -207,26 +200,26 @@ async def test_closing_session_can_commit_owned_continuation_then_close() -> Non
         await state.close()
 
 
-def _binding(digest: str) -> AgentBindingSnapshot:
+def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest=digest,
     )
 
 
 class _DefinitionCatalog:
     def binding(self, digest: str) -> object:
+        binding = _binding()
+        assert digest == binding.binding_digest
         return SimpleNamespace(
-            digest=digest,
+            digest=binding.binding_digest,
             definition=SimpleNamespace(digest="b" * 64),
-            snapshot=_binding(digest),
+            snapshot=binding,
         )
 
 
@@ -359,17 +352,11 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
             runtime_bridge=runtime_bridge,
             live_broker=LiveExecutionEventBroker(),
             history_reader=_History(),
-            storage_contract_factory=lambda _domains: RuntimeStorageContract(
-                1,
-                (),
-                (),
-                (),
-            ),
         )
         with pytest.raises(AIError) as error:
             await service.start_for_session(
                 "agent",
-                "b" * 64,
+                _binding().binding_digest,
                 "session",
                 ExecutionRequest(
                     user_prompt="hello",

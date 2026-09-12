@@ -63,7 +63,6 @@ from .state._step_contracts import (
 )
 from .state._contracts import (
     ConversationCursor,
-    SESSION_AGENT_ID_METADATA_KEY,
 )
 
 _logger = environ.get_logger("ai.runtime.session")
@@ -199,7 +198,6 @@ class DefaultSessionService:
             owner_principal_id=request.principal.principal_id,
             status=SessionStatus.OPEN,
             revision=0,
-            resource_generation=0,
             cwd=cwd,
             metadata=dict(request.metadata),
             created_at=now,
@@ -399,7 +397,7 @@ class DefaultSessionService:
                     request.principal.tenant_id,
                 ),
             )
-            if record.resolved_agent_id() != agent_id:
+            if record.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             execution_request = ExecutionRequest(
                 user_prompt=request.user_prompt,
@@ -436,8 +434,7 @@ class DefaultSessionService:
                     request.principal.principal_id,
                 ),
             )
-            resolved_agent_id = source.resolved_agent_id()
-            if resolved_agent_id != agent_id:
+            if source.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             digest = canonical_sha256(
                 {
@@ -446,7 +443,7 @@ class DefaultSessionService:
                     "principal_id": request.principal.principal_id,
                     "source": session_id,
                     "target": request.new_session_id,
-                    "agent_id": resolved_agent_id,
+                    "agent_id": source.agent_id,
                     "cwd": (
                         source.cwd
                         if request.cwd is None
@@ -461,14 +458,12 @@ class DefaultSessionService:
             )
             now = datetime.now(timezone.utc)
             target_metadata = dict(source.metadata)
-            target_metadata.pop(SESSION_AGENT_ID_METADATA_KEY, None)
             target = SessionRecord(
                 session_id=request.new_session_id,
                 tenant_id=source.tenant_id,
                 owner_principal_id=source.owner_principal_id,
                 status=SessionStatus.OPEN,
                 revision=0,
-                resource_generation=0,
                 cwd=target_cwd,
                 metadata=target_metadata,
                 created_at=now,
@@ -476,7 +471,7 @@ class DefaultSessionService:
                 closed_at=None,
                 active_execution_id=None,
                 continuation=source.continuation,
-                agent_id=resolved_agent_id,
+                agent_id=source.agent_id,
             )
             operation = self._session_terminal_operation(
                 request.idempotency_key,
@@ -511,21 +506,8 @@ class DefaultSessionService:
         current = await self._authorized(
             session_id, request.principal, AuthorizationAction.SESSION_UPDATE
         )
-        resolved_agent_id = current.resolved_agent_id()
-        if resolved_agent_id != agent_id:
+        if current.agent_id != agent_id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-        if any(
-            key.startswith("linktools.ai.") and current.metadata.get(key) != value
-            for key, value in request.metadata.items()
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if any(
-            key.startswith("linktools.ai.")
-            and key != SESSION_AGENT_ID_METADATA_KEY
-            and key not in request.metadata
-            for key in current.metadata
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if any(key.startswith("linktools.ai.") for key in request.metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         requested_cwd = (
@@ -548,11 +530,9 @@ class DefaultSessionService:
         next_record = replace(
             current,
             revision=current.revision + 1,
-            resource_generation=current.resource_generation + 1,
             cwd=requested_cwd,
             metadata=dict(request.metadata),
             updated_at=now,
-            agent_id=resolved_agent_id,
         )
         operation = self._session_terminal_operation(
             request.idempotency_key,
@@ -957,10 +937,9 @@ class DefaultSessionService:
         active = () if active_execution is None else (active_execution.execution_id,)
         return SessionView(
             record.session_id,
-            record.resolved_agent_id(),
+            record.agent_id,
             record.status,
             record.revision,
-            record.resource_generation,
             record.cwd,
             active,
             record.metadata,

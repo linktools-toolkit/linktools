@@ -71,30 +71,37 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_declaration_codecs_preserve_unknown_additive_fields() -> None:
+def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
+    agent_payload = {
+        "version": 1,
+        "id": "agent",
+        "future_metadata": {"future": True},
+    }
+    assert AgentSpecCodec().decode(json.dumps(agent_payload).encode()) == AgentSpec(
+        "agent"
+    )
+
     skill_payload = {
         "version": 1,
         "id": "skill",
         "content": "skill content",
-        "future_metadata": {"$future_v2": ["ignored"]},
+        "future_metadata": {"future": True},
     }
-    decoded_skill = SkillSpecCodec().decode(json.dumps(skill_payload).encode())
-    assert decoded_skill == SkillSpec("skill", "skill content")
-    assert decoded_skill._extensions["future_metadata"] == {
-        "$future_v2": ["ignored"]
-    }
+    assert SkillSpecCodec().decode(json.dumps(skill_payload).encode()) == SkillSpec(
+        "skill",
+        "skill content",
+    )
 
     mcp_payload = {
         "version": 1,
         "id": "mcp",
         "command": "echo",
-        "future_metadata": {"$future_v2": ["ignored"]},
+        "future_metadata": {"future": True},
     }
-    decoded_mcp = MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode())
-    assert decoded_mcp == MCPServerSpec("mcp", "echo")
-    assert decoded_mcp._extensions["future_metadata"] == {
-        "$future_v2": ["ignored"]
-    }
+    assert MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode()) == MCPServerSpec(
+        "mcp",
+        "echo",
+    )
 
 
 def test_agent_spec_codec_ignores_unknown_usage_limit_fields() -> None:
@@ -108,7 +115,6 @@ def test_agent_spec_codec_ignores_unknown_usage_limit_fields() -> None:
     }
 
     decoded = AgentSpecCodec().decode(json.dumps(payload).encode())
-
     assert decoded.usage_limits == AgentUsageLimits(model_requests=1)
 
 

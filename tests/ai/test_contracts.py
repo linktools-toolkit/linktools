@@ -37,7 +37,6 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpoint,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
-    RuntimeStorageContract,
     StoredUserInput,
 )
 from linktools.ai.spec import AgentSpec, SubagentRef
@@ -60,20 +59,14 @@ class _JsonIntEnum(IntEnum):
     VALUE = 1
 
 
-def _binding_snapshot(
-    *,
-    agent_id: str = "default",
-    digest: str = "a" * 64,
-) -> AgentBindingSnapshot:
+def _binding_snapshot(*, agent_id: str = "default") -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec(agent_id, model="route"),
         base_model={"version": 1, "id": "route"},
         selected=(),
         subagents=(),
         output_mode="text",
         output_schema={"type": "object", "properties": {"text": {"type": "string"}}},
-        binding_digest=digest,
     )
 
 
@@ -171,19 +164,18 @@ def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
 
 def _pending_tools() -> PendingToolContinuation:
     payload = StoredPayload.inline_json({"path": "file.txt"})
-    call = PendingDeferredCall("call", "read_file", payload, payload.digest)
+    call = PendingDeferredCall("call", "read_file", payload)
     return PendingToolContinuation(
         "step-1",
-        "a" * 64,
         approvals=(call,),
     )
 
 
 def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
     now = datetime.now(timezone.utc)
+
     def checkpoint(
         state: RecoveryCheckpointState,
-        sequence: int,
         step_run_id: str | None,
         pending_tools: PendingToolContinuation | None = None,
     ) -> RecoveryCheckpoint:
@@ -191,7 +183,6 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
             execution_id="execution",
             tenant_id="tenant",
             step_run_id=step_run_id,
-            agent_run_sequence=sequence,
             state=state,
             revision=0,
             created_at=now,
@@ -201,13 +192,12 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
         )
 
     with pytest.raises(ValueError):
-        checkpoint(RecoveryCheckpointState.ADMITTED, 1, None)
+        checkpoint(RecoveryCheckpointState.ADMITTED, "step-1")
     with pytest.raises(ValueError):
-        checkpoint(RecoveryCheckpointState.ACTIVE, 0, None)
-    assert checkpoint(RecoveryCheckpointState.COMPLETED, 0, None).agent_run_sequence == 0
+        checkpoint(RecoveryCheckpointState.ACTIVE, None)
+    assert checkpoint(RecoveryCheckpointState.COMPLETED, None).step_run_id is None
     waiting = checkpoint(
         RecoveryCheckpointState.WAITING,
-        1,
         "step-1",
         _pending_tools(),
     )
@@ -216,13 +206,12 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
 
 
 def test_execution_record_owns_binding_and_durable_user_input() -> None:
-    snapshot = _binding_snapshot(digest="d" * 64)
+    snapshot = _binding_snapshot()
     now = datetime.now(timezone.utc)
     record = ExecutionRecord(
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest=snapshot.binding_digest,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,
@@ -243,16 +232,12 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
         principal_id="principal",
         principal_kind="user",
         stored_user_input=StoredUserInput(
-            1,
             "text",
             StoredPayload.inline_text("prompt"),
         ),
-        storage_contract=RuntimeStorageContract(1, (), (), ()),
     )
     assert record.stored_user_input.payload.decode() == "prompt"
-
-    with pytest.raises(ValueError):
-        replace(record, binding_digest="e" * 64)
+    assert record.binding_digest == snapshot.binding_digest
 
 
 def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> None:

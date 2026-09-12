@@ -3,7 +3,6 @@
 """Named state commands for multi-record Runtime checkpoints."""
 
 import asyncio
-import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -24,7 +23,6 @@ from ...core import (
     IdempotencyStatus,
     SessionStatus,
     ToolOperationStatus,
-    canonical_json_bytes,
     canonical_sha256,
     step_run_id,
 )
@@ -253,8 +251,6 @@ class RuntimeStateCommands:
                     or current_checkpoint.state is not RecoveryCheckpointState.ACTIVE
                     or current_checkpoint.step_run_id
                     != continuation.source_step_run_id
-                    or current_checkpoint.agent_run_sequence
-                    != expected_agent_run_sequence
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 for record in approval_values:
@@ -611,7 +607,6 @@ class RuntimeStateCommands:
                         checkpoint,
                         state=RecoveryCheckpointState.ACTIVE,
                         step_run_id=next_run_id,
-                        agent_run_sequence=next_sequence,
                         pending_tools=None,
                         revision=expected_recovery_revision + 1,
                         updated_at=updated_execution.updated_at,
@@ -1035,7 +1030,6 @@ class RuntimeStateCommands:
             updated_recovery = replace(
                 current_recovery,
                 step_run_id=next_run_id,
-                agent_run_sequence=next_sequence,
                 state=RecoveryCheckpointState.ACTIVE,
                 revision=current_recovery.revision + 1,
                 updated_at=updated_execution.updated_at,
@@ -1077,7 +1071,6 @@ class RuntimeStateCommands:
                 and recovery.revision == claim.expected_recovery_revision + 1
                 and recovery.state is RecoveryCheckpointState.ACTIVE
                 and recovery.step_run_id == next_run_id
-                and recovery.agent_run_sequence == next_sequence
             )
             execution_predecessor = (
                 execution is not None
@@ -1089,7 +1082,6 @@ class RuntimeStateCommands:
                 and recovery.revision == claim.expected_recovery_revision
                 and recovery.state is claim.expected_recovery_state
                 and recovery.step_run_id is None
-                and recovery.agent_run_sequence == claim.expected_agent_run_sequence
             )
             if execution_target and recovery_target:
                 _logger.warning(
@@ -2467,7 +2459,6 @@ class RuntimeStateCommands:
                 actual is None
                 or actual.execution_id != recovery_checkpoint.execution_id
                 or actual.tenant_id != recovery_checkpoint.tenant_id
-                or actual.agent_run_sequence != 0
                 or actual.step_run_id is not None
                 or actual.state is not RecoveryCheckpointState.ADMITTED
                 or actual.handoff_phase is not RecoveryHandoffPhase.NONE
@@ -3113,30 +3104,11 @@ def _execution_history_seal(
     execution_event_high_water = (
         commit.expected_event_sequence + len(audit_events) + 1
     )
-    digest_input = {
-        "execution_id": commit.execution.execution_id,
-        "tenant_id": commit.execution.tenant_id,
-        "seal_version": 1,
-        "run_heads": [
-            {
-                "run_id": head.run_id,
-                "event_count": head.event_count,
-                "snapshot_count": head.snapshot_count,
-                "transcript_message_count": head.transcript_message_count,
-                "projection_digest": head.projection_digest,
-            }
-            for head in ordered_heads
-        ],
-        "execution_event_high_water": execution_event_high_water,
-    }
-    seal_digest = hashlib.sha256(canonical_json_bytes(digest_input)).hexdigest()
     return ExecutionHistorySealRecord(
-        commit.execution.execution_id,
-        commit.execution.tenant_id,
-        1,
-        ordered_heads,
-        execution_event_high_water,
-        seal_digest,
+        execution_id=commit.execution.execution_id,
+        tenant_id=commit.execution.tenant_id,
+        run_heads=ordered_heads,
+        execution_event_high_water=execution_event_high_water,
     )
 
 

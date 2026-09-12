@@ -214,20 +214,7 @@ class _ContextProjector:
                     )
                 )
             index = end
-        digest = self._digest(items)
-        return ContextProjection(tuple(items), digest)
-
-    def _digest(
-        self,
-        items: Sequence[TranscriptSpanRef | InlineContextBlock],
-    ) -> str:
-        return hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "items": encode_domain(tuple(items)),
-                }
-            )
-        ).hexdigest()
+        return ContextProjection(tuple(items))
 
 
 class TranscriptRepository:
@@ -289,7 +276,6 @@ class TranscriptRepository:
             0,
             0,
             HistoryQuality.COMPLETE,
-            0,
         )
 
     def empty_head_record(self, owner_id: str) -> StoredRecord:
@@ -448,7 +434,7 @@ class TranscriptRepository:
             expected_digest=hashlib.sha256(value).hexdigest(),
         )
         return StoredPayload.object(
-            ObjectRef(self._object_store.store_id, key, stat.digest, stat.size)
+            ObjectRef("runtime", key, stat.digest, stat.size)
         )
 
     async def append_chunks(
@@ -489,7 +475,6 @@ class TranscriptRepository:
             message_count=expected,
             chunk_count=base_head.chunk_count + len(chunks),
             quality=base_head.quality if quality is None else quality,
-            revision=base_head.revision + 1,
         )
         upgraded = replace(
             head_record,
@@ -630,7 +615,7 @@ class TranscriptRepository:
                     RuntimePayloadRef(
                         StoredPayload.object(
                             ObjectRef(
-                                self._object_store.store_id,
+                                "runtime",
                                 stat.key,
                                 stat.digest,
                                 stat.size,
@@ -643,8 +628,7 @@ class TranscriptRepository:
             changed = True
         if not changed:
             return projection
-        digest = self._projector._digest(items)
-        return ContextProjection(tuple(items), digest)
+        return ContextProjection(tuple(items))
 
     def history_stream(self, history_id: str) -> bytes:
         return stream_digest(
@@ -1398,8 +1382,6 @@ class TranscriptRepository:
             return value
         if payload.ref is None or self._object_store is None:
             raise ValueError("object transcript payload has no reader")
-        if payload.ref.store_id != self._object_store.store_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         data = bytearray()
         async for chunk in self._object_store.open(payload.ref.key):
             data.extend(chunk)

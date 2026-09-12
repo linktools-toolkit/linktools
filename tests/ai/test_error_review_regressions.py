@@ -44,14 +44,12 @@ class _EmptyRepositoryInstructionResolver:
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="default"),
         base_model={"version": 1, "id": "default"},
         selected=(),
         subagents=(),
         output_mode="text",
         output_schema={"type": "object", "properties": {"text": {"type": "string"}}},
-        binding_digest="a" * 64,
     )
 
 
@@ -117,7 +115,6 @@ async def test_confirmed_cancel_persists_canonical_terminal_error() -> None:
         execution_id="execution",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
         parent_execution_id=None,
         root_execution_id="execution",
         source_execution_id=None,

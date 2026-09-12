@@ -20,7 +20,6 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
 )
-from linktools.ai.runtime.state._contracts import RuntimeStorageContract
 from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
 
@@ -113,15 +112,12 @@ async def test_execution_freezes_materialized_input_once() -> None:
     materializer = ExecutionInputMaterializer(access, Workspace.load(".", workspace_id="workspace").policy)
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]
-    service._storage_contract_factory = (  # type: ignore[attr-defined]
-        lambda _domains: RuntimeStorageContract(1, (), (), ())
-    )
 
     try:
         canonical = await service._canonicalize_request(
             _request(files=("evidence.txt",))
         )
-        prepared = await service._freeze_input(canonical, session_id=None)
+        prepared = await service._freeze_input(canonical)
         assert prepared.request.files == ()
         assert prepared.stored_user_input is not None
         assert isinstance(prepared.request.user_prompt, tuple)

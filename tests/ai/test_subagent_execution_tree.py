@@ -35,14 +35,12 @@ from ._runtime_test_helpers import execution_owner_fields
 def _binding(agent_id: str = "agent") -> AgentBindingSnapshot:
     spec = AgentSpec(agent_id)
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=spec,
         base_model={},
         selected=(),
         subagents=(),
         output_mode="text",
         output_schema={},
-        binding_digest="a" * 64,
     )
 
 
@@ -52,7 +50,6 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
         execution_id="child" if subagent else "root",
         tenant_id="tenant",
         session_id=None,
-        binding_digest="a" * 64,
         parent_execution_id="root" if subagent else None,
         root_execution_id="root",
         source_execution_id=None,

@@ -15,7 +15,6 @@ from pydantic_ai.providers.openai import OpenAIProvider
 def test_openai_operational_settings_do_not_change_durable_identity() -> None:
     first = ModelRegistry.openai(
         model="gpt-test",
-        provider_instance="corp-openai-primary",
         base_url="https://first.example/v1",
         api_key="first-key",
         timeout=30,
@@ -24,7 +23,6 @@ def test_openai_operational_settings_do_not_change_durable_identity() -> None:
     ).snapshot().resolve("default")
     second = ModelRegistry.openai(
         model="openai:gpt-test",
-        provider_instance="corp-openai-primary",
         base_url="https://second.example/v1",
         api_key="second-key",
         timeout=60,
@@ -36,35 +34,17 @@ def test_openai_operational_settings_do_not_change_durable_identity() -> None:
     assert first.fingerprint == second.fingerprint
 
 
-def test_openai_provider_instance_changes_durable_identity() -> None:
-    first = ModelRegistry.openai(
+def test_openai_custom_endpoint_is_operational_configuration() -> None:
+    binding = ModelRegistry.openai(
         model="gpt-test",
-        provider_instance="corp-openai-primary",
-        base_url="https://gateway.example/v1",
-    ).snapshot().resolve("default")
-    second = ModelRegistry.openai(
-        model="gpt-test",
-        provider_instance="corp-openai-secondary",
         base_url="https://gateway.example/v1",
     ).snapshot().resolve("default")
 
-    assert dict(first.semantic_payload)["provider_instance"] == "corp-openai-primary"
-    assert dict(second.semantic_payload)["provider_instance"] == "corp-openai-secondary"
-    assert first.fingerprint != second.fingerprint
-
-
-def test_openai_custom_endpoint_requires_provider_instance() -> None:
-    with pytest.raises(ValueError, match="provider_instance"):
-        ModelRegistry.openai(
-            model="gpt-test",
-            base_url="https://gateway.example/v1",
-        )
-
-
-def test_openai_public_provider_has_stable_default_instance() -> None:
-    binding = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
-
-    assert dict(binding.semantic_payload)["provider_instance"] == "openai-public"
+    assert dict(binding.semantic_payload) == {
+        "provider": "openai",
+        "model_identity": "openai:gpt-test",
+        "settings": {},
+    }
 
 
 def test_openai_max_tokens_changes_durable_identity() -> None:
@@ -87,27 +67,6 @@ def test_model_registry_restore_requires_exact_semantic_settings() -> None:
     registry = ModelRegistry.openai(
         model="gpt-test",
         max_tokens=2048,
-    )
-
-    with pytest.raises(AIError) as raised:
-        registry.snapshot().restore(
-            dict(historical.semantic_payload),
-            route_id="default",
-        )
-
-    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-
-
-def test_model_registry_restore_requires_exact_provider_instance() -> None:
-    historical = ModelRegistry.openai(
-        model="gpt-test",
-        provider_instance="corp-openai-primary",
-        base_url="https://old.example/v1",
-    ).snapshot().resolve("default")
-    registry = ModelRegistry.openai(
-        model="gpt-test",
-        provider_instance="corp-openai-secondary",
-        base_url="https://new.example/v1",
     )
 
     with pytest.raises(AIError) as raised:
@@ -148,8 +107,6 @@ def test_openai_route_materializes_settings_and_retries() -> None:
         {"max_retries": True},
         {"max_tokens": 0},
         {"max_tokens": True},
-        {"provider_instance": ""},
-        {"provider_instance": "bad instance"},
     ],
 )
 def test_openai_route_rejects_invalid_settings(kwargs: dict[str, Any]) -> None:

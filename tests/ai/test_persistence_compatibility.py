@@ -35,28 +35,32 @@ def _load_json(name: str) -> object:
 def _binding_fixture_value() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("runtime-persistence-v1", tool_retries=10000),
         base_model={"route_id": "default", "model_identity": "fixture:model"},
         selected=(),
         subagents=(),
         output_mode=output.mode,
         output_schema=output.schema_definition,
-        binding_digest="c" * 64,
     )
 
 
-def test_agent_binding_v1_fixture_and_additive_fields() -> None:
+def test_agent_binding_fixture_matches_current_contract() -> None:
     value = _load_json("runtime_agent_binding_snapshot_v1.json")
     expected = _binding_fixture_value()
     assert value == expected.to_payload()
     decoded = AgentBindingSnapshot.from_payload(value)
     assert decoded == expected
-    assert decoded.to_payload() == value
+    assert decoded.binding_digest == expected.binding_digest
 
-    additive = dict(cast(Mapping[str, object], value))
-    additive["future_metadata"] = {"$future_v2": ["must", "not", "decode"]}
-    assert AgentBindingSnapshot.from_payload(additive) == decoded
+
+def test_agent_binding_ignores_unknown_fields() -> None:
+    value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v1.json"))
+    value["future_metadata"] = {"future": True}
+
+    decoded = AgentBindingSnapshot.from_payload(value)
+
+    assert decoded == _binding_fixture_value()
+    assert "future_metadata" not in decoded.to_payload()
 
 
 def test_output_binding_round_trips_from_durable_semantics() -> None:
@@ -144,43 +148,23 @@ def _decode_custom_wire_values(
     return task, idempotency, operation
 
 
-def test_custom_wire_v1_fixture_and_additive_fields() -> None:
+def test_custom_wire_v1_fixture() -> None:
     value = _load_json("runtime_custom_wire_v1.json")
     assert isinstance(value, Mapping)
     expected = _custom_wire_values()
     assert value == expected
     assert _decode_custom_wire_values(value) == _decode_custom_wire_values(expected)
 
-    additive = dict(expected)
-    version = runtime_codec.CURRENT_DATA_VERSION
-    task_key = f"task_node@{version}"
-    task_wire = dict(cast(Mapping[str, object], additive[task_key]))
-    task_fields = dict(cast(Mapping[str, object], task_wire["fields"]))
-    task_fields["future_field"] = {"$future_v2": ["must", "not", "decode"]}
-    task_wire["fields"] = task_fields
-    additive[task_key] = cast(JsonValue, task_wire)
-    additive_task, _, _ = _decode_custom_wire_values(additive)
-    expected_task, _, _ = _decode_custom_wire_values(expected)
-    assert additive_task == expected_task
 
-
-def test_generic_v1_envelope_tolerates_additive_dataclass_fields() -> None:
-    value = ContextProjection((), "d" * 64)
+def test_generic_v1_envelope_round_trips_current_shape() -> None:
+    value = ContextProjection(())
     payload = runtime_codec._encode_persisted_domain(value)
     canonical_json_bytes(payload)
-    assert isinstance(payload, Mapping)
-    fields_value = payload.get("fields")
-    assert isinstance(fields_value, Mapping)
-
-    additive = dict(payload)
-    additive_fields = dict(fields_value)
-    additive_fields["future_field"] = {"$future_v2": ["must", "not", "decode"]}
-    additive["fields"] = additive_fields
     decoded = runtime_codec._decode_enveloped_domain(
         runtime_codec.encode_envelope(
             {
                 "type": runtime_codec.wire_type_id(value),
-                "payload": cast(JsonValue, additive),
+                "payload": payload,
             }
         ),
         ContextProjection,
@@ -188,16 +172,16 @@ def test_generic_v1_envelope_tolerates_additive_dataclass_fields() -> None:
     assert decoded == value
 
 
-def test_workspace_tool_pin_excludes_runtime_capability_provenance(tmp_path: Path) -> None:
+def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
     contribution = workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))[0]
     pin = SemanticPin(
         "tool",
         contribution.id,
-        cast(int, contribution.semantic_contract["version"]),
         contribution.semantic_contract,
     )
     payload = pin.to_payload()
-    assert set(payload) == {"kind", "id", "contract_version", "contract"}
+    assert set(payload) == {"kind", "id", "contract"}
+    assert cast(Mapping[str, object], payload["contract"])["version"] == 1
     assert "capability_id" not in cast(Mapping[str, object], payload["contract"])
 
 

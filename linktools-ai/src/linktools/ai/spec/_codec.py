@@ -15,28 +15,6 @@ from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, no
 
 SpecT = TypeVar("SpecT")
 _VERSION = 1
-_AGENT_FIELDS = frozenset(
-    {
-        "version",
-        "id",
-        "model",
-        "system_prompt",
-        "instructions",
-        "allow_tools",
-        "allow_skills",
-        "allow_subagents",
-        "allow_capabilities",
-        "usage_limits",
-        "planning",
-        "thinking",
-        "tool_retries",
-        "output_retries",
-        "description",
-        "preload_skills",
-    }
-)
-_SKILL_FIELDS = frozenset({"version", "id", "description", "content"})
-_MCP_FIELDS = frozenset({"version", "id", "command", "args"})
 _USAGE_LIMIT_FIELDS = (
     "model_requests",
     "tool_calls",
@@ -85,8 +63,7 @@ class AgentSpecCodec:
         return payload
 
     def to_wire_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
-        payload = dict(value._extensions)
-        payload.update(self.to_payload(value))
+        payload = self.to_payload(value)
         if value.description is not None:
             payload["description"] = value.description
         return payload
@@ -160,7 +137,6 @@ class AgentSpecCodec:
                 output_retries=output_retries,
                 description=cast("str | None", description),
                 preload_skills=tuple(cast("list[str]", preload_skills)),
-                _extensions=_extensions(raw, _AGENT_FIELDS),
             )
         except AIError as error:
             if error.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_VERSION_UNSUPPORTED}:
@@ -191,9 +167,7 @@ class SkillSpecCodec:
         return payload
 
     def to_wire_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
-        payload = dict(value._extensions)
-        payload.update(self.to_payload(value))
-        return payload
+        return self.to_payload(value)
 
     def from_payload(self, raw: Mapping[str, object]) -> SkillSpec:
         _require_v1(raw)
@@ -211,7 +185,6 @@ class SkillSpecCodec:
                 identity,
                 content,
                 cast("str | None", description),
-                _extensions(raw, _SKILL_FIELDS),
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
@@ -266,7 +239,6 @@ class SkillMarkdownSpecAdapter:
             logical_id,
             value.content,
             value.description,
-            _extensions=value._extensions,
         )
 
     def to_storage(self, logical_id: str, value: SkillSpec) -> SkillSpec:
@@ -276,7 +248,6 @@ class SkillMarkdownSpecAdapter:
             logical_id.rsplit("/", 1)[-1],
             value.content,
             value.description,
-            _extensions=value._extensions,
         )
 
 
@@ -299,9 +270,7 @@ class MCPServerSpecCodec:
         return {"version": _VERSION, "id": value.id, "command": value.command, "args": list(value.args)}
 
     def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
-        payload = dict(value._extensions)
-        payload.update(self.to_payload(value))
-        return payload
+        return self.to_payload(value)
 
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
         _require_v1(raw)
@@ -315,7 +284,7 @@ class MCPServerSpecCodec:
         if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server args must be a string array")
         try:
-            return MCPServerSpec(identity, command, tuple(cast("list[str]", args)), _extensions(raw, _MCP_FIELDS))
+            return MCPServerSpec(identity, command, tuple(cast("list[str]", args)))
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
 
@@ -353,21 +322,6 @@ def _require_version(raw: Mapping[str, object], supported: set[int]) -> int:
 
 def _require_v1(raw: Mapping[str, object]) -> None:
     _require_version(raw, {1})
-
-
-def _extensions(raw: Mapping[str, object], known: frozenset[str]) -> "dict[str, JsonValue]":
-    result: dict[str, JsonValue] = {}
-    for key, value in raw.items():
-        if key in known:
-            continue
-        if not isinstance(key, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            json.dumps(value, allow_nan=False)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        result[key] = cast(JsonValue, value)
-    return result
 
 
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":

@@ -1,5 +1,4 @@
 {
-  "version": 1,
   "agent_spec": {
     "version": 1,
     "id": "parent",
@@ -19,9 +18,7 @@
   "base_model": {
     "model_identity": "openai:gpt-test",
     "provider": "openai",
-    "provider_instance": "openai-public",
-    "settings": {},
-    "version": 1
+    "settings": {}
   },
   "selected": [],
   "subagents": [
@@ -37,6 +34,5 @@
     },
     "required": ["text"],
     "type": "object"
-  },
-  "binding_digest": "5b9028995cb764f7aa0030c137f0f9d8d4db39fce27f438eeaf104d72cd22130"
+  }
 }

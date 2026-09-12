@@ -5,7 +5,7 @@
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import monotonic_ns
@@ -130,7 +130,6 @@ from .state._contracts import (
     RecoveryHandoffPhase,
     RecoveryState,
     RuntimePayloadRef,
-    RuntimeStorageContract,
     RecoveryCheckpoint,
     RecoveryConversationIntent,
     RecoveryTerminalHandoff,
@@ -555,8 +554,6 @@ class _RecoveryCoordinatorPort(Protocol):
 
     def validate_binding(self, execution: ExecutionRecord) -> None: ...
 
-    def _validate_recovery_identity(self, execution: ExecutionRecord) -> None: ...
-
     async def _commit_recovery_required(
         self,
         execution: ExecutionRecord,
@@ -824,7 +821,6 @@ class _RecoveryCoordinator:
             current.status is not ExecutionStatus.STARTED
             or checkpoint.state is not RecoveryCheckpointState.ACTIVE
             or checkpoint.step_run_id != step_run_id
-            or checkpoint.agent_run_sequence != current.agent_run_sequence
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         metadata = requests.metadata
@@ -852,29 +848,6 @@ class _RecoveryCoordinator:
         calls = tuple(calls_list)
         continuation = PendingToolContinuation(
             source_step_run_id=step_run_id,
-            requests_digest=canonical_sha256(
-                {
-                    "version": 1,
-                    "approvals": [
-                        {
-                            "tool_call_id": item.tool_call_id,
-                            "tool_name": item.tool_name,
-                            "arguments_digest": item.arguments_digest,
-                            "metadata": item.metadata,
-                        }
-                        for item in approvals
-                    ],
-                    "calls": [
-                        {
-                            "tool_call_id": item.tool_call_id,
-                            "tool_name": item.tool_name,
-                            "arguments_digest": item.arguments_digest,
-                            "metadata": item.metadata,
-                        }
-                        for item in calls
-                    ],
-                }
-            ),
             approvals=approvals,
             calls=calls,
         )
@@ -1068,7 +1041,6 @@ class _RecoveryCoordinator:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         resume: _DeferredResume | None = None
         if execution.status is ExecutionStatus.RECOVERY_REQUIRED:
-            self._port._validate_recovery_identity(execution)
             if (
                 checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
                 or checkpoint.state
@@ -1109,7 +1081,6 @@ class _RecoveryCoordinator:
                     effects,
                 )
                 return
-        self._port._validate_recovery_identity(execution)
         principal = Principal(
             execution.principal_id,
             execution.tenant_id,
@@ -1296,7 +1267,6 @@ class _RecoveryCoordinator:
             or recovery != checkpoint
             or recovery.state is not RecoveryCheckpointState.WAITING
             or recovery.pending_tools is None
-            or recovery.agent_run_sequence != current.agent_run_sequence
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         deferred_results = DeferredToolResults()
@@ -1476,10 +1446,6 @@ class LocalExecutionBackend:
         memory_store_factory: "Callable[[str, str, str], MemoryStore] | None" = None,
         conversation_durable: bool = False,
         input_materializer: ExecutionInputMaterializer | None = None,
-        storage_contract: RuntimeStorageContract | None = None,
-        storage_contract_factory: (
-            "Callable[[Collection[RuntimeDomain]], RuntimeStorageContract] | None"
-        ) = None,
         subagent_dispatcher: "_SubagentDispatcher | None" = None,
         live_broker: "LiveExecutionEventBroker | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
@@ -1504,8 +1470,6 @@ class LocalExecutionBackend:
         self._memory_store_factory = memory_store_factory
         self._conversation_durable = conversation_durable
         self._input_materializer = input_materializer
-        self._storage_contract = storage_contract
-        self._storage_contract_factory = storage_contract_factory
         self._subagent_dispatcher = subagent_dispatcher
         self._live_broker = live_broker or LiveExecutionEventBroker()
         self._payload_policy = payload_policy or PayloadPolicy()
@@ -1916,7 +1880,6 @@ class LocalExecutionBackend:
                     checkpoint is None
                     or checkpoint.state is not RecoveryCheckpointState.WAITING
                     or checkpoint.pending_tools is None
-                    or checkpoint.agent_run_sequence != current.agent_run_sequence
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (
@@ -2009,17 +1972,11 @@ class LocalExecutionBackend:
         binding = self._catalog.binding(execution.binding_digest)
         if execution.binding != binding.snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        storage_contract = execution.storage_contract
-        if storage_contract is None:
-            storage_contract = self._require_storage_contract(execution.session_id)
-        if storage_contract != self._require_storage_contract(execution.session_id):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         now = datetime.now(timezone.utc)
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
             tenant_id=execution.tenant_id,
             step_run_id=None,
-            agent_run_sequence=execution.agent_run_sequence,
             state=RecoveryCheckpointState.ADMITTED,
             revision=0,
             created_at=now,
@@ -2262,12 +2219,6 @@ class LocalExecutionBackend:
             execution.execution_id,
             execution.binding_digest,
         )
-
-    def _validate_recovery_identity(self, execution: ExecutionRecord) -> None:
-        if execution.storage_contract != self._require_storage_contract(
-            execution.session_id
-        ):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
     async def abort_start(self, execution: ExecutionRecord) -> None:
         current = await self._execution.executions.get(
@@ -2648,7 +2599,6 @@ class LocalExecutionBackend:
             call.tool_call_id,
             call.tool_name,
             arguments_payload,
-            arguments_payload.digest,
             raw_metadata,
         )
 
@@ -2785,24 +2735,6 @@ class LocalExecutionBackend:
 
     async def reconcile(self) -> None:
         await self._recovery_coordinator.reconcile()
-
-    def _require_storage_contract(
-        self,
-        session_id: str | None = None,
-    ) -> RuntimeStorageContract:
-        factory = self._storage_contract_factory
-        if factory is not None:
-            domains = {
-                RuntimeDomain.EXECUTION,
-                RuntimeDomain.RECOVERY,
-            }
-            if session_id is not None:
-                domains.add(RuntimeDomain.CONVERSATION)
-            return factory(tuple(domains))
-        storage_contract = self._storage_contract
-        if storage_contract is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return storage_contract
 
     async def _reconcile_session_recovery(
         self,
@@ -3019,7 +2951,6 @@ class LocalExecutionBackend:
         )
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._validate_recovery_identity(execution)
         if (
             execution.status
             in {
@@ -3158,8 +3089,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         identity = records[0]
         if (
-            identity.runtime_domain is not RuntimeDomain.EXECUTION
-            or identity.resource_kind is not ResourceKind.EXECUTION
+            identity.resource_kind is not ResourceKind.EXECUTION
             or identity.resource_id != execution.execution_id
             or identity.tenant_id != execution.tenant_id
         ):
@@ -3187,8 +3117,7 @@ class LocalExecutionBackend:
         expected_status: IdempotencyStatus,
     ) -> IdempotencyRecord:
         if (
-            identity.runtime_domain is not RuntimeDomain.EXECUTION
-            or identity.resource_kind is not ResourceKind.EXECUTION
+            identity.resource_kind is not ResourceKind.EXECUTION
             or identity.resource_id != execution.execution_id
             or identity.tenant_id != execution.tenant_id
         ):
@@ -3471,7 +3400,6 @@ class LocalExecutionBackend:
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._validate_recovery_identity(current)
         if current.status in {
             ExecutionStatus.SUCCEEDED,
             ExecutionStatus.FAILED,
@@ -3608,7 +3536,6 @@ class LocalExecutionBackend:
             or execution.error_diagnostics != handoff.outcome.error_diagnostics
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._validate_recovery_identity(execution)
         result = await self._execution.executions.get_result(
             checkpoint.execution_id,
             tenant_id=checkpoint.tenant_id,
@@ -3894,7 +3821,6 @@ class LocalExecutionBackend:
             )
             if checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_recovery_identity(current)
             if checkpoint.state is RecoveryCheckpointState.ADMITTED:
                 current, checkpoint = (
                     await self._runtime_commands.commit_agent_attempt_checkpoint(
@@ -3930,7 +3856,6 @@ class LocalExecutionBackend:
             if (
                 current.status is not ExecutionStatus.STARTED
                 or checkpoint.step_run_id is None
-                or checkpoint.agent_run_sequence != current.agent_run_sequence
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             binding = self._catalog.binding(current.binding_digest)
@@ -5319,7 +5244,6 @@ class LocalExecutionBackend:
             )
             if recovery_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_recovery_identity(current)
             if (
                 recovery_checkpoint.handoff_phase is RecoveryHandoffPhase.NONE
                 and self._same_terminal_storage_group(
@@ -5573,7 +5497,6 @@ class LocalExecutionBackend:
             ExecutionStatus.CANCELLED,
         }:
             return current
-        self._validate_recovery_identity(current)
         recovery_run = None
         recovery_snapshot = None
         if run_id is not None and status is not ExecutionStatus.SUCCEEDED:
@@ -5945,7 +5868,6 @@ def _admission_matches(
         existing.execution_id == candidate.execution_id
         and existing.tenant_id == candidate.tenant_id
         and existing.step_run_id is None
-        and existing.agent_run_sequence == candidate.agent_run_sequence
         and existing.state is RecoveryCheckpointState.ADMITTED
         and existing.handoff_phase is RecoveryHandoffPhase.NONE
         and existing.terminal_handoff is None

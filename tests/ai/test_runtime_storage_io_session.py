@@ -23,7 +23,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 pytestmark = pytest.mark.asyncio
 
 
-def _session(session_id: str, now: datetime) -> SessionRecord:
+def _session(
+    session_id: str,
+    now: datetime,
+    *,
+    history_id: str | None = None,
+) -> SessionRecord:
     return SessionRecord(
         session_id=session_id,
         tenant_id="tenant",
@@ -31,13 +36,13 @@ def _session(session_id: str, now: datetime) -> SessionRecord:
         agent_id="agent",
         status=SessionStatus.OPEN,
         revision=0,
-        resource_generation=0,
         cwd=None,
         metadata={},
         created_at=now,
         updated_at=now,
         closed_at=None,
         active_execution_id=None,
+        history_id=history_id,
     )
 
 
@@ -90,7 +95,12 @@ def _parameter_count(parameters: object) -> int:
     return 0
 
 
-async def _build_fork_state(tmp_path: Path, namespace: str) -> tuple[
+async def _build_fork_state(
+    tmp_path: Path,
+    namespace: str,
+    *,
+    source_history_id: str | None = None,
+) -> tuple[
     AsyncEngine,
     RuntimeState,
     SessionRecord,
@@ -101,7 +111,9 @@ async def _build_fork_state(tmp_path: Path, namespace: str) -> tuple[
     state = RuntimeState.sql(engine)
     await state.initialize(namespace=namespace, tenant_id="tenant")
     now = datetime.now(timezone.utc)
-    source = await state.conversation.sessions.create(_session("source", now))
+    source = await state.conversation.sessions.create(
+        _session("source", now, history_id=source_history_id)
+    )
     return engine, state, source, _fork_operation(now)
 
 
@@ -203,15 +215,56 @@ async def test_session_fork_replay_batches_known_record_sql(tmp_path: Path) -> N
         assert replayed is True
 
         record_selects = _record_selects(statements)
-        assert len(record_selects) == 2
+        assert len(record_selects) == 1
         batched = [
             parameters
             for statement, parameters in record_selects
             if " IN " in statement
         ]
         assert len(batched) == 1
-        assert _parameter_count(batched[0]) == 3
+        assert _parameter_count(batched[0]) == 4
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
+        await state.close()
+        await engine.dispose()
+
+
+async def test_session_fork_replay_uses_persisted_source_history_id(
+    tmp_path: Path,
+) -> None:
+    engine, state, source, operation = await _build_fork_state(
+        tmp_path,
+        "io-session-fork-custom-history",
+        source_history_id="custom-source-history",
+    )
+    target = _session("target", operation.created_at)
+    try:
+        created, replayed = await state.conversation.sessions.create_fork_with_operation(
+            source.session_id,
+            target,
+            expected_source_revision=source.revision,
+            operation=operation,
+        )
+        assert replayed is False
+
+        replayed_target, replayed = (
+            await state.conversation.sessions.create_fork_with_operation(
+                source.session_id,
+                target,
+                expected_source_revision=source.revision,
+                operation=operation,
+            )
+        )
+        assert replayed is True
+        assert replayed_target == created
+
+        assert created.history_id is not None
+        child = await state.conversation.histories.get(
+            created.history_id,
+            tenant_id="tenant",
+        )
+        assert child is not None
+        assert child.parent_history_id == "custom-source-history"
+    finally:
         await state.close()
         await engine.dispose()

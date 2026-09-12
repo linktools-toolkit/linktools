@@ -418,7 +418,6 @@ class SessionView:
     agent_id: str
     status: SessionStatus
     revision: int = 0
-    resource_generation: int = 0
     cwd: "str | None" = None
     active_execution_ids: "tuple[str, ...]" = ()
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)

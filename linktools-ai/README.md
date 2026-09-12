@@ -292,7 +292,7 @@ workspace = Workspace.load(
 state = RuntimeState.filesystem("/new/runtime-state")
 ```
 
-`Workspace.root`, Runtime state paths, SQLite paths, and SQL endpoints are deployment locations only. Runtime persistence stores logical Workspace paths and a location-independent storage contract, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore. The logical ObjectStore `store_id` and storage topology must remain unchanged; a separate `Runtime.restore()` migration step is not required.
+`Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore `store_id`, and storage topology are deployment details. Runtime persistence keeps logical Workspace paths and resolves object payloads by durable Runtime domain plus object key/digest/size, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore without freezing the original backend identity. A separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics
 

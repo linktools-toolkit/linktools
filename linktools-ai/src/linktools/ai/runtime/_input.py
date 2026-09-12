@@ -211,7 +211,7 @@ class ExecutionInputMaterializer:
 
         canonical = validate_user_input(value)
         if isinstance(canonical, str):
-            return StoredUserInput(1, _TEXT_CODEC, StoredPayload.inline_text(canonical))
+            return StoredUserInput(_TEXT_CODEC, StoredPayload.inline_text(canonical))
         payload = StoredPayload.inline_json(_encode_user_content(canonical))
         if not payload_fits_inline(payload, self._payload_policy):
             if self._object_store is None or self._object_key_factory is None:
@@ -230,13 +230,13 @@ class ExecutionInputMaterializer:
                 body,
             )
             payload = StoredPayload.object(reference)
-        return StoredUserInput(1, _USER_CONTENT_CODEC, payload)
+        return StoredUserInput(_USER_CONTENT_CODEC, payload)
 
     async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
         from .state._contracts import StoredUserInput
 
-        if not isinstance(value, StoredUserInput) or value.version != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if not isinstance(value, StoredUserInput):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload = value.payload
         if payload.kind == "object":
             if self._object_store is None or payload.ref is None:
@@ -343,19 +343,11 @@ def _json_object_or_none(value: object) -> JsonValue:
 
 
 def _encode_user_content(content: Sequence[UserContent]) -> dict[str, JsonValue]:
-    return {
-        "version": 1,
-        "items": [_encode_user_content_item(item) for item in content],
-    }
+    return {"items": [_encode_user_content_item(item) for item in content]}
 
 
 def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ...]:
-    version = payload.get("version")
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if version != 1:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    if not isinstance(payload.get("items"), list):
+    if set(payload) != {"items"} or not isinstance(payload.get("items"), list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         content = tuple(

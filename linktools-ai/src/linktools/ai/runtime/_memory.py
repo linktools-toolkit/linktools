@@ -136,9 +136,6 @@ class RuntimeMemoryStore:
 
         current = await self._record(logical_path)
         _check_version(current, expected_version)
-        expected_storage_version = (
-            None if current is None else _record_storage_version(current)
-        )
         version = _version_token(
             self._namespace,
             self._tenant_id,
@@ -184,7 +181,6 @@ class RuntimeMemoryStore:
             stored, replayed = await self._state.records.apply_write(
                 next_record,
                 expected_revision=None if current is None else current.revision,
-                expected_storage_version=expected_storage_version,
                 operation=_operation_input(
                     operation,
                     self._memory_scope_digest,
@@ -239,9 +235,6 @@ class RuntimeMemoryStore:
                 _memory_id(self._memory_scope_digest, logical_path),
                 tenant_id=self._tenant_id,
                 expected_revision=0 if current is None else current.revision,
-                expected_storage_version=(
-                    None if current is None else _record_storage_version(current)
-                ),
                 operation=_operation_input(
                     operation,
                     self._memory_scope_digest,
@@ -481,12 +474,6 @@ def _record_version(record: MemoryRecord) -> str | None:
     )
 
 
-def _record_storage_version(record: MemoryRecord) -> int:
-    value = record.metadata.get("storage_version")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value
-
 
 def _validate_record(
     record: MemoryRecord,
@@ -502,7 +489,7 @@ def _validate_record(
         or isinstance(record.revision, bool)
         or record.revision < 1
         or _record_version(record) is None
-        or _record_storage_version(record) != record.revision
+        or "storage_version" in record.metadata
         or record.metadata.get("path") != logical_path
         or not isinstance(record.metadata.get("operation_id"), str)
     ):
