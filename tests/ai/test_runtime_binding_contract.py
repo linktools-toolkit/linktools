@@ -2,13 +2,21 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for durable execution binding invariants."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from linktools.ai.agent import (
+    AgentBinding,
+    AgentBindingSnapshot,
+    AgentCatalog,
+    AgentCompiler,
+)
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
@@ -230,6 +238,30 @@ def test_restored_binding_uses_only_snapshot_semantics() -> None:
     assert restored.snapshot == current.snapshot
     assert restored.output_binding.schema_definition == current.output_binding.schema_definition
     assert restored.output_type is not _SchemaTwinA
+
+
+def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
+    compiler = _compiler()
+    binding = compiler.bind(compiler.compile(AgentSpec("agent")))
+    mismatched_definition = replace(
+        binding.definition,
+        selected_tools=(
+            SimpleNamespace(
+                kind="tool",
+                id="unexpected-tool",
+                semantic_contract={"version": 1},
+            ),
+        ),
+    )
+
+    with pytest.raises(AIError) as raised:
+        AgentBinding(
+            binding.digest,
+            mismatched_definition,
+            binding.output_binding,
+            binding.snapshot,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_execution_binding_digest_is_derived_from_snapshot() -> None:
