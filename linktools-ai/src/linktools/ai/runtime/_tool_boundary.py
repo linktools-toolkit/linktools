@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
@@ -24,14 +24,12 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
-from ..capability import AgentContext
+from ..capability import AgentContext, workspace_tool_path_fields_from_metadata
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..workspace import SandboxSession, WorkspaceToolPermissionPolicy
 from ._tool import ToolOperationBridge
 from ._tool_metrics import _ToolMetricContext
-
-_WORKSPACE_PATH_FIELDS_KEY = "linktools.ai.workspace_path_fields"
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -189,15 +187,13 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         descriptor = self._descriptors.get(name, self._default_descriptor)
         if descriptor is None or tool.toolset is not self:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        path_fields = descriptor.workspace_path_fields
         if descriptor.tool_class.startswith("filesystem"):
-            path_fields = (tool.tool_def.metadata or {}).get(_WORKSPACE_PATH_FIELDS_KEY)
-            if isinstance(path_fields, (list, tuple)):
-                descriptor = replace(
-                    descriptor,
-                    workspace_path_fields=tuple(path_fields),
-                )
+            path_fields = workspace_tool_path_fields_from_metadata(tool.tool_def.metadata)
+            if not path_fields:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
-        final_args = await self._canonicalize_args(tool_args, descriptor)
+        final_args = await self._canonicalize_args(tool_args, path_fields)
         call_id = ctx.tool_call_id
         if not isinstance(call_id, str) or not call_id:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -207,7 +203,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
                 tool_name=name,
                 tool_call_id=call_id,
                 arguments=final_args,
-                path_fields=descriptor.workspace_path_fields,
+                path_fields=path_fields,
             )
         await self._authorize(
             name,
@@ -364,15 +360,15 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
     async def _canonicalize_args(
         self,
         args: dict[str, Any],
-        descriptor: ManagedToolDescriptor,
+        path_fields: tuple[str, ...],
     ) -> dict[str, Any]:
-        if not descriptor.workspace_path_fields:
+        if not path_fields:
             return dict(args)
         session = self._sandbox_session
         if session is None:
             raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
         result = dict(args)
-        for field in descriptor.workspace_path_fields:
+        for field in path_fields:
             if field not in result:
                 continue
             value = result[field]
