@@ -187,13 +187,11 @@ class RuntimeCompaction(AbstractCapability[None]):
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
         source = tuple(request_context.messages)
-        projected_context = request_context
         binary_projected = project_transient_binary_content(source)
-        if binary_projected != source:
-            projected_context = replace(
-                projected_context,
-                messages=list(binary_projected),
-            )
+        projected_context = replace(
+            request_context,
+            messages=list(binary_projected),
+        )
         _validate_pending_binary_content(ctx, projected_context.messages)
         if self._target_tokens is None:
             projected_context = await self._deduplicate.before_model_request(
