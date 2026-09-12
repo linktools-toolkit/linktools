@@ -22,6 +22,26 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 
+async def _provider_context(
+    capability: RuntimeCompaction,
+    ctx: RunContext[object],
+    request_context: ModelRequestContext,
+) -> ModelRequestContext:
+    captured: list[ModelRequestContext] = []
+
+    async def handler(current: ModelRequestContext) -> ModelResponse:
+        captured.append(current)
+        return ModelResponse(parts=[TextPart("done")])
+
+    await capability.wrap_model_request(
+        ctx,
+        request_context=request_context,
+        handler=handler,
+    )
+    assert len(captured) == 1
+    return captured[0]
+
+
 @pytest.mark.asyncio
 async def test_harness_summary_request_uses_runtime_journal_and_observer() -> None:
     model = TestModel(custom_output_text="summary")
@@ -41,7 +61,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         )
     request_context = ModelRequestContext(
         model=model,
-        messages=messages,
+        messages=list(messages),
         model_settings=None,
         model_request_parameters=ModelRequestParameters(),
     )
@@ -84,7 +104,11 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
         observer=observer,  # type: ignore[arg-type]
         projection_sink=projection_sink,
     )
-    await capability.before_model_request(ctx, request_context)
+    provider_context = await _provider_context(
+        capability,
+        ctx,  # type: ignore[arg-type]
+        request_context,
+    )
 
     assert [phase for phase, _, _ in observed] == ["started", "completed"]
     assert all(fact.purpose == "compaction" for _, fact, _ in observed)
@@ -92,7 +116,8 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
     assert projections
     assert projections[-1][0] == tuple(messages)
     assert projections[-1][1] is not None
-    assert len(request_context.messages) < len(messages)
+    assert len(provider_context.messages) < len(messages)
+    assert request_context.messages == messages
     with pytest.raises(RuntimeError, match="missing"):
         journal.current(observed[-1][1].request_sequence)
 
@@ -190,11 +215,16 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
         model_request_parameters=ModelRequestParameters(),
     )
 
-    await RuntimeCompaction(
-        1_000_000,
-        workspace_read_available=True,
-    ).before_model_request(ctx, request_context)
+    provider_context = await _provider_context(
+        RuntimeCompaction(
+            1_000_000,
+            workspace_read_available=True,
+        ),
+        ctx,  # type: ignore[arg-type]
+        request_context,
+    )
 
+    assert provider_context.messages == messages
     assert request_context.messages == messages
 
 
@@ -215,10 +245,15 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
         model_request_parameters=ModelRequestParameters(),
     )
 
-    await RuntimeCompaction(
-        None,
-        workspace_read_available=True,
-    ).before_model_request(ctx, request_context)
+    provider_context = await _provider_context(
+        RuntimeCompaction(
+            None,
+            workspace_read_available=True,
+        ),
+        ctx,  # type: ignore[arg-type]
+        request_context,
+    )
 
-    assert request_context.messages != messages
-    assert "[superseded file read]" in str(request_context.messages)
+    assert provider_context.messages != messages
+    assert "[superseded file read]" in str(provider_context.messages)
+    assert request_context.messages == messages
