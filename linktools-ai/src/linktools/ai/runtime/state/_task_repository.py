@@ -343,6 +343,12 @@ def _reconciled_task_nodes(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for node_id in order:
         node = values[node_id]
+        if node.status is TaskStatus.RUNNING and (
+            node.owner is None
+            or node.fence < 1
+            or node.lease_expires_at is None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
             now is not None
             and node.status is TaskStatus.RUNNING
@@ -1847,6 +1853,24 @@ class TaskRepositoryImpl(RepositoryBase):
                 value.node_id: value for value in event_state.node_states
             }
             now = await transaction.now()
+            limits = await self._graph_limits_in_transaction(transaction, graph_id)
+            active = 0
+            for current in event_state.node_states:
+                if current.status is TaskStatus.WAITING:
+                    active += 1
+                    continue
+                if current.status is not TaskStatus.RUNNING:
+                    continue
+                if (
+                    current.owner is None
+                    or current.fence < 1
+                    or current.lease_expires_at is None
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if current.lease_expires_at > now:
+                    active += 1
+            if active >= limits.max_concurrency:
+                raise AIError(ErrorCode.TASK_NOT_READY)
             expired = node.lease_expires_at is not None and node.lease_expires_at <= now
             if (
                 node.status is TaskStatus.RUNNING
