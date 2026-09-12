@@ -118,7 +118,8 @@ async def test_runtime_plan_persists_only_the_current_payload_shape() -> None:
         )
         assert record is not None
         assert record.data == {
-            "items": [{"content": "ship it", "status": "pending"}]
+            "version": 1,
+            "items": [{"content": "ship it", "status": "pending"}],
         }
         assert _decode_payload(record) == ([RuntimePlanItem("ship it")], 1)
 
@@ -127,6 +128,17 @@ async def test_runtime_plan_persists_only_the_current_payload_shape() -> None:
             _decode_payload(record)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         record.data.pop("future")
+
+        record.data["version"] = True
+        with pytest.raises(AIError) as raised:
+            _decode_payload(record)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        record.data["version"] = 2
+        with pytest.raises(AIError) as raised:
+            _decode_payload(record)
+        assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+        record.data["version"] = 1
+
         record.data["items"][0]["future"] = True
         with pytest.raises(AIError) as raised:
             _decode_payload(record)
