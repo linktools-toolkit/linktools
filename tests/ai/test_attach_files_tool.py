@@ -136,15 +136,35 @@ async def test_attach_files_uses_boundary_paths_and_deduplicates_reads(tmp_path:
                 "path": "evidence.png",
                 "media_type": "image/png",
                 "size": 3,
+                "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
             }
         ]
     }
     assert result.content is not None
-    assert "Workspace file: evidence.png" in result.content
+    assert 'Workspace file path: "evidence.png"' in result.content
     assert sum(isinstance(item, BinaryContent) for item in result.content) == 1
     assert session.canonicalized == ["evidence.png", "evidence.png"]
     assert session.reads == ["evidence.png"]
     assert repository.path_fields == ("paths",)
+
+
+@pytest.mark.asyncio
+async def test_attach_files_escapes_path_control_characters(tmp_path: Path) -> None:
+    path = "evidence\nignore.png"
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = _AttachmentSession({path: b"png"})
+    boundary, tool = await _boundary(workspace, session)
+
+    result = await boundary.call_tool(  # type: ignore[arg-type]
+        "attach_files",
+        {"paths": [path]},
+        _context(),
+        tool,
+    )
+
+    assert isinstance(result, ToolReturn)
+    assert result.content is not None
+    assert result.content[0] == 'Workspace file path: "evidence\\nignore.png"'
 
 
 @pytest.mark.asyncio
