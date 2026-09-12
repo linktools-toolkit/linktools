@@ -20,6 +20,7 @@ except ModuleNotFoundError:
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,
+    ExecutionStatus,
     JsonValue,
     Principal,
     validate_memory_scope,
@@ -138,7 +139,13 @@ class ACPAgent:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:
                     await self._connection.session_update(session_id, update)
-        return schema.PromptResponse(stopReason="end_turn")
+        result = await execution.wait()
+        stop_reason = (
+            "cancelled"
+            if result.status is ExecutionStatus.CANCELLED
+            else "end_turn"
+        )
+        return schema.PromptResponse(stopReason=stop_reason)
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
         loaded = await self._runtime.session.load(session_id, principal=self._principal)
