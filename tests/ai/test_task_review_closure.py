@@ -343,7 +343,6 @@ async def test_detached_handoff_unknown_surfaces_background_failure() -> None:
             Control(),
             "execution",
             key=("tenant", "graph", "node"),
-            principal=trusted_workspace_principal("tenant"),
         )
     )
     await started.wait()
@@ -377,7 +376,6 @@ async def test_handoff_after_launch_ignores_expected_ownership_loss() -> None:
         launch_task,
         ("tenant", "graph", "node"),
         Control(),
-        trusted_workspace_principal("tenant"),
     )
     assert handler.background_failure is None
 
