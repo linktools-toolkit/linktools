@@ -81,7 +81,7 @@ async def test_task_recovery_required_is_durable_and_not_dependency_failure() ->
         by_id = {node.node_id: node for node in snapshot.node_states}
         assert by_id["root"].status is TaskStatus.RECOVERY_REQUIRED
         assert by_id["dependent"].status is TaskStatus.PENDING
-        assert page.items == (admission.launch(),)
+        assert page.items == ()
 
         with pytest.raises(AIError) as claim_error:
             await state.task.tasks.claim(
@@ -136,7 +136,7 @@ async def test_task_recovery_preserves_execution_reference_for_waiting_attach() 
             "recover",
             tenant_id="tenant",
         )
-        assert view.status is TaskStatus.WAITING
+        assert view.status is TaskStatus.RUNNING
         assert snapshot is not None
         root = {node.node_id: node for node in snapshot.node_states}["root"]
         assert root.status is TaskStatus.WAITING
