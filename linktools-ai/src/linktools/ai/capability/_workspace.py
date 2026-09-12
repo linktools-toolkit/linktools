@@ -12,7 +12,7 @@ from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.messages import BinaryContent, ToolReturn
+from pydantic_ai.messages import BinaryContent, ToolReturn, UserContent
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..errors import AIError, ErrorCode
@@ -230,11 +230,17 @@ class _WorkspaceToolSurface:
         session = self._require_session()
         total_bytes = 0
         metadata: list[dict[str, object]] = []
-        content: list[object] = []
+        content: list[UserContent] = []
         for path in unique_paths:
             media_type, _ = self._mime.guess_type(path, strict=False)
             if not media_type:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={
+                        "field": "paths",
+                        "reason": "media_type_unknown",
+                    },
+                )
             remaining = self._policy.max_binary_input_bytes - total_bytes
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -261,7 +267,7 @@ class _WorkspaceToolSurface:
             )
         return ToolReturn(
             return_value={"files": metadata},
-            content=cast(Any, content),
+            content=content,
         )
 
     async def read_file(
@@ -365,11 +371,11 @@ class _WorkspaceToolSurface:
 
         Args:
             pattern: Regex pattern to search for.
-            path: Directory to search in, relative to root.
-            include_glob: If provided, only search files matching this glob.
+            path: Directory to search in, relative to the root directory.
+            include_glob: If provided, only search files matching this glob (e.g. '*.py').
 
         Returns:
-            Matching lines formatted as file:line_number:text.
+            str: Matching lines formatted as file:line_number:text.
         """
         return await self._call(
             self._require_session().search_files(
@@ -383,8 +389,9 @@ class _WorkspaceToolSurface:
         """Find files by glob pattern (name matching, not content search).
 
         Args:
-            pattern: Glob pattern to match, relative to `path`.
-            path: Directory to search in, relative to root.
+            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
+                '**/*.json'). Absolute patterns are rejected.
+            path: Directory to search in, relative to the root directory.
 
         Returns:
             Newline-separated list of matching file paths relative to root.
