@@ -22,6 +22,7 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 from ..errors import AIError, ErrorCode
+from ._message import project_transient_binary_content
 from ._plan import PlanItem, RuntimePlanStore
 from .state._step_contracts import (
     ContinuableSnapshot,
@@ -351,16 +352,25 @@ class HarnessStepStoreAdapter:
         self,
         messages: Sequence[ModelMessage],
     ) -> list[ModelMessage] | None:
+        message_values = tuple(messages)
         source = self._projection_source
         projected = self._projection_messages
-        if projected is None:
-            return None
-        message_values = tuple(messages)
-        if _message_prefix(message_values, projected):
-            return list(message_values)
-        if source is None or not _message_prefix(message_values, source):
-            return None
-        return [*projected, *message_values[len(source) :]]
+        context_values = message_values
+        has_projection = False
+        if projected is not None:
+            if _message_prefix(message_values, projected):
+                has_projection = True
+            elif source is not None and _message_prefix(message_values, source):
+                context_values = (
+                    *projected,
+                    *message_values[len(source) :],
+                )
+                has_projection = True
+        binary_projected = project_transient_binary_content(context_values)
+        if binary_projected != context_values:
+            context_values = binary_projected
+            has_projection = True
+        return list(context_values) if has_projection else None
 
 
 def _harness_run(record: RunRecord) -> HarnessRunRecord:
