@@ -200,6 +200,7 @@ class AgentBinding:
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
             or dict(self.definition.model.semantic_payload)
             != dict(self.snapshot.base_model)
+            or _definition_selected_pins(self.definition) != self.snapshot.selected
             or self.definition.selected_subagents != self.snapshot.subagent_ids
             or self.output_binding.mode != self.snapshot.output_mode
             or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
@@ -213,6 +214,33 @@ class AgentBinding:
     @property
     def output_fingerprint(self) -> str:
         return self.output_binding.fingerprint
+
+
+def _definition_selected_pins(
+    definition: "AgentDefinition",
+) -> "tuple[SemanticPin, ...] | None":
+    candidates = (
+        *sorted(
+            (
+                *definition.selected_tools,
+                *definition.selected_skills,
+                *definition.selected_mcp,
+            ),
+            key=lambda item: (item.kind, item.id),
+        ),
+        *definition.selected_capabilities,
+    )
+    try:
+        return tuple(
+            SemanticPin(
+                cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
+                candidate.id,
+                candidate.semantic_contract,
+            )
+            for candidate in candidates
+        )
+    except (AIError, AttributeError, TypeError, ValueError):
+        return None
 
 
 def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
