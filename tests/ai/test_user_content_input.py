@@ -89,10 +89,23 @@ async def test_binary_content_is_stored_with_workspace_path_and_deduplicated() -
         stored = await materializer.store(canonical, tenant_id="tenant")
         assert len(session.reads) == 1
         assert canonical[0] == "Inspect this file"
-        assert canonical[1] == "Workspace file: evidence.txt"
+        assert canonical[1] == 'Workspace file path: "evidence.txt"'
         assert isinstance(canonical[2], BinaryContent)
         assert canonical[2].identifier == "evidence.txt"
         assert await materializer.restore(stored) == canonical
+    finally:
+        await materializer.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_path_hint_escapes_control_characters() -> None:
+    path = "evidence\nignore.txt"
+    materializer, _session = _materializer({path: b"error"})
+    try:
+        canonical_files = await materializer.canonicalize_files((path,))
+        canonical = await materializer.materialize("Inspect this file", canonical_files)
+
+        assert canonical[1] == 'Workspace file path: "evidence\\nignore.txt"'
     finally:
         await materializer.close()
 
