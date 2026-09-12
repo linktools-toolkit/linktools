@@ -448,7 +448,7 @@ class TranscriptRepository:
             expected_digest=hashlib.sha256(value).hexdigest(),
         )
         return StoredPayload.object(
-            ObjectRef(self._object_store.store_id, key, stat.digest, stat.size)
+            ObjectRef("runtime", key, stat.digest, stat.size)
         )
 
     async def append_chunks(
@@ -630,7 +630,7 @@ class TranscriptRepository:
                     RuntimePayloadRef(
                         StoredPayload.object(
                             ObjectRef(
-                                self._object_store.store_id,
+                                "runtime",
                                 stat.key,
                                 stat.digest,
                                 stat.size,
@@ -1398,8 +1398,6 @@ class TranscriptRepository:
             return value
         if payload.ref is None or self._object_store is None:
             raise ValueError("object transcript payload has no reader")
-        if payload.ref.store_id != self._object_store.store_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         data = bytearray()
         async for chunk in self._object_store.open(payload.ref.key):
             data.extend(chunk)

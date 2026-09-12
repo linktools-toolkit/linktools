@@ -110,10 +110,7 @@ class _RuntimeObjectRouter:
         self, domain: RuntimeDomain, reference: ObjectRef
     ) -> ObjectStore:
         """Resolve an object by its durable Runtime domain."""
-        store = self.object_store(domain)
-        if reference.store_id != store.store_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        return store
+        return self.object_store(domain)
 
     def working_object_store(
         self, domain: RuntimeDomain, *, owner_scope: str
