@@ -3,16 +3,25 @@
 """Execution stream consumers must honor the public string event contract."""
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.acp import _acp_update
+from linktools.ai.acp import ACPAgent, _acp_update
 from linktools.ai.core import (
     ExecutionDeltaType,
     ExecutionEventType,
     ExecutionLineageKind,
+    ExecutionStatus,
+    Principal,
+    UsageMetrics,
 )
-from linktools.ai.runtime import ExecutionStreamEvent, ExecutionTreeEvent
+from linktools.ai.errors import ErrorCode
+from linktools.ai.runtime import (
+    ExecutionResult,
+    ExecutionStreamEvent,
+    ExecutionTreeEvent,
+)
 from linktools.cli import CommandError
 from linktools.commands.ai.run import _emit_result
 
@@ -192,6 +201,10 @@ class _ACPSchema:
     def ToolCallProgress(**kwargs: object) -> dict[str, object]:
         return {"kind": "tool-progress", **kwargs}
 
+    @staticmethod
+    def PromptResponse(**kwargs: object) -> dict[str, object]:
+        return kwargs
+
 
 @pytest.mark.parametrize(
     ("event_type", "payload", "expected_kind"),
@@ -239,3 +252,108 @@ def test_acp_ignores_unknown_additive_stream_event() -> None:
         "FUTURE_EXECUTION_EVENT",
         {},
     ) is None
+
+
+class _ACPExecution:
+    execution_id = "execution"
+
+    def __init__(self, result: ExecutionResult, event_type: str) -> None:
+        self._result = result
+        self._event_type = event_type
+
+    def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
+        async def values() -> AsyncIterator[ExecutionTreeEvent]:
+            yield _tree_event(self._event_type, {}, sequence=1)
+
+        return values()
+
+    async def wait(self) -> ExecutionResult:
+        return self._result
+
+
+class _ACPAgentRuntime:
+    def __init__(self, execution: _ACPExecution) -> None:
+        self._execution = execution
+        self.session = SimpleNamespace(get=self._get_session)
+
+    async def _get_session(self, session_id: str, *, principal: Principal) -> object:
+        del session_id, principal
+        return SimpleNamespace(agent_id="agent")
+
+    def agent(self, agent_id: str) -> object:
+        assert agent_id == "agent"
+        execution = self._execution
+
+        class BoundAgent:
+            async def start(
+                self,
+                prompt: str,
+                *,
+                principal: Principal,
+                session_id: str,
+                memory_scope: str,
+            ) -> _ACPExecution:
+                del prompt, principal, session_id, memory_scope
+                return execution
+
+        return BoundAgent()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "event_type", "expected_stop_reason"),
+    (
+        (
+            ExecutionStatus.SUCCEEDED,
+            ExecutionEventType.EXECUTION_SUCCEEDED.value,
+            "end_turn",
+        ),
+        (
+            ExecutionStatus.CANCELLED,
+            ExecutionEventType.EXECUTION_CANCELLED.value,
+            "cancelled",
+        ),
+    ),
+)
+async def test_acp_prompt_uses_authoritative_terminal_stop_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    status: ExecutionStatus,
+    event_type: str,
+    expected_stop_reason: str,
+) -> None:
+    if status is ExecutionStatus.SUCCEEDED:
+        result = ExecutionResult(
+            "execution",
+            status,
+            {"text": "done"},
+            "a" * 64,
+            UsageMetrics(),
+        )
+    else:
+        result = ExecutionResult(
+            "execution",
+            status,
+            None,
+            None,
+            UsageMetrics(),
+            ErrorCode.EXECUTION_CANCELLED.value,
+            {},
+        )
+    runtime = _ACPAgentRuntime(_ACPExecution(result, event_type))
+    agent = ACPAgent(
+        runtime,  # type: ignore[arg-type]
+        principal=Principal("principal", "tenant", "service"),
+        memory_scope="memory",
+    )
+    agent._initialized = True
+    monkeypatch.setattr(
+        "linktools.ai.acp._require_acp",
+        lambda: (SimpleNamespace(), _ACPSchema),
+    )
+
+    response = await agent.prompt(
+        "session",
+        [SimpleNamespace(text="prompt")],  # type: ignore[list-item]
+    )
+
+    assert response["stopReason"] == expected_stop_reason
