@@ -1,4 +1,10 @@
 {
+  "attach_files": {
+    "description": "<summary>Attach Workspace files to the next model request.</summary>\n<returns>\n<description>Lightweight file metadata plus the file content for the next model request.</description>\n</returns>",
+    "metadata": {"linktools.ai.workspace_tool_class": "filesystem.read", "linktools.ai.workspace_path_fields": ["paths"]},
+    "parameters": {"additionalProperties": false, "properties": {"paths": {"description": "File paths relative to the root directory.", "items": {"type": "string"}, "type": "array"}}, "required": ["paths"], "type": "object"},
+    "return_schema": {}, "strict": null, "version": 1
+  },
   "check_command": {
     "description": "<summary>Check the status and recent output of a background command.</summary>\n<returns>\n<description>Status and recent output of the background command.</description>\n</returns>",
     "metadata": {"linktools.ai.workspace_tool_class": "shell"},

@@ -75,6 +75,7 @@ from ..capability import (
     SKILL_TOOL_NAMES,
     SkillSourceRegistry,
     SubagentDelegate,
+    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
     workspace_capabilities,
@@ -811,17 +812,7 @@ async def _materialize_agent(
         context_target_tokens=scope.context_target_tokens,
         workspace_read_available=(
             scope.sandbox_session is not None
-            and any(
-                name
-                in {
-                    "file_info",
-                    "find_files",
-                    "list_directory",
-                    "read_file",
-                    "search_files",
-                }
-                for name in workspace_names
-            )
+            and any(name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES for name in workspace_names)
         ),
         parent_step_run_id=scope.parent_step_run_id,
         plan_store_resolver=scope.plan_store_resolver,
@@ -901,13 +892,7 @@ def _workspace_descriptors(
         if name in WORKSPACE_FILESYSTEM_TOOL_NAMES:
             tool_class = (
                 "filesystem.read"
-                if name in {
-                    "file_info",
-                    "find_files",
-                    "list_directory",
-                    "read_file",
-                    "search_files",
-                }
+                if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
                 else "filesystem.write"
             )
             effect = "none" if tool_class == "filesystem.read" else "non_replay_safe"
@@ -972,13 +957,7 @@ def _plan_mode_prepare(
                     selected.append(tool_def)
                 continue
             if tool_def.name in WORKSPACE_FILESYSTEM_TOOL_NAMES:
-                if tool_def.name in {
-                    "file_info",
-                    "find_files",
-                    "list_directory",
-                    "read_file",
-                    "search_files",
-                }:
+                if tool_def.name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES:
                     selected.append(tool_def)
                 continue
             if tool_def.name == "check_command":

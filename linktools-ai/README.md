@@ -248,7 +248,9 @@ result = await agent.run(
 )
 ```
 
-The Sandbox canonicalizes each logical path before reading it. The first model request receives the files as `BinaryContent`; each distinct logical file is read at most once, and the captured bytes are recovered from Runtime state rather than the Workspace path. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same `files=` execution input.
+The Sandbox canonicalizes and deduplicates logical paths before reading them. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
+
+If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, reads the current Workspace contents, and sends those files only to the next model request. A later complete model response consumes them under the same transient rule. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same explicit `files=` execution input.
 
 ## 7. Runtime state
 
