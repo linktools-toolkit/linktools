@@ -176,23 +176,23 @@ async def test_cli_stream_reads_string_terminal_failure(
 class _ACPSchema:
     @staticmethod
     def TextContentBlock(**kwargs: object) -> dict[str, object]:
-        return {"kind": "content", **kwargs}
+        return {"schema_type": "content", **kwargs}
 
     @staticmethod
     def AgentMessageChunk(**kwargs: object) -> dict[str, object]:
-        return {"kind": "message", **kwargs}
+        return {"schema_type": "message", **kwargs}
 
     @staticmethod
     def AgentThoughtChunk(**kwargs: object) -> dict[str, object]:
-        return {"kind": "thought", **kwargs}
+        return {"schema_type": "thought", **kwargs}
 
     @staticmethod
     def ToolCallStart(**kwargs: object) -> dict[str, object]:
-        return {"kind": "tool-start", **kwargs}
+        return {"schema_type": "tool-start", **kwargs}
 
     @staticmethod
     def ToolCallProgress(**kwargs: object) -> dict[str, object]:
-        return {"kind": "tool-progress", **kwargs}
+        return {"schema_type": "tool-progress", **kwargs}
 
     @staticmethod
     def PromptResponse(**kwargs: object) -> dict[str, object]:
@@ -236,7 +236,7 @@ def test_acp_maps_string_stream_event_types(
     )
 
     assert isinstance(update, dict)
-    assert update["kind"] == expected_kind
+    assert update["schema_type"] == expected_kind
 
 
 def test_acp_ignores_unknown_additive_stream_event() -> None:
