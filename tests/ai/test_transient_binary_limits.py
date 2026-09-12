@@ -5,7 +5,7 @@
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, UserPromptPart
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -61,12 +61,20 @@ def _contexts() -> tuple[RunContext[AgentContext[None]], ModelRequestContext]:
     return context, request_context
 
 
+async def _unexpected_handler(_request_context: ModelRequestContext) -> ModelResponse:
+    raise AssertionError("provider handler must not run for an invalid model request")
+
+
 @pytest.mark.asyncio
 async def test_pending_binary_limit_applies_to_combined_model_context() -> None:
     context, request_context = _contexts()
 
     with pytest.raises(AIError) as raised:
-        await RuntimeCompaction(None).before_model_request(context, request_context)
+        await RuntimeCompaction(None).wrap_model_request(
+            context,
+            request_context=request_context,
+            handler=_unexpected_handler,
+        )
 
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
@@ -83,6 +91,10 @@ async def test_pending_binary_limit_fails_before_compaction(
     monkeypatch.setattr(TieredCompaction, "before_model_request", unexpected_compaction)
 
     with pytest.raises(AIError) as raised:
-        await RuntimeCompaction(1).before_model_request(context, request_context)
+        await RuntimeCompaction(1).wrap_model_request(
+            context,
+            request_context=request_context,
+            handler=_unexpected_handler,
+        )
 
     assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
