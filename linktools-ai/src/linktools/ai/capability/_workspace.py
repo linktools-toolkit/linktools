@@ -4,7 +4,6 @@
 
 import asyncio
 import hashlib
-import json
 import mimetypes
 from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
@@ -258,13 +257,10 @@ class _WorkspaceToolSurface:
                     "sha256": hashlib.sha256(body).hexdigest(),
                 }
             )
-            content.extend(
-                (
-                    f"Workspace file path: {json.dumps(path)}",
-                    BinaryContent(
-                        data=body,
-                        media_type=media_type,
-                    ),
+            content.append(
+                BinaryContent(
+                    data=body,
+                    media_type=media_type,
                 )
             )
         return ToolReturn(
