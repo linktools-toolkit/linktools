@@ -191,6 +191,7 @@ class RuntimeCompaction(AbstractCapability[None]):
                 request_context,
                 messages=list(binary_projected),
             )
+        _validate_pending_binary_content(ctx, request_context.messages)
         if self._target_tokens is None:
             request_context = await self._deduplicate.before_model_request(
                 ctx,
@@ -226,7 +227,6 @@ class RuntimeCompaction(AbstractCapability[None]):
                 request_context,
             )
         projected = tuple(request_context.messages)
-        _validate_pending_binary_content(ctx, projected)
         if self._projection_sink is not None:
             self._projection_sink(
                 source,
