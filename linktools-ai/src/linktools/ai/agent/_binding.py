@@ -76,7 +76,7 @@ class SemanticPin:
 
     @classmethod
     def from_payload(cls, value: object) -> "SemanticPin":
-        if not isinstance(value, Mapping) or set(value) != _PIN_FIELDS:
+        if not isinstance(value, Mapping) or not _PIN_FIELDS.issubset(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         kind = value["kind"]
         identity = value["id"]
@@ -155,7 +155,7 @@ class AgentBindingSnapshot:
 
     @classmethod
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
-        if not isinstance(value, Mapping) or set(value) != _BINDING_FIELDS:
+        if not isinstance(value, Mapping) or not _BINDING_FIELDS.issubset(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         selected = value["selected"]
         subagents = value["subagents"]
@@ -218,7 +218,7 @@ class AgentBinding:
 
 def _definition_selected_pins(
     definition: "AgentDefinition",
-) -> "tuple[SemanticPin, ...] | None":
+) -> "tuple[SemanticPin, ...]":
     candidates = (
         *sorted(
             (
@@ -230,17 +230,14 @@ def _definition_selected_pins(
         ),
         *definition.selected_capabilities,
     )
-    try:
-        return tuple(
-            SemanticPin(
-                cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
-                candidate.id,
-                candidate.semantic_contract,
-            )
-            for candidate in candidates
+    return tuple(
+        SemanticPin(
+            cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
+            candidate.id,
+            candidate.semantic_contract,
         )
-    except (AIError, AttributeError, TypeError, ValueError):
-        return None
+        for candidate in candidates
+    )
 
 
 def _normalize_mapping(value: object) -> "dict[str, JsonValue]":
