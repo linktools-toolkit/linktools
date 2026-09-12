@@ -3,12 +3,10 @@
 """Immutable declaration contracts for Agent, Skill, and MCP specifications."""
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from typing import Literal, cast
+from dataclasses import dataclass
+from typing import Literal
 
 from ..core import (
-    ImmutableJsonMapping,
-    JsonValue,
     ThinkingEffort,
     ThinkingValue,
     normalize_thinking,
@@ -105,7 +103,6 @@ class AgentSpec:
     output_retries: int = 3
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()
-    _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str):
@@ -156,20 +153,6 @@ class AgentSpec:
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                 "preload_skills must be selected by allow_skills",
             )
-        try:
-            extensions = ImmutableJsonMapping(self._extensions)
-        except (TypeError, ValueError) as error:
-            raise TypeError("agent extensions must be JSON values") from error
-        if any(
-            key in extensions
-            for key in (
-                "allow_capabilities",
-                "tool_retries",
-                "output_retries",
-                "preload_skills",
-            )
-        ):
-            raise ValueError("agent extensions contain a reserved field")
         object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "allow_tools", canonical_selectors(self.allow_tools, field_name="allow_tools", mcp=True))
         object.__setattr__(self, "allow_skills", allow_skills)
@@ -177,7 +160,6 @@ class AgentSpec:
         object.__setattr__(self, "allow_capabilities", allow_capabilities)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "preload_skills", preload_skills)
-        object.__setattr__(self, "_extensions", extensions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,7 +167,6 @@ class SkillSpec:
     id: str
     content: str
     description: "str | None" = None
-    _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -196,7 +177,6 @@ class SkillSpec:
             not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
         ):
             raise ValueError("skill description must contain 1..1024 characters")
-        object.__setattr__(self, "_extensions", ImmutableJsonMapping(self._extensions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,12 +186,6 @@ class SubagentRef:
     kind: Literal["agent"]
     id: str
     description: "str | None" = None
-    _extensions: Mapping[str, JsonValue] = field(
-        default_factory=dict,
-        repr=False,
-        compare=False,
-        hash=False,
-    )
 
     def __post_init__(self) -> None:
         if self.kind != "agent" or not isinstance(self.id, str) or not self.id.strip():
@@ -220,22 +194,20 @@ class SubagentRef:
             not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            extensions = ImmutableJsonMapping(self._extensions)
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        object.__setattr__(self, "_extensions", extensions)
 
-    def to_payload(self) -> "dict[str, JsonValue]":
-        payload = dict(self._extensions)
-        payload.update({"kind": "agent", "id": self.id})
+    def to_payload(self) -> "dict[str, object]":
+        payload: dict[str, object] = {"kind": "agent", "id": self.id}
         if self.description is not None:
             payload["description"] = self.description
         return payload
 
     @classmethod
     def from_payload(cls, value: object) -> "SubagentRef":
-        if not isinstance(value, Mapping) or value.get("kind") != "agent":
+        if (
+            not isinstance(value, Mapping)
+            or set(value) not in ({"kind", "id"}, {"kind", "id", "description"})
+            or value.get("kind") != "agent"
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         identity = value.get("id")
         description = value.get("description")
@@ -243,18 +215,7 @@ class SubagentRef:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if description is not None and not isinstance(description, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        extensions: dict[str, JsonValue] = {}
-        for key, raw in value.items():
-            if key in {"kind", "id", "description"}:
-                continue
-            if not isinstance(key, str):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                extensions[key] = cast(JsonValue, raw)
-                ImmutableJsonMapping(extensions)
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return cls("agent", identity, description, extensions)
+        return cls("agent", identity, description)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,7 +223,6 @@ class MCPServerSpec:
     id: str
     command: str
     args: "tuple[str, ...]" = ()
-    _extensions: Mapping[str, JsonValue] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -275,7 +235,6 @@ class MCPServerSpec:
         if any(not isinstance(item, str) for item in args):
             raise TypeError("MCP server args must be strings")
         object.__setattr__(self, "args", args)
-        object.__setattr__(self, "_extensions", ImmutableJsonMapping(self._extensions))
 
 
 __all__ = [
