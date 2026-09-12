@@ -205,7 +205,7 @@ class SubagentRef:
     def from_payload(cls, value: object) -> "SubagentRef":
         if (
             not isinstance(value, Mapping)
-            or set(value) not in ({"kind", "id"}, {"kind", "id", "description"})
+            or not {"kind", "id"}.issubset(value)
             or value.get("kind") != "agent"
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
