@@ -3,7 +3,14 @@
 """Harness Planning must preserve the intentionally narrow LinkTools surface."""
 
 import pytest
-from linktools.ai.runtime._plan import PlanItem as RuntimePlanItem, _validated_items
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime._plan import (
+    PlanItem as RuntimePlanItem,
+    RuntimePlanStore,
+    _decode_payload,
+    _validated_items,
+)
 from linktools.ai.runtime._capabilities import (
     PLANNING_TOOL_NAMES,
     compose_platform_capabilities,
@@ -92,3 +99,37 @@ async def test_runtime_plan_persistence_adds_no_arbitrary_size_limit() -> None:
     items = [RuntimePlanItem("x" * 600) for _ in range(129)]
 
     assert len(_validated_items(items)) == 129
+
+
+async def test_runtime_plan_persists_only_the_current_payload_shape() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="plan-shape", tenant_id="tenant")
+    try:
+        store = RuntimePlanStore(
+            state.execution.executions.state_store,
+            namespace="plan-shape",
+            tenant_id="tenant",
+            owner_kind="execution",
+            owner_id="execution",
+        )
+        await store.write_plan([RuntimePlanItem("ship it")])
+        record = await store._store.read(
+            lambda transaction: transaction.get_record(store._key)
+        )
+        assert record is not None
+        assert record.data == {
+            "items": [{"content": "ship it", "status": "pending"}]
+        }
+        assert _decode_payload(record) == ([RuntimePlanItem("ship it")], 1)
+
+        record.data["future"] = True
+        with pytest.raises(AIError) as raised:
+            _decode_payload(record)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        record.data.pop("future")
+        record.data["items"][0]["future"] = True
+        with pytest.raises(AIError) as raised:
+            _decode_payload(record)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()

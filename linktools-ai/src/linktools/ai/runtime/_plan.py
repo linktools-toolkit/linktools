@@ -24,7 +24,6 @@ from .state._store import (
 _logger = environ.get_logger("ai.runtime.plan")
 _OWNER_KINDS = frozenset({"session", "execution"})
 _KIND = "agent_plan"
-_VERSION = 1
 
 PlanOwnerKind = Literal["session", "execution"]
 PlanStatus = Literal["pending", "in_progress", "completed", "cancelled"]
@@ -56,8 +55,6 @@ class RuntimePlanStore:
         ):
             raise ValueError("plan owner is invalid")
         self._store = store
-        self._namespace = namespace
-        self._tenant_id = tenant_id
         validate_tenant_id(tenant_id)
         self._owner_kind = owner_kind
         self._owner_id = owner_id
@@ -161,10 +158,7 @@ class RuntimePlanStore:
             lease_owner=None,
             lease_fence=0,
             lease_expires_at=None,
-            data={
-                "version": _VERSION,
-                "items": [_item_payload(item) for item in items],
-            },
+            data={"items": [_item_payload(item) for item in items]},
         )
 
 
@@ -179,14 +173,9 @@ def _decode_payload(record: StoredRecord | None) -> tuple[list[PlanItem], int]:
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     data = record.data
-    if not isinstance(data, Mapping):
+    if not isinstance(data, Mapping) or set(data) != {"items"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    version = data.get("version")
-    if isinstance(version, bool) or not isinstance(version, int):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if version != _VERSION:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    raw_items = data.get("items")
+    raw_items = data["items"]
     if not isinstance(raw_items, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
@@ -194,14 +183,12 @@ def _decode_payload(record: StoredRecord | None) -> tuple[list[PlanItem], int]:
         for item in raw_items:
             if not isinstance(item, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if not {"content", "status"}.issubset(item):
+            if set(item) != {"content", "status"}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             decoded_items.append(PlanItem(item["content"], item["status"]))
         items = _validated_items(decoded_items)
     except (KeyError, TypeError, ValueError, AIError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if len(items) != len(raw_items):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return items, record.storage_version
 
 
