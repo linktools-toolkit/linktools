@@ -22,6 +22,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import DeferredToolRequests, RunContext
 from pydantic_ai.usage import RunUsage
+from ._runtime_test_helpers import semantic_tool
 
 
 class _Bridge:
@@ -132,14 +133,15 @@ async def test_ask_boundary_defers_before_runtime_operation() -> None:
     async def read_file(path: str) -> str:
         return path
 
+    descriptor = ManagedToolDescriptor(
+        effect_owner="none",
+        effect="none",
+        tool_class="filesystem.read",
+    )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([read_file]),),
+        (FunctionToolset([semantic_tool(read_file, descriptor)]),),
         {
-            "read_file": ManagedToolDescriptor(
-                effect_owner="none",
-                effect="none",
-                tool_class="filesystem.read",
-            )
+            "read_file": descriptor
         },
         id="workspace",
         workspace_policy=WorkspaceToolPermissionPolicy(

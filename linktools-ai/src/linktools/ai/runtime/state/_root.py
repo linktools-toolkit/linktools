@@ -25,6 +25,7 @@ from ._plan import (
     RuntimeRetentionMode,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    runtime_domain_uses_object_store,
 )
 
 if TYPE_CHECKING:
@@ -356,16 +357,8 @@ def _validate_state_configuration(
 ) -> None:
     if not isinstance(plan, RuntimeStatePlan):
         raise TypeError("plan must be a RuntimeStatePlan")
-    object_domains = {
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.MEMORY,
-        RuntimeDomain.ARTIFACT,
-        RuntimeDomain.RECOVERY,
-        RuntimeDomain.TASK,
-    }
     if object_store is not None and not any(
-        domain in object_domains
+        runtime_domain_uses_object_store(domain)
         and plan.route(domain).retention is RuntimeRetentionMode.DURABLE
         for domain in RuntimeDomain
     ):

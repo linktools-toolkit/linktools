@@ -144,6 +144,7 @@ def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -
     assert dict(plain.semantic_payload) == {
         "provider": "openai",
         "model_identity": "openai:gpt-test",
+        "vision": False,
         "settings": {},
     }
     assert dict(prefixed.semantic_payload) == dict(plain.semantic_payload)

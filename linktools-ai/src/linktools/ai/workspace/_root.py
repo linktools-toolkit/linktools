@@ -45,12 +45,9 @@ _PERMISSION_DECISION_RANK: Mapping[PermissionDecision, int] = {
 }
 _TOOL_PERMISSION_CLASSES = frozenset(
     {
-        "control",
         "filesystem.read",
         "filesystem.write",
         "shell",
-        "memory.read",
-        "memory.write",
     }
 )
 

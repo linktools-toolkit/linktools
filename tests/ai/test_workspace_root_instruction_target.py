@@ -15,6 +15,7 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
 )
+from ._runtime_test_helpers import semantic_tool
 
 
 class _Session:
@@ -57,16 +58,15 @@ async def _list_directory(path: str = ".") -> str:
 
 
 def _toolset(repository: _RepositoryBoundary) -> RuntimeToolBoundaryToolset:
+    descriptor = ManagedToolDescriptor(
+        effect_owner="none",
+        effect="none",
+        tool_class="filesystem.read",
+        workspace_path_fields=("path",),
+    )
     return RuntimeToolBoundaryToolset(
-        (FunctionToolset([_list_directory]),),
-        {
-            "_list_directory": ManagedToolDescriptor(
-                effect_owner="none",
-                effect="none",
-                tool_class="filesystem.read",
-                workspace_path_fields=("path",),
-            )
-        },
+        (FunctionToolset([semantic_tool(_list_directory, descriptor)]),),
+        {"_list_directory": descriptor},
         id="workspace",
         sandbox_session=_Session(),  # type: ignore[arg-type]
         repository_boundary=repository,

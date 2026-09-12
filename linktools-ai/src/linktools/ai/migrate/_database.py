@@ -11,7 +11,7 @@ from linktools.core import environ
 from ..asset import build_asset_sql_metadata
 from ..errors import AIError, ErrorCode
 from ..observe import build_metrics_sql_metadata
-from ..runtime.state import RuntimeDomain
+from ..runtime.state import RuntimeDomain, runtime_domain_uses_object_store
 from ..runtime.state.schema import build_runtime_sql_metadata
 from ..storage import build_object_sql_metadata, provision_sql
 
@@ -33,8 +33,6 @@ def build_sql_schema_metadata() -> "MetaData":
     build_object_sql_metadata(metadata=metadata)
     build_asset_sql_metadata(metadata=metadata)
     build_metrics_sql_metadata(metadata=metadata)
-    if len(metadata.tables) != 12:
-        raise RuntimeError("complete SQL schema must contain exactly 12 tables")
     return metadata
 
 
@@ -60,15 +58,8 @@ async def provision_runtime_database(
 
     metadata = MetaData()
     build_runtime_sql_metadata(selected, metadata=metadata)
-    if object_store is None and selected & frozenset(
-        {
-            RuntimeDomain.CONVERSATION,
-            RuntimeDomain.EXECUTION,
-            RuntimeDomain.MEMORY,
-            RuntimeDomain.ARTIFACT,
-            RuntimeDomain.RECOVERY,
-            RuntimeDomain.TASK,
-        }
+    if object_store is None and any(
+        runtime_domain_uses_object_store(domain) for domain in selected
     ):
         build_object_sql_metadata(metadata=metadata)
     await provision_sql(engine, metadata)

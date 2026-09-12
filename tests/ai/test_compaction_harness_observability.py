@@ -5,7 +5,10 @@
 from collections.abc import Sequence
 
 import pytest
-from linktools.ai.runtime._compaction import RuntimeCompaction
+from linktools.ai.runtime._compaction import (
+    RuntimeCompaction,
+    RuntimeCompactionPolicy,
+)
 from linktools.ai.runtime._journal import ModelRequestFact, ModelRequestJournal
 from pydantic_ai.messages import (
     ModelMessage,
@@ -157,12 +160,12 @@ def test_journal_rejects_double_finish() -> None:
     journal.consume(fact.request_sequence)
 
 
-def _duplicate_read_history() -> list[ModelMessage]:
+def _duplicate_file_history() -> list[ModelMessage]:
     return [
         ModelResponse(
             parts=[
                 ToolCallPart(
-                    "read_file",
+                    "inspect_document",
                     {"path": "same.txt"},
                     tool_call_id="read-1",
                 )
@@ -171,7 +174,7 @@ def _duplicate_read_history() -> list[ModelMessage]:
         ModelRequest(
             parts=[
                 ToolReturnPart(
-                    "read_file",
+                    "inspect_document",
                     "old content",
                     tool_call_id="read-1",
                 )
@@ -180,7 +183,7 @@ def _duplicate_read_history() -> list[ModelMessage]:
         ModelResponse(
             parts=[
                 ToolCallPart(
-                    "read_file",
+                    "inspect_document",
                     {"path": "same.txt"},
                     tool_call_id="read-2",
                 )
@@ -189,7 +192,7 @@ def _duplicate_read_history() -> list[ModelMessage]:
         ModelRequest(
             parts=[
                 ToolReturnPart(
-                    "read_file",
+                    "inspect_document",
                     "new content",
                     tool_call_id="read-2",
                 )
@@ -207,7 +210,7 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
         usage=RunUsage(),
         run_id="run",
     )
-    messages = _duplicate_read_history()
+    messages = _duplicate_file_history()
     request_context = ModelRequestContext(
         model=model,
         messages=list(messages),
@@ -218,7 +221,11 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
     provider_context = await _provider_context(
         RuntimeCompaction(
             1_000_000,
-            workspace_read_available=True,
+            policy=RuntimeCompactionPolicy(
+                context_dedupe_by_tool={
+                    "inspect_document": "workspace_file_read_v1",
+                },
+            ),
         ),
         ctx,  # type: ignore[arg-type]
         request_context,
@@ -237,7 +244,7 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
         usage=RunUsage(),
         run_id="run",
     )
-    messages = _duplicate_read_history()
+    messages = _duplicate_file_history()
     request_context = ModelRequestContext(
         model=model,
         messages=list(messages),
@@ -248,7 +255,11 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
     provider_context = await _provider_context(
         RuntimeCompaction(
             None,
-            workspace_read_available=True,
+            policy=RuntimeCompactionPolicy(
+                context_dedupe_by_tool={
+                    "inspect_document": "workspace_file_read_v1",
+                },
+            ),
         ),
         ctx,  # type: ignore[arg-type]
         request_context,
@@ -257,3 +268,66 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
     assert provider_context.messages != messages
     assert "[superseded file read]" in str(provider_context.messages)
     assert request_context.messages == messages
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_semantic_control_results() -> None:
+    model = TestModel()
+    ctx = RunContext(
+        deps=None,
+        model=model,
+        usage=RunUsage(),
+        run_id="run",
+    )
+    messages: list[ModelMessage] = []
+    for index in range(5):
+        name = "hidden_control" if index == 0 else "ordinary"
+        call_id = f"call-{index}"
+        messages.extend(
+            (
+                ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            name,
+                            {"value": index},
+                            tool_call_id=call_id,
+                        )
+                    ]
+                ),
+                ModelRequest(
+                    parts=[
+                        ToolReturnPart(
+                            name,
+                            f"result-{index}",
+                            tool_call_id=call_id,
+                        )
+                    ]
+                ),
+            )
+        )
+    request_context = ModelRequestContext(
+        model=model,
+        messages=messages,
+        model_settings=None,
+        model_request_parameters=ModelRequestParameters(),
+    )
+    provider_context = await _provider_context(
+        RuntimeCompaction(
+            1,
+            policy=RuntimeCompactionPolicy(
+                keep_result_tools=frozenset({"hidden_control"}),
+            ),
+        ),
+        ctx,  # type: ignore[arg-type]
+        request_context,
+    )
+
+    returns = [
+        part
+        for message in provider_context.messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+    assert returns[0].content == "result-0"
+    assert returns[1].content == "[tool result cleared]"

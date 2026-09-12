@@ -15,21 +15,9 @@ from ..storage import (
     read_object,
     runtime_object_key,
 )
-from .state import RuntimeDomain
+from .state import RuntimeDomain, runtime_domain_uses_object_store
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_OBJECT_DOMAINS = frozenset(
-    {
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.MEMORY,
-        RuntimeDomain.ARTIFACT,
-        RuntimeDomain.RECOVERY,
-        RuntimeDomain.TASK,
-    }
-)
-
-
 @dataclass(frozen=True, slots=True)
 class RuntimeObjectKeyFactory:
     namespace: str
@@ -43,7 +31,7 @@ class RuntimeObjectKeyFactory:
         return namespace_digest(self.namespace)
 
     def key(self, runtime_domain: RuntimeDomain, tenant_id: str, digest: str) -> str:
-        if runtime_domain not in _OBJECT_DOMAINS:
+        if not runtime_domain_uses_object_store(runtime_domain):
             raise ValueError("Runtime object identity is invalid")
         tenant_id = validate_tenant_id(tenant_id)
         if _DIGEST.fullmatch(digest) is None:

@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
+from linktools.core import environ
 from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
@@ -20,61 +21,38 @@ from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import DeferredToolRequests, RunContext as PydanticRunContext
-from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from ..capability import SUBAGENT_TOOL_NAMES
-from ._compaction import ExternalModelRequestObserver, RuntimeCompaction
+from ..errors import AIError, ErrorCode
+from ._compaction import (
+    ExternalModelRequestObserver,
+    RuntimeCompaction,
+    RuntimeCompactionPolicy,
+)
 from ._harness import (
     HarnessPlanStoreAdapter,
     HarnessStepStoreAdapter,
 )
-from ._harness_memory import build_harness_memory
+from ._harness_memory import (
+    build_harness_memory,
+    select_harness_memory_tools,
+)
+from ._harness_planning import build_harness_planning
+from ._journal import (
+    MODEL_USAGE_CACHE_READ_METADATA_KEY,
+    MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
+    MODEL_USAGE_INPUT_METADATA_KEY,
+    MODEL_USAGE_OUTPUT_METADATA_KEY,
+)
 from ._memory import MemoryStore
 from ._plan import RuntimePlanStore
-from .state._step_contracts import (
-    StepStore,
-)
-from ..errors import AIError, ErrorCode
+from .state._step_contracts import StepStore
 
 if TYPE_CHECKING:
     from ._journal import ModelRequestFact, ModelRequestJournal
 
-MEMORY_TOOL_NAMES = (
-    "delete_memory",
-    "read_memory",
-    "search_memory",
-    "write_memory",
-)
-MEMORY_READ_TOOL_NAMES = ("read_memory", "search_memory")
-PLANNING_TOOL_NAMES = ("write_plan",)
 _MEMORY_CAPABILITY_ID = "linktools.ai.memory"
-_PLANNING_CAPABILITY_ID = "linktools.ai.planning"
-
-
-def _tool_name_allowed(name: str, allow_tools: tuple[str, ...]) -> bool:
-    return "*" in allow_tools or name in allow_tools
-
-
-def select_runtime_tool_names(
-    *,
-    ordinary_tool_policy: tuple[str, ...],
-    memory_scope: str | None,
-    subagent_available: bool = False,
-    planning: bool = False,
-) -> tuple[str, ...]:
-    names: set[str] = set()
-    if memory_scope is not None:
-        names.update(
-            name
-            for name in MEMORY_TOOL_NAMES
-            if _tool_name_allowed(name, ordinary_tool_policy)
-        )
-    if planning:
-        names.update(PLANNING_TOOL_NAMES)
-    if subagent_available:
-        names.update(SUBAGENT_TOOL_NAMES)
-    return tuple(sorted(names))
+_logger = environ.get_logger("ai.runtime.capabilities")
 
 
 @dataclass(kw_only=True, eq=False)
@@ -137,16 +115,16 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             usage = response.usage
             metadata.update(
                 {
-                    "linktools.ai.model_usage.input_tokens": str(
+                    MODEL_USAGE_INPUT_METADATA_KEY: str(
                         usage.input_tokens
                     ),
-                    "linktools.ai.model_usage.output_tokens": str(
+                    MODEL_USAGE_OUTPUT_METADATA_KEY: str(
                         usage.output_tokens
                     ),
-                    "linktools.ai.model_usage.cache_read_tokens": str(
+                    MODEL_USAGE_CACHE_READ_METADATA_KEY: str(
                         usage.cache_read_tokens
                     ),
-                    "linktools.ai.model_usage.cache_write_tokens": str(
+                    MODEL_USAGE_CACHE_WRITE_METADATA_KEY: str(
                         usage.cache_write_tokens
                     ),
                 }
@@ -324,12 +302,13 @@ async def compose_platform_capabilities(
     memory_scope: str | None,
     step_store: StepStore,
     memory_store: MemoryStore | None,
-    runtime_tool_names: tuple[str, ...],
+    ordinary_tool_policy: tuple[str, ...],
+    compaction_policy: RuntimeCompactionPolicy,
+    planning: bool,
     context_target_tokens: int | None,
     parent_step_run_id: str | None,
     plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
-    workspace_read_available: bool = False,
     model_journal: "ModelRequestJournal | None" = None,
     model_observation_enabled: bool = False,
     model_request_observer: "ExternalModelRequestObserver | None" = None,
@@ -356,19 +335,17 @@ async def compose_platform_capabilities(
         model_observation_enabled=model_observation_enabled,
     )
     capabilities.append(persistence)
-    selected = frozenset(runtime_tool_names)
-    selected_memory = tuple(name for name in MEMORY_TOOL_NAMES if name in selected)
-    if selected_memory:
-        if memory_store is None or memory_scope is None:
+    selected_memory = select_harness_memory_tools(ordinary_tool_policy)
+    if memory_scope is not None and selected_memory:
+        if memory_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        capabilities.append(
-            build_harness_memory(
-                memory_store,
-                selected_tool_names=selected_memory,
-                capability_id=_MEMORY_CAPABILITY_ID,
-            )
+        memory_capability = build_harness_memory(
+            memory_store,
+            allow_tools=ordinary_tool_policy,
+            capability_id=_MEMORY_CAPABILITY_ID,
         )
-    if any(name in selected for name in PLANNING_TOOL_NAMES):
+        capabilities.append(memory_capability)
+    if planning:
         if plan_store_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
@@ -380,30 +357,28 @@ async def compose_platform_capabilities(
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             return HarnessPlanStoreAdapter(store)
 
-        capabilities.append(
-            Planning(
-                id=_PLANNING_CAPABILITY_ID,
-                tools=PLANNING_TOOL_NAMES,
-                store_resolver=resolve_plan_store,
-            )
-        )
+        planning_capability = build_harness_planning(resolve_plan_store)
+        capabilities.append(planning_capability)
     capabilities.append(
         RuntimeCompaction(
             context_target_tokens,
-            workspace_read_available=workspace_read_available,
+            policy=compaction_policy,
             journal=model_journal,
             observer=model_request_observer,
             projection_sink=persistence.remember_context_projection,
         )
     )
+    _logger.debug(
+        "platform capabilities composed: agent=%s step=%s memory_tools=%s "
+        "planning=%s compaction_policy=per-run",
+        agent_name,
+        step_run_id,
+        selected_memory,
+        planning,
+    )
     return tuple(capabilities)
 
 
 __all__ = [
-    "MEMORY_READ_TOOL_NAMES",
-    "MEMORY_TOOL_NAMES",
-    "PLANNING_TOOL_NAMES",
-    "SUBAGENT_TOOL_NAMES",
     "compose_platform_capabilities",
-    "select_runtime_tool_names",
 ]

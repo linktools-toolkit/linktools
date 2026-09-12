@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
 
 from ..core import normalize_json_value, validate_user_prompt
 from ..errors import AIError, ErrorCode
+from ..model import LinkToolsUploadedFile
 
 UserPromptInput: TypeAlias = str | Sequence[UserContent]
 CanonicalUserInput: TypeAlias = str | tuple[UserContent, ...]
@@ -54,6 +55,13 @@ def validate_user_input(value: UserPromptInput) -> CanonicalUserInput:
 def validate_user_content(content: Sequence[UserContent]) -> None:
     for item in content:
         if not isinstance(item, _USER_CONTENT_TYPES):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if isinstance(item, UploadedFile) and not isinstance(
+            item,
+            LinkToolsUploadedFile,
+        ):
+            # Upstream UploadedFile exposes a computed media_type and does not
+            # retain omission provenance through its public API.
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if isinstance(item, BinaryContent) and (
             not isinstance(item.data, bytes)

@@ -17,7 +17,7 @@ from ._codec import (
     _iter_enveloped_runtime_object_refs,
     decode_envelope,
 )
-from ._plan import RuntimeDomain
+from ._plan import RuntimeDomain, runtime_domain_uses_object_store
 from ._store import (
     FactScanCursor,
     OperationScanCursor,
@@ -29,16 +29,6 @@ from ._store import (
 )
 
 _logger = environ.get_logger("ai.runtime.state.maintenance")
-_OBJECT_DOMAINS = frozenset(
-    {
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.MEMORY,
-        RuntimeDomain.ARTIFACT,
-        RuntimeDomain.RECOVERY,
-        RuntimeDomain.TASK,
-    }
-)
 _MAINTENANCE_PAGE_SIZE = 128
 _ENVELOPED_FACT_KINDS = frozenset(
     {
@@ -164,7 +154,7 @@ class RuntimeStorageInspection:
     def object_inspection_stores(self) -> tuple[ObjectStoreInspection, ...]:
         stores: dict[int, ObjectStoreInspection] = {}
         for domain in self._durable_domains:
-            if domain not in _OBJECT_DOMAINS:
+            if not runtime_domain_uses_object_store(domain):
                 continue
             object_store = self._objects.object_store(domain)
             if not isinstance(object_store, ObjectStoreInspection):
@@ -175,7 +165,7 @@ class RuntimeStorageInspection:
     def object_maintenance_stores(self) -> tuple[ObjectStoreMaintenance, ...]:
         stores: dict[int, ObjectStoreMaintenance] = {}
         for domain in self._durable_domains:
-            if domain not in _OBJECT_DOMAINS:
+            if not runtime_domain_uses_object_store(domain):
                 continue
             object_store = self._objects.object_store(domain)
             if not isinstance(object_store, ObjectStoreMaintenance):

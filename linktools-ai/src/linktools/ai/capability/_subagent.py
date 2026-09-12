@@ -15,7 +15,7 @@ from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._context import AgentContext
-from ._workspace import workspace_tool_path_metadata
+from ._tool_semantic import tool_semantic_metadata
 
 SUBAGENT_CAPABILITY_ID = "linktools.ai.subagents"
 
@@ -62,14 +62,21 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
     def get_toolset(self) -> FunctionToolset[AgentContext[object]]:
         toolset = FunctionToolset[AgentContext[object]](id=self.id)
 
-        @toolset.tool
+        @toolset.tool(
+            metadata=tool_semantic_metadata(
+                plan_safe=True,
+                compaction_keep_result=True,
+            )
+        )
         async def list_subagents(
             _ctx: PydanticRunContext[AgentContext[object]],
         ) -> list[dict[str, str]]:
             """List subagents available for this agent run."""
             return await self.list_subagents()
 
-        @toolset.tool(metadata=workspace_tool_path_metadata(("files",)))
+        @toolset.tool(
+            metadata=tool_semantic_metadata(compaction_keep_result=True)
+        )
         async def delegate_task(
             ctx: PydanticRunContext[AgentContext[object]],
             subagent_id: str,

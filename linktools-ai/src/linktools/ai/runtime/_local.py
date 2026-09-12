@@ -41,7 +41,7 @@ from ._agent_executor import (
     LiveDelta,
     _RunScope,
 )
-from ._capabilities import MEMORY_TOOL_NAMES, select_runtime_tool_names
+from ._harness_memory import select_harness_memory_tools
 from ._input import CanonicalUserInput, ExecutionInputMaterializer
 from ._plan import RuntimePlanStore
 from ..core import (
@@ -4016,17 +4016,11 @@ class LocalExecutionBackend:
                 and self._subagent_dispatcher is not None
                 and bool(subagent_refs)
             )
-            runtime_tool_names = select_runtime_tool_names(
-                ordinary_tool_policy=definition.ordinary_tool_policy,
-                memory_scope=current.memory_scope,
-                planning=current.planning,
-                subagent_available=subagent_available,
-            )
             memory = None
-            selected_memory = tuple(
-                name for name in runtime_tool_names if name in MEMORY_TOOL_NAMES
+            selected_memory = select_harness_memory_tools(
+                definition.ordinary_tool_policy
             )
-            if selected_memory:
+            if current.memory_scope is not None and selected_memory:
                 if self._memory_store_factory is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 memory = self._memory_store_factory(

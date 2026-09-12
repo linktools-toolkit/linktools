@@ -20,6 +20,7 @@ from ._contract import (
     ThinkingValue,
     canonical_selectors,
     normalize_thinking,
+    parse_mcp_tool_selector,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "ThinkingValue",
     "canonical_selectors",
     "normalize_thinking",
+    "parse_mcp_tool_selector",
 ]

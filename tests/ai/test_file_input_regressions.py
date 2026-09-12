@@ -22,6 +22,7 @@ from linktools.ai.runtime._tool_boundary import (
 )
 from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
+from ._runtime_test_helpers import semantic_tool
 
 
 class _Session:
@@ -81,7 +82,7 @@ async def test_text_materialization_keeps_text_codec() -> None:
     access = WorkspaceAccess(_Sandbox(_Session({})), root=Path("."))
     materializer = ExecutionInputMaterializer(
         access,
-        Workspace.load(".", workspace_id="workspace").policy,
+        Workspace.load(".").policy,
     )
     try:
         canonical = await materializer.materialize("plain text", ())
@@ -114,7 +115,7 @@ async def test_execution_freezes_materialized_input_once() -> None:
     access = WorkspaceAccess(_Sandbox(session), root=Path("."))
     materializer = ExecutionInputMaterializer(
         access,
-        Workspace.load(".", workspace_id="workspace").policy,
+        Workspace.load(".").policy,
     )
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]
@@ -153,16 +154,15 @@ def _context() -> RunContext[None]:
 @pytest.mark.asyncio
 async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
     session = _Session({})
+    descriptor = ManagedToolDescriptor(
+        effect_owner="none",
+        effect="none",
+        tool_class="filesystem.read",
+        workspace_path_fields=("path",),
+    )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([_echo_path]),),
-        {
-            "_echo_path": ManagedToolDescriptor(
-                effect_owner="none",
-                effect="none",
-                tool_class="filesystem.read",
-                workspace_path_fields=("path",),
-            )
-        },
+        (FunctionToolset([semantic_tool(_echo_path, descriptor)]),),
+        {"_echo_path": descriptor},
         id="workspace",
         sandbox_session=session,  # type: ignore[arg-type]
     )
@@ -183,16 +183,15 @@ async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
 
 @pytest.mark.asyncio
 async def test_final_tool_boundary_does_not_freeze_transient_sandbox_failure() -> None:
+    descriptor = ManagedToolDescriptor(
+        effect_owner="none",
+        effect="none",
+        tool_class="filesystem.read",
+        workspace_path_fields=("path",),
+    )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([_echo_path]),),
-        {
-            "_echo_path": ManagedToolDescriptor(
-                effect_owner="none",
-                effect="none",
-                tool_class="filesystem.read",
-                workspace_path_fields=("path",),
-            )
-        },
+        (FunctionToolset([semantic_tool(_echo_path, descriptor)]),),
+        {"_echo_path": descriptor},
         id="workspace",
         sandbox_session=_UnavailableAccess(),  # type: ignore[arg-type]
     )

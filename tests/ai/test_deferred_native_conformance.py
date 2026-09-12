@@ -27,6 +27,7 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
+from ._runtime_test_helpers import semantic_tool
 
 
 class _Bridge:
@@ -78,14 +79,15 @@ async def test_approval_frontier_is_persisted_as_interrupted(tmp_path: Path) -> 
     bridge = _Bridge()
     captured: list[int] = []
     del tmp_path
+    descriptor = ManagedToolDescriptor(
+        effect_owner="tool_operation",
+        effect="non_replay_safe",
+        tool_class="filesystem.read",
+    )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([_read_file]),),
+        (FunctionToolset([semantic_tool(_read_file, descriptor)]),),
         {
-            "_read_file": ManagedToolDescriptor(
-                effect_owner="tool_operation",
-                effect="non_replay_safe",
-                tool_class="filesystem.read",
-            )
+            "_read_file": descriptor
         },
         id="workspace",
             workspace_policy=WorkspaceToolPermissionPolicy(default="ask"),

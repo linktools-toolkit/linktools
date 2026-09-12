@@ -140,6 +140,17 @@ class ExecutionHandle:
     execution_id: str
 
 
+class _ExecutionViewSource(Protocol):
+    execution_id: str
+    agent_id: str
+    status: ExecutionStatus
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
+    session_id: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
@@ -149,6 +160,20 @@ class ExecutionView:
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
+    session_id: str | None = None
+
+
+def _project_execution_view(source: _ExecutionViewSource) -> ExecutionView:
+    return ExecutionView(
+        source.execution_id,
+        source.agent_id,
+        source.status,
+        source.lineage_kind,
+        source.parent_execution_id,
+        source.root_execution_id,
+        source.parent_invocation_id,
+        source.session_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +371,24 @@ class ListSessionRequest:
     principal: Principal
     cursor: "str | None" = None
     limit: int = 100
+
+
+@dataclass(frozen=True, slots=True)
+class ListExecutionRequest:
+    principal: Principal
+    session_id: str | None = None
+    agent_id: str | None = None
+    parent_execution_id: str | None = None
+    cursor: str | None = None
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or not 1 <= self.limit <= 200
+        ):
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,6 +762,14 @@ class ArtifactDownload:
 
 
 class ExecutionHistoryService(Protocol):
+    async def inspect(
+        self, execution_id: str, *, principal: Principal
+    ) -> ExecutionView: ...
+
+    async def list(
+        self, request: ListExecutionRequest
+    ) -> "Page[ExecutionView]": ...
+
     async def trace(
         self,
         execution_id: str,
@@ -786,6 +837,9 @@ class ExecutionService(Protocol):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
+    async def list(
+        self, request: ListExecutionRequest
+    ) -> "Page[ExecutionView]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
@@ -994,6 +1048,7 @@ __all__ = [
     "ExternalSupplyResult",
     "ForkExecutionRequest",
     "ForkSessionRequest",
+    "ListExecutionRequest",
     "ListSessionRequest",
     "LoadedSession",
     "Page",

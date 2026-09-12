@@ -53,6 +53,7 @@ from ._external import DefaultExternalService
 from ._execution import DefaultExecutionService, _ExecutionRuntimeBridge
 from ._execution_tree import ExecutionTreeBroker, ExecutionTreeStreamer
 from ._history import StepExecutionHistoryReader, StepSessionHistoryReader
+from ._history_service import DefaultExecutionHistoryService
 from ._input import ExecutionInputMaterializer
 from ._local import LocalExecutionBackend
 from ._memory import MemoryStore, RuntimeMemoryStore
@@ -115,7 +116,9 @@ async def compose_runtime_components(
     owned_workspace_assets: tuple[AssetStore, DirectoryAssetBackend] | None = None
     selected_state: RuntimeState | None = None
     workspace_access: WorkspaceAccess | None = None
+    input_materializer: ExecutionInputMaterializer | None = None
     initialized = False
+    ownership_transferred = False
     try:
         if workspace_groups:
             effective_groups: tuple[CapabilityGroup[object], ...] = cast(
@@ -216,35 +219,39 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
+        grant_key = _grant_key(workspace)
+        history_reader = _execution_history_reader(
+            workspace,
+            selected_state,
+        )
+        session_history_reader = StepSessionHistoryReader(
+            store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
+            cursor_signer=HmacCursorSigner("session-history", grant_key),
+        )
+        memory_store_factory = _memory_store_factory(workspace, selected_state)
+        authorization = TenantAuthorizationPolicy(effective_tenant_id)
         owned_workspace_close = (
             None
             if owned_workspace_assets is None
             else partial(_close_owned_workspace_assets, *owned_workspace_assets)
         )
+        ownership_transferred = True
         return await _build_local_components(
             state=selected_state,
             catalog=catalog,
             compiler=compiler,
-            authorization=TenantAuthorizationPolicy(effective_tenant_id),
+            authorization=authorization,
             tenant_id=effective_tenant_id,
             namespace=workspace.workspace_id,
             workspace=workspace,
             app=app,
             task_handlers=task_handlers,
             task_expanders=task_expanders,
-            history_reader=_execution_history_reader(
-                workspace,
-                selected_state,
-            ),
-            session_history_reader=StepSessionHistoryReader(
-                store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
-                cursor_signer=HmacCursorSigner(
-                    "session-history", _grant_key(workspace)
-                ),
-            ),
-            memory_store_factory=_memory_store_factory(workspace, selected_state),
+            history_reader=history_reader,
+            session_history_reader=session_history_reader,
+            memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
-            grant_key=_grant_key(workspace),
+            grant_key=grant_key,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
@@ -254,14 +261,14 @@ async def compose_runtime_components(
             owned_workspace_close=owned_workspace_close,
         )
     except BaseException:
-        try:
-            if initialized and selected_state is not None:
-                await selected_state.close()
-        finally:
-            if workspace_access is not None:
-                await workspace_access.close()
-            if owned_workspace_assets is not None:
-                await _close_owned_workspace_assets(*owned_workspace_assets)
+        if not ownership_transferred:
+            await _cleanup_compose_resources(
+                selected_state=selected_state,
+                initialized=initialized,
+                input_materializer=input_materializer,
+                workspace_access=workspace_access,
+                owned_workspace_assets=owned_workspace_assets,
+            )
         raise
 
 
@@ -309,6 +316,92 @@ async def _close_owned_workspace_assets(
 ) -> None:
     await store.close()
     await backend.close()
+
+
+def _runtime_close_actions(
+    *,
+    graph_service: DefaultTaskGraphService | None,
+    task_launcher: LocalTaskGraphLauncher | None,
+    execution: DefaultExecutionService,
+    backend: LocalExecutionBackend | None,
+    input_materializer: ExecutionInputMaterializer,
+    metric_buffer: _RuntimeMetricBuffer | None,
+    state: RuntimeState,
+    owned_workspace_close: "Callable[[], Awaitable[None]] | None",
+) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
+    actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+    if graph_service is not None:
+        actions.extend(
+            (
+                ("runtime.graph.finalizers", graph_service.drain_owned_finalizers),
+                ("runtime.graph.preflight", graph_service.preflight_close),
+            )
+        )
+    if task_launcher is not None:
+        actions.append(("runtime.task_launcher", task_launcher.shutdown))
+    if graph_service is not None:
+        actions.append(
+            ("runtime.graph.metrics", graph_service.drain_metric_projector)
+        )
+    actions.append(("runtime.execution.preflight", execution.preflight_close))
+    if backend is not None:
+        actions.append(("runtime.backend", backend.close))
+    actions.append(("runtime.input", input_materializer.close))
+    if metric_buffer is not None:
+        actions.append(("runtime.metrics", metric_buffer.close))
+    actions.append(("runtime.state", state.close))
+    if owned_workspace_close is not None:
+        actions.append(("runtime.workspace", owned_workspace_close))
+    return tuple(actions)
+
+
+async def _run_cleanup_actions(
+    actions: Sequence[tuple[str, Callable[[], Awaitable[None]]]],
+    *,
+    stop_on_error: bool = True,
+) -> None:
+    for phase, action in actions:
+        try:
+            await action()
+        except BaseException as error:
+            _log_secondary_cleanup(phase, error)
+            if stop_on_error:
+                return
+
+
+async def _cleanup_compose_resources(
+    *,
+    selected_state: RuntimeState | None,
+    initialized: bool,
+    input_materializer: ExecutionInputMaterializer | None,
+    workspace_access: WorkspaceAccess | None,
+    owned_workspace_assets: tuple[AssetStore, DirectoryAssetBackend] | None,
+) -> None:
+    actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+    if input_materializer is not None:
+        actions.append(("runtime.compose.input", input_materializer.close))
+    elif workspace_access is not None:
+        actions.append(("runtime.compose.workspace_access", workspace_access.close))
+    if initialized and selected_state is not None:
+        actions.append(("runtime.compose.state", selected_state.close))
+    if owned_workspace_assets is not None:
+        actions.append(
+            (
+                "runtime.compose.workspace",
+                partial(_close_owned_workspace_assets, *owned_workspace_assets),
+            )
+        )
+    await _run_cleanup_actions(actions, stop_on_error=False)
+
+
+def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
+    code = error.code.value if isinstance(error, AIError) else None
+    _logger.error(
+        "secondary cleanup failed: phase=%s code=%s exception_type=%s",
+        phase,
+        code,
+        type(error).__name__,
+    )
 
 
 def _validate_candidate_uniqueness(
@@ -434,11 +527,8 @@ async def _build_local_components(
     metrics: "Metrics | None",
     owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
-    if not state.ready:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
-    metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
-    metric_source_namespace = None if metric_buffer is None else namespace
+    metric_buffer: _RuntimeMetricBuffer | None = None
+    metric_source_namespace: str | None = None
     backend: LocalExecutionBackend | None = None
 
     async def release_execution_handoff(
@@ -457,36 +547,60 @@ async def _build_local_components(
             tenant_id=tenant_id,
         )
 
-    runtime_bridge = _ExecutionRuntimeBridge()
-    live_broker = LiveExecutionEventBroker()
-    execution = DefaultExecutionService(
-        state.execution,
-        state.object_store(RuntimeDomain.EXECUTION),
-        authorization,
-        sessions=state.conversation.sessions,
-        catalog=catalog,
-        compiler=compiler,
-        runtime_bridge=runtime_bridge,
-        live_broker=live_broker,
-        history_reader=history_reader,
-        release_terminal=release_execution_handoff,
-        instruction_resolver=instruction_resolver,
-        object_key_factory=object_key_factory,
-        payload_policy=payload_policy,
-        input_materializer=input_materializer,
-        session_execution_ready=session_execution_ready,
-    )
-    execution_tree_broker = ExecutionTreeBroker()
-    dispatcher = SubagentDispatcher(
-        catalog,
-        compiler,
-        execution,
-        child_observer=execution_tree_broker,
-    )
-    executor = AgentExecutor(
-        skill_sources,
-        metrics=metric_buffer,
-    )
+    try:
+        if not state.ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        _require_state_identity(state, namespace=namespace, tenant_id=tenant_id)
+        metric_buffer = None if metrics is None else _RuntimeMetricBuffer(metrics)
+        metric_source_namespace = None if metric_buffer is None else namespace
+        runtime_bridge = _ExecutionRuntimeBridge()
+        live_broker = LiveExecutionEventBroker()
+        history_service = DefaultExecutionHistoryService(
+            state.execution.executions,
+            authorization,
+            history_reader,
+            HmacCursorSigner("execution", grant_key),
+        )
+        execution = DefaultExecutionService(
+            state.execution,
+            state.object_store(RuntimeDomain.EXECUTION),
+            authorization,
+            sessions=state.conversation.sessions,
+            catalog=catalog,
+            compiler=compiler,
+            runtime_bridge=runtime_bridge,
+            live_broker=live_broker,
+            history_reader=history_reader,
+            history_service=history_service,
+            release_terminal=release_execution_handoff,
+            instruction_resolver=instruction_resolver,
+            object_key_factory=object_key_factory,
+            payload_policy=payload_policy,
+            input_materializer=input_materializer,
+            session_execution_ready=session_execution_ready,
+        )
+        execution_tree_broker = ExecutionTreeBroker()
+        dispatcher = SubagentDispatcher(
+            catalog,
+            compiler,
+            execution,
+            child_observer=execution_tree_broker,
+        )
+        executor = AgentExecutor(
+            skill_sources,
+            metrics=metric_buffer,
+        )
+    except BaseException:
+        actions: list[tuple[str, Callable[[], Awaitable[None]]]] = [
+            ("runtime.build.input", input_materializer.close),
+        ]
+        if metric_buffer is not None:
+            actions.append(("runtime.build.metrics", metric_buffer.close))
+        actions.append(("runtime.build.state", state.close))
+        if owned_workspace_close is not None:
+            actions.append(("runtime.build.workspace", owned_workspace_close))
+        await _run_cleanup_actions(actions)
+        raise
 
     def build_memory_store(
         memory_tenant: str,
@@ -515,6 +629,7 @@ async def _build_local_components(
 
     task_launcher: LocalTaskGraphLauncher | None = None
     graph_service: DefaultTaskGraphService | None = None
+    coordinator: _RuntimeCloseCoordinator | None = None
     try:
         backend = LocalExecutionBackend(
             state.conversation,
@@ -655,34 +770,42 @@ async def _build_local_components(
             local_coordinator,
             execution_tree_broker,
         )
-        close_actions: list[Callable[[], Awaitable[None]]] = [
-            graph_service.drain_owned_finalizers,
-            graph_service.preflight_close,
-            task_launcher.shutdown,
-            graph_service.drain_metric_projector,
-            execution.preflight_close,
-            backend.close,
-        ]
-        close_actions.append(input_materializer.close)
-        if metric_buffer is not None:
-            close_actions.append(metric_buffer.close)
-        close_actions.append(state.close)
-        if owned_workspace_close is not None:
-            close_actions.append(owned_workspace_close)
-        coordinator = _RuntimeCloseCoordinator(tuple(close_actions))
+        close_actions = _runtime_close_actions(
+            graph_service=graph_service,
+            task_launcher=task_launcher,
+            execution=execution,
+            backend=backend,
+            input_materializer=input_materializer,
+            metric_buffer=metric_buffer,
+            state=state,
+            owned_workspace_close=owned_workspace_close,
+        )
+        coordinator = _RuntimeCloseCoordinator(
+            tuple(action for _, action in close_actions)
+        )
         await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
         await graph_service.recover_pending()
     except BaseException:
-        if task_launcher is not None:
-            await task_launcher.shutdown()
-        if graph_service is not None:
-            await graph_service.drain_metric_projector()
-        if backend is not None:
-            await backend.close()
-        if metric_buffer is not None:
-            await metric_buffer.close()
+        if coordinator is not None:
+            try:
+                await coordinator.close()
+            except BaseException as error:
+                _log_secondary_cleanup("runtime.build.close", error)
+        else:
+            await _run_cleanup_actions(
+                _runtime_close_actions(
+                    graph_service=graph_service,
+                    task_launcher=task_launcher,
+                    execution=execution,
+                    backend=backend,
+                    input_materializer=input_materializer,
+                    metric_buffer=metric_buffer,
+                    state=state,
+                    owned_workspace_close=owned_workspace_close,
+                )
+            )
         raise
     return _RuntimeComponents(
         catalog=catalog,

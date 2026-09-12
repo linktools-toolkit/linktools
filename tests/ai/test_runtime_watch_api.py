@@ -11,8 +11,7 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
-from linktools.ai.runtime import Execution, Runtime, TaskGraphRunEvent
-from linktools.ai.runtime._task import TaskGraphRun
+from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
 from linktools.ai.runtime.service_api import (
     ExecutionStreamEvent,
     ExecutionTreeEvent,

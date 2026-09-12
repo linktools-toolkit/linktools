@@ -467,6 +467,17 @@ def test_metric_codec_rejects_invalid_persisted_types() -> None:
 
 def test_complete_sql_schema_includes_metrics_tables() -> None:
     metadata = build_sql_schema_metadata()
-    assert len(metadata.tables) == 12
-    assert "ai_metric_definitions" in metadata.tables
-    assert "ai_metric_observations" in metadata.tables
+    assert {
+        "ai_asset_changes",
+        "ai_asset_entries",
+        "ai_asset_heads",
+        "ai_metric_definitions",
+        "ai_metric_observations",
+        "ai_object_chunks",
+        "ai_objects",
+        "ai_state_aliases",
+        "ai_state_facts",
+        "ai_state_operations",
+        "ai_state_records",
+        "ai_state_sequences",
+    }.issubset(metadata.tables)

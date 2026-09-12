@@ -14,6 +14,7 @@ from linktools.ai.runtime._tool_boundary import (
     RuntimeToolBoundaryToolset,
 )
 from linktools.ai.runtime._tool_metrics import _ToolMetricContext
+from ._runtime_test_helpers import semantic_tool
 from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
@@ -100,15 +101,16 @@ async def _boundary(
         return await handler()
 
     bridge = _Bridge(decision)
-    raw = FunctionToolset([tool])
+    descriptor = ManagedToolDescriptor(
+        effect_owner="tool_operation",
+        effect="replay_safe",
+        tool_class="business",
+    )
+    raw = FunctionToolset([semantic_tool(tool, descriptor)])
     boundary = RuntimeToolBoundaryToolset(
         (raw,),
         {
-            "tool": ManagedToolDescriptor(
-                effect_owner="tool_operation",
-                effect="replay_safe",
-                tool_class="business",
-            )
+            "tool": descriptor
         },
         id="boundary",
         tool_operations=bridge,

@@ -25,6 +25,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 from linktools.ai.workspace import WorkspaceToolPermissionPolicy
+from ._runtime_test_helpers import semantic_tool
 
 
 class _Bridge:
@@ -98,7 +99,7 @@ async def _call(
 ) -> tuple[Any, _Bridge | None]:
     selected_bridge = bridge
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([handler]),),
+        (FunctionToolset([semantic_tool(handler, descriptor)]),),
         {handler.__name__: descriptor},
         id="test.boundary",
         workspace_policy=workspace_policy,

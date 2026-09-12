@@ -42,6 +42,7 @@ from ._plan import (
     RuntimeRetentionMode,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    runtime_domain_uses_object_store,
 )
 from ._recovery_repositories import build_recovery_repository_bundle
 from ._repositories import OperationLedgerRepository, build_repository_bundle
@@ -57,16 +58,6 @@ from ._steps import (
 from ._task_repository import TaskAdmissionRepositoryImpl, TaskRepositoryImpl
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
-_OBJECT_DOMAINS = frozenset(
-    {
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.MEMORY,
-        RuntimeDomain.ARTIFACT,
-        RuntimeDomain.RECOVERY,
-        RuntimeDomain.TASK,
-    }
-)
 _STEP_DOMAINS = (
     RuntimeDomain.CONVERSATION,
     RuntimeDomain.EXECUTION,
@@ -259,7 +250,10 @@ async def materialize_runtime_state(
                 from ._schema import build_runtime_sql_metadata
 
                 build_runtime_sql_metadata(frozenset(domains), metadata=metadata)
-                if object_store is None and set(domains) & _OBJECT_DOMAINS:
+                if object_store is None and any(
+                    runtime_domain_uses_object_store(domain)
+                    for domain in domains
+                ):
                     build_object_sql_metadata(metadata=metadata)
                 group = SqlStateStorageGroup(
                     context,
@@ -396,8 +390,15 @@ async def materialize_runtime_state(
         for cleanup in reversed(cleanups):
             try:
                 await cleanup()
-            except BaseException:
-                _logger.exception("runtime materialization cleanup failed")
+            except BaseException as error:
+                code = error.code.value if isinstance(error, AIError) else None
+                _logger.error(
+                    "runtime materialization cleanup failed: phase=%s code=%s "
+                    "exception_type=%s",
+                    "runtime.state.materialize",
+                    code,
+                    type(error).__name__,
+                )
         raise
 
 
@@ -458,7 +459,9 @@ def _build_object_router(
     values: dict[RuntimeDomain, ObjectStore] = {}
     close_guard_stores: list[ObjectStore] = []
     sql_objects: dict[int, SqlObjectStore] = {}
-    for domain in _OBJECT_DOMAINS:
+    for domain in RuntimeDomain:
+        if not runtime_domain_uses_object_store(domain):
+            continue
         route = plan.route(domain)
         if route.retention is RuntimeRetentionMode.DURABLE and external is not None:
             values[domain] = external

@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import workspace_capabilities
-from linktools.ai.runtime._compaction import RuntimeCompaction
+from linktools.ai.runtime._compaction import (
+    RuntimeCompaction,
+    RuntimeCompactionPolicy,
+)
 from linktools.ai.workspace import SandboxResource, Workspace
 from linktools.ai.workspace._bubblewrap import _build_bwrap_args
 from pydantic_ai.models.test import TestModel
@@ -87,7 +90,11 @@ async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path
 def test_runtime_compaction_uses_harness_deduplication() -> None:
     compaction = RuntimeCompaction(
         4096,
-        workspace_read_available=True,
+        policy=RuntimeCompactionPolicy(
+            context_dedupe_by_tool={
+                "read_file": "workspace_file_read_v1",
+            },
+        ),
         journal=None,
         observer=None,
         projection_sink=None,
