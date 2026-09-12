@@ -194,18 +194,18 @@ def _require_acp() -> "tuple[ModuleType, ModuleType]":
 
 def _acp_update(
     schema: ModuleType,
-    event_type: "ExecutionEventType | ExecutionDeltaType",
+    event_type: str,
     payload: JsonValue,
 ) -> "JsonValue | None":
     if not isinstance(payload, dict):
         return None
-    if event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
+    if event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
         return schema.AgentMessageChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_message_chunk")
-    if event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA:
+    if event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
         return schema.AgentThoughtChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_thought_chunk")
-    if event_type is ExecutionEventType.TOOL_CALL_STARTED:
+    if event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
         return schema.ToolCallStart(toolCallId=str(payload.get("call_id", "")), title=str(payload.get("tool_name", "tool")), kind="execute", status="in_progress", sessionUpdate="tool_call")
-    if event_type is ExecutionEventType.TOOL_CALL_FINISHED:
+    if event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
         return schema.ToolCallProgress(toolCallId=str(payload.get("call_id", "")), kind="execute", status="completed" if payload.get("status") == "SUCCEEDED" else "failed", sessionUpdate="tool_call_update")
     return None
 
