@@ -132,7 +132,7 @@ async def test_explicit_recovery_rearms_original_graph() -> None:
             RecoverGraphRequest(request.principal, "recover:resume"),
         )
 
-        assert result.status is TaskStatus.WAITING
+        assert result.status is TaskStatus.RUNNING
         assert launcher.started == ["resume"]
         assert result.node_results[0].status is TaskStatus.WAITING
         assert result.node_results[0].execution_id == "execution"
