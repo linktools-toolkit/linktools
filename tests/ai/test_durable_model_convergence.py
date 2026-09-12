@@ -3,6 +3,7 @@
 """Regression coverage for minimized Runtime durable contracts."""
 
 from datetime import datetime, timezone
+from inspect import signature
 
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._codec import (
@@ -84,6 +85,7 @@ def test_transcript_head_uses_stored_record_as_its_only_revision_owner() -> None
 
     payload = _encode_persisted_domain(head)
 
+    assert "revision" not in signature(TranscriptHeadRecord).parameters
     assert set(payload["fields"]) == {
         "owner_domain",
         "owner_id",
