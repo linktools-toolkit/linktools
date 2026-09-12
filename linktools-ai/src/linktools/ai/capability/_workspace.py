@@ -467,7 +467,7 @@ class _WorkspaceToolSurface:
             command_id: The ID returned by start_command.
 
         Returns:
-            Status and recent output.
+            Status and recent output of the background command.
         """
         return await self._call(self._require_session().check_command(command_id))
 
