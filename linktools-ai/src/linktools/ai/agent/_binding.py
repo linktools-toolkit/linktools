@@ -18,7 +18,6 @@ _PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
 _PIN_FIELDS = frozenset({"kind", "id", "contract"})
 _BINDING_FIELDS = frozenset(
     {
-        "version",
         "agent_spec",
         "base_model",
         "selected",
@@ -99,7 +98,6 @@ class SemanticPin:
 class AgentBindingSnapshot:
     """Persist the semantic inputs required to restore one Agent binding."""
 
-    version: int
     agent_spec: AgentSpec
     base_model: Mapping[str, JsonValue]
     selected: "tuple[SemanticPin, ...]"
@@ -108,10 +106,6 @@ class AgentBindingSnapshot:
     output_schema: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.version, int) or isinstance(self.version, bool) or self.version < 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self.version != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in {"text", "structured"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
@@ -151,7 +145,6 @@ class AgentBindingSnapshot:
 
     def to_payload(self) -> "dict[str, JsonValue]":
         return {
-            "version": self.version,
             "agent_spec": AgentSpecCodec().to_wire_payload(self.agent_spec),
             "base_model": dict(self.base_model),
             "selected": [item.to_payload() for item in self.selected],
@@ -164,11 +157,6 @@ class AgentBindingSnapshot:
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
         if not isinstance(value, Mapping) or set(value) != _BINDING_FIELDS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        version = value["version"]
-        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if version != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         selected = value["selected"]
         subagents = value["subagents"]
         mode = value["output_mode"]
@@ -180,7 +168,6 @@ class AgentBindingSnapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             return cls(
-                version=version,
                 agent_spec=AgentSpecCodec().from_payload(_require_mapping(value["agent_spec"])),
                 base_model=_normalize_mapping(value["base_model"]),
                 selected=tuple(SemanticPin.from_payload(item) for item in selected),

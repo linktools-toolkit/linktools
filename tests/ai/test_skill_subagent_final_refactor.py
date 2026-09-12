@@ -104,7 +104,6 @@ def test_v1_binding_restores_from_current_semantic_snapshot() -> None:
     restored = compiler.restore(snapshot)
 
     assert restored.digest == snapshot.binding_digest
-    assert restored.snapshot.version == 1
     assert restored.snapshot.subagent_ids == ("child",)
     assert restored.snapshot.subagents[0].to_payload() == {"kind": "agent", "id": "child"}
     assert restored.snapshot.to_payload() == payload
@@ -155,7 +154,6 @@ def test_parent_binding_keeps_one_logical_subagent_set_and_rejects_unknown_field
     compiler = _compiler({"parent": parent, "child": child})
     binding = compiler.bind(compiler.compile(parent))
 
-    assert binding.snapshot.version == 1
     assert binding.snapshot.subagent_ids == ("child",)
     assert binding.snapshot.subagents[0].to_payload() == {
         "kind": "agent",
@@ -189,9 +187,9 @@ def test_future_semantic_pin_version_is_not_misclassified_as_corruption() -> Non
     assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
+def test_agent_task_recovery_rejects_unknown_binding_fields() -> None:
     binding = _load_json("agent_binding_subagent_v1_golden.json")
-    binding["version"] = 2
+    binding["future"] = 2
     body = {
         "binding": binding,
         "user_prompt": {"kind": "text", "text": "work"},
@@ -210,7 +208,7 @@ def test_agent_task_recovery_preserves_future_binding_version_error() -> None:
             node_id="node",
         )
 
-    assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
@@ -605,7 +603,6 @@ def test_child_description_changes_parent_binding_identity_without_pinning_defin
     old_binding = old_compiler.bind(old_compiler.compile(parent))
     new_binding = new_compiler.bind(new_compiler.compile(parent))
 
-    assert old_binding.snapshot.version == 1
     assert old_binding.snapshot.subagents[0].to_payload() == {
         "kind": "agent",
         "id": "child",

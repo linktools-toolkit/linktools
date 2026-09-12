@@ -42,7 +42,6 @@ def test_runtime_bound_agent_does_not_expose_compile_or_registration() -> None:
 
 def test_agent_binding_snapshot_persists_only_semantic_inputs() -> None:
     snapshot = AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"version": 1, "id": "model"},
         selected=(),
@@ -54,7 +53,6 @@ def test_agent_binding_snapshot_persists_only_semantic_inputs() -> None:
     payload = snapshot.to_payload()
 
     assert set(payload) == {
-        "version",
         "agent_spec",
         "base_model",
         "selected",
@@ -87,9 +85,8 @@ def test_semantic_pin_persists_contract_once() -> None:
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_agent_binding_snapshot_rejects_unknown_version() -> None:
+def test_agent_binding_snapshot_rejects_unknown_fields() -> None:
     snapshot = AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"version": 1, "id": "model"},
         selected=(),
@@ -97,12 +94,12 @@ def test_agent_binding_snapshot_rejects_unknown_version() -> None:
         output_mode="text",
         output_schema={"type": "object"},
     ).to_payload()
-    snapshot["version"] = 3
+    snapshot["future"] = 3
 
     with pytest.raises(AIError) as error:
         AgentBindingSnapshot.from_payload(snapshot)
 
-    assert error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 class _AllowAuthorization:

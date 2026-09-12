@@ -82,7 +82,6 @@ class _UncertainExecution:
 def _binding() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"route_id": "model", "model_identity": "test:model"},
         selected=(),

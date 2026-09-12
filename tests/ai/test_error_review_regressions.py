@@ -44,7 +44,6 @@ class _EmptyRepositoryInstructionResolver:
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="default"),
         base_model={"version": 1, "id": "default"},
         selected=(),

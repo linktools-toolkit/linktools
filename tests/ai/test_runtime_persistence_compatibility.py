@@ -68,7 +68,6 @@ def _envelope(
 def _binding_snapshot_payload() -> dict[str, object]:
     output = bind_output()
     snapshot = AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
@@ -265,7 +264,6 @@ def test_agent_binding_snapshot_rejects_unknown_field() -> None:
 @pytest.mark.parametrize(
     "missing",
     (
-        "version",
         "agent_spec",
         "base_model",
         "selected",

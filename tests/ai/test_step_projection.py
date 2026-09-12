@@ -34,7 +34,6 @@ def _run() -> RunRecord:
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),

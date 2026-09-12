@@ -43,7 +43,6 @@ from ._runtime_test_helpers import execution_owner_fields
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent", model="default"),
         base_model={"provider": "test", "model": "fixture"},
         selected=(),

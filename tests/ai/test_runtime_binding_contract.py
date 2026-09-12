@@ -66,7 +66,6 @@ class _SchemaTwinB(BaseModel):
 def _snapshot() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("agent"),
         base_model={"route_id": "default", "model_identity": "test:model"},
         selected=(),
@@ -165,7 +164,6 @@ def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
     snapshot = _snapshot()
 
     assert set(snapshot.to_payload()) == {
-        "version",
         "agent_spec",
         "base_model",
         "selected",

@@ -92,7 +92,6 @@ def _workspace(root: Path) -> Workspace:
 
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec("default", model="default"),
         base_model=dict(_DiagnosticModelBinding.semantic_payload),
         selected=(),

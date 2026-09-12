@@ -1,5 +1,4 @@
 {
-  "version": 1,
   "agent_spec": {
     "version": 1,
     "id": "runtime-persistence-v1",

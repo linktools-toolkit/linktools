@@ -61,7 +61,6 @@ class _JsonIntEnum(IntEnum):
 
 def _binding_snapshot(*, agent_id: str = "default") -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        version=1,
         agent_spec=AgentSpec(agent_id, model="route"),
         base_model={"version": 1, "id": "route"},
         selected=(),

@@ -140,7 +140,6 @@ class AgentCompiler:
     ) -> AgentBinding:
         output_binding = bind_output(output)
         snapshot = AgentBindingSnapshot(
-            version=1,
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_payload(definition.spec)
             ),
