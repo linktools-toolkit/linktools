@@ -4933,12 +4933,14 @@ def _require_session_identity(
         candidate.owner_principal_id,
         candidate.agent_id,
         candidate.history_id,
+        candidate.created_at,
     ) != (
         current.session_id,
         current.tenant_id,
         current.owner_principal_id,
         current.agent_id,
         current.history_id,
+        current.created_at,
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
