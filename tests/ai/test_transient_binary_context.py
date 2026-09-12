@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Transient BinaryContent projection contracts."""
 
+import pytest
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -16,6 +17,11 @@ from linktools.ai.runtime._message import (
     binary_content_usage,
     project_transient_binary_content,
 )
+from linktools.ai.runtime.state._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+)
+from linktools.ai.runtime.state._steps import StagingStepStore
 
 
 def _request(name: str, body: bytes) -> ModelRequest:
@@ -85,3 +91,39 @@ def test_snapshot_context_projects_consumed_binary_even_without_compaction() -> 
     assert context is not None
     assert binary_content_usage(context) == (0, 0)
     assert binary_content_usage(raw) == (1, 5)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> None:
+    store = StagingStepStore()
+    await store.initialize()
+    await store.register_run(RunRecord("pending"))
+    await store.register_run(RunRecord("consumed"))
+    adapter = HarnessStepStoreAdapter(store, execution_id=None)
+    pending_request = _request("pending.png", b"pending")
+    consumed_request = _request("consumed.png", b"consumed")
+    consumed_response = ModelResponse(parts=[TextPart("done")])
+
+    await store.save_snapshot(
+        ContinuableSnapshot(
+            run_id="pending",
+            step_index=1,
+            messages=[pending_request],
+            context_messages=adapter.snapshot_context_messages([pending_request]),
+        )
+    )
+    consumed_raw = [consumed_request, consumed_response]
+    await store.save_snapshot(
+        ContinuableSnapshot(
+            run_id="consumed",
+            step_index=1,
+            messages=consumed_raw,
+            context_messages=adapter.snapshot_context_messages(consumed_raw),
+        )
+    )
+
+    pending = await store.load_loaded_model_context(owner_id="pending")
+    consumed = await store.load_loaded_model_context(owner_id="consumed")
+
+    assert binary_content_usage(pending.model_messages()) == (1, 7)
+    assert binary_content_usage(consumed.model_messages()) == (0, 0)
