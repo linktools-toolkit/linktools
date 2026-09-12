@@ -109,18 +109,12 @@ class _AgentTaskNodeHandler:
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         *,
-        acquire_dependency_hold: Callable[..., Awaitable[None]] | None = None,
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
         request_terminal_handoff: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._execution = execution
         self._catalog = catalog
         self._compiler = compiler
-        self._acquire_dependency_hold = (
-            _noop_async_callback
-            if acquire_dependency_hold is None
-            else acquire_dependency_hold
-        )
         self._release_dependency_hold = (
             _noop_async_callback
             if release_dependency_hold is None
@@ -831,7 +825,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         payload_policy: PayloadPolicy,
         handlers: Sequence[TaskNodeHandler[AppT]] = (),
         expanders: Sequence[TaskExpander] = (),
-        acquire_dependency_hold: Callable[..., Awaitable[None]] | None = None,
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
         request_terminal_handoff: Callable[..., Awaitable[None]] | None = None,
         task_durable: bool = False,
@@ -850,7 +843,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution,
             catalog,
             compiler,
-            acquire_dependency_hold=acquire_dependency_hold,
             release_dependency_hold=release_dependency_hold,
             request_terminal_handoff=request_terminal_handoff,
         )
