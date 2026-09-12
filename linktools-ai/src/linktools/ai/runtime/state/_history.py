@@ -276,7 +276,6 @@ class TranscriptRepository:
             0,
             0,
             HistoryQuality.COMPLETE,
-            0,
         )
 
     def empty_head_record(self, owner_id: str) -> StoredRecord:
@@ -476,7 +475,6 @@ class TranscriptRepository:
             message_count=expected,
             chunk_count=base_head.chunk_count + len(chunks),
             quality=base_head.quality if quality is None else quality,
-            revision=base_head.revision + 1,
         )
         upgraded = replace(
             head_record,

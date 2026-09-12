@@ -216,17 +216,9 @@ class TranscriptHeadRecord:
     message_count: int
     chunk_count: int
     quality: HistoryQuality
-    revision: int
 
     def __post_init__(self) -> None:
-        if any(
-            value < 0
-            for value in (
-                self.message_count,
-                self.chunk_count,
-                self.revision,
-            )
-        ):
+        if self.message_count < 0 or self.chunk_count < 0:
             raise ValueError("transcript head counts cannot be negative")
         if not self.owner_id:
             raise ValueError("transcript head owner cannot be empty")

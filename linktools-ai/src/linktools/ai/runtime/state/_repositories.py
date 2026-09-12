@@ -710,7 +710,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                         0,
                         0,
                         HistoryQuality.COMPLETE,
-                        0,
                     ),
                 ),
             )
@@ -4784,7 +4783,6 @@ def _empty_conversation_transcript_head(
         0,
         0,
         HistoryQuality.COMPLETE,
-        0,
     )
 
 
