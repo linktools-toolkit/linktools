@@ -7,9 +7,10 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, Protocol
 
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.wrapper import WrapperModel
@@ -22,9 +23,11 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
 )
 
+from ..capability import AgentContext
 from ..errors import AIError, ErrorCode
 from ..workspace import normalize_workspace_path
 from ._journal import ModelRequestFact, ModelRequestJournal
+from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
@@ -144,7 +147,7 @@ class _ObservedCompactionModel(WrapperModel):
 
 
 class RuntimeCompaction(AbstractCapability[None]):
-    """Adapt Harness compaction to Runtime context projection ownership."""
+    """Project the provider context without rewriting the raw run transcript."""
 
     def __init__(
         self,
@@ -176,22 +179,30 @@ class RuntimeCompaction(AbstractCapability[None]):
             )
         )
 
-    async def before_model_request(
+    async def wrap_model_request(
         self,
         ctx: PydanticRunContext[Any],
+        *,
         request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
+        handler: WrapModelRequestHandler,
+    ) -> ModelResponse:
         source = tuple(request_context.messages)
+        binary_projected = project_transient_binary_content(source)
+        projected_context = replace(
+            request_context,
+            messages=list(binary_projected),
+        )
+        _validate_pending_binary_content(ctx, projected_context.messages)
         if self._target_tokens is None:
-            request_context = await self._deduplicate.before_model_request(
+            projected_context = await self._deduplicate.before_model_request(
                 ctx,
-                request_context,
+                projected_context,
             )
         else:
             summary_model: Model | None = None
             if self._journal is not None and self._observer is not None:
                 summary_model = _ObservedCompactionModel(
-                    request_context.model,
+                    projected_context.model,
                     ctx=ctx,
                     journal=self._journal,
                     observer=self._observer,
@@ -212,17 +223,33 @@ class RuntimeCompaction(AbstractCapability[None]):
                 ),
                 target_tokens=self._target_tokens,
             )
-            request_context = await tiered.before_model_request(
+            projected_context = await tiered.before_model_request(
                 ctx,
-                request_context,
+                projected_context,
             )
-        projected = tuple(request_context.messages)
+        projected = tuple(projected_context.messages)
         if self._projection_sink is not None:
             self._projection_sink(
                 source,
                 None if projected == source else projected,
             )
-        return request_context
+        return await handler(projected_context)
+
+
+def _validate_pending_binary_content(
+    ctx: PydanticRunContext[Any],
+    messages: Sequence[ModelMessage],
+) -> None:
+    deps = ctx.deps
+    if not isinstance(deps, AgentContext):
+        return
+    count, total_bytes = binary_content_usage(messages)
+    policy = deps.workspace.policy
+    if (
+        count > policy.max_binary_input_parts
+        or total_bytes > policy.max_binary_input_bytes
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def _workspace_file_key(call: ToolCallPart) -> str | None:
