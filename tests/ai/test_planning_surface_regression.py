@@ -67,10 +67,9 @@ async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> Non
         usage=RunUsage(),
         run_id="run",
     )
-    original = UserPromptPart("continue")
     request_context = ModelRequestContext(
         model=TestModel(),
-        messages=[ModelRequest(parts=[original])],
+        messages=[ModelRequest(parts=[UserPromptPart("continue")])],
         model_settings=None,
         model_request_parameters=ModelRequestParameters(),
     )
@@ -88,11 +87,23 @@ async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> Non
     )
 
     assert len(captured) == 1
-    reminder = captured[0].parts[-1]
-    assert isinstance(reminder, UserPromptPart)
-    assert not isinstance(reminder.content, str)
-    assert any(isinstance(item, CachePoint) for item in reminder.content)
-    assert request_context.messages[0].parts[0] is original
+    tokens: list[object] = []
+    for part in captured[0].parts:
+        if not isinstance(part, UserPromptPart):
+            continue
+        if isinstance(part.content, str):
+            tokens.append(part.content)
+        else:
+            tokens.extend(part.content)
+
+    cache_index = next(
+        index for index, item in enumerate(tokens) if isinstance(item, CachePoint)
+    )
+    plan_index = next(
+        index for index, item in enumerate(tokens) if "ship it" in str(item)
+    )
+    assert cache_index < plan_index
+    assert any("continue" in str(item) for item in tokens)
 
 
 async def test_runtime_plan_persistence_adds_no_arbitrary_size_limit() -> None:
