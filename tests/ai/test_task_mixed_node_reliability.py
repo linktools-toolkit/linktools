@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from ._task_test_helpers import admit_graph
+from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import CapabilityGroup, TaskExpansionContext
 from linktools.ai.core import JsonValue, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
@@ -130,7 +131,13 @@ class _AgentGraphExpander:
     version = 1
 
     def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
-        return (context.agent_task("agent-child", "return a child result"),)
+        return (
+            context.agent_task(
+                "worker",
+                "agent-child",
+                "return a child result",
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -285,6 +292,13 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         allow_skills=(),
         allow_subagents=(),
     )
+    application.agent(
+        "worker",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
     app_reference = TaskExpanderRef("application.graph", 1)
     agent_reference = TaskExpanderRef("application.agent-graph", 1)
     state = RuntimeState.in_memory()
@@ -336,6 +350,11 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         assert [node.node_id for node in snapshot.nodes] == sorted(
             node.node_id for node in snapshot.nodes
         )
+        agent_child = next(
+            node for node in snapshot.nodes if node.node_id == "agent-child"
+        )
+        binding = AgentBindingSnapshot.from_payload(agent_child.input["binding"])
+        assert binding.agent_spec.id == "worker"
         assert snapshot.node_states[-1].status is TaskStatus.SUCCEEDED
         assert await runtime.read_task_result(
             graph.graph_id,
