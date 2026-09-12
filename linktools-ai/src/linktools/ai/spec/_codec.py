@@ -15,28 +15,6 @@ from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, no
 
 SpecT = TypeVar("SpecT")
 _VERSION = 1
-_AGENT_FIELDS = frozenset(
-    {
-        "version",
-        "id",
-        "model",
-        "system_prompt",
-        "instructions",
-        "allow_tools",
-        "allow_skills",
-        "allow_subagents",
-        "allow_capabilities",
-        "usage_limits",
-        "planning",
-        "thinking",
-        "tool_retries",
-        "output_retries",
-        "description",
-        "preload_skills",
-    }
-)
-_SKILL_FIELDS = frozenset({"version", "id", "description", "content"})
-_MCP_FIELDS = frozenset({"version", "id", "command", "args"})
 _USAGE_LIMIT_FIELDS = (
     "model_requests",
     "tool_calls",
@@ -92,7 +70,6 @@ class AgentSpecCodec:
 
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
         _require_v1(raw)
-        _require_known_fields(raw, _AGENT_FIELDS)
         identity = raw.get("id")
         model = raw.get("model", "default")
         system_prompt = raw.get("system_prompt", "")
@@ -194,7 +171,6 @@ class SkillSpecCodec:
 
     def from_payload(self, raw: Mapping[str, object]) -> SkillSpec:
         _require_v1(raw)
-        _require_known_fields(raw, _SKILL_FIELDS)
         identity = raw.get("id")
         content = raw.get("content")
         if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
@@ -298,7 +274,6 @@ class MCPServerSpecCodec:
 
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
         _require_v1(raw)
-        _require_known_fields(raw, _MCP_FIELDS)
         identity = raw.get("id")
         command = raw.get("command")
         args = raw.get("args", [])
@@ -349,11 +324,6 @@ def _require_v1(raw: Mapping[str, object]) -> None:
     _require_version(raw, {1})
 
 
-def _require_known_fields(raw: Mapping[str, object], known: frozenset[str]) -> None:
-    if any(not isinstance(key, str) or key not in known for key in raw):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "declaration contains unsupported fields")
-
-
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
     if value is None:
         return None
@@ -361,8 +331,6 @@ def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits must be an object or null")
     if any(not isinstance(name, str) for name in value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "usage_limits field name is invalid")
-    if any(name not in _USAGE_LIMIT_FIELDS for name in value):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits contains unsupported fields")
     kwargs = {name: value[name] for name in _USAGE_LIMIT_FIELDS if name in value}
     try:
         return AgentUsageLimits(**kwargs)
