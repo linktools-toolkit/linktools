@@ -84,6 +84,13 @@ _TERMINAL_TASK_STATUSES = frozenset(
         TaskStatus.CANCELLED,
     }
 )
+_RECOVERABLE_GRAPH_STATES = frozenset(
+    {
+        TaskStatus.PENDING.value,
+        TaskStatus.RUNNING.value,
+        TaskStatus.RECOVERY_REQUIRED.value,
+    }
+)
 _RECOVERY_REQUIRED_CODES = frozenset(
     {
         ErrorCode.TOOL_EFFECT_UNKNOWN.value,
@@ -180,7 +187,7 @@ def _same_task_admission_contract(
 
 
 def _require_canonical_graph_status(status: TaskStatus) -> None:
-    if status is TaskStatus.READY:
+    if status in {TaskStatus.READY, TaskStatus.WAITING}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -923,23 +930,6 @@ class TaskRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         node_candidate = projected_record(self, node_record, value)
         await replace_checked(transaction, node_candidate, node_record.storage_version)
-
-    def _admission_key(self, graph_id: str) -> bytes:
-        return self._key("task_admission", graph_id)
-
-    def _validate_admission_record(self, record: StoredRecord, graph_id: str) -> None:
-        if (
-            record.kind != "task_admission"
-            or record.key_digest != self._admission_key(graph_id)
-            or record.partition_digest != self._partition("task_admission")
-            or record.scope_digest != self._recovery_scope()
-            or record.parent_digest is not None
-            or record.sort_key != sortable_identity(graph_id)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _recovery_scope(self) -> bytes:
-        return self._scope("task_admission", "recoverable", "graphs")
 
     async def _current_graph_in_transaction(
         self,
@@ -2622,6 +2612,7 @@ class TaskRepositoryImpl(RepositoryBase):
         except (KeyError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
+
 class TaskAdmissionRepositoryImpl(RepositoryBase):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(
@@ -2879,26 +2870,66 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         async def read(transaction: StateTransaction) -> Page[TaskGraphLaunch]:
             records = await transaction.list_records(
                 RecordQuery(
-                    scope_digest=self._recovery_scope(),
-                    kind="task_admission",
+                    partition_digest=self._partition("task_graph"),
+                    kind="task_graph",
+                    states=_RECOVERABLE_GRAPH_STATES,
                     after_sort_key=after_sort_key,
                     after_key_digest=after_key_digest,
                     limit=limit + 1,
                 )
             )
             selected = records[:limit]
-            admissions = tuple(
-                [await self._decode(record, TaskGraphAdmission) for record in selected]
+            headers: list[TaskGraphView] = []
+            for record in selected:
+                header = await self._decode(record, TaskGraphView)
+                self._validate_graph_record(record, header.graph_id)
+                _require_canonical_graph_status(header.status)
+                if (
+                    record.state != header.status.value
+                    or header.status.value not in _RECOVERABLE_GRAPH_STATES
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                headers.append(header)
+            admission_keys = tuple(
+                self._admission_key(header.graph_id) for header in headers
+            )
+            admission_records = (
+                await transaction.get_records(admission_keys)
+                if admission_keys
+                else {}
             )
             launches: list[TaskGraphLaunch] = []
-            for record, admission in zip(selected, admissions, strict=True):
-                self._validate_admission_record(record, admission.graph_id)
-                current, _states = await self._current_graph_in_transaction(
-                    transaction,
-                    admission.graph_id,
+            for header, admission_key in zip(headers, admission_keys, strict=True):
+                admission_record = admission_records.get(admission_key)
+                if admission_record is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._validate_admission_record(admission_record, header.graph_id)
+                admission = await self._decode(admission_record, TaskGraphAdmission)
+                if (
+                    admission.graph_id != header.graph_id
+                    or admission.principal.tenant_id != self._tenant_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                stored_operation = await transaction.get_operation(
+                    operation_key(
+                        self._namespace,
+                        self._tenant_id,
+                        self._domain.value,
+                        admission.operation_id,
+                    )
                 )
-                if current.status in _TERMINAL_TASK_STATUSES:
-                    continue
+                if stored_operation is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                operation = decode_operation(stored_operation)
+                self._validate_operation_identity(operation, admission)
+                if (
+                    operation.request_digest != admission.initial_request_digest
+                    or operation.status is not OperationStatus.SUCCEEDED
+                    or operation.result_ref != admission.graph_id
+                    or not _is_sha256(operation.result_digest)
+                    or operation.error_code is not None
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 launches.append(admission.launch())
             next_cursor = (
                 record_cursor(selected[-1])
@@ -3313,23 +3344,24 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+
 def _isolated_graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
     statuses = {node.status for node in nodes}
     if TaskStatus.RECOVERY_REQUIRED in statuses:
         return TaskStatus.RECOVERY_REQUIRED
     if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
         return TaskStatus.SUCCEEDED
+    if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:
+        return TaskStatus.RUNNING
+    if TaskStatus.PENDING in statuses or TaskStatus.READY in statuses:
+        return TaskStatus.PENDING
     if TaskStatus.FAILED in statuses:
         return TaskStatus.FAILED
     if TaskStatus.BLOCKED in statuses:
         return TaskStatus.BLOCKED
     if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
         return TaskStatus.CANCELLED
-    if TaskStatus.RUNNING in statuses:
-        return TaskStatus.RUNNING
-    if TaskStatus.WAITING in statuses:
-        return TaskStatus.WAITING
-    return TaskStatus.PENDING
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _effective_graph_status(
