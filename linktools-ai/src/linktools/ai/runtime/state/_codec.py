@@ -9,7 +9,7 @@ import json
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from operator import attrgetter
@@ -304,7 +304,7 @@ def _decode_v1_task_node(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskNode:
-    _require_exact_keys(
+    _require_contract_fields(
         raw_fields,
         frozenset(
             {
@@ -314,6 +314,7 @@ def _decode_v1_task_node(
                 "budget_cost",
             }
         ),
+        persisted=persisted,
     )
     return TaskNode(
         str(_decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -359,9 +360,10 @@ def _decode_v1_task_result(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskResultRecord:
-    _require_exact_keys(
+    _require_contract_fields(
         raw_fields,
         frozenset({"graph_id", "node_id", "result_digest", "payload"}),
+        persisted=persisted,
     )
     return TaskResultRecord(
         cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
@@ -409,7 +411,7 @@ def _decode_v1_object_ref(
         if persisted
         else frozenset({"store_id", "key", "digest", "size"})
     )
-    _require_exact_keys(raw_fields, expected)
+    _require_contract_fields(raw_fields, expected, persisted=persisted)
     store_id = (
         _RUNTIME_OBJECT_STORE_ID
         if persisted
@@ -436,7 +438,11 @@ def _decode_v1_stored_user_input(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> StoredUserInput:
-    _require_exact_keys(raw_fields, frozenset({"codec", "payload"}))
+    _require_contract_fields(
+        raw_fields,
+        frozenset({"codec", "payload"}),
+        persisted=persisted,
+    )
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
     )
@@ -449,7 +455,6 @@ def _decode_v1_stored_user_input(
         return StoredUserInput(codec_name, payload)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
 
 
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
@@ -508,6 +513,17 @@ def _require_exact_keys(
     expected: frozenset[str],
 ) -> None:
     if set(value.keys()) != expected:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _require_contract_fields(
+    value: Mapping[str, object],
+    required: frozenset[str],
+    *,
+    persisted: bool,
+) -> None:
+    keys = set(value.keys())
+    if not required.issubset(keys) or (not persisted and keys != required):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -804,6 +820,8 @@ def _decode_external(
     value: object,
     target: type[object],
     codec: _VersionCodec,
+    *,
+    persisted: bool,
 ) -> object:
     if target not in codec.external_schema_types:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -828,7 +846,7 @@ def _decode_external(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if target is IdempotencyTerminalUpdate:
-        _require_exact_keys(
+        _require_contract_fields(
             value,
             frozenset(
                 {
@@ -841,6 +859,7 @@ def _decode_external(
                     "error_code",
                 }
             ),
+            persisted=persisted,
         )
         return IdempotencyTerminalUpdate(
             scope=cast(str, _decode_domain(value["scope"], str, codec)),
@@ -872,7 +891,7 @@ def _decode_external(
             ),
         )
     if target is OperationTerminalUpdate:
-        _require_exact_keys(
+        _require_contract_fields(
             value,
             frozenset(
                 {
@@ -884,6 +903,7 @@ def _decode_external(
                     "error_code",
                 }
             ),
+            persisted=persisted,
         )
         return OperationTerminalUpdate(
             operation_id=cast(
@@ -1338,7 +1358,12 @@ def _decode_domain(
             )
         return result
     if isinstance(target, type) and target in codec.external_schema_types:
-        return _decode_external(value, target, codec)
+        return _decode_external(
+            value,
+            target,
+            codec,
+            persisted=persisted,
+        )
     if isinstance(target, type) and is_dataclass(target):
         return _decode_dataclass(value, target, codec, persisted=persisted)
     if target is float:
@@ -1440,13 +1465,18 @@ def _decode_dataclass(
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
     declared_fields = tuple(fields(target))
-    _require_exact_keys(
-        raw_fields,
-        frozenset(field.name for field in declared_fields),
-    )
+    declared_names = frozenset(field.name for field in declared_fields)
+    if not persisted:
+        _require_exact_keys(raw_fields, declared_names)
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
     for field in declared_fields:
+        if field.name not in raw_fields:
+            if field.init and (
+                field.default is MISSING and field.default_factory is MISSING
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            continue
         try:
             decoded = _decode_domain(
                 raw_fields[field.name],
