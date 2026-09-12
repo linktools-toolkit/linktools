@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from linktools.ai.core import TaskStatus
-from linktools.ai.task import TaskNodeView
+from linktools.ai.task import TaskEvent, TaskEventType, TaskNodeView
 
 
 @pytest.mark.parametrize(
@@ -41,6 +41,23 @@ def test_unbound_task_states_reject_execution_id(
             None,
             None,
             None,
+            "execution",
+        )
+
+
+def test_running_event_rejects_execution_id() -> None:
+    with pytest.raises(ValueError, match="running task event state is invalid"):
+        TaskEvent(
+            1,
+            "graph",
+            1,
+            TaskEventType.NODE_CHANGED,
+            datetime.now(timezone.utc),
+            TaskStatus.RUNNING,
+            TaskStatus.READY,
+            "node",
+            "worker",
+            1,
             "execution",
         )
 
