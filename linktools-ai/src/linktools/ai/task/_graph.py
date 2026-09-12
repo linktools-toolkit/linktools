@@ -541,21 +541,21 @@ class TaskGraphSnapshot:
 
 def _aggregate_graph_status(nodes: "tuple[TaskNodeView, ...]") -> TaskStatus:
     statuses = {node.status for node in nodes}
-    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
-        return TaskStatus.SUCCEEDED
     if TaskStatus.RECOVERY_REQUIRED in statuses:
         return TaskStatus.RECOVERY_REQUIRED
+    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
+        return TaskStatus.SUCCEEDED
+    if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:
+        return TaskStatus.RUNNING
+    if TaskStatus.PENDING in statuses or TaskStatus.READY in statuses:
+        return TaskStatus.PENDING
     if TaskStatus.FAILED in statuses:
         return TaskStatus.FAILED
     if TaskStatus.BLOCKED in statuses:
         return TaskStatus.BLOCKED
     if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
         return TaskStatus.CANCELLED
-    if TaskStatus.RUNNING in statuses:
-        return TaskStatus.RUNNING
-    if TaskStatus.WAITING in statuses:
-        return TaskStatus.WAITING
-    return TaskStatus.PENDING
+    raise ValueError("task graph aggregate status is invalid")
 
 
 @dataclass(frozen=True, slots=True)
