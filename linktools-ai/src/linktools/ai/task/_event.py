@@ -183,6 +183,7 @@ class TaskEvent:
             if (
                 self.owner is None
                 or self.fence < 1
+                or self.execution_id is not None
                 or self.result_digest is not None
                 or self.error_code is not None
                 or self.error_digest is not None
