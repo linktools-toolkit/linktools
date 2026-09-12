@@ -116,7 +116,7 @@ class TaskEvent:
                 or not self.source_node_id.strip()
                 or not added_node_ids
                 or self.previous_status is not None
-                or self.status is TaskStatus.READY
+                or self.status in {TaskStatus.READY, TaskStatus.WAITING}
             ):
                 raise ValueError("task graph expansion event identity is invalid")
             self._validate_graph_only_fields()
@@ -125,9 +125,12 @@ class TaskEvent:
         if self.event_type is TaskEventType.GRAPH_CHANGED:
             if self.previous_status is None:
                 raise ValueError("task graph change event requires previous status")
-            if self.status is TaskStatus.READY or self.previous_status is TaskStatus.READY:
+            if (
+                self.status in {TaskStatus.READY, TaskStatus.WAITING}
+                or self.previous_status in {TaskStatus.READY, TaskStatus.WAITING}
+            ):
                 raise ValueError(
-                    "task graph change event cannot use node-only READY status"
+                    "task graph change event cannot use node-only status"
                 )
             if self.previous_status is self.status:
                 raise ValueError("task graph change event requires a status transition")
