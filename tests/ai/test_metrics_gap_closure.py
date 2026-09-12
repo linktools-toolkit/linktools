@@ -243,7 +243,6 @@ async def test_task_metrics_derive_timing_attempt_index_and_retry_from_durable_e
             TaskStatus.READY,
             fence=1,
             owner="owner",
-            execution_id="execution-1",
         ),
         _node_event(
             graph_id,
@@ -269,7 +268,6 @@ async def test_task_metrics_derive_timing_attempt_index_and_retry_from_durable_e
             TaskStatus.READY,
             fence=2,
             owner="owner",
-            execution_id="execution-2",
         ),
         _node_event(
             graph_id,

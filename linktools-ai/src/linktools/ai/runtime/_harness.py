@@ -142,7 +142,6 @@ class HarnessStepStoreAdapter:
             agent_name=record.agent_name,
             metadata=dict(record.metadata),
             started_at=record.started_at,
-            registration_id=record.registration_id,
         )
         if self._execution_id is None:
             await self._store.register_run(value)
@@ -166,7 +165,6 @@ class HarnessStepStoreAdapter:
         return [_harness_run(record) for record in values]
 
     async def append_event(self, event: HarnessStepEvent) -> None:
-        harness_index = _harness_event_index(event)
         kind = (
             "run_interrupted"
             if event.kind == "run_completed" and event.run_id in self._interrupted_runs
@@ -185,8 +183,6 @@ class HarnessStepStoreAdapter:
                 tool_name=event.tool_name,
                 error=event.error,
                 metadata=dict(event.metadata),
-                idempotency_key=event.idempotency_key,
-                event_index=harness_index,
             )
         )
 
@@ -208,7 +204,6 @@ class HarnessStepStoreAdapter:
                     tool_name=event.tool_name,
                     error=event.error,
                     metadata=dict(event.metadata),
-                    idempotency_key=event.idempotency_key,
                 )
             )
         return result
@@ -229,7 +224,6 @@ class HarnessStepStoreAdapter:
                 agent_name=snapshot.agent_name,
                 timestamp=snapshot.timestamp,
                 state=state,
-                idempotency_key=snapshot.idempotency_key,
                 context_messages=self.snapshot_context_messages(snapshot.messages),
             )
         )
@@ -387,7 +381,6 @@ def _harness_run(record: RunRecord) -> HarnessRunRecord:
         agent_name=record.agent_name,
         metadata=dict(record.metadata),
         started_at=record.started_at,
-        registration_id=record.registration_id,
     )
 
 
@@ -401,24 +394,7 @@ def _harness_snapshot(snapshot: ContinuableSnapshot) -> HarnessContinuableSnapsh
         agent_name=snapshot.agent_name,
         timestamp=snapshot.timestamp,
         state=snapshot.state,
-        idempotency_key=snapshot.idempotency_key,
     )
-
-
-def _harness_event_index(event: HarnessStepEvent) -> int:
-    key = event.idempotency_key
-    if not isinstance(key, str):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    prefix, separator, _ = key.partition(":")
-    if not separator:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        value = int(prefix)
-    except ValueError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if value < 0:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value
 
 
 def _message_prefix(

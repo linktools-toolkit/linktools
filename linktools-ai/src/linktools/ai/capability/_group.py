@@ -28,17 +28,26 @@ from ..spec import (
     SkillSpecCodec,
     ThinkingValue,
 )
-from ..task import TaskNodeHandler
+from ..task import TaskExpanderRef, TaskNodeHandler
 from ._context import AgentContext
 from ._names import SKILL_TOOL_NAMES, SUBAGENT_TOOL_NAMES
 from ._skill import SkillDefinition
 from ._skill_source import AssetSkillResourceSource, SkillResourceSource, SkillSourceRef
+from ._task import TaskExpander
 
 AppT = TypeVar("AppT")
 PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 
 
-ContributionKind = Literal["tool", "agent", "skill", "mcp", "capability", "task"]
+ContributionKind = Literal[
+    "tool",
+    "agent",
+    "skill",
+    "mcp",
+    "capability",
+    "task",
+    "task_expander",
+]
 ContributionSemanticValue: TypeAlias = (
     Tool
     | AgentSpec
@@ -46,6 +55,7 @@ ContributionSemanticValue: TypeAlias = (
     | MCPServerSpec
     | AbstractCapability
     | TaskNodeHandler[object]
+    | TaskExpander
 )
 _RESERVED_TOOL_NAMES = frozenset(
     {
@@ -61,6 +71,7 @@ _RESERVED_TOOL_NAMES = frozenset(
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESERVED_TASK_TYPE_PREFIX = "linktools.ai."
+_RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,10 +79,21 @@ class CapabilityContribution(Generic[AppT]):
     kind: ContributionKind
     id: str
     fingerprint: str
-    value: "Tool[AgentContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | AbstractCapability[AgentContext[AppT]] | TaskNodeHandler[AppT]"
+    value: (
+        "Tool[AgentContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | "
+        "AbstractCapability[AgentContext[AppT]] | TaskNodeHandler[AppT] | TaskExpander"
+    )
 
     def __post_init__(self) -> None:
-        if self.kind not in {"tool", "agent", "skill", "mcp", "capability", "task"}:
+        if self.kind not in {
+            "tool",
+            "agent",
+            "skill",
+            "mcp",
+            "capability",
+            "task",
+            "task_expander",
+        }:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if not isinstance(self.id, str) or not self.id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -87,6 +109,8 @@ class CapabilityContribution(Generic[AppT]):
         if self.kind == "capability" and not isinstance(self.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "task" and not isinstance(self.value, TaskNodeHandler):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.kind == "task_expander" and not isinstance(self.value, TaskExpander):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "tool" and cast(Tool, self.value).name != self.id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -110,6 +134,11 @@ class CapabilityContribution(Generic[AppT]):
             handler = cast("TaskNodeHandler[object]", self.value)
             task_type, task_version = _task_identity(handler)
             if self.id != f"{task_type}@{task_version}":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.kind == "task_expander":
+            expander = cast(TaskExpander, self.value)
+            expander_id, expander_version = _expander_identity(expander)
+            if self.id != f"{expander_id}@{expander_version}":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.fingerprint != capability_fingerprint(
             self.kind,
@@ -361,6 +390,31 @@ class CapabilityGroup(Generic[AppT]):
             )
         )
         return handler
+
+    def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
+        """Register one pure application-owned TaskGraph expander version."""
+        expander_id, expander_version = _expander_identity(expander)
+        identity = f"{expander_id}@{expander_version}"
+        contract: dict[str, JsonValue] = {
+            "version": 1,
+            "expander_id": expander_id,
+            "expander_version": expander_version,
+        }
+        if any(
+            value.kind == "task_expander" and value.id == identity
+            for value in self._contributions
+        ):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        self._contributions.append(
+            _SemanticContribution(
+                "task_expander",
+                identity,
+                capability_fingerprint("task_expander", identity, contract),
+                expander,
+                contract,
+            )
+        )
+        return TaskExpanderRef(expander_id, expander_version)
 
     def capability(
         self,
@@ -662,6 +716,15 @@ def contribution_semantic_contract(
             "task_type": task_type,
             "task_version": task_version,
         }
+    if kind == "task_expander" and isinstance(value, TaskExpander):
+        expander_id, expander_version = _expander_identity(value)
+        if identity != f"{expander_id}@{expander_version}":
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return {
+            "version": 1,
+            "expander_id": expander_id,
+            "expander_version": expander_version,
+        }
     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
@@ -698,6 +761,18 @@ def _task_identity(handler: object) -> tuple[str, int]:
     ):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return task_type, task_version
+
+
+def _expander_identity(expander: object) -> tuple[str, int]:
+    if not isinstance(expander, TaskExpander):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    try:
+        reference = TaskExpanderRef(expander.id, expander.version)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if reference.id.startswith(_RESERVED_EXPANDER_ID_PREFIX):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return reference.id, reference.version
 
 
 def _validate_business_tool_name(value: str) -> None:

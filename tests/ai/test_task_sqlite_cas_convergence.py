@@ -335,14 +335,14 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
             cursor=None,
             limit=128,
         )
-        assert page.items == (admission.bind(request.graph),)
+        assert page.items == ()
     finally:
         await state.close()
 
     reopened = RuntimeState.sqlite(database)
     await reopened.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
-        view = await reopened.task.tasks.reconcile_graph(
+        view = await reopened.task.tasks.scheduler_snapshot(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -408,7 +408,7 @@ class _ReadOnlyTaskRepository:
             self.view.status,
         )
 
-    async def reconcile_graph(
+    async def scheduler_snapshot(
         self,
         graph_id: str,
         *,
@@ -475,13 +475,26 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
     assert isinstance(repository, TaskRepositoryImpl)
 
     async def corrupt(transaction) -> None:
-        key = repository._node_key(request.graph.graph_id, "b")
+        key = repository._definition_key(request.graph.graph_id, "b")
         record = await transaction.get_record(key)
         assert record is not None
-        node = await repository._decode(record, TaskNodeView)
-        candidate = repository._task_node_record(
-            record,
-            replace(node, dependencies=()),
+        node = await repository._decode(record, TaskNode)
+        tampered = TaskNode(
+            node.node_id,
+            ("missing",),
+            input=node.input,
+            budget_cost=node.budget_cost,
+            expander=node.expander,
+        )
+        candidate = repository._stored(
+            "task_node_definition",
+            [request.graph.graph_id, node.node_id],
+            tampered,
+            parent=repository._definition_parent(request.graph.graph_id),
+        )
+        candidate = replace(
+            candidate,
+            storage_version=record.storage_version + 1,
         )
         assert await transaction.replace_record(
             candidate,
@@ -491,11 +504,11 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
     await repository.state_store.mutate(corrupt)
     try:
         with pytest.raises(AIError) as reconcile_error:
-            await repository.reconcile_graph(
+            await repository.scheduler_snapshot(
                 request.graph.graph_id,
                 tenant_id="tenant",
             )
-        assert reconcile_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert reconcile_error.value.code is ErrorCode.TASK_DAG_INVALID
 
         with pytest.raises(AIError) as claim_error:
             await repository.claim(
@@ -505,15 +518,13 @@ async def test_task_node_dependency_projection_fails_closed() -> None:
                 owner="runner",
                 lease_seconds=60,
             )
-        assert claim_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert claim_error.value.code is ErrorCode.TASK_DAG_INVALID
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_task_projection_readback_rejects_corrupt_admission_graph_identity(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_task_admission_readback_rejects_corrupt_graph_identity() -> None:
     state, request = await _admitted_state(
         TaskGraph("readback-integrity", (TaskNode("root"),))
     )
@@ -543,15 +554,10 @@ async def test_task_projection_readback_rejects_corrupt_admission_graph_identity
             expected_storage_version=record.storage_version,
         )
 
-    async def conflict(operation):
-        del operation
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
-
     await repository.state_store.mutate(corrupt)
-    monkeypatch.setattr(repository, "_mutate_with_event_retry", conflict)
     try:
         with pytest.raises(AIError) as raised:
-            await repository.reconcile_graph(
+            await state.task.admissions.get(
                 request.graph.graph_id,
                 tenant_id="tenant",
             )
@@ -867,19 +873,23 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
         execution_id=None,
         result_digest=canonical_sha256({"result": "a"}),
     )
-    original = repository._sync_recovery_projection
+    original = repository._mutate_with_event_retry
     attempts = 0
 
-    async def sync(transaction, view: TaskGraphView) -> None:
+    async def mutate_with_event_retry(operation: object) -> object:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await original(transaction, view)
+        return await original(operation)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(repository, "_sync_recovery_projection", sync)
+    monkeypatch.setattr(
+        repository,
+        "_mutate_with_event_retry",
+        mutate_with_event_retry,
+    )
     try:
-        view = await repository.reconcile_graph(
+        view = await repository.scheduler_snapshot(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -895,7 +905,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
         assert nodes["a"].status is TaskStatus.SUCCEEDED
         assert nodes["b"].status is TaskStatus.PENDING
 
-        view = await repository.reconcile_graph(
+        view = await repository.scheduler_snapshot(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -922,17 +932,21 @@ async def test_task_cancel_conflict_requires_explicit_retry(
     )
     repository = state.task.tasks
     assert isinstance(repository, TaskRepositoryImpl)
-    original = repository._sync_recovery_projection
+    original = repository._mutate_with_event_retry
     attempts = 0
 
-    async def sync(transaction, view: TaskGraphView) -> None:
+    async def mutate_with_event_retry(operation: object) -> object:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await original(transaction, view)
+        return await original(operation)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(repository, "_sync_recovery_projection", sync)
+    monkeypatch.setattr(
+        repository,
+        "_mutate_with_event_retry",
+        mutate_with_event_retry,
+    )
     try:
         with pytest.raises(AIError) as raised:
             await repository.cancel_graph(

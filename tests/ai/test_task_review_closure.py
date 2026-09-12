@@ -76,45 +76,65 @@ class _FailingCancelLauncher:
 
 
 @pytest.mark.asyncio
-async def test_natural_failure_is_visible_before_explicit_cancel_override() -> None:
+async def test_natural_failure_waits_for_independent_active_node_before_terminal() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-natural-aggregate", tenant_id="tenant")
     try:
         repository = state.task.tasks
         graph = TaskGraph("natural-aggregate", (TaskNode("failed"), TaskNode("active")))
         await admit_graph(state, graph)
-        lease = await repository.claim(
+        failed_lease = await repository.claim(
             graph.graph_id,
             "failed",
             tenant_id="tenant",
-            owner="worker",
+            owner="failed-worker",
+            lease_seconds=30,
+        )
+        active_lease = await repository.claim(
+            graph.graph_id,
+            "active",
+            tenant_id="tenant",
+            owner="active-worker",
             lease_seconds=30,
         )
         await repository.fail(
-            lease,
+            failed_lease,
             tenant_id="tenant",
             error_code=ErrorCode.TASK_NODE_FAILED.value,
             error_digest="a" * 64,
         )
 
-        before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
-        assert before is not None
-        assert before.status is TaskStatus.FAILED
+        active = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        assert active is not None
+        active_states = {item.node_id: item.status for item in active.node_states}
+        assert active.status is TaskStatus.RUNNING
+        assert active_states == {
+            "active": TaskStatus.RUNNING,
+            "failed": TaskStatus.FAILED,
+        }
 
-        view = await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-        after = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
-        assert after is not None
-        states = {item.node_id: item for item in after.node_states}
-        assert view.status is TaskStatus.CANCELLED
-        assert after.status is TaskStatus.CANCELLED
-        assert states["failed"].status is TaskStatus.FAILED
-        assert states["active"].status is TaskStatus.CANCELLED
+        await repository.complete(
+            active_lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="b" * 64,
+        )
+        terminal = await repository.scheduler_snapshot(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert terminal.status is TaskStatus.FAILED
+        terminal_states = {item.node_id: item.status for item in terminal.node_states}
+        assert terminal_states == {
+            "active": TaskStatus.SUCCEEDED,
+            "failed": TaskStatus.FAILED,
+        }
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
+async def test_service_cancel_overrides_failed_graph_with_pending_independent_node() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-service-cancel-override", tenant_id="tenant")
     try:
@@ -138,7 +158,7 @@ async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
         )
         before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
         assert before is not None
-        assert before.status is TaskStatus.FAILED
+        assert before.status is TaskStatus.PENDING
         assert {item.node_id: item.status for item in before.node_states}[
             "active"
         ] is TaskStatus.READY
@@ -198,11 +218,12 @@ async def test_explicit_cancel_preserves_blocked_terminal_node() -> None:
             error_code=ErrorCode.TASK_NODE_FAILED.value,
             error_digest="b" * 64,
         )
-        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
 
         before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
         assert before is not None
         before_states = {item.node_id: item for item in before.node_states}
+        assert before.status is TaskStatus.RUNNING
         assert before_states["blocked"].status is TaskStatus.BLOCKED
         assert before_states["active"].status is TaskStatus.RUNNING
 
@@ -238,7 +259,7 @@ async def test_launcher_counts_remote_live_lease_in_max_concurrency() -> None:
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
             TaskGraphLaunch(
-                graph,
+                graph.graph_id,
                 trusted_workspace_principal("tenant"),
                 TaskGraphLimits(max_concurrency=1),
             )
@@ -305,20 +326,20 @@ async def test_cancel_cleanup_failure_marks_operation_effect_unknown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_detached_bind_unknown_surfaces_background_failure() -> None:
+async def test_detached_handoff_unknown_surfaces_background_failure() -> None:
     handler = _AgentTaskNodeHandler(object(), object(), object())
     started = asyncio.Event()
     release = asyncio.Event()
 
     class Control:
-        async def bind_execution(self, execution_id: str) -> None:
+        async def handoff_execution(self, execution_id: str) -> None:
             del execution_id
             started.set()
             await release.wait()
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
 
     task = asyncio.create_task(
-        handler._bind_execution(
+        handler._handoff_execution(
             Control(),
             "execution",
             key=("tenant", "graph", "node"),
@@ -339,19 +360,19 @@ async def test_detached_bind_unknown_surfaces_background_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bind_after_launch_ignores_expected_ownership_loss() -> None:
+async def test_handoff_after_launch_ignores_expected_ownership_loss() -> None:
     handler = _AgentTaskNodeHandler(object(), object(), object())
 
     async def launched() -> object:
         return SimpleNamespace(execution_id="execution")
 
     class Control:
-        async def bind_execution(self, execution_id: str) -> None:
+        async def handoff_execution(self, execution_id: str) -> None:
             del execution_id
             raise AIError(ErrorCode.TASK_FENCE_STALE)
 
     launch_task = asyncio.create_task(launched())
-    await handler._bind_after_launch(
+    await handler._handoff_after_launch(
         launch_task,
         ("tenant", "graph", "node"),
         Control(),
@@ -367,7 +388,7 @@ async def test_task_get_graph_rejects_missing_canonical_node() -> None:
         repository = state.task.tasks
         graph = TaskGraph("get-graph-missing-node", (TaskNode("node"),))
         await admit_graph(state, graph)
-        node_key = repository._node_key(graph.graph_id, "node")
+        node_key = repository._state_key(graph.graph_id, "node")
 
         async def delete_node(transaction: StateTransaction) -> None:
             record = await transaction.get_record(node_key)
@@ -405,15 +426,28 @@ async def test_task_get_graph_rejects_tampered_node_dependencies() -> None:
             (TaskNode("root"), TaskNode("child", ("root",))),
         )
         await admit_graph(state, graph)
-        node_key = repository._node_key(graph.graph_id, "child")
+        node_key = repository._definition_key(graph.graph_id, "child")
 
         async def corrupt_dependencies(transaction: StateTransaction) -> None:
             record = await transaction.get_record(node_key)
             assert record is not None
-            node = await repository._decode(record, TaskNodeView)
-            candidate = repository._task_node_record(
-                record,
-                replace(node, dependencies=()),
+            node = await repository._decode(record, TaskNode)
+            tampered = TaskNode(
+                node.node_id,
+                ("missing",),
+                input=node.input,
+                budget_cost=node.budget_cost,
+                expander=node.expander,
+            )
+            candidate = repository._stored(
+                "task_node_definition",
+                [graph.graph_id, node.node_id],
+                tampered,
+                parent=repository._definition_parent(graph.graph_id),
+            )
+            candidate = replace(
+                candidate,
+                storage_version=record.storage_version + 1,
             )
             assert await transaction.replace_record(
                 candidate,
@@ -424,7 +458,7 @@ async def test_task_get_graph_rejects_tampered_node_dependencies() -> None:
 
         with pytest.raises(AIError) as error:
             await repository.get_graph(graph.graph_id, tenant_id="tenant")
-        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert error.value.code is ErrorCode.TASK_DAG_INVALID
     finally:
         await state.close()
 
@@ -437,7 +471,7 @@ async def test_cancel_readback_does_not_accept_corrupt_graph_as_terminal() -> No
         repository = state.task.tasks
         graph = TaskGraph("cancel-corrupt-readback", (TaskNode("node"),))
         await admit_graph(state, graph)
-        node_key = repository._node_key(graph.graph_id, "node")
+        node_key = repository._state_key(graph.graph_id, "node")
 
         async def delete_node(transaction: StateTransaction) -> None:
             record = await transaction.get_record(node_key)
@@ -488,7 +522,7 @@ async def test_wait_graph_reuses_existing_read_authorization(
             owner="worker",
             lease_seconds=30,
         )
-        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
 
         original_get_header = repository.get_header
         original_list_events = repository.list_events
@@ -520,7 +554,7 @@ async def test_wait_graph_reuses_existing_read_authorization(
                     execution_id=None,
                     result_digest="d" * 64,
                 )
-                await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+                await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
             return await original_list_events(
                 graph_id,
                 tenant_id=tenant_id,

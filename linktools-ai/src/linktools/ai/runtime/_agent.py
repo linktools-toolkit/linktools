@@ -32,7 +32,7 @@ from .service_api import (
 )
 
 if TYPE_CHECKING:
-    from ..task import TaskNode
+    from ..task import TaskExpanderRef, TaskNode
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -512,6 +512,7 @@ class Agent(Generic[AppT]):
         output: "type[BaseModel] | None" = None,
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
+        expander: "TaskExpanderRef | None" = None,
     ) -> "TaskNode":
         return self._runtime._task_for_agent(
             self._agent_digest,
@@ -522,6 +523,7 @@ class Agent(Generic[AppT]):
             output=output,
             planning=planning,
             thinking=thinking,
+            expander=expander,
         )
 
 

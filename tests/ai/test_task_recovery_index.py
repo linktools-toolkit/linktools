@@ -40,7 +40,7 @@ async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -
             result_digest="0" * 64,
         )
 
-        view = await state.task.tasks.reconcile_graph(
+        view = await state.task.tasks.scheduler_snapshot(
             request.graph.graph_id,
             tenant_id="tenant",
         )
@@ -51,6 +51,56 @@ async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -
 
         assert view.status is TaskStatus.SUCCEEDED
         assert recoverable.items == ()
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_index_filters_by_graph_header_without_topology_hydration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-recovery-header-index", tenant_id="tenant")
+    try:
+        terminal_request = _request("terminal-history")
+        active_request = _request("active-history")
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(terminal_request),
+            terminal_request.graph,
+        )
+        await state.task.admissions.admit(
+            TaskGraphAdmission.from_request(active_request),
+            active_request.graph,
+        )
+        lease = await state.task.tasks.claim(
+            terminal_request.graph.graph_id,
+            "root",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=60,
+        )
+        await state.task.tasks.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="1" * 64,
+        )
+
+        async def unexpected_topology_hydration(*args: object, **kwargs: object):
+            del args, kwargs
+            raise AssertionError("recovery index must not hydrate graph topology")
+
+        monkeypatch.setattr(
+            state.task.admissions,
+            "_current_graph_in_transaction",
+            unexpected_topology_hydration,
+        )
+        page = await state.task.admissions.list_recoverable_page(
+            cursor=None,
+            limit=128,
+        )
+
+        assert [launch.graph_id for launch in page.items] == ["active-history"]
     finally:
         await state.close()
 

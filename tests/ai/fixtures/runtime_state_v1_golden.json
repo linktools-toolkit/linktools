@@ -66,6 +66,7 @@
     "task_graph_view",
     "task_lease",
     "task_node",
+    "task_expander_ref",
     "task_node_view",
     "task_result",
     "task_terminal",

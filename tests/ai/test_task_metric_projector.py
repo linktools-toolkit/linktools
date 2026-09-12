@@ -85,7 +85,6 @@ def _running(
     at: datetime,
     *,
     fence: int,
-    execution_id: str | None = None,
     previous_status: TaskStatus = TaskStatus.READY,
 ) -> TaskEvent:
     return TaskEvent(
@@ -99,6 +98,27 @@ def _running(
         node_id="node",
         owner="owner",
         fence=fence,
+    )
+
+
+def _waiting(
+    graph_id: str,
+    sequence: int,
+    at: datetime,
+    *,
+    fence: int,
+    execution_id: str,
+) -> TaskEvent:
+    return TaskEvent(
+        1,
+        graph_id,
+        sequence,
+        TaskEventType.NODE_CHANGED,
+        at,
+        TaskStatus.WAITING,
+        previous_status=TaskStatus.RUNNING,
+        node_id="node",
+        fence=fence,
         execution_id=execution_id,
     )
 
@@ -110,6 +130,7 @@ def _succeeded(
     *,
     fence: int,
     execution_id: str | None,
+    previous_status: TaskStatus = TaskStatus.RUNNING,
 ) -> TaskEvent:
     return TaskEvent(
         1,
@@ -118,7 +139,7 @@ def _succeeded(
         TaskEventType.NODE_CHANGED,
         at,
         TaskStatus.SUCCEEDED,
-        previous_status=TaskStatus.RUNNING,
+        previous_status=previous_status,
         node_id="node",
         fence=fence,
         execution_id=execution_id,
@@ -171,13 +192,12 @@ async def test_node_attempt_uses_first_running_event_for_same_fence() -> None:
     events = (
         _admitted("graph", start),
         _running("graph", 2, start + timedelta(seconds=1), fence=1),
-        _running(
+        _waiting(
             "graph",
             3,
             start + timedelta(seconds=3),
             fence=1,
             execution_id="execution",
-            previous_status=TaskStatus.RUNNING,
         ),
         _succeeded(
             "graph",
@@ -185,6 +205,7 @@ async def test_node_attempt_uses_first_running_event_for_same_fence() -> None:
             start + timedelta(seconds=6),
             fence=1,
             execution_id="execution",
+            previous_status=TaskStatus.WAITING,
         ),
         _graph_terminal("graph", 5, start + timedelta(seconds=7)),
     )
@@ -220,7 +241,6 @@ async def test_unmatched_old_fence_is_not_paired_with_new_attempt() -> None:
             3,
             start + timedelta(seconds=4),
             fence=2,
-            execution_id="execution-2",
             previous_status=TaskStatus.RUNNING,
         ),
         _succeeded(

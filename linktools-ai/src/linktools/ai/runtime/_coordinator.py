@@ -40,9 +40,9 @@ class _LocalRuntimeCoordinator:
                 after_sequence=after_sequence,
             ):
                 if event.event_type in {
-                    ExecutionEventType.EXECUTION_SUCCEEDED,
-                    ExecutionEventType.EXECUTION_FAILED,
-                    ExecutionEventType.EXECUTION_CANCELLED,
+                    ExecutionEventType.EXECUTION_SUCCEEDED.value,
+                    ExecutionEventType.EXECUTION_FAILED.value,
+                    ExecutionEventType.EXECUTION_CANCELLED.value,
                 }:
                     terminal_yielded = True
                 yield event

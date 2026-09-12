@@ -55,6 +55,7 @@ def _expected_request_digest(request: TaskGraphRequest) -> str:
                     "dependencies": sorted(node.dependencies),
                     "input": node.input,
                     "budget_cost": node.budget_cost,
+                    "expander": None,
                 }
                 for node in sorted(request.graph.nodes, key=lambda item: item.node_id)
             ],
@@ -88,7 +89,7 @@ def _partial_operation(
         None,
         OperationKind.TASK_NODE,
         status,
-        admission.request_digest,
+        admission.initial_request_digest,
         graph.graph_id if terminal else None,
         _submit_result_digest(graph) if terminal else None,
         None,
@@ -98,11 +99,11 @@ def _partial_operation(
     )
 
 
-def test_task_admission_freezes_legacy_request_digest_without_raw_key() -> None:
+def test_task_admission_freezes_initial_request_digest_without_raw_key() -> None:
     request = _request("digest", idempotency_key="raw-secret-idempotency-key")
     admission = TaskGraphAdmission.from_request(request)
 
-    assert admission.request_digest == _expected_request_digest(request)
+    assert admission.initial_request_digest == _expected_request_digest(request)
     assert admission.operation_id != request.idempotency_key
     assert not hasattr(admission, "idempotency_key")
     assert request.idempotency_key not in repr(admission)
@@ -117,11 +118,11 @@ def test_task_admission_rejects_unsupported_version() -> None:
         admission.principal,
         admission.limits,
         admission.operation_id,
-        admission.request_digest,
+        admission.initial_request_digest,
     )
 
     with pytest.raises(AIError) as raised:
-        unsupported.bind(request.graph)
+        unsupported.launch()
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
@@ -163,7 +164,7 @@ async def test_memory_admission_is_atomic_replay_safe_and_recoverable() -> None:
             )
             == operation
         )
-        assert page.items == (admission.bind(request.graph),)
+        assert page.items == (admission.launch(),)
 
         changed = _request(
             "memory",
@@ -319,7 +320,7 @@ async def test_durable_admission_survives_reopen_and_remains_recoverable(
                 cursor=None,
                 limit=128,
             )
-            assert page.items == (admission.bind(request.graph),)
+            assert page.items == (admission.launch(),)
             operation = await reopened.task.operations.get(
                 admission.operation_id,
                 tenant_id="tenant",
@@ -381,14 +382,14 @@ async def test_empty_graph_is_terminal_and_excluded_from_recovery() -> None:
         await state.close()
 
 
-def test_durable_task_requires_durable_execution_and_recovery(tmp_path) -> None:
+def test_durable_pure_task_graph_does_not_require_durable_execution(tmp_path) -> None:
     task = RuntimeStateRoute.filesystem(tmp_path / "task")
 
-    with pytest.raises(ValueError, match="durable task requires durable execution"):
-        RuntimeState.from_plan(
-            RuntimeStatePlan(
-                task=task,
-                recovery=RuntimeStateRoute.transient(),
-                execution=RuntimeStateRoute.transient(),
-            )
+    state = RuntimeState.from_plan(
+        RuntimeStatePlan(
+            task=task,
+            recovery=RuntimeStateRoute.transient(),
+            execution=RuntimeStateRoute.transient(),
         )
+    )
+    assert state.plan.route(RuntimeDomain.TASK).retention.value == "durable"

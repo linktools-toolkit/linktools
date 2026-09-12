@@ -47,18 +47,20 @@ async def test_task_recovery_required_is_durable_and_not_dependency_failure() ->
             owner="worker",
             lease_seconds=30,
         )
-        await state.task.tasks.bind_execution(
+        await state.task.tasks.handoff_execution(
             lease,
             tenant_id="tenant",
             execution_id="execution",
         )
 
         recovered = await state.task.tasks.mark_recovery_required(
-            lease,
+            None,
             tenant_id="tenant",
             error_code=ErrorCode.TOOL_EFFECT_UNKNOWN.value,
             error_digest=_recovery_digest(ErrorCode.TOOL_EFFECT_UNKNOWN),
             execution_id="execution",
+            graph_id="graph",
+            node_id="root",
         )
         snapshot = await state.task.tasks.snapshot_graph(
             "graph",
@@ -95,7 +97,7 @@ async def test_task_recovery_required_is_durable_and_not_dependency_failure() ->
 
 
 @pytest.mark.asyncio
-async def test_task_recovery_preserves_lineage_and_advances_fence_on_reclaim() -> None:
+async def test_task_recovery_preserves_execution_reference_for_waiting_attach() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-recovery", tenant_id="tenant")
     try:
@@ -111,17 +113,19 @@ async def test_task_recovery_preserves_lineage_and_advances_fence_on_reclaim() -
             owner="worker-1",
             lease_seconds=30,
         )
-        await state.task.tasks.bind_execution(
+        await state.task.tasks.handoff_execution(
             first,
             tenant_id="tenant",
             execution_id="execution",
         )
         await state.task.tasks.mark_recovery_required(
-            first,
+            None,
             tenant_id="tenant",
             error_code=ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
             error_digest=_recovery_digest(ErrorCode.STORAGE_RECOVERY_REQUIRED),
             execution_id="execution",
+            graph_id="recover",
+            node_id="root",
         )
 
         view = await state.task.tasks.recover_graph(
@@ -132,29 +136,15 @@ async def test_task_recovery_preserves_lineage_and_advances_fence_on_reclaim() -
             "recover",
             tenant_id="tenant",
         )
-        assert view.status is TaskStatus.PENDING
+        assert view.status is TaskStatus.RUNNING
         assert snapshot is not None
         root = {node.node_id: node for node in snapshot.node_states}["root"]
-        assert root.status is TaskStatus.READY
+        assert root.status is TaskStatus.WAITING
         assert root.fence == first.fence
         assert root.execution_id == "execution"
         assert root.error_code is None
         assert root.error_digest is None
 
-        second = await state.task.tasks.claim(
-            "recover",
-            "root",
-            tenant_id="tenant",
-            owner="worker-2",
-            lease_seconds=30,
-        )
-        assert second.fence == first.fence + 1
-        bound = await state.task.tasks.bind_execution(
-            second,
-            tenant_id="tenant",
-            execution_id="execution",
-        )
-        assert bound.execution_id == "execution"
     finally:
         await state.close()
 

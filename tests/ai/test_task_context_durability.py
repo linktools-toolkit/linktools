@@ -37,13 +37,13 @@ class _CaptureLauncher:
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
         self.started = launch
         return TaskGraphHandle(
-            launch.graph.graph_id,
-            f"capture:{launch.principal.tenant_id}:{launch.graph.graph_id}",
+            launch.graph_id,
+            f"capture:{launch.principal.tenant_id}:{launch.graph_id}",
         )
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         self.cancelled = launch
-        return TaskGraphView(launch.graph.graph_id, TaskStatus.CANCELLED, launch.graph.nodes)
+        return TaskGraphView(launch.graph_id, TaskStatus.CANCELLED, ())
 
 
 def _request(
@@ -74,7 +74,7 @@ async def test_task_admission_correlation_is_durable_but_not_semantic_identity()
         )
 
         assert first.operation_id == second.operation_id
-        assert first.request_digest == second.request_digest
+        assert first.initial_request_digest == second.initial_request_digest
         assert first.correlation != second.correlation
 
         await state.task.admissions.admit(first, graph)
@@ -99,7 +99,7 @@ async def test_task_admission_correlation_drift_conflicts() -> None:
         drifted = TaskGraphAdmission.from_request(
             _request(graph, correlation={"trace_id": "trace-b"})
         )
-        assert original.request_digest == drifted.request_digest
+        assert original.initial_request_digest == drifted.initial_request_digest
 
         await state.task.admissions.admit(original, graph)
         with pytest.raises(AIError) as raised:
@@ -173,7 +173,7 @@ async def test_cancel_cleanup_restores_durable_submission_principal_and_correlat
 
         assert view.status is TaskStatus.CANCELLED
         assert launcher.cancelled is not None
-        assert launcher.cancelled.graph == graph
+        assert launcher.cancelled.graph_id == graph.graph_id
         assert launcher.cancelled.principal == submitter
         assert dict(launcher.cancelled.correlation) == {
             "attempt": 3,

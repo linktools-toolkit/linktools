@@ -2,12 +2,14 @@
 # -*- coding: utf-8 -*-
 """Durable TaskGraph event history contracts."""
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import (
@@ -17,6 +19,7 @@ from linktools.ai.task import (
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphRequest,
+    TaskExpanderRef,
     TaskNode,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -95,6 +98,200 @@ async def test_task_admission_starts_contiguous_durable_event_history() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_expansion_commits_topology_and_events_atomically() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-event-expansion", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        reference = TaskExpanderRef("application.expand", 1)
+        graph = TaskGraph(
+            "event-expansion",
+            (TaskNode("root", expander=reference),),
+        )
+        await admit_graph(state, graph)
+        lease = await repository.claim(
+            graph.graph_id,
+            "root",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
+        expanded = (
+            TaskNode("child-b", dependencies=("child-a",)),
+            TaskNode("disconnected"),
+            TaskNode("child-a"),
+        )
+
+        await repository.complete(
+            lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="a" * 64,
+            expanded_nodes=expanded,
+        )
+
+        snapshot = await repository.snapshot_graph(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert snapshot is not None
+        assert [node.node_id for node in snapshot.nodes] == [
+            "child-a",
+            "child-b",
+            "disconnected",
+            "root",
+        ]
+        assert snapshot.status is TaskStatus.PENDING
+        assert snapshot.node_states[0].status is TaskStatus.READY
+        assert snapshot.node_states[1].status is TaskStatus.PENDING
+
+        events = await repository.list_events(
+            graph.graph_id,
+            tenant_id="tenant",
+            after_sequence=3,
+            limit=100,
+        )
+        assert [event.event_type for event in events.items] == [
+            TaskEventType.NODE_CHANGED,
+            TaskEventType.GRAPH_EXPANDED,
+            TaskEventType.GRAPH_CHANGED,
+        ]
+        assert events.items[1].source_node_id == "root"
+        assert events.items[1].added_node_ids == (
+            "child-a",
+            "child-b",
+            "disconnected",
+        )
+
+        await repository.complete(
+            None,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="a" * 64,
+            graph_id=graph.graph_id,
+            node_id="root",
+            expanded_nodes=(TaskNode("not-committed"),),
+        )
+        replayed = await repository.snapshot_graph(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert replayed is not None
+        assert "not-committed" not in {node.node_id for node in replayed.nodes}
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "expanded_nodes",
+    (
+        (TaskNode("root"),),
+        (TaskNode("child"), TaskNode("child")),
+    ),
+)
+async def test_task_expansion_rejects_node_id_collisions(
+    expanded_nodes: tuple[TaskNode, ...],
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-expansion-collision", tenant_id="tenant")
+    try:
+        graph = TaskGraph(
+            "expansion-collision",
+            (
+                TaskNode(
+                    "root",
+                    expander=TaskExpanderRef("application.expand", 1),
+                ),
+            ),
+        )
+        await admit_graph(state, graph)
+        lease = await state.task.tasks.claim(
+            graph.graph_id,
+            "root",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+
+        with pytest.raises(AIError) as raised:
+            await state.task.tasks.complete(
+                lease,
+                tenant_id="tenant",
+                execution_id=None,
+                result_digest="b" * 64,
+                expanded_nodes=expanded_nodes,
+            )
+        assert raised.value.code is ErrorCode.TASK_DAG_INVALID
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_task_expansions_retry_graph_header_cas() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-expansion-concurrent", tenant_id="tenant")
+    try:
+        reference = TaskExpanderRef("application.expand", 1)
+        graph = TaskGraph(
+            "concurrent-expansion",
+            (
+                TaskNode("source-a", expander=reference),
+                TaskNode("source-b", expander=reference),
+            ),
+        )
+        await admit_graph(state, graph)
+        repository = state.task.tasks
+        leases = await asyncio.gather(
+            repository.claim(
+                graph.graph_id,
+                "source-a",
+                tenant_id="tenant",
+                owner="worker-a",
+                lease_seconds=30,
+            ),
+            repository.claim(
+                graph.graph_id,
+                "source-b",
+                tenant_id="tenant",
+                owner="worker-b",
+                lease_seconds=30,
+            ),
+        )
+        await asyncio.gather(
+            repository.complete(
+                leases[0],
+                tenant_id="tenant",
+                execution_id=None,
+                result_digest="c" * 64,
+                expanded_nodes=(TaskNode("child-a"),),
+            ),
+            repository.complete(
+                leases[1],
+                tenant_id="tenant",
+                execution_id=None,
+                result_digest="d" * 64,
+                expanded_nodes=(TaskNode("child-b"),),
+            ),
+        )
+
+        snapshot = await repository.snapshot_graph(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert snapshot is not None
+        assert {node.node_id for node in snapshot.nodes} == {
+            "child-a",
+            "child-b",
+            "source-a",
+            "source-b",
+        }
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_task_event_page_accepts_maximum_limit() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-event-max-limit", tenant_id="tenant")
@@ -166,11 +363,6 @@ async def test_node_event_mutations_do_not_read_full_graph_snapshot(
             owner="worker",
             lease_seconds=30,
         )
-        await repository.bind_execution(
-            lease,
-            tenant_id="tenant",
-            execution_id="execution-local",
-        )
         await repository.complete(
             lease,
             tenant_id="tenant",
@@ -185,9 +377,9 @@ async def test_node_event_mutations_do_not_read_full_graph_snapshot(
         )
 
         assert [event.sequence for event in page.items] == [2, 3, 4]
-        assert all(
-            event.event_type is TaskEventType.NODE_CHANGED for event in page.items
-        )
+        assert page.items[0].event_type is TaskEventType.NODE_CHANGED
+        assert page.items[1].event_type is TaskEventType.NODE_CHANGED
+        assert page.items[2].event_type is TaskEventType.GRAPH_CHANGED
     finally:
         await state.close()
 
@@ -228,7 +420,7 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         assert claimed.items[0].owner == "worker"
         assert claimed.items[0].fence == 1
 
-        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
         running = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
@@ -253,18 +445,19 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         )
         assert after_renew.items == ()
 
-        await repository.bind_execution(
+        await repository.handoff_execution(
             renewed,
             tenant_id="tenant",
             execution_id="execution-1",
         )
         await repository.complete(
-            renewed,
+            None,
             tenant_id="tenant",
             execution_id="execution-1",
             result_digest="a" * 64,
+            graph_id=graph.graph_id,
+            node_id="node",
         )
-        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
         terminal = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
@@ -273,8 +466,8 @@ async def test_task_event_history_records_semantic_changes_but_not_heartbeat() -
         )
         assert [event.sequence for event in terminal.items] == [4, 5, 6]
         assert terminal.items[0].execution_id == "execution-1"
-        assert terminal.items[0].status is TaskStatus.RUNNING
-        assert terminal.items[1].previous_status is TaskStatus.RUNNING
+        assert terminal.items[0].status is TaskStatus.WAITING
+        assert terminal.items[1].previous_status is TaskStatus.WAITING
         assert terminal.items[1].status is TaskStatus.SUCCEEDED
         assert terminal.items[1].owner is None
         assert terminal.items[1].result_digest == "a" * 64
@@ -313,7 +506,7 @@ async def test_idempotent_admission_projection_repair_emits_graph_change() -> No
             after_sequence=0,
             limit=100,
         )
-        assert before.items[-1].event_type is TaskEventType.NODE_CHANGED
+        assert before.items[-1].event_type is TaskEventType.GRAPH_CHANGED
         assert before.items[-1].status is TaskStatus.SUCCEEDED
 
         repaired = await state.task.admissions.admit(admission, graph)
@@ -325,10 +518,7 @@ async def test_idempotent_admission_projection_repair_emits_graph_change() -> No
         )
 
         assert repaired.status is TaskStatus.SUCCEEDED
-        assert len(after.items) == 1
-        assert after.items[0].event_type is TaskEventType.GRAPH_CHANGED
-        assert after.items[0].previous_status is TaskStatus.PENDING
-        assert after.items[0].status is TaskStatus.SUCCEEDED
+        assert not after.items
     finally:
         await state.close()
 
@@ -403,7 +593,7 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
             execution_id=None,
             result_digest="b" * 64,
         )
-        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
         durable = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",
@@ -497,7 +687,7 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
             error_code="TASK_NODE_FAILED",
             error_digest="c" * 64,
         )
-        await repository.reconcile_graph(graph.graph_id, tenant_id="tenant")
+        await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
         before = await repository.list_events(
             graph.graph_id,
             tenant_id="tenant",

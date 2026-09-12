@@ -46,14 +46,13 @@ from ._metrics import _TaskMetricProjector
 from ._service import TaskGraphLauncher, TaskGraphService
 
 _logger = environ.get_logger("ai.task.service")
-_GRAPH_OBSERVATION_RECHECK_SECONDS = 1.0
 _TASK_EVENT_READ_LIMIT = 200
 _MAX_PENDING_GRAPH_OPERATIONS = 128
 
 
 @runtime_checkable
 class _TaskMetricProjectorBinder(Protocol):
-    def _bind_metric_projector(self, projector: _TaskMetricProjector) -> None: ...
+    def bind_metric_projector(self, projector: _TaskMetricProjector) -> None: ...
 
 
 class _LocalTaskWaiter(Protocol):
@@ -78,7 +77,7 @@ class _LocalTaskWaiter(Protocol):
 class _TaskGraphPreflight(Protocol):
     def validate_request(self, graph: TaskGraph) -> None: ...
 
-    def validate_recovery(self, graph: TaskGraph) -> None: ...
+    def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None: ...
 
 
 class _TaskRepository(Protocol):
@@ -119,12 +118,12 @@ class _TaskRepository(Protocol):
         tenant_id: str,
     ) -> TaskEvent | None: ...
 
-    async def reconcile_graph(
+    async def scheduler_snapshot(
         self,
         graph_id: str,
         *,
         tenant_id: str,
-    ) -> TaskGraphView: ...
+    ) -> TaskGraphSnapshot: ...
 
     async def recover_graph(
         self,
@@ -244,7 +243,7 @@ class DefaultTaskGraphService(TaskGraphService):
             self._metric_projector is not None
             and isinstance(launcher, _TaskMetricProjectorBinder)
         ):
-            launcher._bind_metric_projector(self._metric_projector)
+            launcher.bind_metric_projector(self._metric_projector)
         self._detached_finalizers: set[asyncio.Task[object]] = set()
         self._detached_finalizer_failure: AIError | None = None
 
@@ -277,7 +276,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if _terminal(view.status):
             await self._observe_metric_history(view, tenant_id=tenant_id)
         elif view.status is not TaskStatus.RECOVERY_REQUIRED:
-            await self._arm_graph(durable_admission.bind(request.graph))
+            await self._arm_graph(durable_admission.launch())
         return await self._result(view, tenant_id)
 
     async def _arm_graph(self, launch: TaskGraphLaunch) -> None:
@@ -285,7 +284,7 @@ class DefaultTaskGraphService(TaskGraphService):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         task = asyncio.create_task(
             self._launcher.start(launch),
-            name=f"task-scheduler-arm-{launch.principal.tenant_id}-{launch.graph.graph_id}",
+            name=f"task-scheduler-arm-{launch.principal.tenant_id}-{launch.graph_id}",
         )
         try:
             await asyncio.shield(task)
@@ -293,7 +292,7 @@ class DefaultTaskGraphService(TaskGraphService):
             if not task.done():
                 self._detach_finalizer(
                     cast("asyncio.Task[object]", task),
-                    launch.graph.graph_id,
+                    launch.graph_id,
                     label="task scheduler arm",
                 )
                 raise
@@ -303,14 +302,14 @@ class DefaultTaskGraphService(TaskGraphService):
                 raise _task_service_failure(
                     error,
                     phase="task_scheduler_arm",
-                    graph_id=launch.graph.graph_id,
+                    graph_id=launch.graph_id,
                     durable_admitted=True,
                 ) from error
             except BaseException as error:  # noqa: BLE001
                 raise _task_service_failure(
                     error,
                     phase="task_scheduler_arm",
-                    graph_id=launch.graph.graph_id,
+                    graph_id=launch.graph_id,
                     durable_admitted=True,
                 ) from error
             raise
@@ -318,7 +317,7 @@ class DefaultTaskGraphService(TaskGraphService):
             raise _task_service_failure(
                 error,
                 phase="task_scheduler_arm",
-                graph_id=launch.graph.graph_id,
+                graph_id=launch.graph_id,
                 durable_admitted=True,
             ) from error
 
@@ -333,11 +332,16 @@ class DefaultTaskGraphService(TaskGraphService):
                 limit=128,
             )
             for launch in page.items:
-                if self._preflight is not None:
-                    self._preflight.validate_recovery(launch.graph)
-                view = await self._persistence.tasks.reconcile_graph(
-                    launch.graph.graph_id,
+                snapshot = await self._persistence.tasks.scheduler_snapshot(
+                    launch.graph_id,
                     tenant_id=launch.principal.tenant_id,
+                )
+                if self._preflight is not None:
+                    self._preflight.validate_recovery(snapshot)
+                view = TaskGraphView(
+                    snapshot.graph_id,
+                    snapshot.status,
+                    snapshot.nodes,
                 )
                 if _terminal(view.status):
                     await self._observe_metric_history(
@@ -456,10 +460,13 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if admission is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            graph = TaskGraph(view.graph_id, view.nodes)
+            snapshot = await self._persistence.tasks.scheduler_snapshot(
+                graph_id,
+                tenant_id=tenant_id,
+            )
             if self._preflight is not None:
-                self._preflight.validate_recovery(graph)
-            await self._arm_graph(admission.bind(graph))
+                self._preflight.validate_recovery(snapshot)
+            await self._arm_graph(admission.launch())
 
         settled = await self._record_success(
             operation,
@@ -728,6 +735,7 @@ class DefaultTaskGraphService(TaskGraphService):
     ) -> AsyncIterator[TaskEvent]:
         cursor = after_sequence
         pending_wait_error: AIError | None = None
+        fallback_backoff = 1.0
         while True:
             generation = self._local_activity_generation(
                 graph_id,
@@ -746,6 +754,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if page.items:
                 pending_wait_error = None
+                fallback_backoff = 1.0
                 for event in page.items:
                     cursor = event.sequence
                     yield event
@@ -767,10 +776,11 @@ class DefaultTaskGraphService(TaskGraphService):
             if pending_wait_error is not None:
                 raise pending_wait_error
             try:
-                await self._wait_event_observation_opportunity(
+                fallback_backoff = await self._wait_event_observation_opportunity(
                     graph_id,
                     tenant_id=tenant_id,
                     after_generation=generation,
+                    fallback_backoff=fallback_backoff,
                 )
             except AIError as error:
                 pending_wait_error = error
@@ -792,20 +802,28 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         tenant_id: str,
         after_generation: int | None,
-    ) -> None:
+        fallback_backoff: float,
+    ) -> float:
         waiter = self._local_waiter
         if (
             waiter is None
             or not waiter.owns_graph(graph_id, tenant_id=tenant_id)
             or after_generation is None
         ):
-            await asyncio.sleep(_GRAPH_OBSERVATION_RECHECK_SECONDS)
-            return
-        await waiter.wait_graph_activity(
-            graph_id,
-            tenant_id=tenant_id,
-            after_generation=after_generation,
-        )
+            await asyncio.sleep(fallback_backoff)
+            return min(30.0, fallback_backoff * 2)
+        try:
+            await asyncio.wait_for(
+                waiter.wait_graph_activity(
+                    graph_id,
+                    tenant_id=tenant_id,
+                    after_generation=after_generation,
+                ),
+                timeout=fallback_backoff,
+            )
+        except asyncio.TimeoutError:
+            return min(30.0, fallback_backoff * 2)
+        return 1.0
 
     async def wait(
         self,
@@ -1232,7 +1250,7 @@ class DefaultTaskGraphService(TaskGraphService):
         if admission is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            launch = admission.bind(TaskGraph(view.graph_id, view.nodes))
+            launch = admission.launch()
             if launch.principal.tenant_id != tenant_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._launcher.cancel(launch)

@@ -748,8 +748,35 @@ class ExecutionHistoryService(Protocol):
 
 
 class ExecutionService(Protocol):
+    async def acquire_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> None: ...
+
+    async def release_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> None: ...
+
+    async def request_terminal_handoff(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> None: ...
+
     async def start(
-        self, binding_digest: str, request: ExecutionRequest
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle: ...
     async def resolve_existing(
         self,

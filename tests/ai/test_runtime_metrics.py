@@ -25,6 +25,7 @@ from linktools.ai.task import (
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphLimits,
+    TaskGraphSnapshot,
     TaskGraphView,
     TaskLease,
     TaskNode,
@@ -362,9 +363,25 @@ class _CommitUnknownTaskRepository:
         graph_status = (
             TaskStatus.SUCCEEDED
             if self.status is TaskStatus.SUCCEEDED
+            else self.status
+            if self.status is TaskStatus.RUNNING
             else TaskStatus.PENDING
         )
         return TaskGraphView("graph", graph_status, (self.node,))
+
+    async def scheduler_snapshot(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot:
+        view = await self.reconcile_graph(graph_id, tenant_id=tenant_id)
+        return TaskGraphSnapshot(
+            view.graph_id,
+            view.status,
+            view.nodes,
+            await self.list_nodes(graph_id, tenant_id=tenant_id),
+        )
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         return await self.reconcile_graph(graph_id, tenant_id=tenant_id)
@@ -482,7 +499,7 @@ class _CommitUnknownTaskRepository:
         assert lease_seconds > 0
         return lease
 
-    async def bind_execution(
+    async def handoff_execution(
         self,
         lease: TaskLease,
         *,
@@ -490,7 +507,7 @@ class _CommitUnknownTaskRepository:
         execution_id: str,
     ) -> TaskNodeView:
         del lease, tenant_id, execution_id
-        raise AssertionError("runner does not bind execution before completion")
+        raise AssertionError("runner does not hand off execution before completion")
 
     async def complete(
         self,
@@ -500,7 +517,11 @@ class _CommitUnknownTaskRepository:
         execution_id: str | None,
         result_digest: str,
         result_payload: object = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        expanded_nodes: tuple[TaskNode, ...] = (),
     ) -> None:
+        del graph_id, node_id, expanded_nodes
         assert lease.fence == 1
         assert tenant_id == "tenant"
         assert execution_id == "execution"
@@ -570,9 +591,9 @@ async def test_task_commit_unknown_readback_projects_durable_terminal_history() 
         _SuccessfulTaskRunner(),  # type: ignore[arg-type]
         owner="worker",
     )
-    launcher._bind_metric_projector(projector)
+    launcher.bind_metric_projector(projector)
     launch = TaskGraphLaunch(
-        TaskGraph("graph", (node,)),
+        "graph",
         Principal("owner", "tenant"),
         TaskGraphLimits(),
     )

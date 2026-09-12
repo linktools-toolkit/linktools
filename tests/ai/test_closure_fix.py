@@ -26,9 +26,11 @@ from linktools.ai.task._graph import (
     TaskGraph,
     TaskGraphLaunch,
     TaskGraphRequest,
+    TaskGraphSnapshot,
     TaskGraphView,
     TaskLease,
     TaskNode,
+    TaskNodeView,
 )
 from linktools.ai.task._local import (
     LocalTaskGraphLauncher,
@@ -312,11 +314,37 @@ class _TaskRepository:
         self.failure: BaseException | None = None
         self.recovery: dict[str, object] | None = None
 
-    async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+    async def scheduler_snapshot(
+        self, graph_id: str, *, tenant_id: str
+    ) -> TaskGraphSnapshot:
         del graph_id, tenant_id
         if self.failure is not None:
             raise self.failure
-        return TaskGraphView("graph", self.status, ())
+        return TaskGraphSnapshot("graph", self.status, (), ())
+
+    async def snapshot_graph(
+        self, graph_id: str, *, tenant_id: str
+    ) -> TaskGraphSnapshot:
+        del graph_id, tenant_id
+        return TaskGraphSnapshot(
+            "graph",
+            self.status,
+            (node := TaskNode("node"),),
+            (
+                TaskNodeView(
+                    "graph",
+                    node.node_id,
+                    node.dependencies,
+                    self.status,
+                    None,
+                    1,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        )
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         del graph_id, tenant_id
@@ -363,6 +391,16 @@ def _task_request() -> TaskGraphRequest:
     )
 
 
+def _task_launch() -> TaskGraphLaunch:
+    request = _task_request()
+    return TaskGraphLaunch(
+        request.graph.graph_id,
+        request.principal,
+        request.limits,
+        request.correlation,
+    )
+
+
 @pytest.mark.parametrize(
     "code",
     (
@@ -377,15 +415,15 @@ async def test_task_recovery_persists_bounded_original_error_code(code: ErrorCod
     launcher = object.__new__(LocalTaskGraphLauncher)
     launcher._lock = asyncio.Lock()
     launcher._repository = repository
-    request = _task_request()
+    launch = _task_launch()
     run = SimpleNamespace(
-        request=request,
+        request=launch,
         condition=asyncio.Condition(),
         generation=0,
         failure=None,
         closed=False,
     )
-    launcher._graphs = {(request.principal.tenant_id, request.graph.graph_id): run}
+    launcher._graphs = {(launch.principal.tenant_id, launch.graph_id): run}
     cause = AIError(code, safe_details={"source": "must-not-be-copied"})
     lease = TaskLease(
         "graph",
@@ -398,7 +436,7 @@ async def test_task_recovery_persists_bounded_original_error_code(code: ErrorCod
 
     await launcher._defer_recovery(
         run,
-        request.graph.nodes[0],
+        _task_request().graph.nodes[0],
         _LeaseState(lease),
         cause=cause,
     )
@@ -423,7 +461,7 @@ async def test_local_scheduler_terminal_exit_wakes_waiter_and_cleans_entry() -> 
         _TaskRunner(),
         owner="launcher",
     )
-    await launcher.start(_task_request())
+    await launcher.start(_task_launch())
     waiter = asyncio.create_task(
         launcher.wait_graph_activity("graph", tenant_id="tenant")
     )
@@ -438,7 +476,7 @@ async def test_local_scheduler_failure_wakes_waiter_with_infrastructure_error() 
     repository = _TaskRepository()
     repository.failure = RuntimeError("scheduler failure")
     launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
-    await launcher.start(_task_request())
+    await launcher.start(_task_launch())
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     with pytest.raises(AIError) as raised:
@@ -455,10 +493,7 @@ async def test_launcher_cancel_clears_retained_failure() -> None:
     repository = _TaskRepository()
     repository.failure = RuntimeError("scheduler failure")
     launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
-    request = _task_request()
-    launch = TaskGraphLaunch(
-        request.graph, request.principal, request.limits, request.correlation
-    )
+    launch = _task_launch()
     await launcher.start(launch)
     await asyncio.sleep(0)
     await asyncio.sleep(0)

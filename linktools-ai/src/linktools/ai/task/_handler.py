@@ -17,7 +17,7 @@ from ..core import (
     normalize_json_value,
     normalize_correlation,
 )
-from ._graph import TaskNode
+from ._graph import TaskExpanderRef, TaskNode
 
 AppT = TypeVar("AppT")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -151,6 +151,7 @@ class TaskFunction(Generic[AppT]):
         input: "Mapping[str, JsonValue] | None" = None,
         dependencies: "tuple[str, ...]" = (),
         budget_cost: int = 1,
+        expander: "TaskExpanderRef | None" = None,
     ) -> TaskNode:
         normalized = self.normalize({} if input is None else input)
         return TaskNode(
@@ -162,6 +163,7 @@ class TaskFunction(Generic[AppT]):
                 **normalized,
             },
             budget_cost=budget_cost,
+            expander=expander,
         )
 
 

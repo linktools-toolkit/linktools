@@ -50,12 +50,13 @@ from ..task import (
     TaskGraphResult,
     TaskGraphService,
     TaskNode,
+    TaskExpanderRef,
 )
 from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
 from ._task import TaskGraphRun
 from ._context import RuntimeContext
-from ._input import CanonicalUserInput, task_prompt_draft
+from ._input import CanonicalUserInput
 from ._metrics import (
     RuntimeMetricFlushResult,
     RuntimeMetricStatus,
@@ -93,6 +94,20 @@ AppT = TypeVar("AppT")
 
 class _TaskNodeRuntimePort(Protocol):
     def admit_node(self, node: "TaskNode") -> "TaskNode": ...
+
+    def build_agent_task(
+        self,
+        agent_digest: str,
+        node_id: str,
+        user_prompt: CanonicalUserInput,
+        *,
+        dependencies: tuple[str, ...] = (),
+        budget_cost: int = 1,
+        output: "type[BaseModel] | None" = None,
+        planning: "bool | None" = None,
+        thinking: "ThinkingValue | None" = None,
+        expander: "TaskExpanderRef | None" = None,
+    ) -> "TaskNode": ...
 
     async def get_result_record(
         self,
@@ -666,29 +681,18 @@ class Runtime(Generic[AppT]):
         output: "type[BaseModel] | None",
         planning: "bool | None",
         thinking: "ThinkingValue | None",
+        expander: "TaskExpanderRef | None",
     ) -> TaskNode:
-        definition = self._definition(agent_digest)
-        _mode, resolved_planning, resolved_thinking = _execution_policy(
-            definition,
-            mode="run",
+        return self._require_task_node_runtime().build_agent_task(
+            agent_digest,
+            node_id,
+            user_prompt,
+            dependencies=dependencies,
+            budget_cost=budget_cost,
+            output=output,
             planning=planning,
             thinking=thinking,
-        )
-        binding = self._bind_agent(agent_digest, output=output)
-        task_input: JsonValue = {
-            "type": "linktools.ai.agent",
-            "version": 1,
-            "binding": binding.snapshot.to_payload(),
-            "user_prompt": task_prompt_draft(user_prompt),
-            "mode": "run",
-            "planning": resolved_planning,
-            "thinking": resolved_thinking,
-        }
-        return TaskNode(
-            node_id,
-            dependencies,
-            input=task_input,
-            budget_cost=budget_cost,
+            expander=expander,
         )
 
     async def start_graph(
@@ -760,6 +764,7 @@ class Runtime(Generic[AppT]):
             TaskStatus.PENDING,
             TaskStatus.READY,
             TaskStatus.RUNNING,
+            TaskStatus.WAITING,
             TaskStatus.RECOVERY_REQUIRED,
         }:
             raise AIError(

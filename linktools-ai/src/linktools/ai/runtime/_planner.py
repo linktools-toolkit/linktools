@@ -5,19 +5,23 @@
 import asyncio
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, cast
 
 from linktools.core import environ
+from pydantic import BaseModel
+from pydantic_ai.messages import UserContent
 
-from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
+from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler, AgentDefinition
+from ..capability import TaskExpander, TaskExpansionContext
 from ..core import (
     ExecutionMode,
     ExecutionStatus,
     JsonValue,
     Principal,
     CorrelationData,
+    TaskStatus,
     ThinkingValue,
     canonical_json_bytes,
     canonical_sha256,
@@ -36,6 +40,7 @@ from ..task import (
     TaskGraph,
     TaskGraphSnapshot,
     TaskNode,
+    TaskExpanderRef,
     TaskNodeContext,
     TaskNodeHandler,
     TaskNodeInvocation,
@@ -44,7 +49,12 @@ from ..task import (
     TaskNodeRunResult,
     TaskResultRecord,
 )
-from ._input import decode_user_content_payload
+from ._input import (
+    CanonicalUserInput,
+    decode_user_content_payload,
+    task_prompt_draft,
+    validate_user_input,
+)
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .service_api import (
     CancelExecutionRequest,
@@ -60,6 +70,7 @@ AppT = TypeVar("AppT")
 _AGENT_TASK_TYPE = "linktools.ai.agent"
 _AGENT_TASK_VERSION = 1
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
 _AGENT_BODY_FIELDS = frozenset(
     {
         "binding",
@@ -97,10 +108,17 @@ class _AgentTaskNodeHandler:
         execution: ExecutionService,
         catalog: AgentCatalog,
         compiler: AgentCompiler,
+        *,
+        release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._execution = execution
         self._catalog = catalog
         self._compiler = compiler
+        self._release_dependency_hold = (
+            _noop_async_callback
+            if release_dependency_hold is None
+            else release_dependency_hold
+        )
         self._detached_tasks: set[asyncio.Task[object]] = set()
         self._cancelled_tasks: set[asyncio.Task[object]] = set()
         self._active_launch_tasks: dict[
@@ -230,8 +248,13 @@ class _AgentTaskNodeHandler:
             dependencies=dependencies,
         )
         key = (principal.tenant_id, graph_id, node.node_id)
+        hold_id = f"task:{graph_id}:{node.node_id}"
         launch_task = asyncio.create_task(
-            self._execution.start(binding_digest, request),
+            self._execution.start(
+                binding_digest,
+                request,
+                dependency_hold_id=hold_id,
+            ),
             name=f"task-execution-launch-{graph_id}-{node.node_id}",
         )
         self._active_launch_tasks[key] = launch_task
@@ -239,16 +262,16 @@ class _AgentTaskNodeHandler:
             handle = await asyncio.shield(launch_task)
         except asyncio.CancelledError:
             continuation = asyncio.create_task(
-                self._bind_after_launch(
+                self._handoff_after_launch(
                     launch_task,
                     key,
                     control,
                 ),
-                name=f"task-execution-bind-after-launch-{graph_id}-{node.node_id}",
+                name=f"task-execution-handoff-after-launch-{graph_id}-{node.node_id}",
             )
             self._detach(
                 cast("asyncio.Task[object]", continuation),
-                f"task execution bind after launch graph={graph_id} task={node.node_id}",
+                f"task execution handoff after launch graph={graph_id} task={node.node_id}",
             )
             raise
         finally:
@@ -256,7 +279,7 @@ class _AgentTaskNodeHandler:
                 self._active_launch_tasks.pop(key, None)
         if not handle.execution_id:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-        await self._bind_execution(
+        await self._handoff_execution(
             control,
             handle.execution_id,
             key=key,
@@ -448,7 +471,7 @@ class _AgentTaskNodeHandler:
             correlation=correlation,
         )
 
-    async def _bind_execution(
+    async def _handoff_execution(
         self,
         control: TaskNodeRunControl,
         execution_id: str,
@@ -456,32 +479,63 @@ class _AgentTaskNodeHandler:
         key: tuple[str, str, str],
     ) -> None:
         task = asyncio.create_task(
-            control.bind_execution(execution_id),
-            name=f"task-execution-bind-{key[1]}-{key[2]}",
+            control.handoff_execution(execution_id),
+            name=f"task-execution-handoff-{key[1]}-{key[2]}",
         )
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             continuation = asyncio.create_task(
-                self._settle_detached_bind(task, key),
-                name=f"task-execution-bind-settle-{key[1]}-{key[2]}",
+                self._settle_detached_handoff(
+                    task,
+                    execution_id,
+                    key,
+                ),
+                name=f"task-execution-handoff-settle-{key[1]}-{key[2]}",
             )
             self._detach(
                 cast("asyncio.Task[object]", continuation),
-                f"task execution bind graph={key[1]} task={key[2]}",
+                f"task execution handoff graph={key[1]} task={key[2]}",
+            )
+            raise
+        except BaseException:
+            await self._release_dependency_hold(
+                execution_id,
+                tenant_id=key[0],
+                hold_id=f"task:{key[1]}:{key[2]}",
             )
             raise
 
-    async def _settle_detached_bind(
+    async def _settle_detached_handoff(
         self,
         task: asyncio.Task[None],
+        execution_id: str,
         key: tuple[str, str, str],
     ) -> None:
+        handoff_succeeded = False
         try:
             await task
+            handoff_succeeded = True
+            await self._release_dependency_hold(
+                execution_id,
+                tenant_id=key[0],
+                hold_id=f"task:{key[1]}:{key[2]}",
+            )
         except asyncio.CancelledError:
+            if not handoff_succeeded:
+                await self._release_dependency_hold(
+                    execution_id,
+                    tenant_id=key[0],
+                    hold_id=f"task:{key[1]}:{key[2]}",
+                )
             raise
         except AIError as error:
+            if not handoff_succeeded:
+                await self._release_dependency_hold(
+                    execution_id,
+                    tenant_id=key[0],
+                    hold_id=f"task:{key[1]}:{key[2]}",
+                )
             if error.code in {
                 ErrorCode.TASK_FENCE_STALE,
                 ErrorCode.TASK_OWNER_CONFLICT,
@@ -491,16 +545,22 @@ class _AgentTaskNodeHandler:
             raise self._record_background_failure(
                 key,
                 error,
-                phase="task_execution_bind",
+                phase="task_execution_handoff",
             ) from error
         except BaseException as error:  # noqa: BLE001
+            if not handoff_succeeded:
+                await self._release_dependency_hold(
+                    execution_id,
+                    tenant_id=key[0],
+                    hold_id=f"task:{key[1]}:{key[2]}",
+                )
             raise self._record_background_failure(
                 key,
                 error,
-                phase="task_execution_bind",
+                phase="task_execution_handoff",
             ) from error
 
-    async def _bind_after_launch(
+    async def _handoff_after_launch(
         self,
         launch_task: asyncio.Task[ExecutionHandle],
         key: tuple[str, str, str],
@@ -510,7 +570,16 @@ class _AgentTaskNodeHandler:
             handle = await launch_task
             if not handle.execution_id:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
-            await control.bind_execution(handle.execution_id)
+            await self._handoff_execution(
+                control,
+                handle.execution_id,
+                key=key,
+            )
+            await self._release_dependency_hold(
+                handle.execution_id,
+                tenant_id=key[0],
+                hold_id=f"task:{key[1]}:{key[2]}",
+            )
         except asyncio.CancelledError:
             raise
         except AIError as error:
@@ -523,13 +592,13 @@ class _AgentTaskNodeHandler:
             raise self._record_background_failure(
                 key,
                 error,
-                phase="task_execution_bind_after_launch",
+                phase="task_execution_handoff_after_launch",
             ) from error
         except BaseException as error:  # noqa: BLE001
             raise self._record_background_failure(
                 key,
                 error,
-                phase="task_execution_bind_after_launch",
+                phase="task_execution_handoff_after_launch",
             ) from error
         finally:
             if self._active_launch_tasks.get(key) is launch_task:
@@ -598,6 +667,79 @@ class _AgentTaskNodeHandler:
             _logger.exception("detached %s failed", label)
 
 
+class _TaskExpansionContext:
+    __slots__ = (
+        "_build_agent_task",
+        "_generated_agent_tasks",
+        "_graph_id",
+        "_output",
+        "_principal",
+        "_source_node",
+    )
+
+    def __init__(
+        self,
+        principal: Principal,
+        graph_id: str,
+        source_node: TaskNode,
+        output: JsonValue,
+        *,
+        build_agent_task: Callable[..., TaskNode],
+    ) -> None:
+        self._principal = principal
+        self._graph_id = graph_id
+        self._source_node = source_node
+        self._output = output
+        self._build_agent_task = build_agent_task
+        self._generated_agent_tasks: dict[str, TaskNode] = {}
+
+    def agent_task(
+        self,
+        agent_id: str,
+        node_id: str,
+        user_prompt: str | Sequence[UserContent],
+        *,
+        dependencies: tuple[str, ...] = (),
+        budget_cost: int = 1,
+        output: type[BaseModel] | None = None,
+        planning: bool | None = None,
+        thinking: ThinkingValue | None = None,
+        expander: TaskExpanderRef | None = None,
+    ) -> TaskNode:
+        node = self._build_agent_task(
+            agent_id,
+            node_id,
+            validate_user_input(user_prompt),
+            dependencies=dependencies,
+            budget_cost=budget_cost,
+            output=output,
+            planning=planning,
+            thinking=thinking,
+            expander=expander,
+        )
+        self._generated_agent_tasks[node.node_id] = node
+        return node
+
+    @property
+    def principal(self) -> Principal:
+        return self._principal
+
+    @property
+    def graph_id(self) -> str:
+        return self._graph_id
+
+    @property
+    def source_node(self) -> TaskNode:
+        return self._source_node
+
+    @property
+    def output(self) -> JsonValue:
+        return self._output
+
+    def _generated_agent_task(self, node_id: str) -> TaskNode | None:
+        return self._generated_agent_tasks.get(node_id)
+
+
 class RuntimeTaskNodeRunner(Generic[AppT]):
     """Interpret admitted TaskNodes using the frozen Runtime handler map."""
 
@@ -613,13 +755,26 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         object_key_factory: RuntimeObjectKeyFactory,
         payload_policy: PayloadPolicy,
         handlers: Sequence[TaskNodeHandler[AppT]] = (),
+        expanders: Sequence[TaskExpander] = (),
+        release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
+        task_durable: bool = False,
+        execution_durable: bool = True,
+        recovery_durable: bool = True,
     ) -> None:
         self._app = app
+        self._catalog = catalog
+        self._compiler = compiler
+        self._execution = execution
         self._task_state = task_state
         self._task_objects = task_objects
         self._object_key_factory = object_key_factory
         self._payload_policy = payload_policy
-        self._agent = _AgentTaskNodeHandler(execution, catalog, compiler)
+        self._agent = _AgentTaskNodeHandler(
+            execution,
+            catalog,
+            compiler,
+            release_dependency_hold=release_dependency_hold,
+        )
         values: dict[tuple[str, int], TaskNodeHandler[AppT]] = {}
         for handler in handlers:
             key = _external_handler_identity(handler)
@@ -627,6 +782,16 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             values[key] = handler
         self._handlers = MappingProxyType(values)
+        expander_values: dict[tuple[str, int], TaskExpander] = {}
+        for expander in expanders:
+            key = _external_expander_identity(expander)
+            if key in expander_values:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            expander_values[key] = expander
+        self._expanders = MappingProxyType(expander_values)
+        self._task_durable = task_durable
+        self._execution_durable = execution_durable
+        self._recovery_durable = recovery_durable
         self._materialization_tasks: set[asyncio.Task[StoredPayload]] = set()
         self._background_failure: AIError | None = None
 
@@ -659,6 +824,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     def admit_node(self, node: TaskNode) -> TaskNode:
         task_type, task_version, body = _parse_node(node, request=True)
         handler = self._handler(task_type, task_version, request=True)
+        if node.expander is not None:
+            self._resolve_expander(node.expander, request=True)
         try:
             normalized = handler.normalize(body)
             canonical_body = _normalize_handler_body(normalized)
@@ -673,6 +840,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 **canonical_body,
             },
             budget_cost=node.budget_cost,
+            expander=node.expander,
         )
 
     def validate_request(self, graph: TaskGraph) -> None:
@@ -680,9 +848,22 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             canonical = self.admit_node(node)
             if canonical.input != node.input:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            self._validate_durability(node, graph_id=graph.graph_id, request=True)
 
-    def validate_recovery(self, graph: TaskGraph) -> None:
-        for node in graph.nodes:
+    def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None:
+        for node, state in zip(snapshot.nodes, snapshot.node_states, strict=True):
+            if state.status in {
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+                TaskStatus.CANCELLED,
+            }:
+                continue
+            self._validate_durability(
+                node,
+                graph_id=snapshot.graph_id,
+                request=False,
+            )
             task_type, task_version, body = _parse_node(node, request=False)
             try:
                 handler = self._handler(task_type, task_version, request=False)
@@ -695,14 +876,16 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         "kind": "task",
                         "task_type": task_type,
                         "task_version": task_version,
-                        "graph_id": graph.graph_id,
+                        "graph_id": snapshot.graph_id,
                         "node_id": node.node_id,
                     },
                 ) from error
+            if node.expander is not None:
+                self._resolve_expander(node.expander, request=False)
             if handler is self._agent:
                 canonical_body = self._agent.validate_recovery(
                     body,
-                    graph_id=graph.graph_id,
+                    graph_id=snapshot.graph_id,
                     node_id=node.node_id,
                 )
             else:
@@ -712,7 +895,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     raise AIError(
                         ErrorCode.STORAGE_INTEGRITY_ERROR,
                         safe_details={
-                            "graph_id": graph.graph_id,
+                            "graph_id": snapshot.graph_id,
                             "node_id": node.node_id,
                             "task_type": task_type,
                             "task_version": task_version,
@@ -727,12 +910,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     **canonical_body,
                 },
                 budget_cost=node.budget_cost,
+                expander=node.expander,
             )
             if canonical.input != node.input:
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     safe_details={
-                        "graph_id": graph.graph_id,
+                        "graph_id": snapshot.graph_id,
                         "node_id": node.node_id,
                         "task_type": task_type,
                         "task_version": task_version,
@@ -791,16 +975,127 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 raise
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        digest = canonical_sha256(output)
-        payload = await self._materialize_result(
+        return await self._complete_output(
+            node,
             output,
-            tenant_id=principal.tenant_id,
+            execution_id=execution_id,
+            principal=principal,
             graph_id=graph_id,
-            node_id=node.node_id,
         )
-        if payload.digest != digest:
+
+    async def wait_bound(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        node = invocation.node
+        task_type, task_version, _body = _parse_node(node, request=False)
+        if (task_type, task_version) != (self._agent.type, self._agent.version):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return TaskNodeRunResult(digest, execution_id, payload)
+        view = await self._execution.inspect(
+            execution_id,
+            principal=invocation.principal,
+        )
+        if view.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if view.status is ExecutionStatus.RECOVERY_REQUIRED:
+            await self._execution.recover(
+                execution_id,
+                principal=invocation.principal,
+            )
+        result = await self._execution.wait(
+            execution_id,
+            principal=invocation.principal,
+        )
+        if result.status is not ExecutionStatus.SUCCEEDED:
+            raise _execution_failure(result)
+        if result.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._complete_output(
+            node,
+            result.output,
+            execution_id=execution_id,
+            principal=invocation.principal,
+            graph_id=invocation.graph_id,
+        )
+
+    def build_agent_task(
+        self,
+        agent_digest: str,
+        node_id: str,
+        user_prompt: CanonicalUserInput,
+        *,
+        dependencies: tuple[str, ...] = (),
+        budget_cost: int = 1,
+        output: type[BaseModel] | None = None,
+        planning: bool | None = None,
+        thinking: ThinkingValue | None = None,
+        expander: TaskExpanderRef | None = None,
+    ) -> TaskNode:
+        definition = self._root_definition(agent_digest)
+        if planning is not None and not isinstance(planning, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        resolved_planning = (
+            definition.spec.planning if planning is None else planning
+        )
+        resolved_thinking = (
+            definition.spec.thinking
+            if thinking is None
+            else normalize_thinking(thinking)
+        )
+        binding = self._catalog.register_binding(
+            self._compiler.bind(definition, output=output)
+        )
+        return TaskNode(
+            node_id,
+            dependencies,
+            input={
+                "type": self._agent.type,
+                "version": self._agent.version,
+                "binding": binding.snapshot.to_payload(),
+                "user_prompt": task_prompt_draft(user_prompt),
+                "mode": "run",
+                "planning": resolved_planning,
+                "thinking": resolved_thinking,
+            },
+            budget_cost=budget_cost,
+            expander=expander,
+        )
+
+    def _build_agent_task_by_id(
+        self,
+        agent_id: str,
+        node_id: str,
+        user_prompt: CanonicalUserInput,
+        *,
+        dependencies: tuple[str, ...] = (),
+        budget_cost: int = 1,
+        output: type[BaseModel] | None = None,
+        planning: bool | None = None,
+        thinking: ThinkingValue | None = None,
+        expander: TaskExpanderRef | None = None,
+    ) -> TaskNode:
+        validate_agent_id(agent_id)
+        try:
+            definition = self._catalog.root_definition(agent_id)
+        except AIError as error:
+            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                raise
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={"kind": "agent", "agent_id": agent_id},
+            ) from error
+        return self.build_agent_task(
+            definition.digest,
+            node_id,
+            user_prompt,
+            dependencies=dependencies,
+            budget_cost=budget_cost,
+            output=output,
+            planning=planning,
+            thinking=thinking,
+            expander=expander,
+        )
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         node = invocation.node
@@ -871,6 +1166,180 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if canonical_sha256(output) != record.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return output
+
+    async def _complete_output(
+        self,
+        node: TaskNode,
+        output: JsonValue,
+        *,
+        execution_id: str | None,
+        principal: Principal,
+        graph_id: str,
+    ) -> TaskNodeRunResult:
+        normalized = normalize_json_value(output)
+        digest = canonical_sha256(normalized)
+        payload = await self._materialize_result(
+            normalized,
+            tenant_id=principal.tenant_id,
+            graph_id=graph_id,
+            node_id=node.node_id,
+        )
+        if payload.digest != digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expanded_nodes = self._expand_nodes(
+            node,
+            normalized,
+            principal=principal,
+            graph_id=graph_id,
+        )
+        return TaskNodeRunResult(
+            digest,
+            execution_id,
+            payload,
+            expanded_nodes,
+        )
+
+    def _expand_nodes(
+        self,
+        source_node: TaskNode,
+        output: JsonValue,
+        *,
+        principal: Principal,
+        graph_id: str,
+    ) -> tuple[TaskNode, ...]:
+        if source_node.expander is None:
+            return ()
+        expander = self._resolve_expander(source_node.expander, request=False)
+        context_impl = _TaskExpansionContext(
+            principal,
+            graph_id,
+            source_node,
+            output,
+            build_agent_task=self._build_agent_task_by_id,
+        )
+        context: TaskExpansionContext = context_impl
+        try:
+            expanded = expander.expand(context)
+        except AIError as error:
+            if error.code is ErrorCode.CAPABILITY_REQUIRED_MISSING:
+                raise
+            raise _expansion_error(
+                graph_id,
+                source_node.node_id,
+                reason="expander_failed",
+            ) from error
+        except (TypeError, ValueError) as error:
+            raise _expansion_error(
+                graph_id,
+                source_node.node_id,
+                reason="expander_output_invalid",
+            ) from error
+        if not isinstance(expanded, Sequence) or isinstance(
+            expanded,
+            (str, bytes, bytearray),
+        ):
+            raise _expansion_error(
+                graph_id,
+                source_node.node_id,
+                reason="expander_output_invalid",
+            )
+        raw_nodes = tuple(expanded)
+        raw_ids = tuple(node.node_id for node in raw_nodes if isinstance(node, TaskNode))
+        if len(raw_ids) != len(raw_nodes) or len(set(raw_ids)) != len(raw_ids):
+            raise _expansion_error(
+                graph_id,
+                source_node.node_id,
+                reason="duplicate_node_id",
+            )
+        nodes: list[TaskNode] = []
+        for raw_node in raw_nodes:
+            task_type = raw_node.input.get("type")
+            if task_type == self._agent.type:
+                generated = context_impl._generated_agent_task(raw_node.node_id)
+                if generated != raw_node:
+                    raise _expansion_error(
+                        graph_id,
+                        source_node.node_id,
+                        reason="agent_task_builder_required",
+                        conflict=raw_node.node_id,
+                    )
+            try:
+                admitted = self.admit_node(raw_node)
+                self._validate_durability(
+                    admitted,
+                    graph_id=graph_id,
+                    request=False,
+                )
+                nodes.append(admitted)
+            except AIError as error:
+                if error.code is ErrorCode.CAPABILITY_REQUIRED_MISSING:
+                    raise
+                raise _expansion_error(
+                    graph_id,
+                    source_node.node_id,
+                    reason="node_admission_invalid",
+                    conflict=raw_node.node_id,
+                ) from error
+        result = tuple(sorted(nodes, key=lambda item: item.node_id))
+        _logger.info(
+            "task graph expansion produced nodes: graph=%s source=%s nodes=%s",
+            graph_id,
+            source_node.node_id,
+            tuple(node.node_id for node in result),
+        )
+        return result
+
+    def _resolve_expander(
+        self,
+        reference: TaskExpanderRef,
+        *,
+        request: bool,
+    ) -> TaskExpander:
+        expander = self._expanders.get((reference.id, reference.version))
+        if expander is not None:
+            return expander
+        raise AIError(
+            ErrorCode.REQUEST_FIELD_INVALID
+            if request
+            else ErrorCode.CAPABILITY_REQUIRED_MISSING,
+            safe_details={
+                "kind": "task_expander",
+                "expander_id": reference.id,
+                "expander_version": reference.version,
+            },
+        )
+
+    def _validate_durability(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+        request: bool,
+    ) -> None:
+        task_type = node.input.get("type")
+        if not self._task_durable or task_type != self._agent.type:
+            return
+        if self._execution_durable and self._recovery_durable:
+            return
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            safe_details={
+                "phase": "task_durability_validation",
+                "graph_id": graph_id,
+                "node_id": node.node_id,
+                "request": request,
+            },
+        )
+
+    def _root_definition(self, agent_digest: str) -> AgentDefinition:
+        for agent_id in self._catalog.root_ids:
+            definition = self._catalog.root_definition(agent_id)
+            if definition.digest == agent_digest:
+                return definition
+        raise AIError(
+            ErrorCode.CAPABILITY_REQUIRED_MISSING,
+            safe_details={"kind": "agent", "agent_digest": agent_digest},
+        )
 
     async def _dependencies(
         self,
@@ -1051,6 +1520,38 @@ def _external_handler_identity(handler: TaskNodeHandler[object]) -> tuple[str, i
     ):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return task_type, task_version
+
+
+def _external_expander_identity(expander: TaskExpander) -> tuple[str, int]:
+    try:
+        reference = TaskExpanderRef(expander.id, expander.version)
+    except (TypeError, ValueError, AttributeError) as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if reference.id.startswith(_RESERVED_EXPANDER_ID_PREFIX):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return reference.id, reference.version
+
+
+def _expansion_error(
+    graph_id: str,
+    source_node_id: str,
+    *,
+    reason: str,
+    conflict: str | None = None,
+) -> AIError:
+    details: dict[str, JsonValue] = {
+        "phase": "task_graph_expansion",
+        "reason": reason,
+        "graph_id": graph_id,
+        "source_node_id": source_node_id,
+    }
+    if conflict is not None:
+        details["conflict"] = conflict
+    return AIError(ErrorCode.TASK_DAG_INVALID, safe_details=details)
+
+
+async def _noop_async_callback(*args: object, **kwargs: object) -> None:
+    return None
 
 
 def _normalize_handler_body(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:

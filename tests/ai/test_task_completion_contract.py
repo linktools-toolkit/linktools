@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Task completion identity contract."""
+"""Task node result identity contract."""
 
-import pytest
-
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.task import TaskCompletionLedger
+from linktools.ai.core import canonical_sha256
+from linktools.ai.task import TaskNode, TaskNodeRunResult
 
 
-def test_task_completion_uses_owner_fence_and_result_identity() -> None:
-    ledger = TaskCompletionLedger()
+def test_task_node_result_keeps_expansion_outside_execution_identity() -> None:
+    digest = canonical_sha256({"value": 1})
+    result = TaskNodeRunResult(
+        digest,
+        execution_id="execution",
+        expanded_nodes=(TaskNode("child", input={"type": "app", "version": 1}),),
+    )
 
-    first = ledger.complete("task", "owner", 1, "digest")
-    assert ledger.complete("task", "owner", 1, "digest") == first
-
-    with pytest.raises(AIError) as error:
-        ledger.complete("task", "owner", 1, "other")
-    assert error.value.code is ErrorCode.TASK_RESULT_CONFLICT
+    assert result.result_digest == digest
+    assert result.execution_id == "execution"
+    assert result.expanded_nodes[0].node_id == "child"
