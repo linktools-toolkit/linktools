@@ -3,6 +3,8 @@
 """Adapt one opened workspace session to Pydantic AI tools."""
 
 import asyncio
+import hashlib
+import json
 import mimetypes
 from collections.abc import Awaitable, Mapping, Sequence
 from pathlib import Path
@@ -253,11 +255,12 @@ class _WorkspaceToolSurface:
                     "path": path,
                     "media_type": media_type,
                     "size": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
                 }
             )
             content.extend(
                 (
-                    f"Workspace file: {path}",
+                    f"Workspace file path: {json.dumps(path)}",
                     BinaryContent(
                         data=body,
                         media_type=media_type,
@@ -465,7 +468,7 @@ class _WorkspaceToolSurface:
             command_id: The ID returned by start_command.
 
         Returns:
-            Status and recent output of the background command.
+            Status and recent output.
         """
         return await self._call(self._require_session().check_command(command_id))
 
