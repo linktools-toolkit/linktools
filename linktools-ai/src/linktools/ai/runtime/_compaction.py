@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, Protocol
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -22,9 +23,11 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
 )
 
+from ..capability import AgentContext
 from ..errors import AIError, ErrorCode
 from ..workspace import normalize_workspace_path
 from ._journal import ModelRequestFact, ModelRequestJournal
+from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
@@ -182,6 +185,12 @@ class RuntimeCompaction(AbstractCapability[None]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         source = tuple(request_context.messages)
+        binary_projected = project_transient_binary_content(source)
+        if binary_projected != source:
+            request_context = replace(
+                request_context,
+                messages=list(binary_projected),
+            )
         if self._target_tokens is None:
             request_context = await self._deduplicate.before_model_request(
                 ctx,
@@ -217,12 +226,29 @@ class RuntimeCompaction(AbstractCapability[None]):
                 request_context,
             )
         projected = tuple(request_context.messages)
+        _validate_pending_binary_content(ctx, projected)
         if self._projection_sink is not None:
             self._projection_sink(
                 source,
                 None if projected == source else projected,
             )
         return request_context
+
+
+def _validate_pending_binary_content(
+    ctx: PydanticRunContext[Any],
+    messages: Sequence[ModelMessage],
+) -> None:
+    deps = ctx.deps
+    if not isinstance(deps, AgentContext):
+        return
+    count, total_bytes = binary_content_usage(messages)
+    policy = deps.workspace.policy
+    if (
+        count > policy.max_binary_input_parts
+        or total_bytes > policy.max_binary_input_bytes
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def _workspace_file_key(call: ToolCallPart) -> str | None:
