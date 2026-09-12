@@ -76,45 +76,65 @@ class _FailingCancelLauncher:
 
 
 @pytest.mark.asyncio
-async def test_natural_failure_is_visible_before_explicit_cancel_override() -> None:
+async def test_natural_failure_waits_for_independent_active_node_before_terminal() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-natural-aggregate", tenant_id="tenant")
     try:
         repository = state.task.tasks
         graph = TaskGraph("natural-aggregate", (TaskNode("failed"), TaskNode("active")))
         await admit_graph(state, graph)
-        lease = await repository.claim(
+        failed_lease = await repository.claim(
             graph.graph_id,
             "failed",
             tenant_id="tenant",
-            owner="worker",
+            owner="failed-worker",
+            lease_seconds=30,
+        )
+        active_lease = await repository.claim(
+            graph.graph_id,
+            "active",
+            tenant_id="tenant",
+            owner="active-worker",
             lease_seconds=30,
         )
         await repository.fail(
-            lease,
+            failed_lease,
             tenant_id="tenant",
             error_code=ErrorCode.TASK_NODE_FAILED.value,
             error_digest="a" * 64,
         )
 
-        before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
-        assert before is not None
-        assert before.status is TaskStatus.FAILED
+        active = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
+        assert active is not None
+        active_states = {item.node_id: item.status for item in active.node_states}
+        assert active.status is TaskStatus.RUNNING
+        assert active_states == {
+            "active": TaskStatus.RUNNING,
+            "failed": TaskStatus.FAILED,
+        }
 
-        view = await repository.cancel_graph(graph.graph_id, tenant_id="tenant")
-        after = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
-        assert after is not None
-        states = {item.node_id: item for item in after.node_states}
-        assert view.status is TaskStatus.CANCELLED
-        assert after.status is TaskStatus.CANCELLED
-        assert states["failed"].status is TaskStatus.FAILED
-        assert states["active"].status is TaskStatus.CANCELLED
+        await repository.complete(
+            active_lease,
+            tenant_id="tenant",
+            execution_id=None,
+            result_digest="b" * 64,
+        )
+        terminal = await repository.scheduler_snapshot(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert terminal.status is TaskStatus.FAILED
+        terminal_states = {item.node_id: item.status for item in terminal.node_states}
+        assert terminal_states == {
+            "active": TaskStatus.SUCCEEDED,
+            "failed": TaskStatus.FAILED,
+        }
     finally:
         await state.close()
 
 
 @pytest.mark.asyncio
-async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
+async def test_service_cancel_overrides_failed_graph_with_pending_independent_node() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-service-cancel-override", tenant_id="tenant")
     try:
@@ -138,7 +158,7 @@ async def test_service_cancel_overrides_failed_graph_with_active_node() -> None:
         )
         before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
         assert before is not None
-        assert before.status is TaskStatus.FAILED
+        assert before.status is TaskStatus.PENDING
         assert {item.node_id: item.status for item in before.node_states}[
             "active"
         ] is TaskStatus.READY
@@ -203,6 +223,7 @@ async def test_explicit_cancel_preserves_blocked_terminal_node() -> None:
         before = await repository.snapshot_graph(graph.graph_id, tenant_id="tenant")
         assert before is not None
         before_states = {item.node_id: item for item in before.node_states}
+        assert before.status is TaskStatus.RUNNING
         assert before_states["blocked"].status is TaskStatus.BLOCKED
         assert before_states["active"].status is TaskStatus.RUNNING
 
