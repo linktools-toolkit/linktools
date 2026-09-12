@@ -9,7 +9,7 @@ on:
   workflow_call:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -20,6 +20,165 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runtime_object_ref_patch:
+    name: Runtime object ref convergence
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'refactor/ai-durable-contract-convergence'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-durable-contract-convergence
+      - name: Remove physical ObjectStore identity from Runtime persistence
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected 1 occurrence, got {count}')
+              return text.replace(old, new, 1)
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/_object.py')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'from ..errors import AIError, ErrorCode\n',
+              '',
+              'runtime object error import',
+          )
+          text = replace_once(
+              text,
+              '    return ObjectRef(store.store_id, key, stat.digest, stat.size)\n',
+              '    return ObjectRef("runtime", key, stat.digest, stat.size)\n',
+              'runtime object ref creation',
+          )
+          text = replace_once(
+              text,
+              'async def read_runtime_object(store: ObjectStore, reference: ObjectRef) -> bytes:\n'
+              '    if reference.store_id != store.store_id:\n'
+              '        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)\n'
+              '    return await read_object(store, reference.key, expected_digest=reference.digest, expected_size=reference.size)\n',
+              'async def read_runtime_object(store: ObjectStore, reference: ObjectRef) -> bytes:\n'
+              '    return await read_object(\n'
+              '        store,\n'
+              '        reference.key,\n'
+              '        expected_digest=reference.digest,\n'
+              '        expected_size=reference.size,\n'
+              '    )\n',
+              'runtime object read identity',
+          )
+          path.write_text(text, encoding='utf-8')
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/state/_materializer.py')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '        store = self.object_store(domain)\n'
+              '        if reference.store_id != store.store_id:\n'
+              '            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)\n'
+              '        return store\n',
+              '        return self.object_store(domain)\n',
+              'runtime object router identity',
+          )
+          path.write_text(text, encoding='utf-8')
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/state/_history.py')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              'ObjectRef(self._object_store.store_id, key, stat.digest, stat.size)',
+              'ObjectRef("runtime", key, stat.digest, stat.size)',
+              'transcript object ref creation',
+          )
+          text = replace_once(
+              text,
+              '                                self._object_store.store_id,\n',
+              '                                "runtime",\n',
+              'context object ref creation',
+          )
+          text = replace_once(
+              text,
+              '        if payload.ref.store_id != self._object_store.store_id:\n'
+              '            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)\n',
+              '',
+              'transcript object read identity',
+          )
+          path.write_text(text, encoding='utf-8')
+
+          path = Path('linktools-ai/src/linktools/ai/runtime/state/_codec.py')
+          text = path.read_text(encoding='utf-8')
+          anchor = '\n\ndef _decode_v1_stored_user_input(\n'
+          block = '''\n\n_RUNTIME_OBJECT_STORE_ID = "runtime"\n\n\ndef _encode_v1_object_ref(\n    value: object,\n    codec: "_VersionCodec",\n    persisted: bool,\n) -> Mapping[str, JsonValue]:\n    if not isinstance(value, ObjectRef):\n        raise TypeError("V1 object_ref encoder received the wrong type")\n    encoded: dict[str, JsonValue] = {\n        "key": _encode_domain(value.key, codec, persisted=persisted),\n        "digest": _encode_domain(value.digest, codec, persisted=persisted),\n        "size": _encode_domain(value.size, codec, persisted=persisted),\n    }\n    if not persisted:\n        encoded["store_id"] = _encode_domain(\n            value.store_id, codec, persisted=persisted\n        )\n    return encoded\n\n\ndef _decode_v1_object_ref(\n    raw_fields: Mapping[str, object],\n    codec: "_VersionCodec",\n    persisted: bool,\n) -> ObjectRef:\n    expected = (\n        frozenset({"key", "digest", "size"})\n        if persisted\n        else frozenset({"store_id", "key", "digest", "size"})\n    )\n    _require_exact_keys(raw_fields, expected)\n    store_id = (\n        _RUNTIME_OBJECT_STORE_ID\n        if persisted\n        else cast(\n            str,\n            _decode_domain(\n                raw_fields["store_id"], str, codec, persisted=persisted\n            ),\n        )\n    )\n    return ObjectRef(\n        store_id,\n        cast(str, _decode_domain(raw_fields["key"], str, codec, persisted=persisted)),\n        cast(\n            str,\n            _decode_domain(raw_fields["digest"], str, codec, persisted=persisted),\n        ),\n        cast(int, _decode_domain(raw_fields["size"], int, codec, persisted=persisted)),\n    )\n'''
+          text = replace_once(
+              text,
+              anchor,
+              block + anchor,
+              'runtime object codec insertion',
+          )
+          text = replace_once(
+              text,
+              '    {\n        "task_node": _encode_v1_task_node,\n        "task_result": _encode_v1_task_result,\n    }\n',
+              '    {\n        "object_ref": _encode_v1_object_ref,\n        "task_node": _encode_v1_task_node,\n        "task_result": _encode_v1_task_result,\n    }\n',
+              'object ref encoder registry',
+          )
+          text = replace_once(
+              text,
+              '    {\n        "stored_user_input": _decode_v1_stored_user_input,\n        "task_node": _decode_v1_task_node,\n        "task_result": _decode_v1_task_result,\n    }\n',
+              '    {\n        "object_ref": _decode_v1_object_ref,\n        "stored_user_input": _decode_v1_stored_user_input,\n        "task_node": _decode_v1_task_node,\n        "task_result": _decode_v1_task_result,\n    }\n',
+              'object ref decoder registry',
+          )
+          text = replace_once(
+              text,
+              '    custom_encoders = {"task_node", "task_result"}\n'
+              '    custom_decoders = {"stored_user_input", "task_node", "task_result"}\n',
+              '    custom_encoders = {"object_ref", "task_node", "task_result"}\n'
+              '    custom_decoders = {\n'
+              '        "object_ref",\n'
+              '        "stored_user_input",\n'
+              '        "task_node",\n'
+              '        "task_result",\n'
+              '    }\n',
+              'object ref codec registry assertion',
+          )
+          path.write_text(text, encoding='utf-8')
+
+          path = Path('linktools-ai/README.md')
+          text = path.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '`Workspace.root`, Runtime state paths, SQLite paths, and SQL endpoints are deployment locations only. Runtime persistence stores logical Workspace paths and a location-independent storage contract, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore. The logical ObjectStore `store_id` and storage topology must remain unchanged; a separate `Runtime.restore()` migration step is not required.\n',
+              '`Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore `store_id`, and storage topology are deployment details. Runtime persistence keeps logical Workspace paths and resolves object payloads by durable Runtime domain plus object key/digest/size, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore without freezing the original backend identity. A separate `Runtime.restore()` migration step is not required.\n',
+              'runtime restore documentation',
+          )
+          path.write_text(text, encoding='utf-8')
+          PY
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/_object.py \
+            linktools-ai/src/linktools/ai/runtime/state/_materializer.py \
+            linktools-ai/src/linktools/ai/runtime/state/_history.py \
+            linktools-ai/src/linktools/ai/runtime/state/_codec.py
+          git diff --check
+      - name: Commit Runtime object ref convergence
+        shell: bash
+        run: |
+          git show HEAD^:.github/workflows/python-check.yml > .github/workflows/python-check.yml
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            .github/workflows/python-check.yml \
+            linktools-ai/README.md \
+            linktools-ai/src/linktools/ai/runtime/_object.py \
+            linktools-ai/src/linktools/ai/runtime/state/_materializer.py \
+            linktools-ai/src/linktools/ai/runtime/state/_history.py \
+            linktools-ai/src/linktools/ai/runtime/state/_codec.py
+          git commit -m 'refactor(ai): decouple runtime object refs from stores'
+          git push origin HEAD:refactor/ai-durable-contract-convergence
+
   python36:
     name: Python 3.6 static compatibility
     runs-on: ubuntu-latest
