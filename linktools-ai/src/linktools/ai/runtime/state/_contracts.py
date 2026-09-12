@@ -526,19 +526,37 @@ class ExecutionRunSealHead:
 class ExecutionHistorySealRecord:
     execution_id: str
     tenant_id: str
-    seal_version: int
     run_heads: tuple[ExecutionRunSealHead, ...]
     execution_event_high_water: int
-    seal_digest: str
 
     def __post_init__(self) -> None:
-        if self.seal_version < 1 or self.execution_event_high_water < 0:
+        if self.execution_event_high_water < 0:
             raise ValueError("execution history seal values are invalid")
-        if not self.execution_id or not self.tenant_id or not self.seal_digest:
+        if not self.execution_id or not self.tenant_id:
             raise ValueError("execution history seal identity cannot be empty")
         run_ids = tuple(head.run_id for head in self.run_heads)
         if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
             raise ValueError("execution history seal heads must be sorted and unique")
+
+    @property
+    def seal_digest(self) -> str:
+        return canonical_sha256(
+            {
+                "execution_id": self.execution_id,
+                "tenant_id": self.tenant_id,
+                "run_heads": [
+                    {
+                        "run_id": head.run_id,
+                        "event_count": head.event_count,
+                        "snapshot_count": head.snapshot_count,
+                        "transcript_message_count": head.transcript_message_count,
+                        "projection_digest": head.projection_digest,
+                    }
+                    for head in self.run_heads
+                ],
+                "execution_event_high_water": self.execution_event_high_water,
+            }
+        )
 
 
 class ExecutionHistoryState(str, Enum):

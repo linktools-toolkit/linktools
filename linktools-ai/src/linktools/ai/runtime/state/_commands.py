@@ -3,7 +3,6 @@
 """Named state commands for multi-record Runtime checkpoints."""
 
 import asyncio
-import hashlib
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -24,7 +23,6 @@ from ...core import (
     IdempotencyStatus,
     SessionStatus,
     ToolOperationStatus,
-    canonical_json_bytes,
     canonical_sha256,
     step_run_id,
 )
@@ -3106,30 +3104,11 @@ def _execution_history_seal(
     execution_event_high_water = (
         commit.expected_event_sequence + len(audit_events) + 1
     )
-    digest_input = {
-        "execution_id": commit.execution.execution_id,
-        "tenant_id": commit.execution.tenant_id,
-        "seal_version": 1,
-        "run_heads": [
-            {
-                "run_id": head.run_id,
-                "event_count": head.event_count,
-                "snapshot_count": head.snapshot_count,
-                "transcript_message_count": head.transcript_message_count,
-                "projection_digest": head.projection_digest,
-            }
-            for head in ordered_heads
-        ],
-        "execution_event_high_water": execution_event_high_water,
-    }
-    seal_digest = hashlib.sha256(canonical_json_bytes(digest_input)).hexdigest()
     return ExecutionHistorySealRecord(
-        commit.execution.execution_id,
-        commit.execution.tenant_id,
-        1,
-        ordered_heads,
-        execution_event_high_water,
-        seal_digest,
+        execution_id=commit.execution.execution_id,
+        tenant_id=commit.execution.tenant_id,
+        run_heads=ordered_heads,
+        execution_event_high_water=execution_event_high_water,
     )
 
 

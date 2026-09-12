@@ -616,10 +616,9 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
         execution_id="execution",
     )
     seal = ExecutionHistorySealRecord(
-        "execution",
-        "tenant",
-        1,
-        (
+               execution_id="execution",
+               tenant_id="tenant",
+               run_heads=(
             ExecutionRunSealHead(
                 run_id,
                 2,
@@ -628,9 +627,8 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
                 "projection",
             ),
         ),
-        0,
-        f"seal-{sequence}",
-    )
+               execution_event_high_water=0,
+           )
     await state.execution.executions.state_store.mutate(
         lambda transaction: state.execution.executions.put_history_seal_in_transaction(
             transaction,
@@ -722,13 +720,11 @@ async def test_read_model_rejects_a_different_complete_source() -> None:
     try:
         await state.execution.executions.create(_record(ExecutionStatus.FAILED, 0))
         seal = ExecutionHistorySealRecord(
-            "execution",
-            "tenant",
-            1,
-            (),
-            1,
-            "seal",
-        )
+                   execution_id="execution",
+                   tenant_id="tenant",
+                   run_heads=(),
+                   execution_event_high_water=1,
+               )
         await state.execution.executions.state_store.mutate(
             lambda transaction: (
                 state.execution.executions.put_history_seal_in_transaction(
@@ -792,13 +788,11 @@ async def test_read_model_accepts_current_v1_record() -> None:
     try:
         await state.execution.executions.create(_record(ExecutionStatus.FAILED, 0))
         seal = ExecutionHistorySealRecord(
-            "execution",
-            "tenant",
-            1,
-            (),
-            1,
-            "seal",
-        )
+                   execution_id="execution",
+                   tenant_id="tenant",
+                   run_heads=(),
+                   execution_event_high_water=1,
+               )
         store = state.execution.executions.state_store
         await store.mutate(
             lambda transaction: (
