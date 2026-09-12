@@ -264,6 +264,30 @@ def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+def test_binding_preserves_selected_pin_version_error() -> None:
+    compiler = _compiler()
+    binding = compiler.bind(compiler.compile(AgentSpec("agent")))
+    invalid_definition = replace(
+        binding.definition,
+        selected_tools=(
+            SimpleNamespace(
+                kind="tool",
+                id="future-tool",
+                semantic_contract={"version": 2},
+            ),
+        ),
+    )
+
+    with pytest.raises(AIError) as raised:
+        AgentBinding(
+            binding.digest,
+            invalid_definition,
+            binding.output_binding,
+            binding.snapshot,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
 def test_execution_binding_digest_is_derived_from_snapshot() -> None:
     value = _execution(planning=True, thinking=True)
     assert value.binding_digest == value.binding.binding_digest
