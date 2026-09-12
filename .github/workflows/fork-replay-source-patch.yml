@@ -1,0 +1,31 @@
+name: Fork replay source patch
+
+on:
+  push:
+    branches:
+      - refactor/ai-durable-contract-convergence
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-durable-contract-convergence
+      - name: Apply patch
+        run: python .github/fork_replay_source_patch.py
+      - name: Validate patch
+        run: |
+          python -m py_compile linktools-ai/src/linktools/ai/runtime/state/_repositories.py
+          git diff --check
+      - name: Commit patch
+        run: |
+          rm -f .github/fork_replay_source_patch.py .github/workflows/fork-replay-source-patch.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'fix(ai): use source session for fork replay'
+          git push origin HEAD:refactor/ai-durable-contract-convergence
