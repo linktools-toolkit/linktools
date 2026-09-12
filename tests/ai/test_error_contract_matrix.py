@@ -372,8 +372,12 @@ class _StreamingExecution:
     def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
         async def events() -> AsyncIterator[ExecutionTreeEvent]:
             for sequence, event_type, payload in (
-                (1, ExecutionDeltaType.ASSISTANT_TEXT_DELTA, {"text": "hello"}),
-                (2, ExecutionEventType.EXECUTION_SUCCEEDED, {}),
+                (
+                    1,
+                    ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value,
+                    {"text": "hello"},
+                ),
+                (2, ExecutionEventType.EXECUTION_SUCCEEDED.value, {}),
             ):
                 yield ExecutionTreeEvent(
                     self.execution_id,
@@ -392,6 +396,15 @@ class _StreamingExecution:
                 )
 
         return events()
+
+    async def wait(self) -> ExecutionResult:
+        return ExecutionResult(
+            self.execution_id,
+            ExecutionStatus.SUCCEEDED,
+            {"text": "hello"},
+            "a" * 64,
+            UsageMetrics(),
+        )
 
 
 class _StreamingAgent:
