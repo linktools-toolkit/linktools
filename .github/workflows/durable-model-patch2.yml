@@ -17,7 +17,19 @@ jobs:
           ref: refactor/ai-durable-contract-convergence
           fetch-depth: 64
       - name: Apply durable contract convergence
-        run: python .github/durable_model_patch.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/durable_model_patch.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'text = replace_once(text, "    SessionForkResultRecord,\\n", "", "fork repository import")'
+          new = 'text = text.replace("    SessionForkResultRecord,\\n", "", 1)'
+          if text.count(old) != 1:
+              raise RuntimeError('fork repository helper patch did not match')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          python .github/durable_model_patch.py
       - name: Validate patch
         run: |
           python -m py_compile \
