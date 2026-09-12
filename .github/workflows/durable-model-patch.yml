@@ -1,0 +1,327 @@
+name: Durable model patch
+
+on:
+  push:
+    branches:
+      - refactor/ai-durable-contract-convergence
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-durable-contract-convergence
+          fetch-depth: 32
+      - name: Apply durable model convergence
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{label}: expected 1 occurrence, got {count}')
+              return text.replace(old, new, 1)
+
+          contracts = Path('linktools-ai/src/linktools/ai/runtime/state/_contracts.py')
+          text = contracts.read_text(encoding='utf-8')
+          projection_pattern = re.compile(
+              r'@dataclass\(frozen=True, slots=True\)\nclass ContextProjection:\n.*?(?=\n\n@dataclass\(frozen=True, slots=True\)\nclass StoredStepSnapshot:)',
+              re.DOTALL,
+          )
+          projection_block = '''@dataclass(frozen=True, slots=True)
+class ContextProjection:
+    items: tuple[ContextProjectionItem, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.items, tuple) or any(
+            not isinstance(item, (TranscriptSpanRef, InlineContextBlock))
+            for item in self.items
+        ):
+            raise TypeError("context projection items are invalid")
+
+    @property
+    def digest(self) -> str:
+        identities: list[JsonValue] = []
+        for item in self.items:
+            if isinstance(item, TranscriptSpanRef):
+                identities.append(
+                    {
+                        "kind": "transcript",
+                        "source_domain": item.source_domain.value,
+                        "owner_id": item.owner_id,
+                        "start": item.start,
+                        "end": item.end,
+                    }
+                )
+                continue
+            payload = item.content.payload
+            payload_identity: dict[str, JsonValue] = {
+                "kind": payload.kind,
+                "encoding": payload.encoding,
+                "digest": payload.digest,
+                "size": payload.size,
+            }
+            if payload.kind == "inline":
+                payload_identity["value"] = payload.value
+            elif payload.ref is not None:
+                payload_identity["key"] = payload.ref.key
+            identities.append(
+                {
+                    "kind": "inline",
+                    "source_domain": (
+                        None
+                        if item.content.source_domain is None
+                        else item.content.source_domain.value
+                    ),
+                    "payload": payload_identity,
+                }
+            )
+        return canonical_sha256(
+            {"contract": "context-projection-v1", "items": identities}
+        )
+'''
+          text, count = projection_pattern.subn(projection_block, text, count=1)
+          if count != 1:
+              raise RuntimeError('ContextProjection block not found')
+
+          artifact_old = '''@dataclass(frozen=True, slots=True)
+class ArtifactRecord:
+    artifact_id: str
+    execution_id: str
+    tenant_id: str
+    producer: str
+    media_type: str
+    size: int
+    digest: str
+    object_ref: ObjectRef
+    created_at: datetime
+'''
+          artifact_new = '''@dataclass(frozen=True, slots=True)
+class ArtifactRecord:
+    artifact_id: str
+    execution_id: str
+    tenant_id: str
+    producer: str
+    media_type: str
+    object_ref: ObjectRef
+    created_at: datetime
+
+    @property
+    def size(self) -> int:
+        return self.object_ref.size
+
+    @property
+    def digest(self) -> str:
+        return self.object_ref.digest
+'''
+          text = replace_once(text, artifact_old, artifact_new, 'ArtifactRecord block')
+
+          fork_pattern = re.compile(
+              r'\n@dataclass\(frozen=True, slots=True\)\nclass SessionForkResultRecord:\n.*?(?=\n\n@dataclass\(frozen=True, slots=True\)\nclass ExecutionRecord:)',
+              re.DOTALL,
+          )
+          text, count = fork_pattern.subn('\n', text, count=1)
+          if count != 1:
+              raise RuntimeError('SessionForkResultRecord block not found')
+          contracts.write_text(text, encoding='utf-8')
+
+          history = Path('linktools-ai/src/linktools/ai/runtime/state/_history.py')
+          text = history.read_text(encoding='utf-8')
+          text = replace_once(
+              text,
+              '        digest = self._digest(items)\n        return ContextProjection(tuple(items), digest)\n\n    def _digest(\n        self,\n        items: Sequence[TranscriptSpanRef | InlineContextBlock],\n    ) -> str:\n        return hashlib.sha256(\n            canonical_json_bytes(\n                {\n                    "items": encode_domain(tuple(items)),\n                }\n            )\n        ).hexdigest()\n',
+              '        return ContextProjection(tuple(items))\n',
+              'ContextProjection creation',
+          )
+          text = replace_once(
+              text,
+              '        digest = self._projector._digest(items)\n        return ContextProjection(tuple(items), digest)\n',
+              '        return ContextProjection(tuple(items))\n',
+              'externalized ContextProjection creation',
+          )
+          history.write_text(text, encoding='utf-8')
+
+          codec = Path('linktools-ai/src/linktools/ai/runtime/state/_codec.py')
+          text = codec.read_text(encoding='utf-8')
+          text = replace_once(text, '    SessionForkResultRecord,\n', '', 'fork codec import')
+          text = replace_once(
+              text,
+              '    ("session_fork_result", SessionForkResultRecord),\n',
+              '',
+              'fork wire type',
+          )
+          codec.write_text(text, encoding='utf-8')
+
+          repositories = Path('linktools-ai/src/linktools/ai/runtime/state/_repositories.py')
+          text = repositories.read_text(encoding='utf-8')
+          text = replace_once(text, '    SessionForkResultRecord,\n', '', 'fork repository import')
+          text = replace_once(
+              text,
+              '            operation_record, replayed = await _append_operation(\n',
+              '            _, replayed = await _append_operation(\n',
+              'fork operation replay binding',
+          )
+          text = replace_once(
+              text,
+              '                    target=target,\n                    operation=operation,\n                    operation_record=operation_record,\n',
+              '                    target=target,\n',
+              'fork replay call arguments',
+          )
+          text, count = re.subn(
+              r'            fork_result = SessionForkResultRecord\(.*?            if not fork_result\.result_digest:\n                raise AIError\(ErrorCode\.STORAGE_INTEGRITY_ERROR\)\n',
+              '',
+              text,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if count != 1:
+              raise RuntimeError('fork result creation block not found')
+          text, count = re.subn(
+              r'                    self\._stored\(\n                        "session_fork_result",\n                        operation\.operation_id,\n                        fork_result,\n                    \),\n',
+              '',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise RuntimeError('fork receipt insert not found')
+
+          replay_pattern = re.compile(
+              r'    async def _replay_fork_in_transaction\(.*?(?=\n    async def _visible_history_count_in_transaction\()',
+              re.DOTALL,
+          )
+          replay_block = '''    async def _replay_fork_in_transaction(
+        self,
+        transaction: StateTransaction,
+        *,
+        source_session_id: str,
+        target: SessionRecord,
+    ) -> tuple[SessionRecord, bool]:
+        target_history_id = target.history_id
+        if target_history_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        target_key = self._key("session", target.session_id)
+        child_key = self._key("conversation_history", target_history_id)
+        head_key = self._key("transcript_head", target_history_id)
+        related = await transaction.get_records((target_key, child_key, head_key))
+        target_stored = related.get(target_key)
+        child_stored = related.get(child_key)
+        head_stored = related.get(head_key)
+        if target_stored is None or child_stored is None or head_stored is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        existing_target = await self._decode(target_stored, SessionRecord)
+        child = await self._decode_history(child_stored)
+        if (
+            existing_target.session_id != target.session_id
+            or existing_target.history_id != target_history_id
+            or existing_target.tenant_id != self._tenant_id
+            or existing_target.owner_principal_id != target.owner_principal_id
+            or existing_target.agent_id != target.agent_id
+            or child.session_id != target.session_id
+            or child.tenant_id != self._tenant_id
+            or child.parent_history_id
+            != _session_history_id(source_session_id, self._tenant_id)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        head = _decode_enveloped_domain(
+            head_stored.data,
+            TranscriptHeadRecord,
+        )
+        if (
+            head.owner_domain is not TranscriptOwnerDomain.CONVERSATION
+            or head.owner_id != target_history_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.info(
+            "session fork replayed: source=%s target=%s",
+            source_session_id,
+            existing_target.session_id,
+        )
+        return existing_target, True
+
+'''
+          text, count = replay_pattern.subn(replay_block, text, count=1)
+          if count != 1:
+              raise RuntimeError('fork replay method not found')
+
+          history_helper_old = '''def _ensure_session_history(value: SessionRecord) -> SessionRecord:
+    if value.history_id is not None:
+        return value
+    history_id = canonical_sha256(
+        {
+            "kind": "conversation_history",
+            "session_id": value.session_id,
+            "tenant_id": value.tenant_id,
+        }
+    )
+    return replace(value, history_id=history_id)
+'''
+          history_helper_new = '''def _session_history_id(session_id: str, tenant_id: str) -> str:
+    return canonical_sha256(
+        {
+            "kind": "conversation_history",
+            "session_id": session_id,
+            "tenant_id": tenant_id,
+        }
+    )
+
+
+def _ensure_session_history(value: SessionRecord) -> SessionRecord:
+    if value.history_id is not None:
+        return value
+    return replace(
+        value,
+        history_id=_session_history_id(value.session_id, value.tenant_id),
+    )
+'''
+          text = replace_once(
+              text,
+              history_helper_old,
+              history_helper_new,
+              'session history helper',
+          )
+          repositories.write_text(text, encoding='utf-8')
+
+          fixture = Path('tests/ai/fixtures/runtime_state_v1_golden.json')
+          value = json.loads(fixture.read_text(encoding='utf-8'))
+          value['wire_type_ids'].remove('session_fork_result')
+          fixture.write_text(json.dumps(value, indent=2) + '\n', encoding='utf-8')
+
+          for name in (
+              'tests/ai/test_persistence_compatibility.py',
+              'tests/ai/test_runtime_persistence_compatibility.py',
+              'tests/ai/test_runtime_storage_io_optimization.py',
+          ):
+              path = Path(name)
+              value = path.read_text(encoding='utf-8')
+              value = value.replace('ContextProjection((), "d" * 64)', 'ContextProjection(())')
+              value = value.replace('ContextProjection((), "projection")', 'ContextProjection(())')
+              value = value.replace(
+                  'ContextProjection(\n            cast("tuple[ContextProjectionItem, ...]", ("invalid",)),\n            "d" * 64,\n        )',
+                  'ContextProjection(\n            cast("tuple[ContextProjectionItem, ...]", ("invalid",)),\n        )',
+              )
+              path.write_text(value, encoding='utf-8')
+          PY
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/state/_contracts.py \
+            linktools-ai/src/linktools/ai/runtime/state/_history.py \
+            linktools-ai/src/linktools/ai/runtime/state/_codec.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py
+          git diff --check
+      - name: Commit and remove patch workflow
+        shell: bash
+        run: |
+          git show 125eaa6f38a0aaf893bcdeaab98f88680a3073af:.github/workflows/python-check.yml > .github/workflows/python-check.yml
+          rm .github/workflows/durable-model-patch.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m 'refactor(ai): derive remaining durable facts'
+          git push origin HEAD:refactor/ai-durable-contract-convergence
