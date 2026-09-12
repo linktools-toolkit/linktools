@@ -578,7 +578,6 @@ async def _build_local_components(
             payload_policy=payload_policy,
             handlers=task_handlers,
             expanders=task_expanders,
-            acquire_dependency_hold=execution.acquire_dependency_hold,
             release_dependency_hold=execution.release_dependency_hold,
             request_terminal_handoff=execution.request_terminal_handoff,
             task_durable=(
