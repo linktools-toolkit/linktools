@@ -71,29 +71,40 @@ def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
     assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
-def test_declaration_codecs_reject_unknown_fields() -> None:
+def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
+    agent_payload = {
+        "version": 1,
+        "id": "agent",
+        "future_metadata": {"future": True},
+    }
+    assert AgentSpecCodec().decode(json.dumps(agent_payload).encode()) == AgentSpec(
+        "agent"
+    )
+
     skill_payload = {
         "version": 1,
         "id": "skill",
         "content": "skill content",
-        "future_metadata": {"$future_v2": ["ignored"]},
+        "future_metadata": {"future": True},
     }
-    with pytest.raises(AIError) as skill_error:
-        SkillSpecCodec().decode(json.dumps(skill_payload).encode())
-    assert skill_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert SkillSpecCodec().decode(json.dumps(skill_payload).encode()) == SkillSpec(
+        "skill",
+        "skill content",
+    )
 
     mcp_payload = {
         "version": 1,
         "id": "mcp",
         "command": "echo",
-        "future_metadata": {"$future_v2": ["ignored"]},
+        "future_metadata": {"future": True},
     }
-    with pytest.raises(AIError) as mcp_error:
-        MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode())
-    assert mcp_error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    assert MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode()) == MCPServerSpec(
+        "mcp",
+        "echo",
+    )
 
 
-def test_agent_spec_codec_rejects_unknown_usage_limit_fields() -> None:
+def test_agent_spec_codec_ignores_unknown_usage_limit_fields() -> None:
     payload = {
         "version": 1,
         "id": "agent",
@@ -103,9 +114,8 @@ def test_agent_spec_codec_rejects_unknown_usage_limit_fields() -> None:
         },
     }
 
-    with pytest.raises(AIError) as error:
-        AgentSpecCodec().decode(json.dumps(payload).encode())
-    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+    decoded = AgentSpecCodec().decode(json.dumps(payload).encode())
+    assert decoded.usage_limits == AgentUsageLimits(model_requests=1)
 
 
 def test_spec_constructors_reject_invalid_values() -> None:
