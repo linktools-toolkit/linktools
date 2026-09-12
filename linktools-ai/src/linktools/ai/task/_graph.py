@@ -120,10 +120,7 @@ class TaskNode:
             or not isinstance(budget_cost, int)
             or isinstance(budget_cost, bool)
             or budget_cost < 1
-            or (
-                expander is not None
-                and not isinstance(expander, TaskExpanderRef)
-            )
+            or (expander is not None and not isinstance(expander, TaskExpanderRef))
         ):
             raise ValueError("task node identity is invalid")
         values: Mapping[str, JsonValue] = {} if input is None else input
@@ -185,6 +182,12 @@ class TaskNodeView:
                 validate_lease_owner(self.owner)
             except AIError as error:
                 raise ValueError("task node lease owner is invalid") from error
+        if self.status in {
+            TaskStatus.PENDING,
+            TaskStatus.READY,
+            TaskStatus.RUNNING,
+        } and self.execution_id is not None:
+            raise ValueError("unbound task node state cannot carry an execution id")
         if self.status is TaskStatus.RECOVERY_REQUIRED and (
             self.owner is not None
             or self.lease_expires_at is not None
@@ -192,6 +195,7 @@ class TaskNodeView:
             or self.result_digest is not None
             or self.error_code is None
             or not self.error_code.strip()
+            or self.error_digest is None
         ):
             raise ValueError("recovery-required task node state is invalid")
         if self.status is TaskStatus.WAITING and (
@@ -513,10 +517,7 @@ class TaskGraphSnapshot:
         if len(set(node_ids)) != len(node_ids) or node_ids != state_ids:
             raise ValueError("task graph snapshot node set is invalid")
         for node, state in zip(nodes, states, strict=True):
-            if (
-                state.graph_id != self.graph_id
-                or state.dependencies != node.dependencies
-            ):
+            if state.graph_id != self.graph_id or state.dependencies != node.dependencies:
                 raise ValueError("task graph snapshot node identity is invalid")
         aggregate = _aggregate_graph_status(states)
         if aggregate is not self.status:
