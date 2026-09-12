@@ -53,14 +53,14 @@ def test_agent_binding_fixture_matches_current_contract() -> None:
     assert decoded.binding_digest == expected.binding_digest
 
 
-def test_agent_binding_rejects_unknown_fields() -> None:
+def test_agent_binding_ignores_unknown_fields() -> None:
     value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v1.json"))
     value["future_metadata"] = {"future": True}
 
-    with pytest.raises(AIError) as error:
-        AgentBindingSnapshot.from_payload(value)
+    decoded = AgentBindingSnapshot.from_payload(value)
 
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert decoded == _binding_fixture_value()
+    assert "future_metadata" not in decoded.to_payload()
 
 
 def test_output_binding_round_trips_from_durable_semantics() -> None:
