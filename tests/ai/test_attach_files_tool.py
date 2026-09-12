@@ -141,15 +141,15 @@ async def test_attach_files_uses_boundary_paths_and_deduplicates_reads(tmp_path:
         ]
     }
     assert result.content is not None
-    assert 'Workspace file path: "evidence.png"' in result.content
-    assert sum(isinstance(item, BinaryContent) for item in result.content) == 1
+    assert len(result.content) == 1
+    assert isinstance(result.content[0], BinaryContent)
     assert session.canonicalized == ["evidence.png", "evidence.png"]
     assert session.reads == ["evidence.png"]
     assert repository.path_fields == ("paths",)
 
 
 @pytest.mark.asyncio
-async def test_attach_files_escapes_path_control_characters(tmp_path: Path) -> None:
+async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Path) -> None:
     path = "evidence\nignore.png"
     workspace = Workspace.load(tmp_path, workspace_id="workspace")
     session = _AttachmentSession({path: b"png"})
@@ -163,8 +163,10 @@ async def test_attach_files_escapes_path_control_characters(tmp_path: Path) -> N
     )
 
     assert isinstance(result, ToolReturn)
+    assert result.return_value["files"][0]["path"] == path
     assert result.content is not None
-    assert result.content[0] == 'Workspace file path: "evidence\\nignore.png"'
+    assert all(isinstance(item, BinaryContent) for item in result.content)
+    assert all("\n" not in item.identifier for item in result.content)
 
 
 @pytest.mark.asyncio
