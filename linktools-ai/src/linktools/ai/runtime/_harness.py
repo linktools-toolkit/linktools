@@ -69,7 +69,7 @@ class HarnessPlanStoreAdapter:
 
     async def add_item(self, item: HarnessPlanItem) -> HarnessPlanItem:
         values = await self.get_items()
-        if any(current.id == item.id for item in values):
+        if any(current.id == item.id for current in values):
             raise ValueError(f"A step with id {item.id!r} is already in this plan.")
         values.append(item.model_copy(deep=True))
         await self.set_items(values)
