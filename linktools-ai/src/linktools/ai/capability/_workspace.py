@@ -19,6 +19,7 @@ from ..errors import AIError, ErrorCode
 from ..workspace import (
     LocalSandbox,
     Sandbox,
+    SandboxOperationRejected,
     SandboxSession,
     Workspace,
     WorkspacePolicy,
@@ -102,6 +103,13 @@ _WORKSPACE_TOOL_DECLARATIONS: dict[str, Mapping[str, object]] = {
         tool_class="shell",
     ),
 }
+_EFFECTFUL_WORKSPACE_TOOLS = frozenset(
+    {
+        name
+        for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items()
+        if metadata.get("linktools.tool.effect") != "none"
+    }
+)
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
 _logger = environ.get_logger("ai.capability.workspace")
 _INVALID_WORKSPACE_REQUEST = (
@@ -213,32 +221,14 @@ class _WorkspaceToolSurface:
     ) -> _ResultT:
         try:
             return await operation
-        except AIError as error:
+        except SandboxOperationRejected as error:
             if error.code not in rejected_codes:
                 raise
-            if (
-                name == "attach_files"
-                and error.safe_details.get("reason") == "image_input_not_supported"
-            ):
-                message = _UNSUPPORTED_IMAGE_INPUT
-            elif error.code is ErrorCode.STORAGE_NOT_FOUND:
-                message = _MISSING_WORKSPACE_TARGET
-            elif error.code is ErrorCode.STORAGE_CONFLICT:
-                message = _WORKSPACE_CONFLICT
-            elif error.code is ErrorCode.AUTHORIZATION_DENIED:
-                message = _DISALLOWED_WORKSPACE_TARGET
-            elif error.code is ErrorCode.TOOL_ARGUMENTS_TOO_LARGE:
-                message = _LARGE_WORKSPACE_REQUEST
-            elif error.code is ErrorCode.TOO_MANY_PENDING_OPERATIONS:
-                message = _TOO_MANY_WORKSPACE_COMMANDS
-            else:
-                message = rejected_message
-            _logger.debug(
-                "workspace tool call rejected: operation=%s code=%s",
-                name,
-                error.code.value,
-            )
-            raise ToolCallRejected(message) from error
+            raise _workspace_tool_rejected(name, error, rejected_message) from error
+        except AIError as error:
+            if name in _EFFECTFUL_WORKSPACE_TOOLS or error.code not in rejected_codes:
+                raise
+            raise _workspace_tool_rejected(name, error, rejected_message) from error
 
     async def attach_files(self, paths: list[str]) -> ToolReturn:
         """Attach Workspace files to the next model request.
@@ -762,6 +752,36 @@ def _workspace_tool(
         name=name,
         metadata=dict(metadata),
     )
+
+
+def _workspace_tool_rejected(
+    name: str,
+    error: AIError,
+    default_message: str,
+) -> ToolCallRejected:
+    if (
+        name == "attach_files"
+        and error.safe_details.get("reason") == "image_input_not_supported"
+    ):
+        message = _UNSUPPORTED_IMAGE_INPUT
+    elif error.code is ErrorCode.STORAGE_NOT_FOUND:
+        message = _MISSING_WORKSPACE_TARGET
+    elif error.code is ErrorCode.STORAGE_CONFLICT:
+        message = _WORKSPACE_CONFLICT
+    elif error.code is ErrorCode.AUTHORIZATION_DENIED:
+        message = _DISALLOWED_WORKSPACE_TARGET
+    elif error.code is ErrorCode.TOOL_ARGUMENTS_TOO_LARGE:
+        message = _LARGE_WORKSPACE_REQUEST
+    elif error.code is ErrorCode.TOO_MANY_PENDING_OPERATIONS:
+        message = _TOO_MANY_WORKSPACE_COMMANDS
+    else:
+        message = default_message
+    _logger.debug(
+        "workspace tool call rejected: operation=%s code=%s",
+        name,
+        error.code.value,
+    )
+    return ToolCallRejected(message)
 
 
 __all__ = [
