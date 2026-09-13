@@ -24,7 +24,7 @@ from .service_api import (
     ExecutionView,
     ListExecutionRequest,
     TranscriptItem,
-    _project_execution_view,
+    project_execution_view,
 )
 from .state._contracts import ExecutionRecord, ExecutionRepository
 
@@ -47,7 +47,7 @@ class DefaultExecutionHistoryService:
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView:
-        return _project_execution_view(await self._authorize(execution_id, principal))
+        return project_execution_view(await self._authorize(execution_id, principal))
 
     async def list(self, request: ListExecutionRequest) -> Page[ExecutionView]:
         signer = self._cursor_signer
@@ -100,7 +100,7 @@ class DefaultExecutionHistoryService:
                     if error.code is not ErrorCode.AUTHORIZATION_DENIED:
                         raise
                     continue
-                views.append(_project_execution_view(record))
+                views.append(project_execution_view(record))
                 if len(views) == request.limit:
                     has_more = page.has_more or index + 1 < len(page.items)
                     return Page(
