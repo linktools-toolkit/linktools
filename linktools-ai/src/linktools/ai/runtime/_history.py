@@ -26,11 +26,13 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ._journal import (
+    DURATION_NS_METADATA_KEY,
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
     MODEL_USAGE_METADATA_KEYS,
     MODEL_USAGE_OUTPUT_METADATA_KEY,
+    OBSERVATION_ID_METADATA_KEY,
     OUTPUT_RETRY_INDEX_METADATA_KEY,
     REQUEST_PURPOSE_METADATA_KEY,
     REQUEST_SEQUENCE_METADATA_KEY,
@@ -50,8 +52,6 @@ from .state._views import (
 )
 
 _logger = environ.get_logger("ai.runtime.history")
-_OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
-_DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"
 
 
 @dataclass(frozen=True, slots=True)
@@ -780,12 +780,12 @@ def _trace_item(
         "depth": depth,
         "occurred_at": _event_timestamp(event).isoformat(),
     }
-    observation_id = event.metadata.get(_OBSERVATION_ID_METADATA_KEY)
+    observation_id = event.metadata.get(OBSERVATION_ID_METADATA_KEY)
     if observation_id is not None:
         if not observation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["observation_id"] = observation_id
-    duration_ns = event.metadata.get(_DURATION_NS_METADATA_KEY)
+    duration_ns = event.metadata.get(DURATION_NS_METADATA_KEY)
     if duration_ns is not None:
         if not duration_ns.isdigit():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
