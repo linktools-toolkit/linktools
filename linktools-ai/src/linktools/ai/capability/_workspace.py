@@ -103,12 +103,6 @@ _WORKSPACE_TOOL_DECLARATIONS: dict[str, Mapping[str, object]] = {
     ),
 }
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
-_MODEL_CORRECTABLE_ERRORS = {
-    ErrorCode.REQUEST_FIELD_INVALID,
-    ErrorCode.STORAGE_NOT_FOUND,
-    ErrorCode.STORAGE_CONFLICT,
-    ErrorCode.AUTHORIZATION_DENIED,
-}
 _MODEL_ERROR_MESSAGES = {
     ErrorCode.REQUEST_FIELD_INVALID: (
         "The workspace tool arguments or target are invalid. Correct them and retry."
@@ -125,8 +119,28 @@ _MODEL_ERROR_MESSAGES = {
         "The requested workspace path or command is not allowed. Choose an allowed target "
         "or command and retry."
     ),
+    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE: (
+        "The workspace tool arguments are too large. Use a smaller request and retry."
+    ),
+    ErrorCode.TOO_MANY_PENDING_OPERATIONS: (
+        "Too many workspace operations are pending. Reuse, inspect, or stop existing "
+        "operations before starting another one."
+    ),
 }
 _logger = environ.get_logger("ai.capability.workspace")
+
+
+def workspace_model_retry_message(error: AIError) -> str | None:
+    """Return model-facing correction guidance for a known Workspace error."""
+    if (
+        error.code is ErrorCode.REQUEST_FIELD_INVALID
+        and error.safe_details.get("reason") == "image_input_not_supported"
+    ):
+        return (
+            "The current model does not support image attachments. "
+            "Use a non-image input or another approach."
+        )
+    return _MODEL_ERROR_MESSAGES.get(error.code)
 
 
 class WorkspaceAccess:
@@ -187,9 +201,12 @@ class _WorkspaceToolSurface:
         self,
         session: SandboxSession | None,
         policy: WorkspacePolicy,
+        *,
+        vision: bool = True,
     ) -> None:
         self._session = session
         self._policy = policy
+        self._vision = vision
         self._mime = mimetypes.MimeTypes(filenames=())
 
     def _require_session(self) -> SandboxSession:
@@ -202,9 +219,10 @@ class _WorkspaceToolSurface:
         try:
             return await operation
         except AIError as error:
-            if error.code not in _MODEL_CORRECTABLE_ERRORS:
+            message = workspace_model_retry_message(error)
+            if message is None:
                 raise
-            raise ModelRetry(_MODEL_ERROR_MESSAGES[error.code]) from error
+            raise ModelRetry(message) from error
 
     async def attach_files(self, paths: list[str]) -> ToolReturn:
         """Attach Workspace files to the next model request.
@@ -236,6 +254,14 @@ class _WorkspaceToolSurface:
                     safe_details={
                         "field": "paths",
                         "reason": "media_type_unknown",
+                    },
+                )
+            if not self._vision and media_type.lower().startswith("image/"):
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={
+                        "field": "paths",
+                        "reason": "image_input_not_supported",
                     },
                 )
             remaining = self._policy.max_binary_input_bytes - total_bytes
@@ -481,9 +507,11 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         session: SandboxSession | None,
         policy: WorkspacePolicy,
+        *,
+        vision: bool,
     ) -> None:
         super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
-        surface = _WorkspaceToolSurface(session, policy)
+        surface = _WorkspaceToolSurface(session, policy, vision=vision)
         for name in selected_tool_names:
             self.add_tool(
                 _workspace_tool(
@@ -500,17 +528,21 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         session: SandboxSession | None,
         policy: WorkspacePolicy,
+        *,
+        vision: bool,
     ) -> None:
         self.id = _WORKSPACE_SANDBOX_CAPABILITY_ID
         self._selected_tool_names = selected_tool_names
         self._session = session
         self._policy = policy
+        self._vision = vision
 
     def get_toolset(self) -> _WorkspaceSandboxToolset:
         return _WorkspaceSandboxToolset(
             self._selected_tool_names,
             self._session,
             self._policy,
+            vision=self._vision,
         )
 
 
@@ -531,6 +563,7 @@ def workspace_capabilities(
     selected_tool_names: Sequence[str],
     *,
     session: SandboxSession | None = None,
+    vision: bool = True,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened session."""
     selected = frozenset(selected_tool_names)
@@ -549,7 +582,14 @@ def workspace_capabilities(
         ordered,
         session is not None,
     )
-    return (_WorkspaceCapability(ordered, session, workspace.policy),)
+    return (
+        _WorkspaceCapability(
+            ordered,
+            session,
+            workspace.policy,
+            vision=vision,
+        ),
+    )
 
 
 def _workspace_tool(
@@ -568,5 +608,6 @@ def _workspace_tool(
 __all__ = [
     "WorkspaceAccess",
     "workspace_capabilities",
+    "workspace_model_retry_message",
     "workspace_tool_contributions",
 ]
