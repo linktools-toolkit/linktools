@@ -106,9 +106,7 @@ from ..workspace import LocalSandbox, SandboxResource, SandboxSession
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructions
 
-from ._capabilities import (
-    compose_platform_capabilities,
-)
+from ._capabilities import compose_platform_capabilities
 from ._compaction import RuntimeCompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
@@ -377,9 +375,7 @@ class AgentExecutor:
         selected = tuple(
             candidate.id
             for candidate in scope.binding.definition.selected_tools
-            if tool_class_from_metadata(
-                _frozen_tool_metadata(candidate)
-            )
+            if tool_class_from_metadata(_frozen_tool_metadata(candidate))
             in {"filesystem.read", "filesystem.write", "shell"}
         )
         resources, resource_keys = await _skill_sandbox_resources(
@@ -725,6 +721,7 @@ async def _materialize_agent(
         scope.context.workspace,
         workspace_names,
         session=scope.sandbox_session,
+        vision=definition.model.vision,
     )
     workspace_toolset_values = tuple(
         toolset
