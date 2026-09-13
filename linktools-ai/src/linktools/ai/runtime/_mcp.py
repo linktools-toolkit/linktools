@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Materialize the MCP transport selected by a compiled runtime binding."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -14,9 +14,16 @@ from ..capability import mcp_server_namespace, tool_semantic_metadata
 from ..core import Principal, ResourceRef
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, parse_mcp_tool_selector
-from ._tool_boundary import ManagedToolDescriptor
+from ._tool_boundary import (
+    ManagedToolDescriptor,
+    managed_tool_descriptor_from_metadata,
+)
 
 _logger = environ.get_logger("ai.runtime.mcp")
+_MCP_TOOL_METADATA = tool_semantic_metadata(
+    effect="non_replay_safe",
+    tool_class="mcp",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +32,12 @@ class MCPMaterializedToolset:
 
     toolset: AbstractToolset[object]
     descriptor: ManagedToolDescriptor
+
+
+def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
+    metadata = tool_semantic_metadata(base=base)
+    metadata.update(_MCP_TOOL_METADATA)
+    return metadata
 
 
 class _MCPSemanticToolset(WrapperToolset[object]):
@@ -38,11 +51,7 @@ class _MCPSemanticToolset(WrapperToolset[object]):
         for tool in tools.values():
             tool.tool_def = replace(
                 tool.tool_def,
-                metadata=tool_semantic_metadata(
-                    effect="non_replay_safe",
-                    tool_class="mcp",
-                    base=tool.tool_def.metadata,
-                ),
+                metadata=_mcp_tool_metadata(tool.tool_def.metadata),
             )
         return tools
 
@@ -63,6 +72,7 @@ async def materialize_mcp_servers(
     if principal.tenant_id != execution.tenant_id:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     policy = _selector_policy(selectors)
+    descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[MCPMaterializedToolset] = []
     seen_namespaces: set[str] = set()
     for server in servers:
@@ -95,16 +105,7 @@ async def materialize_mcp_servers(
             namespace,
             tuple(sorted(allowed or ("*",))),
         )
-        values.append(
-            MCPMaterializedToolset(
-                prefixed,
-                ManagedToolDescriptor(
-                    effect_owner="tool_operation",
-                    effect="non_replay_safe",
-                    tool_class="mcp",
-                ),
-            )
-        )
+        values.append(MCPMaterializedToolset(prefixed, descriptor))
     return tuple(values)
 
 

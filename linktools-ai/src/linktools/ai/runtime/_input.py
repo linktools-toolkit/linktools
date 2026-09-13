@@ -27,7 +27,6 @@ from pydantic_ai.messages import (
 from ..capability import WorkspaceAccess
 from ..core import JsonValue, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..model import LinkToolsUploadedFile, declared_uploaded_file_media_type
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..workspace import WorkspacePolicy, normalize_workspace_path
 from ._input_contract import (
@@ -401,7 +400,7 @@ def _encode_user_content_item(item: UserContent) -> JsonValue:
                 "kind": "uploaded-file",
                 "file_id": item.file_id,
                 "provider_name": item.provider_name,
-                "media_type": declared_uploaded_file_media_type(item),
+                "media_type": item.media_type,
                 "identifier": item.identifier,
                 "vendor_metadata": normalize_json_value(item.vendor_metadata),
             }
@@ -483,7 +482,7 @@ def _decode_user_content_item(value: object) -> UserContent:
             or "vendor_metadata" not in value
         ):
             raise ValueError("uploaded file is invalid")
-        return LinkToolsUploadedFile(
+        return UploadedFile(
             file_id,
             provider_name,
             media_type=media_type,

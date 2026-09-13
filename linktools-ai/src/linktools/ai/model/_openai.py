@@ -27,7 +27,6 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ._contract import declared_uploaded_file_media_type
 
 _logger = environ.get_logger("ai.model.openai")
 
@@ -266,11 +265,7 @@ def _contains_image_content(value: object) -> bool:
     if isinstance(value, ImageUrl):
         return True
     if isinstance(value, UploadedFile):
-        media_type = declared_uploaded_file_media_type(value)
-        return (
-            isinstance(media_type, str)
-            and media_type.lower().startswith("image/")
-        )
+        return value.media_type.lower().startswith("image/")
     if isinstance(value, Mapping):
         return any(_contains_image_content(item) for item in value.values())
     if isinstance(value, Sequence) and not isinstance(

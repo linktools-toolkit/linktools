@@ -6,10 +6,6 @@ import json
 import pytest
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import (
-    LinkToolsUploadedFile,
-    declared_uploaded_file_media_type,
-)
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from pydantic_ai import RequestUsage
 from pydantic_ai.messages import (
@@ -18,11 +14,6 @@ from pydantic_ai.messages import (
     UploadedFile,
     UserPromptPart,
 )
-
-
-class _CustomReprUploadedFile(LinkToolsUploadedFile):
-    def __repr__(self) -> str:
-        return "uploaded-file"
 
 
 def test_model_message_round_trip_is_canonical() -> None:
@@ -55,14 +46,10 @@ def test_model_message_round_trip_preserves_usage_extensions() -> None:
     assert decoded[0].usage.__dict__["label"] == "original"
 
 
-def test_model_message_round_trip_does_not_infer_uploaded_file_media_type() -> None:
+def test_model_message_round_trip_preserves_uploaded_file_media_type() -> None:
     messages = (
         ModelRequest(
-            parts=[
-                UserPromptPart(
-                    [LinkToolsUploadedFile("report.png", "openai")]
-                )
-            ]
+            parts=[UserPromptPart([UploadedFile("report.png", "openai")])]
         ),
     )
 
@@ -70,55 +57,7 @@ def test_model_message_round_trip_does_not_infer_uploaded_file_media_type() -> N
 
     uploaded = decoded[0].parts[0].content[0]
     assert isinstance(uploaded, UploadedFile)
-    assert declared_uploaded_file_media_type(uploaded) is None
-
-
-def test_model_message_round_trip_preserves_explicit_uploaded_file_media_type() -> None:
-    messages = (
-        ModelRequest(
-            parts=[
-                UserPromptPart(
-                    [
-                        LinkToolsUploadedFile(
-                            "report.png",
-                            "openai",
-                            media_type="image/png",
-                        )
-                    ]
-                )
-            ]
-        ),
-    )
-
-    decoded = decode_model_messages(encode_model_messages(messages))
-
-    uploaded = decoded[0].parts[0].content[0]
-    assert isinstance(uploaded, UploadedFile)
-    assert declared_uploaded_file_media_type(uploaded) == "image/png"
-
-
-def test_model_message_round_trip_preserves_media_type_with_custom_repr() -> None:
-    messages = (
-        ModelRequest(
-            parts=[
-                UserPromptPart(
-                    [
-                        _CustomReprUploadedFile(
-                            "report.png",
-                            "openai",
-                            media_type="image/png",
-                        )
-                    ]
-                )
-            ]
-        ),
-    )
-
-    decoded = decode_model_messages(encode_model_messages(messages))
-
-    uploaded = decoded[0].parts[0].content[0]
-    assert isinstance(uploaded, UploadedFile)
-    assert declared_uploaded_file_media_type(uploaded) == "image/png"
+    assert uploaded.media_type == "image/png"
 
 
 def test_model_message_reader_accepts_pydantic_legacy_usage() -> None:

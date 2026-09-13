@@ -599,7 +599,7 @@ async def _build_local_components(
         actions.append(("runtime.build.state", state.close))
         if owned_workspace_close is not None:
             actions.append(("runtime.build.workspace", owned_workspace_close))
-        await _run_cleanup_actions(actions)
+        await _run_cleanup_actions(actions, stop_on_error=False)
         raise
 
     def build_memory_store(
@@ -630,6 +630,7 @@ async def _build_local_components(
     task_launcher: LocalTaskGraphLauncher | None = None
     graph_service: DefaultTaskGraphService | None = None
     coordinator: _RuntimeCloseCoordinator | None = None
+    close_actions: tuple[tuple[str, Callable[[], Awaitable[None]]], ...] | None = None
     try:
         backend = LocalExecutionBackend(
             state.conversation,
@@ -788,24 +789,21 @@ async def _build_local_components(
             await backend.reconcile()
         await graph_service.recover_pending()
     except BaseException:
-        if coordinator is not None:
-            try:
-                await coordinator.close()
-            except BaseException as error:
-                _log_secondary_cleanup("runtime.build.close", error)
-        else:
-            await _run_cleanup_actions(
-                _runtime_close_actions(
-                    graph_service=graph_service,
-                    task_launcher=task_launcher,
-                    execution=execution,
-                    backend=backend,
-                    input_materializer=input_materializer,
-                    metric_buffer=metric_buffer,
-                    state=state,
-                    owned_workspace_close=owned_workspace_close,
-                )
+        abort_actions = (
+            close_actions
+            if close_actions is not None
+            else _runtime_close_actions(
+                graph_service=graph_service,
+                task_launcher=task_launcher,
+                execution=execution,
+                backend=backend,
+                input_materializer=input_materializer,
+                metric_buffer=metric_buffer,
+                state=state,
+                owned_workspace_close=owned_workspace_close,
             )
+        )
+        await _run_cleanup_actions(abort_actions, stop_on_error=False)
         raise
     return _RuntimeComponents(
         catalog=catalog,

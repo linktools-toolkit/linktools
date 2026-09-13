@@ -6,13 +6,14 @@ from typing import Any
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import LinkToolsUploadedFile, ModelRegistry
+from linktools.ai.model import ModelRegistry
 from linktools.ai.model._openai import _RetryingModel
 from pydantic_ai.messages import (
     BinaryContent,
     ImageUrl,
     ModelMessage,
     ModelRequest,
+    UploadedFile,
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestParameters, ModelResponse, ModelSettings
@@ -97,7 +98,7 @@ def test_openai_vision_is_durable_model_semantics() -> None:
     (
         BinaryContent(b"image", media_type="image/png"),
         ImageUrl("https://example.com/image"),
-        LinkToolsUploadedFile("file-image", "openai", media_type="image/png"),
+        UploadedFile("report.png", "openai"),
     ),
 )
 async def test_openai_without_vision_rejects_images_before_provider(
@@ -197,20 +198,15 @@ async def test_openai_vision_policy_is_independent_per_binding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_without_vision_does_not_guess_uploaded_file_type() -> None:
+async def test_openai_without_vision_does_not_guess_opaque_uploaded_file_type() -> None:
     wrapped = _CountingModel()
     model = _RetryingModel(wrapped, 2, 0, vision=False)
 
+    uploaded = UploadedFile("file-image", "openai")
+    assert uploaded.media_type == "application/octet-stream"
+
     await model.request(
-        [
-            ModelRequest(
-                parts=[
-                    UserPromptPart(
-                        [LinkToolsUploadedFile("report.png", "openai")]
-                    )
-                ]
-            )
-        ],
+        [ModelRequest(parts=[UserPromptPart([uploaded])])],
         None,
         ModelRequestParameters(),
     )

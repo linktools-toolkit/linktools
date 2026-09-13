@@ -5,12 +5,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import BinaryContent, ImageUrl
+from pydantic_ai.messages import BinaryContent, ImageUrl, UploadedFile
 
 from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import LinkToolsUploadedFile
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._input import (
     ExecutionInputMaterializer,
@@ -55,7 +54,7 @@ class _CountingSandbox:
 
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
-    workspace = Workspace.load(".")
+    workspace = Workspace.load(".", workspace_id="workspace")
     access = WorkspaceAccess(_CountingSandbox(session), root=workspace.root)
     return ExecutionInputMaterializer(access, workspace.policy), session
 
@@ -130,11 +129,7 @@ async def test_unknown_file_media_type_fails_before_read() -> None:
 
 
 def test_uploaded_file_is_durable_at_request_boundary() -> None:
-    uploaded = LinkToolsUploadedFile(
-        "file-123",
-        "openai",
-        media_type="text/plain",
-    )
+    uploaded = UploadedFile("file-123", "openai", media_type="text/plain")
     request = ExecutionRequest(
         user_prompt=("Inspect this file", uploaded),
         principal=Principal("user", "tenant", "local_trusted"),

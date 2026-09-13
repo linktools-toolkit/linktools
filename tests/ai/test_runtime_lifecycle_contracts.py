@@ -421,3 +421,82 @@ async def test_compose_cleanup_continues_after_independent_resource_failure(
     assert workspace_store.calls == 1
     assert workspace_backend.calls == 1
     assert phases == [f"runtime.compose.{resource_name}"]
+
+
+@pytest.mark.asyncio
+async def test_build_abort_continues_after_input_cleanup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linktools.ai.runtime._factory as factory
+
+    state = RuntimeState.in_memory()
+    state_close_calls = 0
+    original_state_close = RuntimeState.close
+
+    class FailingExecutionService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("build failed")
+
+    async def fail_input_close(_input: object) -> None:
+        raise RuntimeError("input cleanup failed")
+
+    async def count_state_close(current: RuntimeState) -> None:
+        nonlocal state_close_calls
+        state_close_calls += 1
+        await original_state_close(current)
+
+    monkeypatch.setattr(factory, "DefaultExecutionService", FailingExecutionService)
+    monkeypatch.setattr(factory.ExecutionInputMaterializer, "close", fail_input_close)
+    monkeypatch.setattr(RuntimeState, "close", count_state_close)
+
+    with pytest.raises(RuntimeError, match="build failed"):
+        await factory.compose_runtime_components(
+            _workspace(tmp_path),
+            models=ModelRegistry.openai(model="test-model"),
+            state=state,
+        )
+
+    assert state_close_calls == 1
+    assert state.ready is False
+
+
+@pytest.mark.asyncio
+async def test_late_build_abort_continues_after_close_action_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import linktools.ai.runtime._factory as factory
+
+    state = RuntimeState.in_memory()
+    state_close_calls = 0
+    original_state_close = RuntimeState.close
+
+    async def fail_restore(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("restore failed")
+
+    async def fail_finalizers(_service: object) -> None:
+        raise RuntimeError("finalizer cleanup failed")
+
+    async def count_state_close(current: RuntimeState) -> None:
+        nonlocal state_close_calls
+        state_close_calls += 1
+        await original_state_close(current)
+
+    monkeypatch.setattr(factory, "_restore_recovery_bindings", fail_restore)
+    monkeypatch.setattr(
+        factory.DefaultTaskGraphService,
+        "drain_owned_finalizers",
+        fail_finalizers,
+    )
+    monkeypatch.setattr(RuntimeState, "close", count_state_close)
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        await factory.compose_runtime_components(
+            _workspace(tmp_path),
+            models=ModelRegistry.openai(model="test-model"),
+            state=state,
+        )
+
+    assert state_close_calls == 1
+    assert state.ready is False
