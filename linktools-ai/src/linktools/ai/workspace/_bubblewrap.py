@@ -20,11 +20,14 @@ from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._sandbox import (
+    SandboxOperationRejected,
     SandboxResource,
     SandboxSession,
     normalize_workspace_path,
 )
 from ._sandbox_protocol import (
+    ERROR_EFFECT_NOT_APPLIED,
+    ERROR_EFFECT_VALUES,
     GUARDIAN_EXIT_OK,
     GUARDIAN_EXIT_SESSION_FAILED,
     PROTOCOL_VERSION,
@@ -354,7 +357,10 @@ class _BubblewrapSandboxSession:
         business: bool = True,
         sent_event: asyncio.Event | None = None,
     ) -> str:
-        validate_request_params(method, params)
+        try:
+            validate_request_params(method, params)
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
         frame_id = uuid.uuid4().hex
         try:
             frame = encode_frame(
@@ -365,19 +371,17 @@ class _BubblewrapSandboxSession:
                     "params": dict(params),
                 }
             )
-        except AIError:
-            raise
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         future.add_done_callback(_consume_future_exception)
         async with self._state_lock:
             if self._state != "OPEN":
                 raise AIError(_session_state_error(self._state))
             async with self._pending_lock:
-                pending_business = sum(
-                    item[1] for item in self._pending.values()
-                )
+                pending_business = sum(item[1] for item in self._pending.values())
                 if business and pending_business >= _MAX_PENDING_REQUESTS:
-                    raise AIError(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
+                    raise AIError(ErrorCode.SANDBOX_BUSY)
                 self._pending[frame_id] = (future, business)
         sent = False
         try:
@@ -465,12 +469,16 @@ class _BubblewrapSandboxSession:
         if not isinstance(error, Mapping) or set(error) != {
             "code",
             "safe_details",
+            "effect",
         }:
             raise SandboxProtocolError("response error is invalid")
         code_value = error.get("code")
         details = error.get("safe_details", {})
+        effect = error.get("effect")
         try:
             code = ErrorCode(code_value)
+            if effect not in ERROR_EFFECT_VALUES:
+                raise ValueError("error effect is invalid")
             if not isinstance(details, Mapping):
                 raise ValueError("safe details are invalid")
             if any(not isinstance(key, str) for key in details):
@@ -487,15 +495,20 @@ class _BubblewrapSandboxSession:
             raise SandboxProtocolError("response error code is invalid") from protocol_error
         async with self._pending_lock:
             self._pending.pop(request_id, None)
+        exception: AIError
+        if effect == ERROR_EFFECT_NOT_APPLIED:
+            exception = SandboxOperationRejected(code, safe_details=dict(details))
+        else:
+            exception = AIError(code, safe_details=dict(details))
         if code in {
             ErrorCode.SANDBOX_SESSION_LOST,
             ErrorCode.SANDBOX_CLEANUP_FAILED,
         }:
             if not future.done():
-                future.set_exception(AIError(code, safe_details=dict(details)))
+                future.set_exception(exception)
             await self._mark_lost()
         elif not future.done():
-            future.set_exception(AIError(code, safe_details=dict(details)))
+            future.set_exception(exception)
 
     async def _drop_pending(self, request_id: str) -> None:
         async with self._pending_lock:

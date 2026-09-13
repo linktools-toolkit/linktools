@@ -18,8 +18,10 @@ from typing import Any
 
 from ..errors import AIError, ErrorCode
 from ._local_sandbox import _LocalSandboxSession
-from ._sandbox import SandboxResource
+from ._sandbox import SandboxOperationRejected, SandboxResource
 from ._sandbox_protocol import (
+    ERROR_EFFECT_NOT_APPLIED,
+    ERROR_EFFECT_UNKNOWN,
     PROTOCOL_VERSION,
     WORKER_EXIT_CLEANUP_FAILED,
     WORKER_EXIT_OK,
@@ -221,7 +223,14 @@ async def _receive_requests(
         try:
             validate_request_params(method, params)
         except AIError as error:
-            await _send_error(writer, request_id, error.code, write_lock)
+            await _send_error(
+                writer,
+                request_id,
+                error.code,
+                write_lock,
+                error.safe_details,
+                effect=ERROR_EFFECT_NOT_APPLIED,
+            )
             continue
         is_control = method == "stop_command"
         if (not is_control and len(active_business) >= _MAX_ACTIVE_REQUESTS) or (
@@ -230,7 +239,7 @@ async def _receive_requests(
             await _send_error(
                 writer,
                 request_id,
-                ErrorCode.TOO_MANY_PENDING_OPERATIONS,
+                ErrorCode.SANDBOX_BUSY,
                 write_lock,
             )
             continue
@@ -283,6 +292,11 @@ async def _handle_request(
                 error.code,
                 write_lock,
                 error.safe_details,
+                effect=(
+                    ERROR_EFFECT_NOT_APPLIED
+                    if isinstance(error, SandboxOperationRejected)
+                    else ERROR_EFFECT_UNKNOWN
+                ),
             )
         except (BrokenPipeError, ConnectionError, OSError):
             if failure_event is not None:
@@ -389,13 +403,19 @@ async def _send_error(
     code: ErrorCode,
     write_lock: asyncio.Lock,
     details: Mapping[str, Any] | None = None,
+    *,
+    effect: str = ERROR_EFFECT_UNKNOWN,
 ) -> None:
     safe_details = dict(details or {})
     try:
         frame = encode_frame(
             {
                 "request_id": request_id,
-                "error": {"code": code.value, "safe_details": safe_details},
+                "error": {
+                    "code": code.value,
+                    "safe_details": safe_details,
+                    "effect": effect,
+                },
             }
         )
         if len(frame) > _SAFE_ERROR_BYTES:
@@ -404,7 +424,11 @@ async def _send_error(
         frame = encode_frame(
             {
                 "request_id": request_id,
-                "error": protocol_error(code, reason="operation failed"),
+                "error": protocol_error(
+                    code,
+                    reason="operation failed",
+                    effect=effect,
+                ),
             }
         )
     async with write_lock:

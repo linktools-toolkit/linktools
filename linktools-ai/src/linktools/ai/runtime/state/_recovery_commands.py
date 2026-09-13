@@ -20,7 +20,12 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
-from ._contracts import ExecutionEventAppend, ExecutionRecord, ToolOperationRecord
+from ._contracts import (
+    ExecutionEventAppend,
+    ExecutionRecord,
+    ToolOperationRecord,
+    validate_tool_operation_failure,
+)
 from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._repositories import (
     EventRepositoryImpl,
@@ -431,6 +436,7 @@ class RuntimeRecoveryCommands:
         elif target_status is ToolOperationStatus.FAILED:
             if result_payload is not None or error_code is None:
                 raise ValueError("failed resolution requires an error")
+            validate_tool_operation_failure(error_code, error_payload)
         else:
             raise ValueError("unsupported tool effect resolution target")
 

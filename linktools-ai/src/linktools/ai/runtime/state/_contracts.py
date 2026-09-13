@@ -8,6 +8,8 @@ is the single semantic boundary shared by the local and SQL implementations.
 
 from __future__ import annotations
 
+import binascii
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -48,7 +50,7 @@ from ...core import (
     validate_resource_id,
     validate_tenant_id,
 )
-from ...errors import AIError, ErrorDiagnostics
+from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskEvent,
@@ -85,6 +87,57 @@ def _validate_tool_arguments_payload(
 ) -> None:
     if payload is not None and payload.digest != arguments_digest:
         raise ValueError("tool arguments payload does not match its digest")
+
+
+def validate_tool_operation_failure(
+    error_code: str | None,
+    error_payload: StoredPayload | None,
+) -> None:
+    """Require the only durable payload contract allowed for tool failure."""
+    if (
+        error_code
+        not in {
+            ErrorCode.TOOL_RETRY_REQUIRED.value,
+            ErrorCode.TOOL_EXECUTION_FAILED.value,
+        }
+        or not isinstance(error_payload, StoredPayload)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if error_payload.kind != "inline" or error_payload.encoding != "base64":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        raw = error_payload.decode()
+        value = json.loads(raw.decode("utf-8"))
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        binascii.Error,
+    ) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(value, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = value.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    if set(value) != {"version", "kind", "message"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    kind = value.get("kind")
+    message = value.get("message")
+    expected_kind = (
+        "tool_call_rejected"
+        if error_code == ErrorCode.TOOL_RETRY_REQUIRED.value
+        else "tool_call_failed"
+    )
+    if (
+        not isinstance(kind, str)
+        or kind != expected_kind
+        or not isinstance(message, str)
+        or not message.strip()
+        or len(message) > 2048
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _error_diagnostics_payload(diagnostics: ErrorDiagnostics) -> dict[str, JsonValue]:
@@ -739,6 +792,46 @@ class ToolOperationRecord:
 
     def __post_init__(self) -> None:
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
+        if self.status in {
+            ToolOperationStatus.PENDING,
+            ToolOperationStatus.CLAIMED,
+            ToolOperationStatus.CANCELLED,
+        }:
+            if (
+                self.result_payload is not None
+                or self.error_code is not None
+                or self.error_payload is not None
+            ):
+                raise ValueError("tool operation state cannot carry a terminal payload")
+        elif self.status is ToolOperationStatus.COMPLETED:
+            if (
+                self.result_payload is None
+                or self.error_code is not None
+                or self.error_payload is not None
+            ):
+                raise ValueError("completed tool operation payload is invalid")
+        elif self.status is ToolOperationStatus.FAILED:
+            if self.result_payload is not None:
+                raise ValueError("failed tool operation cannot carry a result payload")
+            try:
+                validate_tool_operation_failure(
+                    self.error_code,
+                    self.error_payload,
+                )
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+                    raise
+                raise ValueError("tool failure contract is invalid") from error
+        elif self.status is ToolOperationStatus.EFFECT_UNKNOWN:
+            if (
+                self.result_payload is not None
+                or self.error_payload is not None
+                or self.error_code
+                not in {None, ErrorCode.TOOL_EFFECT_UNKNOWN.value}
+            ):
+                raise ValueError("unknown-effect tool operation payload is invalid")
+        else:
+            raise ValueError("tool operation status is invalid")
         try:
             validate_tenant_id(self.tenant_id)
             validate_resource_id(self.execution_id)
@@ -2039,6 +2132,7 @@ __all__ = [
     "TaskRepository",
     "TaskState",
     "ToolOperationAdmission",
+    "validate_tool_operation_failure",
     "TranscriptChunk",
     "TranscriptHeadRecord",
     "TranscriptOrigin",

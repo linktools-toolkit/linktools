@@ -10,10 +10,8 @@ from typing import Any, Protocol
 
 from pydantic import TypeAdapter
 from linktools.core import environ
-from pydantic_ai.exceptions import ModelRetry, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import (
     ModelRequest,
-    RetryPromptPart,
     ToolCallPart,
     ToolReturnPart,
 )
@@ -28,7 +26,8 @@ from ..core import (
     validate_resource_id,
     validate_tenant_id,
 )
-from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..capability import ToolCallFailed, ToolCallRejected
+from ..errors import AIError, ErrorCode
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -61,7 +60,7 @@ class ToolOperationDecision:
     replay_safe: bool
     cached_result: JsonValue = None
     has_cached_result: bool = False
-    cached_error: BaseException | None = None
+    cached_error: ToolCallRejected | ToolCallFailed | None = None
 
 
 class ToolOperationBridge(Protocol):
@@ -79,7 +78,9 @@ class ToolOperationBridge(Protocol):
     async def complete(self, decision: ToolOperationDecision, result: Any) -> bool: ...
 
     async def fail(
-        self, decision: ToolOperationDecision, error: BaseException
+        self,
+        decision: ToolOperationDecision,
+        error: ToolCallRejected | ToolCallFailed,
     ) -> bool: ...
 
     async def unknown(
@@ -117,7 +118,7 @@ class ToolStateRepository(Protocol):
         fence: int,
         lease_seconds: int,
     ) -> ToolOperationRecord: ...
-    async def fail(
+    async def fail_payload(
         self,
         tool_operation_id: str,
         *,
@@ -125,6 +126,7 @@ class ToolStateRepository(Protocol):
         owner: str,
         fence: int,
         error_code: str,
+        error_payload: StoredPayload,
     ) -> ToolOperationRecord: ...
     async def defer(
         self,
@@ -207,7 +209,7 @@ class _ToolOperationRuntimeRepository(Protocol):
         owner: str,
         fence: int,
         error_code: str,
-        error_payload: "StoredPayload | None",
+        error_payload: StoredPayload,
     ) -> ToolOperationRecord: ...
 
     async def defer(
@@ -476,7 +478,7 @@ class RuntimeToolOperationBridge:
     async def fail(
         self,
         decision: "ToolOperationDecision",
-        error: BaseException,
+        error: ToolCallRejected | ToolCallFailed,
     ) -> bool:
         code, payload = await self._error_payload(error)
 
@@ -499,13 +501,21 @@ class RuntimeToolOperationBridge:
                 error_payload=payload,
             )
 
-        return await self._finish_with_readback(
+        cancelled = await self._finish_with_readback(
             finish,
             decision,
             expected_status=ToolOperationStatus.FAILED,
             expected_payload=payload,
             expected_error=code,
         )
+        _logger.debug(
+            "tool operation failed: execution=%s operation=%s code=%s signal=%s",
+            self._execution_id,
+            decision.operation_id,
+            code,
+            type(error).__name__,
+        )
+        return cancelled
 
     async def unknown(
         self,
@@ -718,176 +728,66 @@ class RuntimeToolOperationBridge:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return part.content
 
-    async def _decode_error(self, record: ToolOperationRecord) -> BaseException:
+    async def _decode_error(
+        self,
+        record: ToolOperationRecord,
+    ) -> ToolCallRejected | ToolCallFailed:
         if record.error_payload is None:
-            if record.error_code is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                code = ErrorCode(record.error_code)
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            return AIError(code)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = await self._payload_json(record.error_payload)
         if not isinstance(value, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        version = value.get("version")
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version != 1
+        ):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if set(value) != {"version", "kind", "message"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         kind = value.get("kind")
-        if kind == "model_retry" and isinstance(value.get("message"), str):
+        message = value.get("message")
+        if not isinstance(kind, str) or not isinstance(message, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if kind == "tool_call_rejected":
             if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ModelRetry(value["message"])
-        if kind == "tool_retry" and isinstance(value.get("content"), str):
-            if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ToolRetryError(
-                RetryPromptPart(
-                    value["content"],
-                    tool_call_id=str(value.get("tool_call_id", "")),
-                )
-            )
-        if kind == "tool_retry_message":
-            if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            part = self._decode_error_part(value)
-            if not isinstance(part, RetryPromptPart):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ToolRetryError(part)
-        if kind == "tool_failed_message":
+            try:
+                return ToolCallRejected(message)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if kind == "tool_call_failed":
             if record.error_code != ErrorCode.TOOL_EXECUTION_FAILED.value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            part = self._decode_error_part(value)
-            if not isinstance(part, ToolReturnPart) or part.outcome != "failed":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ToolFailedError(part)
-        if kind == "error" and isinstance(value.get("code"), str):
             try:
-                code = ErrorCode(value["code"])
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if record.error_code != code.value:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            safe_details = value.get("safe_details", {})
-            if not isinstance(safe_details, dict):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            diagnostics = None
-            if "diagnostics" in value:
-                diagnostics = self._decode_error_diagnostics(value["diagnostics"])
-            try:
-                return AIError(
-                    code,
-                    safe_details=safe_details,
-                    diagnostics=diagnostics,
-                )
+                return ToolCallFailed(message)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def _error_payload(self, error: BaseException) -> tuple[str, StoredPayload]:
-        if isinstance(error, ModelRetry):
-            value = {"kind": "model_retry", "message": error.message}
-            return ErrorCode.TOOL_RETRY_REQUIRED.value, await self._json_payload(value)
-        if isinstance(error, ToolRetryError):
-            return (
-                ErrorCode.TOOL_RETRY_REQUIRED.value,
-                await self._message_error_payload(
-                    "tool_retry_message", error.tool_retry
-                ),
-            )
-        if isinstance(error, ToolFailedError):
-            return (
-                ErrorCode.TOOL_EXECUTION_FAILED.value,
-                await self._message_error_payload(
-                    "tool_failed_message", error.tool_failed
-                ),
-            )
-        if isinstance(error, AIError):
-            value: dict[str, object] = {
-                "kind": "error",
-                "code": error.code.value,
-                "safe_details": dict(error.safe_details),
-            }
-            if error.diagnostics is not None:
-                value["diagnostics"] = self._error_diagnostics_payload(
-                    error.diagnostics
-                )
-            return error.code.value, await self._json_payload(value)
-        diagnostics = ErrorDiagnostics.from_exception(error)
-        return ErrorCode.TOOL_EXECUTION_FAILED.value, await self._json_payload(
-            {
-                "kind": "error",
-                "code": ErrorCode.TOOL_EXECUTION_FAILED.value,
-                "safe_details": {
-                    "error_digest": diagnostics.cause_digest,
-                    "phase": "tool_execution",
-                },
-                "diagnostics": self._error_diagnostics_payload(diagnostics),
-            }
-        )
-
-    @staticmethod
-    def _error_diagnostics_payload(
-        diagnostics: ErrorDiagnostics,
-    ) -> dict[str, str]:
-        return {
-            "exception_type": diagnostics.exception_type,
-            "exception_message": diagnostics.exception_message,
-            "cause_digest": diagnostics.cause_digest,
-        }
-
-    @staticmethod
-    def _decode_error_diagnostics(value: object) -> ErrorDiagnostics:
-        required = {"exception_type", "exception_message", "cause_digest"}
-        if not isinstance(value, dict) or not required.issubset(value):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        exception_type = value["exception_type"]
-        exception_message = value["exception_message"]
-        cause_digest = value["cause_digest"]
-        if not all(
-            isinstance(item, str)
-            for item in (exception_type, exception_message, cause_digest)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            return ErrorDiagnostics(
-                exception_type,
-                exception_message,
-                cause_digest,
-            )
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-    async def _message_error_payload(
+    async def _error_payload(
         self,
-        kind: str,
-        part: RetryPromptPart | ToolReturnPart,
-    ) -> StoredPayload:
-        encoded = encode_model_messages((ModelRequest(parts=[part]),))
-        try:
-            messages = json.loads(encoded.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        return await self._json_payload({"kind": kind, "messages": messages})
-
-    @staticmethod
-    def _decode_error_part(value: dict[str, object]) -> object:
-        messages = value.get("messages")
-        if not isinstance(messages, list):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            encoded = json.dumps(
-                messages,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            decoded = decode_model_messages(encoded)
-        except Exception as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if (
-            len(decoded) != 1
-            or not isinstance(decoded[0], ModelRequest)
-            or len(decoded[0].parts) != 1
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return decoded[0].parts[0]
+        error: ToolCallRejected | ToolCallFailed,
+    ) -> tuple[str, StoredPayload]:
+        if isinstance(error, ToolCallRejected):
+            code = ErrorCode.TOOL_RETRY_REQUIRED.value
+            kind = "tool_call_rejected"
+        elif isinstance(error, ToolCallFailed):
+            code = ErrorCode.TOOL_EXECUTION_FAILED.value
+            kind = "tool_call_failed"
+        else:
+            raise TypeError("tool failure must be a LinkTools tool signal")
+        payload = StoredPayload.inline_bytes(
+            canonical_json_bytes(
+                {
+                    "version": 1,
+                    "kind": kind,
+                    "message": error.message,
+                }
+            )
+        )
+        return code, payload
 
     async def _finish_with_readback(
         self,
@@ -1005,12 +905,6 @@ class RuntimeToolOperationBridge:
 
     async def _arguments_payload(self, args: dict[str, Any]) -> StoredPayload:
         return await self._payload(canonical_json_bytes(_portable_arguments(args)))
-
-    async def _json_payload(self, value: dict[str, object]) -> StoredPayload:
-        data = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        return await self._payload(data)
 
     async def _payload_bytes(self, payload: StoredPayload) -> bytes:
         if payload.kind == "inline":

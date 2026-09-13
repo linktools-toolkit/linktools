@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _AI_ROOT = "linktools.ai"
+_PYDANTIC_TOOL_CONTROL_OWNER_MARKER = "_OWNS_PYDANTIC_TOOL_CONTROL"
+_PYDANTIC_TOOL_CONTROL_NAMES = frozenset({"ModelRetry", "ToolFailed"})
 _ALL_MUTATING_METHODS = frozenset(
     {
         "__delitem__",
@@ -66,12 +68,130 @@ class ArchitecturePolicyChecker:
         errors.extend(_validate_exports(inventory.modules))
         errors.extend(_validate_runtime_cycles(inventory))
         errors.extend(_validate_cross_owner_access(inventory, inventory.modules.values()))
+        errors.extend(_validate_pydantic_tool_control_owner(inventory.modules.values()))
 
         external_modules: list[_ModuleInfo] = []
         for external_root in external_roots:
             external_modules.extend(_build_external_modules(Path(external_root).resolve()))
         errors.extend(_validate_cross_owner_access(inventory, external_modules))
         return ArchitectureCheckResult(tuple(sorted(set(errors))))
+
+
+def _validate_pydantic_tool_control_owner(
+    modules: Iterable[_ModuleInfo],
+) -> tuple[str, ...]:
+    values = tuple(modules)
+    errors: list[str] = []
+    owners: list[_ModuleInfo] = []
+    for module in values:
+        is_owner, marker_error = _pydantic_tool_control_owner_marker(module)
+        if marker_error is not None:
+            errors.append(marker_error)
+        if is_owner:
+            owners.append(module)
+    if len(owners) > 1:
+        errors.append(
+            "multiple production Pydantic tool control owners: "
+            + ", ".join(sorted(owner.name for owner in owners))
+        )
+    owner = owners[0] if len(owners) == 1 else None
+    accessors = tuple(
+        module for module in values if _uses_pydantic_tool_control(module)
+    )
+    if accessors and owner is None:
+        errors.append(
+            "direct Pydantic tool control access requires exactly one declared production owner"
+        )
+    if owner is not None and owner not in accessors:
+        errors.append(
+            f"{owner.name}: declared Pydantic tool control owner does not access the control types"
+        )
+    for module in accessors:
+        if owner is None or module.name != owner.name:
+            errors.append(_pydantic_tool_control_error(module, owner))
+    return tuple(errors)
+
+
+def _pydantic_tool_control_owner_marker(
+    module: _ModuleInfo,
+) -> tuple[bool, str | None]:
+    values: list[ast.AST] = []
+    for node in module.tree.body:
+        if isinstance(node, ast.Assign):
+            if any(
+                isinstance(target, ast.Name)
+                and target.id == _PYDANTIC_TOOL_CONTROL_OWNER_MARKER
+                for target in node.targets
+            ):
+                values.append(node.value)
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == _PYDANTIC_TOOL_CONTROL_OWNER_MARKER
+            and node.value is not None
+        ):
+            values.append(node.value)
+    if not values:
+        return False, None
+    if (
+        len(values) != 1
+        or not isinstance(values[0], ast.Constant)
+        or values[0].value is not True
+    ):
+        return (
+            False,
+            f"{module.name}: Pydantic tool control owner marker must be assigned True exactly once",
+        )
+    return True, None
+
+
+def _uses_pydantic_tool_control(module: _ModuleInfo) -> bool:
+    aliases: dict[str, str] = {}
+    for node in _runtime_imports(module.tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module not in {"pydantic_ai", "pydantic_ai.exceptions"}:
+                continue
+            for alias in node.names:
+                if alias.name == "*" or alias.name in _PYDANTIC_TOOL_CONTROL_NAMES:
+                    return True
+                if node.module == "pydantic_ai" and alias.name == "exceptions":
+                    aliases[alias.asname or alias.name] = "pydantic_ai.exceptions"
+            continue
+        for alias in node.names:
+            if alias.name not in {"pydantic_ai", "pydantic_ai.exceptions"}:
+                continue
+            bound = alias.asname or alias.name.split(".", 1)[0]
+            aliases[bound] = alias.name
+
+    for node in ast.walk(module.tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        chain = _attribute_chain(node)
+        if chain is None:
+            continue
+        root, parts = chain[0], chain[1:]
+        imported = aliases.get(root)
+        if imported is None:
+            continue
+        full = ".".join([imported, *parts])
+        if full.rsplit(".", 1)[-1] in _PYDANTIC_TOOL_CONTROL_NAMES:
+            return True
+    return False
+
+
+def _pydantic_tool_control_error(
+    module: _ModuleInfo,
+    owner: _ModuleInfo | None,
+) -> str:
+    if owner is None:
+        return (
+            f"{module.name}: direct Pydantic tool control access requires one "
+            "declared production owner"
+        )
+    return (
+        f"{module.name}: direct Pydantic tool control access is owned by "
+        f"{owner.name}"
+    )
 
 
 def _build_modules(root: Path) -> tuple[dict[str, _ModuleInfo], tuple[str, ...]]:
@@ -223,7 +343,11 @@ def _validate_cross_owner_access(
                     aliases[bound] = target if alias.asname else alias.name.split(".", 1)[0]
                     errors.extend(_check_module_boundary(source, source_owner, target))
             else:
-                base = _resolve_from_module(source.name, source.path.name == "__init__.py", node)
+                base = _resolve_from_module(
+                    source.name,
+                    source.path.name == "__init__.py",
+                    node,
+                )
                 if base is None:
                     continue
                 if not base.startswith(_AI_ROOT) or base not in known:

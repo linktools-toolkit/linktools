@@ -106,9 +106,7 @@ from ..workspace import LocalSandbox, SandboxResource, SandboxSession
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructions
 
-from ._capabilities import (
-    compose_platform_capabilities,
-)
+from ._capabilities import compose_platform_capabilities
 from ._compaction import RuntimeCompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
@@ -116,6 +114,7 @@ from ._mcp import materialize_mcp_servers
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
+from ._pydantic_tool_control import PydanticToolControlCapability
 from ._tool import ToolOperationBridge
 from ._tool_boundary import (
     ManagedToolDescriptor,
@@ -123,7 +122,10 @@ from ._tool_boundary import (
     RuntimeToolBoundaryToolset,
     managed_tool_descriptor_from_metadata,
 )
-from ._tool_metrics import _ToolMetricContext
+from ._tool_metrics import (
+    RuntimeToolMetricsCapability,
+    _ToolMetricContext,
+)
 from ._tool_return_codec import (
     rehydrate_deferred_tool_results,
     tool_return_content_digest,
@@ -377,9 +379,7 @@ class AgentExecutor:
         selected = tuple(
             candidate.id
             for candidate in scope.binding.definition.selected_tools
-            if tool_class_from_metadata(
-                _frozen_tool_metadata(candidate)
-            )
+            if tool_class_from_metadata(_frozen_tool_metadata(candidate))
             in {"filesystem.read", "filesystem.write", "shell"}
         )
         resources, resource_keys = await _skill_sandbox_resources(
@@ -662,7 +662,9 @@ async def _materialize_agent(
         else:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-    capabilities: list[AbstractCapability[AgentContext[object]]] = []
+    capabilities: list[AbstractCapability[AgentContext[object]]] = [
+        PydanticToolControlCapability()
+    ]
     for candidate in definition.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -719,12 +721,15 @@ async def _materialize_agent(
             agent_id=definition.spec.id,
         )
     )
+    if tool_metrics is not None:
+        capabilities.append(RuntimeToolMetricsCapability(tool_metrics))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
     workspace_toolsets = workspace_capabilities(
         scope.context.workspace,
         workspace_names,
         session=scope.sandbox_session,
+        vision=definition.model.vision,
     )
     workspace_toolset_values = tuple(
         toolset

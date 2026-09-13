@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import cast
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -21,6 +20,7 @@ from ._skill_source import (
     SkillSourceRegistry,
     normalize_skill_resource_path,
 )
+from ._tool_signal import ToolCallFailed, ToolCallRejected
 from ._tool_semantic import tool_semantic_metadata
 
 
@@ -171,13 +171,15 @@ class LinkToolsSkills(AbstractCapability[AgentContext[object]]):
                     ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                     ErrorCode.REQUEST_FIELD_INVALID,
                 }:
-                    raise ModelRetry("skill id or resource path is invalid") from error
+                    raise ToolCallRejected(
+                        "skill id or resource path is invalid"
+                    ) from error
                 if error.code in {
                     ErrorCode.ASSET_PATH_OUTSIDE_ROOT,
                     ErrorCode.ASSET_NOT_FOUND,
                     ErrorCode.ASSET_CODEC_UNKNOWN,
                 }:
-                    raise ToolFailed("skill resource is unavailable") from error
+                    raise ToolCallFailed("skill resource is unavailable") from error
                 raise
 
         return toolset

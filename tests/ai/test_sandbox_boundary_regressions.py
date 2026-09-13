@@ -4,15 +4,24 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from linktools.ai.capability import workspace_capabilities
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._compaction import (
     RuntimeCompaction,
     RuntimeCompactionPolicy,
 )
-from linktools.ai.workspace import SandboxResource, Workspace
-from linktools.ai.workspace._bubblewrap import _build_bwrap_args
+from linktools.ai.workspace import SandboxOperationRejected, SandboxResource, Workspace
+from linktools.ai.workspace._bubblewrap import (
+    _BubblewrapSandboxSession,
+    _build_bwrap_args,
+)
+from linktools.ai.workspace._sandbox_protocol import (
+    ERROR_EFFECT_NOT_APPLIED,
+    ERROR_EFFECT_UNKNOWN,
+)
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -85,6 +94,40 @@ async def test_cancelled_close_propagates_without_primary_failure(tmp_path: Path
     session = _CancellingCloseSession()
     with pytest.raises(asyncio.CancelledError):
         await session.close()
+
+
+@pytest.mark.parametrize(
+    ("effect", "expected_type"),
+    (
+        (ERROR_EFFECT_NOT_APPLIED, SandboxOperationRejected),
+        (ERROR_EFFECT_UNKNOWN, AIError),
+    ),
+)
+@pytest.mark.asyncio
+async def test_bubblewrap_error_frame_preserves_effect_certainty(
+    effect: str,
+    expected_type: type[AIError],
+) -> None:
+    session = _BubblewrapSandboxSession(cast(Any, object()), {})
+    future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    session._pending["request"] = (future, True)
+
+    await session._accept_response(
+        {
+            "request_id": "request",
+            "error": {
+                "code": ErrorCode.REQUEST_FIELD_INVALID.value,
+                "safe_details": {"reason": "invalid"},
+                "effect": effect,
+            },
+        }
+    )
+
+    error = future.exception()
+    assert type(error) is expected_type
+    assert isinstance(error, AIError)
+    assert error.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert error.safe_details == {"reason": "invalid"}
 
 
 def test_runtime_compaction_uses_harness_deduplication() -> None:

@@ -23,6 +23,7 @@ from ._bubblewrap import BubblewrapSandbox
 from ._sandbox import (
     DisabledSandbox,
     Sandbox,
+    SandboxOperationRejected,
     SandboxResource,
     SandboxSession,
     normalize_workspace_path as normalize_workspace_input_path,
@@ -38,6 +39,7 @@ __all__ = [
     "RepositoryInstructionResolver",
     "RepositoryInstructions",
     "Sandbox",
+    "SandboxOperationRejected",
     "SandboxResource",
     "SandboxSession",
     "LocalSandbox",

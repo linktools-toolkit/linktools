@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import workspace_capabilities, workspace_tool_contributions
+from linktools.ai.capability import ToolCallRejected
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalSandbox, Workspace
 from linktools.ai.workspace._sandbox_protocol import (
@@ -14,7 +15,6 @@ from linktools.ai.workspace._sandbox_protocol import (
     encode_frame,
     validate_request_size,
 )
-from pydantic_ai.exceptions import ModelRetry
 
 
 def _golden_contract() -> dict[str, object]:
@@ -56,7 +56,7 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
             session=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ModelRetry, match="does not exist"):
+        with pytest.raises(ToolCallRejected, match="does not exist"):
             await toolset.tools["read_file"].function("missing.txt")  # type: ignore[attr-defined]
     finally:
         await session.close()
@@ -73,7 +73,7 @@ async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path)
             session=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ModelRetry, match="parent directory"):
+        with pytest.raises(ToolCallRejected, match="parent directory"):
             await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
                 "missing/report.txt",
                 "report",
@@ -94,7 +94,7 @@ async def test_workspace_denied_shell_command_is_model_retry(tmp_path: Path) -> 
             session=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ModelRetry, match="not allowed"):
+        with pytest.raises(ToolCallRejected, match="not allowed"):
             await toolset.tools["run_command"].function("ssh example.invalid")  # type: ignore[attr-defined]
     finally:
         await session.close()

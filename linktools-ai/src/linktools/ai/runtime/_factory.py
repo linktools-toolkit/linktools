@@ -421,8 +421,22 @@ def _build_default_models(workspace: Workspace) -> ModelRegistry:
     )
     if not model:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
+    raw_vision = os.getenv("OPENAI_VISION")
+    try:
+        vision = (
+            False
+            if raw_vision is None or not raw_vision.strip()
+            else environ.config.cast(raw_vision, bool)
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(
+            ErrorCode.MODEL_CONFIG_INVALID,
+            retryable=False,
+            safe_details={"provider": "openai", "field": "vision"},
+        ) from error
     return ModelRegistry.openai(
         model=model,
+        vision=vision,
         base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
         api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
     )

@@ -2,19 +2,22 @@
 # -*- coding: utf-8 -*-
 """Stable error classification and propagation contracts."""
 
+import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.capability import ToolCallFailed, ToolCallRejected
 from linktools.ai.runtime import ExecutionResult
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._evaluation import _stable_error
 from linktools.ai.runtime._execution import _terminal_error
 from linktools.ai.runtime._local import _secondary_execution_error
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationRecord
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
 from openai import APIError as OpenAIAPIError
 from pydantic_ai.exceptions import ModelHTTPError, RunCancelled
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -235,7 +238,7 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
 def _failed_tool_record(
     *,
     error_code: str,
-    error_payload: object,
+    error_payload: StoredPayload,
 ) -> ToolOperationRecord:
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
@@ -256,54 +259,121 @@ def _failed_tool_record(
         error_code=error_code,
         created_at=now,
         updated_at=now,
-        error_payload=error_payload,  # type: ignore[arg-type]
+        error_payload=error_payload,
     )
 
 
+def _unchecked_failed_tool_record(
+    *,
+    error_code: str,
+    error_payload: StoredPayload,
+) -> object:
+    return SimpleNamespace(error_code=error_code, error_payload=error_payload)
+
+
 @pytest.mark.asyncio
-async def test_tool_error_codec_preserves_ai_error_code_and_safe_details() -> None:
+@pytest.mark.parametrize(
+    ("signal", "code", "kind"),
+    (
+        (
+            ToolCallRejected("correct the target"),
+            ErrorCode.TOOL_RETRY_REQUIRED.value,
+            "tool_call_rejected",
+        ),
+        (
+            ToolCallFailed("the call failed"),
+            ErrorCode.TOOL_EXECUTION_FAILED.value,
+            "tool_call_failed",
+        ),
+    ),
+)
+async def test_tool_error_codec_round_trips_linktools_signal(
+    signal: ToolCallRejected | ToolCallFailed,
+    code: str,
+    kind: str,
+) -> None:
     bridge = _tool_bridge()
-    code, payload = await bridge._error_payload(
-        AIError(
-            ErrorCode.MODEL_RATE_LIMITED,
-            safe_details={"status_code": 429, "retry_after": 2.0},
+    actual_code, payload = await bridge._error_payload(signal)
+    assert actual_code == code
+    value = json.loads(payload.decode().decode("utf-8"))
+    assert value == {
+        "version": 1,
+        "kind": kind,
+        "message": signal.message,
+    }
+    decoded = await bridge._decode_error(
+        _failed_tool_record(error_code=actual_code, error_payload=payload)
+    )
+    assert type(decoded) is type(signal)
+    assert decoded.message == signal.message
+
+
+@pytest.mark.asyncio
+async def test_tool_error_codec_rejects_non_signal_failure() -> None:
+    bridge = _tool_bridge()
+    with pytest.raises(TypeError):
+        await bridge._error_payload(  # type: ignore[arg-type]
+            AIError(ErrorCode.MODEL_RATE_LIMITED)
         )
-    )
-    assert code == ErrorCode.MODEL_RATE_LIMITED.value
-    decoded = await bridge._decode_error(
-        _failed_tool_record(error_code=code, error_payload=payload)
-    )
-    assert isinstance(decoded, AIError)
-    assert decoded.code is ErrorCode.MODEL_RATE_LIMITED
-    assert decoded.safe_details == {"status_code": 429, "retry_after": 2.0}
 
 
 @pytest.mark.asyncio
-async def test_tool_error_codec_maps_generic_failure_without_message_leak() -> None:
-    bridge = _tool_bridge()
-    code, payload = await bridge._error_payload(RuntimeError("provider secret"))
-    assert code == ErrorCode.TOOL_EXECUTION_FAILED.value
-    decoded = await bridge._decode_error(
-        _failed_tool_record(error_code=code, error_payload=payload)
-    )
-    assert isinstance(decoded, AIError)
-    assert decoded.code is ErrorCode.TOOL_EXECUTION_FAILED
-    assert decoded.safe_details["phase"] == "tool_execution"
-    assert "provider secret" not in str(decoded.safe_details)
-
-    second_code, second_payload = await bridge._error_payload(RuntimeError("other secret"))
-    second = await bridge._decode_error(
-        _failed_tool_record(error_code=second_code, error_payload=second_payload)
-    )
-    assert isinstance(second, AIError)
-    assert second.safe_details["error_digest"] != decoded.safe_details["error_digest"]
-
-
-@pytest.mark.asyncio
-async def test_tool_error_codec_rejects_unknown_persisted_error_code() -> None:
+@pytest.mark.parametrize(
+    "value",
+    (
+        {"kind": "tool_call_rejected", "message": "retry"},
+        {"version": 2, "kind": "tool_call_rejected", "message": "retry"},
+    ),
+)
+async def test_tool_error_codec_rejects_missing_or_unknown_version(
+    value: dict[str, object],
+) -> None:
     bridge = _tool_bridge()
     with pytest.raises(AIError) as captured:
         await bridge._decode_error(
-            _failed_tool_record(error_code="UNKNOWN_ERROR", error_payload=None)
+            _unchecked_failed_tool_record(
+                error_code=ErrorCode.TOOL_RETRY_REQUIRED.value,
+                error_payload=StoredPayload.inline_bytes(
+                    json.dumps(value).encode("utf-8")
+                ),
+            )
         )
-    assert captured.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert captured.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_tool_error_codec_rejects_malformed_or_mismatched_payload() -> None:
+    bridge = _tool_bridge()
+    for value, code in (
+        (
+            {
+                "version": 1,
+                "kind": "tool_call_rejected",
+                "message": "retry",
+                "extra": 1,
+            },
+            ErrorCode.TOOL_RETRY_REQUIRED.value,
+        ),
+        (
+            {"version": 1, "kind": "tool_call_rejected", "message": "retry"},
+            ErrorCode.TOOL_EXECUTION_FAILED.value,
+        ),
+    ):
+        with pytest.raises(AIError) as captured:
+            await bridge._decode_error(
+                _unchecked_failed_tool_record(
+                    error_code=code,
+                    error_payload=StoredPayload.inline_bytes(
+                        json.dumps(value).encode("utf-8")
+                    ),
+                )
+            )
+        assert captured.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_failed_tool_record_requires_the_linktools_failure_contract() -> None:
+    with pytest.raises(ValueError):
+        _failed_tool_record(
+            error_code=ErrorCode.MODEL_RATE_LIMITED.value,
+            error_payload=StoredPayload.inline_bytes(b"{}"),
+        )

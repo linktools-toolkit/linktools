@@ -130,7 +130,10 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_tool_repository_retries_raw_storage_conflict() -> None:
     repository = object.__new__(ToolRepositoryImpl)
-    committed = _record(status=ToolOperationStatus.COMPLETED)
+    committed = _record(
+        status=ToolOperationStatus.COMPLETED,
+        result_payload=StoredPayload.inline_bytes(b"result"),
+    )
     attempts = 0
 
     async def operation() -> ToolOperationRecord:

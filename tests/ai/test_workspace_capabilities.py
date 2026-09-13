@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from linktools.ai.capability import (
     CapabilityGroup,
+    ToolCallFailed,
     tool_class_from_metadata,
     workspace_capabilities,
     workspace_tool_contributions,
@@ -28,7 +29,7 @@ from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ApprovalRequired, ToolFailed
+from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -331,7 +332,7 @@ async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path
 
 @pytest.mark.parametrize(
     ("decision", "expected_error"),
-    (("deny", ToolFailed), ("ask", ApprovalRequired)),
+    (("deny", ToolCallFailed), ("ask", ApprovalRequired)),
 )
 @pytest.mark.asyncio
 async def test_permission_rejection_has_no_sandbox_operation_side_effect(

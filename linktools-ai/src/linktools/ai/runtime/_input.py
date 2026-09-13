@@ -135,9 +135,12 @@ class ExecutionInputMaterializer:
                 canonical = normalize_workspace_path(
                     await self._access.canonicalize_path(path)
                 )
-            except (AIError, TypeError, ValueError) as error:
-                if isinstance(error, AIError):
+            except AIError as error:
+                mapped = _file_request_error(error, request_invalid_reason="path_invalid")
+                if mapped is None:
                     raise
+                raise mapped from error
+            except (TypeError, ValueError) as error:
                 raise AIError(
                     ErrorCode.REQUEST_FIELD_INVALID,
                     safe_details={"field": "files", "reason": "path_invalid"},
@@ -180,7 +183,13 @@ class ExecutionInputMaterializer:
             remaining = self._policy.max_binary_input_bytes - total_bytes
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            body = await self._access.read_bytes(path, max_bytes=remaining)
+            try:
+                body = await self._access.read_bytes(path, max_bytes=remaining)
+            except AIError as error:
+                mapped = _file_request_error(error, request_invalid_reason="file_invalid")
+                if mapped is None:
+                    raise
+                raise mapped from error
             total_bytes += len(body)
             if total_bytes > self._policy.max_binary_input_bytes:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -274,6 +283,35 @@ class ExecutionInputMaterializer:
                 },
             )
         return media_type
+
+
+def _file_request_error(
+    error: AIError,
+    *,
+    request_invalid_reason: str,
+) -> AIError | None:
+    if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+        return AIError(
+            ErrorCode.REQUEST_FIELD_INVALID,
+            retryable=False,
+            safe_details={
+                "field": "files",
+                "reason": request_invalid_reason,
+            },
+        )
+    if error.code is ErrorCode.STORAGE_NOT_FOUND:
+        return AIError(
+            ErrorCode.REQUEST_FIELD_INVALID,
+            retryable=False,
+            safe_details={"field": "files", "reason": "file_not_found"},
+        )
+    if error.code is ErrorCode.AUTHORIZATION_DENIED:
+        return AIError(
+            ErrorCode.REQUEST_FIELD_INVALID,
+            retryable=False,
+            safe_details={"field": "files", "reason": "path_not_allowed"},
+        )
+    return None
 
 
 def _require_files(value: Sequence[str]) -> tuple[str, ...]:

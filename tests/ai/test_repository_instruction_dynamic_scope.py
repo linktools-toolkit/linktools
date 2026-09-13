@@ -5,7 +5,6 @@
 from typing import Any
 
 import pytest
-from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
@@ -16,6 +15,7 @@ from linktools.ai.runtime._tool_boundary import (
     RepositoryInstructionBoundary,
     RuntimeToolBoundaryToolset,
 )
+from linktools.ai.capability import ToolCallRejected
 from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
@@ -52,7 +52,7 @@ class _Boundary:
             }
         )
         if self.fail:
-            raise ToolFailed("repository instructions changed")
+            raise ToolCallRejected("repository instructions changed")
 
 
 async def _read_file(path: str) -> str:
@@ -117,7 +117,7 @@ async def test_repository_instruction_check_precedes_ask_permission() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolFailed, match="repository instructions changed"):
+    with pytest.raises(ToolCallRejected, match="repository instructions changed"):
         await toolset.call_tool(
             "_read_file",
             {"path": "pkg/file.txt"},
@@ -136,7 +136,7 @@ async def test_repository_instruction_refresh_can_fence_one_model_call() -> None
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolFailed):
+    with pytest.raises(ToolCallRejected):
         await toolset.call_tool(
             "_read_file",
             {"path": "pkg/file.txt"},

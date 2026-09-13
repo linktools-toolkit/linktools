@@ -3,11 +3,43 @@
 """Workspace filesystem and process execution boundary."""
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
+
+
+class SandboxOperationRejected(AIError):
+    """Prove that one sandbox operation was rejected before external effect."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str = "",
+        *,
+        safe_details: Mapping[str, Any] | None = None,
+        diagnostics: ErrorDiagnostics | None = None,
+    ) -> None:
+        super().__init__(
+            code,
+            message,
+            retryable=False,
+            safe_details=safe_details,  # type: ignore[arg-type]
+            diagnostics=diagnostics,
+        )
+
+    @classmethod
+    def from_error(cls, error: AIError) -> "SandboxOperationRejected":
+        if isinstance(error, cls):
+            return error
+        return cls(
+            error.code,
+            str(error),
+            safe_details=error.safe_details,
+            diagnostics=error.diagnostics,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +72,13 @@ class Sandbox(Protocol):
 
 
 class SandboxSession(Protocol):
+    """Sandbox operation contract.
+
+    Effectful implementations may raise ``SandboxOperationRejected`` only when
+    they can prove that the rejected operation produced no external effect.
+    Ordinary ``AIError`` values carry no effect-certainty guarantee.
+    """
+
     def resource_path(self, key: str) -> str: ...
 
     async def canonicalize_path(self, path: str) -> str: ...
@@ -151,6 +190,7 @@ class DisabledSandbox:
 __all__ = [
     "DisabledSandbox",
     "Sandbox",
+    "SandboxOperationRejected",
     "SandboxResource",
     "SandboxSession",
     "normalize_workspace_path",

@@ -21,6 +21,7 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
+from ..capability import ToolCallRejected
 from ..errors import AIError, ErrorCode
 from ._message import project_transient_binary_content
 from ._plan import PlanItem, RuntimePlanStore
@@ -104,16 +105,48 @@ class HarnessPlanStoreAdapter:
 
 
 def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
+    if not isinstance(items, list):
+        raise ToolCallRejected(
+            "Plan items are invalid for this runtime. Correct the plan and retry."
+        )
     values: list[PlanItem] = []
     for item in items:
         if not isinstance(item, HarnessPlanItem):
-            raise TypeError("plan items must be Harness PlanItem values")
+            raise ToolCallRejected(
+                "Plan items are invalid for this runtime. Correct the plan and retry."
+            )
         if (
-            item.status is TaskStatus.blocked
+            not isinstance(item.parent_id, (str, type(None)))
+            or not isinstance(item.depends_on, list)
+            or any(not isinstance(value, str) for value in item.depends_on)
             or item.parent_id is not None
             or item.depends_on
         ):
-            raise ValueError("subtask planning is not enabled")
+            raise ToolCallRejected(
+                "Subtasks and dependencies are not enabled. Use a flat plan and retry."
+            )
+        if not isinstance(item.status, TaskStatus):
+            raise ToolCallRejected(
+                "Plan items are invalid for this runtime. Correct the plan and retry."
+            )
+        if item.status is TaskStatus.blocked:
+            raise ToolCallRejected(
+                "Subtasks and dependencies are not enabled. Use a flat plan and retry."
+            )
+        if (
+            not isinstance(item.content, str)
+            or not item.content.strip()
+            or item.status
+            not in {
+                TaskStatus.pending,
+                TaskStatus.in_progress,
+                TaskStatus.completed,
+                TaskStatus.cancelled,
+            }
+        ):
+            raise ToolCallRejected(
+                "Plan items are invalid for this runtime. Correct the plan and retry."
+            )
         values.append(PlanItem(item.content, cast(str, item.status.value)))
     return values
 

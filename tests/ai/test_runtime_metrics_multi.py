@@ -22,6 +22,7 @@ class _ModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:test"
+    vision = False
     fingerprint = "d" * 64
     semantic_payload: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 

@@ -55,7 +55,15 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         for capability in capabilities
         if isinstance(capability, HarnessPlanning)
     )
-    assert tuple(planning.get_toolset().tools) == ("write_plan",)
+    toolset = planning.get_toolset()
+    assert toolset is not None
+    context = RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        run_id="run",
+    )
+    assert tuple(await toolset.get_tools(context)) == ("write_plan",)
 
 
 async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> None:

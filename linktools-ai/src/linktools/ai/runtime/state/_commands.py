@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import datetime
+from typing import cast
 
 from linktools.core import environ
 
@@ -58,6 +59,7 @@ from ._contracts import (
     SessionRepository,
     SessionRecord,
     ToolOperationAdmission,
+    validate_tool_operation_failure,
 )
 from ._durability import (
     CommitObservation,
@@ -1124,14 +1126,23 @@ class RuntimeStateCommands:
         tools = self._tools
         if tools is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if result_payload is None and error_code is None:
-            raise ValueError("tool terminal command requires a result or error")
+        if result_payload is not None:
+            if error_code is not None or error_payload is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif error_code is None or error_payload is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        else:
+            validate_tool_operation_failure(error_code, error_payload)
         expected_status = (
             ToolOperationStatus.COMPLETED
             if result_payload is not None
             else ToolOperationStatus.FAILED
         )
-        terminal_error_code = error_code or ErrorCode.EXECUTION_FAILED.value
+        terminal_error_code: str | None = None
+        terminal_error_payload: StoredPayload | None = None
+        if result_payload is None:
+            terminal_error_code = cast(str, error_code)
+            terminal_error_payload = cast(StoredPayload, error_payload)
         stores = [tools.state_store]
         cancelled = False
 
@@ -1153,7 +1164,7 @@ class RuntimeStateCommands:
                 owner=owner,
                 fence=fence,
                 error_code=terminal_error_code,
-                error_payload=error_payload,
+                error_payload=terminal_error_payload,
             )
 
         async def readback() -> CommitObservation[ToolOperationRecord]:
@@ -1177,7 +1188,7 @@ class RuntimeStateCommands:
                         )
                 elif (
                     observed.error_code != terminal_error_code
-                    or observed.error_payload != error_payload
+                    or observed.error_payload != terminal_error_payload
                 ):
                     return CommitObservation(
                         DurableCommitState.NOT_COMMITTED,
