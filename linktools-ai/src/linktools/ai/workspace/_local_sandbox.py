@@ -146,7 +146,7 @@ class _WindowsJob:
                 ("MaximumWorkingSetSize", ctypes.c_size_t),
                 ("ActiveProcessLimit", ctypes.c_uint32),
                 ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", ctypes.c_size_t),
+                ("PriorityClass", ctypes.c_uint32),
                 ("SchedulingClass", ctypes.c_uint32),
             ]
 
