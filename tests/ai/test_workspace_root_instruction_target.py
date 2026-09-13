@@ -5,6 +5,7 @@
 from typing import Any
 
 import pytest
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
@@ -103,24 +104,16 @@ async def test_empty_path_uses_workspace_root_before_instruction_lookup() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("path", "expected_code"),
-    (
-        ("\x00", ErrorCode.REQUEST_FIELD_INVALID),
-        ("../outside", ErrorCode.AUTHORIZATION_DENIED),
-        ("bad\\path", ErrorCode.REQUEST_FIELD_INVALID),
-    ),
-)
-async def test_invalid_workspace_target_fails_before_instruction_lookup(
+@pytest.mark.parametrize("path", ("\x00", "../outside", "bad\\path"))
+async def test_invalid_workspace_target_retries_before_instruction_lookup(
     path: str,
-    expected_code: ErrorCode,
 ) -> None:
     repository = _RepositoryBoundary()
     toolset = _toolset(repository)
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(AIError) as raised:
+    with pytest.raises(ModelRetry):
         await toolset.call_tool(
             "_list_directory",
             {"path": path},
@@ -128,7 +121,6 @@ async def test_invalid_workspace_target_fails_before_instruction_lookup(
             tools["_list_directory"],
         )
 
-    assert raised.value.code is expected_code
     assert repository.calls == []
 
 
