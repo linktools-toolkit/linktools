@@ -479,7 +479,11 @@ class StepExecutionHistoryReader:
             run_id=final_run_id,
             signer=self._cursor_signer,
         )
-        messages = self._store.iter_messages(run_id=final_run_id)
+        messages = self._message_range(
+            final_run_id,
+            start=message_index,
+            from_cursor=cursor is not None,
+        )
         conversation_id = step_conversation_id(
             namespace=self._namespace,
             tenant_id=tenant_id,
