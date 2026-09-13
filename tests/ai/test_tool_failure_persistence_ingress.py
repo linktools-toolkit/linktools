@@ -5,9 +5,10 @@
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
-from linktools.ai.core import ToolOperationStatus
+from linktools.ai.core import JsonValue, ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._codec import (
@@ -50,21 +51,24 @@ def _record() -> ToolOperationRecord:
 def _decode_with_error_payload(payload: StoredPayload) -> ToolOperationRecord:
     encoded_payload = _encode_persisted_domain(payload)
 
-    def replace_error_payload(value: object) -> object:
+    def replace_error_payload(value: JsonValue) -> JsonValue:
         restored = _restore_lease_fields(value, ToolOperationRecord)
         assert isinstance(restored, Mapping)
         fields = restored.get("fields")
         assert isinstance(fields, Mapping)
-        return {
-            **restored,
-            "fields": {
-                **fields,
-                "error_payload": encoded_payload,
+        return cast(
+            JsonValue,
+            {
+                **restored,
+                "fields": {
+                    **fields,
+                    "error_payload": encoded_payload,
+                },
             },
-        }
+        )
 
     return _decode_enveloped_domain(
-        _domain_data(_record()),
+        cast("Mapping[str, JsonValue]", _domain_data(_record())),
         ToolOperationRecord,
         payload_transform=replace_error_payload,
     )
