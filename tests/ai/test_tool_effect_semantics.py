@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.capability import ToolCallFailed, ToolCallRejected
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -18,7 +19,6 @@ from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
     ModelRetry,
-    ToolFailed,
 )
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
@@ -35,7 +35,7 @@ class _Bridge:
         *,
         cached_result: Any = None,
         has_cached_result: bool = False,
-        cached_error: BaseException | None = None,
+        cached_error: ToolCallRejected | ToolCallFailed | None = None,
     ) -> None:
         self.decision = ToolOperationDecision(
             "operation",
@@ -61,7 +61,11 @@ class _Bridge:
         self.calls.append("complete")
         return False
 
-    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> bool:
+    async def fail(
+        self,
+        decision: ToolOperationDecision,
+        error: ToolCallRejected | ToolCallFailed,
+    ) -> bool:
         del decision, error
         self.calls.append("fail")
         return False
@@ -155,12 +159,12 @@ async def test_workspace_approval_precedes_tool_operation_admission() -> None:
 
 
 @pytest.mark.asyncio
-async def test_replay_safe_known_tool_failure_is_terminalized() -> None:
+async def test_replay_safe_rejected_tool_call_is_terminalized() -> None:
     async def retry() -> None:
-        raise ModelRetry("retry")
+        raise ToolCallRejected("retry")
 
     bridge = _Bridge(True)
-    with pytest.raises(ModelRetry):
+    with pytest.raises(ToolCallRejected):
         await _call(
             retry,
             ManagedToolDescriptor(
@@ -174,14 +178,14 @@ async def test_replay_safe_known_tool_failure_is_terminalized() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_replay_safe_known_tool_failure_becomes_effect_unknown() -> None:
-    async def retry() -> None:
-        raise ModelRetry("retry")
+async def test_non_replay_safe_failed_tool_call_is_terminalized() -> None:
+    async def failed() -> None:
+        raise ToolCallFailed("failed")
 
     bridge = _Bridge(False)
-    with pytest.raises(ToolFailed, match="TOOL_EFFECT_UNKNOWN"):
+    with pytest.raises(ToolCallFailed, match="failed"):
         await _call(
-            retry,
+            failed,
             ManagedToolDescriptor(
                 effect_owner="tool_operation",
                 effect="non_replay_safe",
@@ -189,6 +193,26 @@ async def test_non_replay_safe_known_tool_failure_becomes_effect_unknown() -> No
             ),
             bridge=bridge,
         )
+    assert bridge.calls == ["begin", "fail"]
+
+
+@pytest.mark.asyncio
+async def test_pydantic_retry_is_not_a_linktools_effect_signal() -> None:
+    async def retry() -> None:
+        raise ModelRetry("retry")
+
+    bridge = _Bridge(True)
+    with pytest.raises(AIError) as raised:
+        await _call(
+            retry,
+            ManagedToolDescriptor(
+                effect_owner="tool_operation",
+                effect="replay_safe",
+                tool_class="business",
+            ),
+            bridge=bridge,
+        )
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     assert bridge.calls == ["begin", "unknown"]
 
 
@@ -218,7 +242,7 @@ async def test_non_replay_safe_unhandled_failure_requires_effect_verification() 
         raise RuntimeError("unknown result")
 
     bridge = _Bridge(False)
-    with pytest.raises(ToolFailed, match="TOOL_EFFECT_UNKNOWN"):
+    with pytest.raises(AIError) as raised:
         await _call(
             broken,
             ManagedToolDescriptor(
@@ -228,6 +252,7 @@ async def test_non_replay_safe_unhandled_failure_requires_effect_verification() 
             ),
             bridge=bridge,
         )
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     assert bridge.calls == ["begin", "unknown"]
 
 
@@ -256,7 +281,7 @@ async def test_non_replay_safe_deferred_call_becomes_effect_unknown() -> None:
         raise CallDeferred({"reason": "later"})
 
     bridge = _Bridge(False)
-    with pytest.raises(ToolFailed, match="TOOL_EFFECT_UNKNOWN"):
+    with pytest.raises(AIError) as raised:
         await _call(
             deferred,
             ManagedToolDescriptor(
@@ -266,6 +291,7 @@ async def test_non_replay_safe_deferred_call_becomes_effect_unknown() -> None:
             ),
             bridge=bridge,
         )
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     assert bridge.calls == ["begin", "unknown"]
 
 
@@ -312,8 +338,8 @@ async def test_cached_failure_skips_raw_leaf() -> None:
     async def unexpected() -> None:
         raise AssertionError("cached operation must not invoke the leaf")
 
-    bridge = _Bridge(True, cached_error=AIError(ErrorCode.TOOL_RETRY_REQUIRED))
-    with pytest.raises(AIError) as raised:
+    bridge = _Bridge(True, cached_error=ToolCallRejected("retry cached"))
+    with pytest.raises(ToolCallRejected) as raised:
         await _call(
             unexpected,
             ManagedToolDescriptor(
@@ -323,7 +349,7 @@ async def test_cached_failure_skips_raw_leaf() -> None:
             ),
             bridge=bridge,
         )
-    assert raised.value.code is ErrorCode.TOOL_RETRY_REQUIRED
+    assert str(raised.value) == "retry cached"
     assert bridge.calls == ["begin"]
 
 

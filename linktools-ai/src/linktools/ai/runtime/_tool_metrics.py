@@ -12,24 +12,27 @@ from time import monotonic_ns
 from typing import Any
 
 from linktools.core import environ
-from pydantic import ValidationError
+from pydantic_ai.capabilities import (
+    AbstractCapability,
+    CapabilityOrdering,
+    ValidatedToolArgs,
+)
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
-    ModelRetry,
     SkipToolExecution,
-    ToolFailed,
-    ToolFailedError,
-    ToolRetryError,
 )
 from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.tools import ToolDefinition
 
+from ..capability import AgentContext, ToolCallFailed, ToolCallRejected
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._metric_id import _tool_observation_id
 
 _logger = environ.get_logger("ai.runtime.tool_metrics")
+TOOL_METRICS_MANAGED_METADATA_KEY = "linktools.tool_metrics_managed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +44,29 @@ class _ToolMetricContext:
     session_id: str | None
     step_run_id: str
     agent_id: str
+
+    def record_error(
+        self,
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        error: Exception,
+    ) -> None:
+        """Record a model-visible failure before Pydantic handles it."""
+        self._record(
+            _tool_observation_id(
+                self.source_namespace,
+                self.tenant_id,
+                self.execution_id,
+                self.step_run_id,
+                call.tool_call_id,
+            ),
+            call=call,
+            tool_def=tool_def,
+            started=monotonic_ns(),
+            status="FAILED",
+            error_code=_tool_error_code(error),
+        )
 
     async def execute(
         self,
@@ -153,14 +179,53 @@ class _ToolMetricContext:
             _logger.exception("tool metric observation rejected")
 
 
+class RuntimeToolMetricsCapability(
+    AbstractCapability[AgentContext[object]]
+):
+    """Observe capability tools before the outer Pydantic control boundary."""
+
+    def __init__(self, context: _ToolMetricContext) -> None:
+        self.id = "linktools.ai.tool-metrics"
+        self._context = context
+
+    def get_ordering(self) -> CapabilityOrdering:
+        return CapabilityOrdering(position="innermost")
+
+    async def wrap_tool_execute(
+        self,
+        ctx: PydanticRunContext[AgentContext[object]],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: ValidatedToolArgs,
+        handler: Callable[[dict[str, Any]], Awaitable[Any]],
+    ) -> Any:
+        del ctx
+        if (
+            tool_def.metadata is not None
+            and tool_def.metadata.get(TOOL_METRICS_MANAGED_METADATA_KEY) is True
+        ):
+            return await handler(args)
+        return await self._context.execute(
+            call=call,
+            tool_def=tool_def,
+            args=args,
+            handler=handler,
+            suppress_cancel=lambda: False,
+        )
+
+
 def _tool_error_code(error: Exception) -> str:
     if isinstance(error, AIError):
         return error.code.value
-    if isinstance(error, (ValidationError, ModelRetry, ToolRetryError)):
+    if isinstance(error, ToolCallRejected):
         return ErrorCode.TOOL_RETRY_REQUIRED.value
-    if isinstance(error, (ToolFailed, ToolFailedError)):
+    if isinstance(error, ToolCallFailed):
         return ErrorCode.TOOL_EXECUTION_FAILED.value
     return ErrorCode.TOOL_EXECUTION_FAILED.value
 
 
-__all__: list[str] = []
+__all__ = [
+    "RuntimeToolMetricsCapability",
+    "TOOL_METRICS_MANAGED_METADATA_KEY",
+]

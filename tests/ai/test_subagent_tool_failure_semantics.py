@@ -6,13 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from linktools.ai.capability import LinkToolsSubagents
+from linktools.ai.capability import LinkToolsSubagents, ToolCallFailed, ToolCallRejected
 from linktools.ai.core import ExecutionStatus, Principal, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionResult
 from linktools.ai.spec import SubagentRef
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -113,7 +112,7 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolFailed) as raised:
+    with pytest.raises(ToolCallFailed) as raised:
         await toolset.call_tool(
             "delegate_task",
             {"subagent_id": "child", "task": "do work"},
@@ -147,7 +146,10 @@ async def test_subagent_tool_retries_its_own_oversized_task() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ModelRetry, match="delegated task is invalid or too large"):
+    with pytest.raises(
+        ToolCallRejected,
+        match="delegated task is invalid or too large",
+    ):
         await toolset.call_tool(
             "delegate_task",
             {"subagent_id": "child", "task": "x" * (1024 * 1024 + 1)},

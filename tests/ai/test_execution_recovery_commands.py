@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
-from linktools.ai.capability._effect import ToolEffectNotAppliedError
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -25,7 +24,6 @@ from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.runtime.state._recovery_commands import RuntimeRecoveryCommands
 from linktools.ai.spec import AgentSpec
-from pydantic_ai.exceptions import ToolFailed
 from ._runtime_test_helpers import execution_owner_fields
 
 
@@ -246,7 +244,3 @@ async def test_not_applied_resolution_reopens_tool_with_next_fence() -> None:
         assert claimed.owner == "next-worker"
     finally:
         await state.close()
-
-
-def test_explicit_not_applied_marker_is_a_known_tool_failure() -> None:
-    assert issubclass(ToolEffectNotAppliedError, ToolFailed)

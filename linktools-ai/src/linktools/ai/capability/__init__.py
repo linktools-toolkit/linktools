@@ -23,6 +23,7 @@ from ._skill_source import (
 )
 from ._subagent import LinkToolsSubagents, SubagentDelegate
 from ._task import TaskExpander, TaskExpansionContext
+from ._tool_signal import ToolCallFailed, ToolCallRejected
 from ._tool_semantic import (
     TOOL_CLASS_METADATA_KEY,
     TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
@@ -42,7 +43,6 @@ from ._tool_semantic import (
 from ._workspace import (
     WorkspaceAccess,
     workspace_capabilities,
-    workspace_model_retry_message,
     workspace_tool_contributions,
 )
 
@@ -72,11 +72,12 @@ __all__ = [
     "SubagentDelegate",
     "TaskExpander",
     "TaskExpansionContext",
+    "ToolCallFailed",
+    "ToolCallRejected",
     "WorkspaceAccess",
     "mcp_server_namespace",
     "mcp_server_selector",
     "workspace_capabilities",
-    "workspace_model_retry_message",
     "workspace_tool_contributions",
     "tool_class_from_metadata",
     "tool_compaction_keep_result_from_metadata",

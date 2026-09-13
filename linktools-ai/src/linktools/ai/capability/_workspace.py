@@ -12,7 +12,6 @@ from typing import Any, TypeVar, cast
 from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import BinaryContent, ToolReturn, UserContent
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -27,6 +26,7 @@ from ..workspace import (
 )
 from ._context import AgentContext
 from ._group import CapabilityContribution
+from ._tool_signal import ToolCallRejected
 from ._tool_semantic import tool_semantic_metadata
 
 _ResultT = TypeVar("_ResultT")
@@ -103,44 +103,33 @@ _WORKSPACE_TOOL_DECLARATIONS: dict[str, Mapping[str, object]] = {
     ),
 }
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
-_MODEL_ERROR_MESSAGES = {
-    ErrorCode.REQUEST_FIELD_INVALID: (
-        "The workspace tool arguments or target are invalid. Correct them and retry."
-    ),
-    ErrorCode.STORAGE_NOT_FOUND: (
-        "The requested workspace path does not exist, or its parent directory is missing. "
-        "Correct the path and retry."
-    ),
-    ErrorCode.STORAGE_CONFLICT: (
-        "The workspace changed since it was read. Read the target again and retry with "
-        "the current hash."
-    ),
-    ErrorCode.AUTHORIZATION_DENIED: (
-        "The requested workspace path or command is not allowed. Choose an allowed target "
-        "or command and retry."
-    ),
-    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE: (
-        "The workspace tool arguments are too large. Use a smaller request and retry."
-    ),
-    ErrorCode.TOO_MANY_PENDING_OPERATIONS: (
-        "Too many workspace operations are pending. Reuse, inspect, or stop existing "
-        "operations before starting another one."
-    ),
-}
 _logger = environ.get_logger("ai.capability.workspace")
-
-
-def workspace_model_retry_message(error: AIError) -> str | None:
-    """Return model-facing correction guidance for a known Workspace error."""
-    if (
-        error.code is ErrorCode.REQUEST_FIELD_INVALID
-        and error.safe_details.get("reason") == "image_input_not_supported"
-    ):
-        return (
-            "The current model does not support image attachments. "
-            "Use a non-image input or another approach."
-        )
-    return _MODEL_ERROR_MESSAGES.get(error.code)
+_INVALID_WORKSPACE_REQUEST = (
+    "The workspace tool arguments or target are invalid. Correct them and retry."
+)
+_MISSING_WORKSPACE_TARGET = (
+    "The requested workspace path does not exist, or its parent directory is missing. "
+    "Correct the path and retry."
+)
+_WORKSPACE_CONFLICT = (
+    "The workspace changed since it was read. Read the target again and retry with "
+    "the current hash."
+)
+_DISALLOWED_WORKSPACE_TARGET = (
+    "The requested workspace path or command is not allowed. Choose an allowed target "
+    "or command and retry."
+)
+_LARGE_WORKSPACE_REQUEST = (
+    "The workspace tool arguments are too large. Use a smaller request and retry."
+)
+_TOO_MANY_WORKSPACE_COMMANDS = (
+    "Too many workspace operations are pending. Reuse, inspect, or stop existing "
+    "operations before starting another one."
+)
+_UNSUPPORTED_IMAGE_INPUT = (
+    "The current model does not support image attachments. "
+    "Use a non-image input or another approach."
+)
 
 
 class WorkspaceAccess:
@@ -215,14 +204,41 @@ class _WorkspaceToolSurface:
         return self._session
 
     @staticmethod
-    async def _call(operation: Awaitable[_ResultT]) -> _ResultT:
+    async def _call(
+        operation: Awaitable[_ResultT],
+        *,
+        name: str,
+        rejected_codes: frozenset[ErrorCode],
+        rejected_message: str,
+    ) -> _ResultT:
         try:
             return await operation
         except AIError as error:
-            message = workspace_model_retry_message(error)
-            if message is None:
+            if error.code not in rejected_codes:
                 raise
-            raise ModelRetry(message) from error
+            if (
+                name == "attach_files"
+                and error.safe_details.get("reason") == "image_input_not_supported"
+            ):
+                message = _UNSUPPORTED_IMAGE_INPUT
+            elif error.code is ErrorCode.STORAGE_NOT_FOUND:
+                message = _MISSING_WORKSPACE_TARGET
+            elif error.code is ErrorCode.STORAGE_CONFLICT:
+                message = _WORKSPACE_CONFLICT
+            elif error.code is ErrorCode.AUTHORIZATION_DENIED:
+                message = _DISALLOWED_WORKSPACE_TARGET
+            elif error.code is ErrorCode.TOOL_ARGUMENTS_TOO_LARGE:
+                message = _LARGE_WORKSPACE_REQUEST
+            elif error.code is ErrorCode.TOO_MANY_PENDING_OPERATIONS:
+                message = _TOO_MANY_WORKSPACE_COMMANDS
+            else:
+                message = rejected_message
+            _logger.debug(
+                "workspace tool call rejected: operation=%s code=%s",
+                name,
+                error.code.value,
+            )
+            raise ToolCallRejected(message) from error
 
     async def attach_files(self, paths: list[str]) -> ToolReturn:
         """Attach Workspace files to the next model request.
@@ -233,7 +249,19 @@ class _WorkspaceToolSurface:
         Returns:
             Lightweight file metadata plus the file content for the next model request.
         """
-        return await self._call(self._attach_files(paths))
+        return await self._call(
+            self._attach_files(paths),
+            name="attach_files",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
+        )
 
     async def _attach_files(self, paths: list[str]) -> ToolReturn:
         if not paths:
@@ -308,7 +336,17 @@ class _WorkspaceToolSurface:
             File content with line numbers, plus metadata header.
         """
         return await self._call(
-            self._require_session().read_file(path, offset=offset, limit=limit)
+            self._require_session().read_file(path, offset=offset, limit=limit),
+            name="read_file",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def write_file(
@@ -329,12 +367,23 @@ class _WorkspaceToolSurface:
         Returns:
             Confirmation message with new hash.
         """
+        rejected_codes = {
+            ErrorCode.REQUEST_FIELD_INVALID,
+            ErrorCode.STORAGE_NOT_FOUND,
+            ErrorCode.AUTHORIZATION_DENIED,
+            ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+        }
+        if expected_hash is not None:
+            rejected_codes.add(ErrorCode.STORAGE_CONFLICT)
         return await self._call(
             self._require_session().write_file(
                 path,
                 content,
                 expected_hash=expected_hash,
-            )
+            ),
+            name="write_file",
+            rejected_codes=frozenset(rejected_codes),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def edit_file(
@@ -360,13 +409,24 @@ class _WorkspaceToolSurface:
         Returns:
             Summary with new hash for subsequent operations.
         """
+        rejected_codes = {
+            ErrorCode.REQUEST_FIELD_INVALID,
+            ErrorCode.STORAGE_NOT_FOUND,
+            ErrorCode.AUTHORIZATION_DENIED,
+            ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+        }
+        if expected_hash is not None:
+            rejected_codes.add(ErrorCode.STORAGE_CONFLICT)
         return await self._call(
             self._require_session().edit_file(
                 path,
                 old_text,
                 new_text,
                 expected_hash=expected_hash,
-            )
+            ),
+            name="edit_file",
+            rejected_codes=frozenset(rejected_codes),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def list_directory(self, path: str = ".") -> str:
@@ -378,7 +438,19 @@ class _WorkspaceToolSurface:
         Returns:
             A newline-separated listing with type indicators and sizes.
         """
-        return await self._call(self._require_session().list_directory(path))
+        return await self._call(
+            self._require_session().list_directory(path),
+            name="list_directory",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
+        )
 
     async def search_files(
         self,
@@ -402,7 +474,17 @@ class _WorkspaceToolSurface:
                 pattern,
                 path=path,
                 include_glob=include_glob,
-            )
+            ),
+            name="search_files",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def find_files(self, pattern: str, *, path: str = ".") -> str:
@@ -417,7 +499,17 @@ class _WorkspaceToolSurface:
             Newline-separated list of matching file paths relative to root.
         """
         return await self._call(
-            self._require_session().find_files(pattern, path=path)
+            self._require_session().find_files(pattern, path=path),
+            name="find_files",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def create_directory(self, path: str) -> str:
@@ -429,7 +521,19 @@ class _WorkspaceToolSurface:
         Returns:
             Confirmation message.
         """
-        return await self._call(self._require_session().create_directory(path))
+        return await self._call(
+            self._require_session().create_directory(path),
+            name="create_directory",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
+        )
 
     async def file_info(self, path: str) -> str:
         """Get metadata about a file or directory.
@@ -440,7 +544,19 @@ class _WorkspaceToolSurface:
         Returns:
             Formatted metadata including size, type, and permissions.
         """
-        return await self._call(self._require_session().file_info(path))
+        return await self._call(
+            self._require_session().file_info(path),
+            name="file_info",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
+        )
 
     async def run_command(
         self,
@@ -461,7 +577,16 @@ class _WorkspaceToolSurface:
             self._require_session().run_command(
                 command,
                 timeout_seconds=timeout_seconds,
-            )
+            ),
+            name="run_command",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
         )
 
     async def start_command(self, command: str) -> str:
@@ -476,7 +601,19 @@ class _WorkspaceToolSurface:
         Returns:
             A message containing the unique command ID for later check/stop calls.
         """
-        return await self._call(self._require_session().start_command(command))
+        return await self._call(
+            self._require_session().start_command(command),
+            name="start_command",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
+                    ErrorCode.TOO_MANY_PENDING_OPERATIONS,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
+        )
 
     async def check_command(self, command_id: str) -> str:
         """Check the status and recent output of a background command.
@@ -487,7 +624,18 @@ class _WorkspaceToolSurface:
         Returns:
             Status and recent output of the background command.
         """
-        return await self._call(self._require_session().check_command(command_id))
+        return await self._call(
+            self._require_session().check_command(command_id),
+            name="check_command",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
+        )
 
     async def stop_command(self, command_id: str) -> str:
         """Stop a background command and return its final output.
@@ -498,7 +646,18 @@ class _WorkspaceToolSurface:
         Returns:
             Final output and exit status of the stopped command.
         """
-        return await self._call(self._require_session().stop_command(command_id))
+        return await self._call(
+            self._require_session().stop_command(command_id),
+            name="stop_command",
+            rejected_codes=frozenset(
+                {
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    ErrorCode.AUTHORIZATION_DENIED,
+                }
+            ),
+            rejected_message=_INVALID_WORKSPACE_REQUEST,
+        )
 
 
 class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
@@ -608,6 +767,5 @@ def _workspace_tool(
 __all__ = [
     "WorkspaceAccess",
     "workspace_capabilities",
-    "workspace_model_retry_message",
     "workspace_tool_contributions",
 ]

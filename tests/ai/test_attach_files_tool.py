@@ -5,13 +5,16 @@
 from pathlib import Path
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import BinaryContent, ToolReturn
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
-from linktools.ai.capability import workspace_capabilities, workspace_tool_contributions
+from linktools.ai.capability import (
+    ToolCallRejected,
+    workspace_capabilities,
+    workspace_tool_contributions,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -190,7 +193,7 @@ async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_pa
     session = _AttachmentSession({"first.png": b"png"})
     boundary, tool = await _boundary(workspace, session)
 
-    with pytest.raises(ModelRetry):
+    with pytest.raises(ToolCallRejected):
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["first.png", "missing.png"]},
@@ -207,7 +210,7 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
     session = _AttachmentSession({"evidence.unknown": b"body"})
     boundary, tool = await _boundary(workspace, session)
 
-    with pytest.raises(ModelRetry):
+    with pytest.raises(ToolCallRejected):
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["evidence.unknown"]},
@@ -226,7 +229,10 @@ async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
     session = _AttachmentSession({"evidence.png": b"png"})
     boundary, tool = await _boundary(workspace, session, vision=False)
 
-    with pytest.raises(ModelRetry, match="does not support image attachments"):
+    with pytest.raises(
+        ToolCallRejected,
+        match="does not support image attachments",
+    ):
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["evidence.png"]},

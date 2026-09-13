@@ -7,13 +7,13 @@ from typing import Any
 
 import pytest
 from linktools.ai.capability import workspace_capabilities
+from linktools.ai.capability import ToolCallRejected
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
 )
 from linktools.ai.workspace import LocalSandbox, Workspace
-from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -104,7 +104,7 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
             tool_call_id="call",
         )
         args = {"path": "missing/report.txt", "content": "report"}
-        with pytest.raises(ModelRetry):
+        with pytest.raises(ToolCallRejected):
             tools = await boundary.get_tools(context)
             await boundary.call_tool("write_file", args, context, tools["write_file"])
 

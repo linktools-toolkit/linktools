@@ -230,7 +230,7 @@ async def _receive_requests(
             await _send_error(
                 writer,
                 request_id,
-                ErrorCode.TOO_MANY_PENDING_OPERATIONS,
+                ErrorCode.SANDBOX_BUSY,
                 write_lock,
             )
             continue

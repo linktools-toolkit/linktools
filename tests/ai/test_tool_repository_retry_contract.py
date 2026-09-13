@@ -3,9 +3,11 @@
 """Contract tests for ToolRepository optimistic-CAS retry wiring."""
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from linktools.ai.core import ToolOperationStatus, canonical_sha256
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import ToolOperationAdmission
 from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
@@ -76,14 +78,6 @@ async def _invoke_retry_method(
             fence=1,
             result_payload=StoredPayload.inline_bytes(b"result"),
         )
-    if method_name == "fail":
-        return await repository.fail(
-            "tool-operation",
-            tenant_id="tenant",
-            owner="tool-owner",
-            fence=1,
-            error_code="tool_failed",
-        )
     if method_name == "fail_payload":
         return await repository.fail_payload(
             "tool-operation",
@@ -111,7 +105,6 @@ async def _invoke_retry_method(
         "reserve",
         "claim",
         "complete_payload",
-        "fail",
         "fail_payload",
         "mark_effect_unknown",
     ),
@@ -137,6 +130,21 @@ async def test_tool_mutations_use_raw_storage_conflict_retry(
 
     assert result is expected
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_reserve_rejects_malformed_failure_payload() -> None:
+    repository = object.__new__(ToolRepositoryImpl)
+    record = SimpleNamespace(
+        status=ToolOperationStatus.FAILED,
+        error_code=ErrorCode.TOOL_EXECUTION_FAILED.value,
+        error_payload=StoredPayload.inline_bytes(b'{"version":1}'),
+    )
+
+    with pytest.raises(AIError) as raised:
+        await repository.reserve(record)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 class _RenewStore:

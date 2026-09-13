@@ -7,7 +7,6 @@ from typing import Protocol
 
 from pydantic import JsonValue as PydanticJsonValue
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -15,6 +14,7 @@ from ..core import JsonValue, validate_user_prompt
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._context import AgentContext
+from ._tool_signal import ToolCallFailed, ToolCallRejected
 from ._tool_semantic import tool_semantic_metadata
 
 SUBAGENT_CAPABILITY_ID = "linktools.ai.subagents"
@@ -90,7 +90,7 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
                 validate_user_prompt(task)
             except AIError as error:
                 if error.code is ErrorCode.PROMPT_TOO_LARGE:
-                    raise ModelRetry(
+                    raise ToolCallRejected(
                         "The delegated task is invalid or too large. Shorten it and retry."
                     ) from error
                 raise
@@ -103,12 +103,16 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
                 )
             except AIError as error:
                 if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
-                    raise ToolFailed("subagent execution failed; adapt and continue") from error
+                    raise ToolCallFailed(
+                        "subagent execution failed; adapt and continue"
+                    ) from error
                 if error.code in {
                     ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                     ErrorCode.REQUEST_FIELD_INVALID,
                 }:
-                    raise ModelRetry("requested subagent, task, or files are invalid") from error
+                    raise ToolCallRejected(
+                        "requested subagent, task, or files are invalid"
+                    ) from error
                 raise
 
         return toolset

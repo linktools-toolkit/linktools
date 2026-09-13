@@ -7,15 +7,21 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from linktools.ai.capability import ToolCallFailed, ToolCallRejected
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Observation
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
 )
-from linktools.ai.runtime._tool_metrics import _ToolMetricContext
+from linktools.ai.runtime._tool_metrics import (
+    RuntimeToolMetricsCapability,
+    _ToolMetricContext,
+)
 from ._runtime_test_helpers import semantic_tool
 from pydantic_ai.exceptions import SkipToolExecution
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -206,3 +212,76 @@ async def test_skip_tool_execution_emits_success_metric_and_durable_completion()
     assert observation.kind == "linktools.tool.execution"
     assert observation.status == "SUCCEEDED"
     assert observation.error_code is None
+
+
+@pytest.mark.parametrize(
+    ("signal", "expected_code"),
+    (
+        (ToolCallRejected("retry"), ErrorCode.TOOL_RETRY_REQUIRED.value),
+        (ToolCallFailed("failed"), ErrorCode.TOOL_EXECUTION_FAILED.value),
+    ),
+)
+async def test_tool_signal_metric_uses_stable_failure_code(
+    signal: ToolCallRejected | ToolCallFailed,
+    expected_code: str,
+) -> None:
+    recorder = _Recorder()
+
+    async def handler() -> object:
+        raise signal
+
+    boundary, bridge, context, tool = await _boundary(
+        ToolOperationDecision("operation", "owner", 1, True),
+        recorder,
+        handler,
+    )
+
+    with pytest.raises(type(signal)):
+        await boundary.call_tool("tool", {}, context, tool)
+
+    assert bridge.calls == ["begin", "fail"]
+    assert recorder.observations[0].error_code == expected_code
+
+
+@pytest.mark.parametrize(
+    ("signal", "expected_code"),
+    (
+        (ToolCallRejected("retry"), ErrorCode.TOOL_RETRY_REQUIRED.value),
+        (ToolCallFailed("failed"), ErrorCode.TOOL_EXECUTION_FAILED.value),
+    ),
+)
+async def test_capability_tool_signal_is_observed_before_control_conversion(
+    signal: ToolCallRejected | ToolCallFailed,
+    expected_code: str,
+) -> None:
+    recorder = _Recorder()
+    capability = RuntimeToolMetricsCapability(_metric_context(recorder))
+    call = ToolCallPart("capability_tool", args={}, tool_call_id="call")
+    tool_def = ToolDefinition(name="capability_tool")
+
+    async def handler(_: dict[str, Any]) -> object:
+        raise signal
+
+    with pytest.raises(type(signal)):
+        await capability.wrap_tool_execute(
+            _context(),
+            call=call,
+            tool_def=tool_def,
+            args={},
+            handler=handler,
+        )
+
+    assert recorder.observations[0].error_code == expected_code
+
+
+async def test_tool_metric_preserves_ai_error_and_defaults_other_errors() -> None:
+    from linktools.ai.runtime._tool_metrics import _tool_error_code
+
+    assert (
+        _tool_error_code(AIError(ErrorCode.SANDBOX_BUSY))
+        == ErrorCode.SANDBOX_BUSY.value
+    )
+    assert (
+        _tool_error_code(RuntimeError("failed"))
+        == ErrorCode.TOOL_EXECUTION_FAILED.value
+    )

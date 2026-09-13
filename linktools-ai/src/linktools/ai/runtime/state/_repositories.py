@@ -82,6 +82,7 @@ from ._contracts import (
     ResultRecord,
     SessionRecord,
     ToolOperationAdmission,
+    validate_tool_operation_failure,
     TranscriptHeadRecord,
     TranscriptOwnerDomain,
 )
@@ -4117,6 +4118,9 @@ class ToolRepositoryImpl(_RepositoryBase):
         return await mutate(transaction)
 
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord:
+        if record.status is ToolOperationStatus.FAILED:
+            validate_tool_operation_failure(record.error_code, record.error_payload)
+
         async def attempt() -> ToolOperationRecord:
             _require_tenant(record, self._tenant_id)
             key = self._tool_key(record.tool_operation_id)
@@ -4450,39 +4454,6 @@ class ToolRepositoryImpl(_RepositoryBase):
 
         return await self._retry_storage_conflict(attempt)
 
-    async def fail(
-        self,
-        tool_operation_id: str,
-        *,
-        tenant_id: str,
-        owner: str,
-        fence: int,
-        error_code: str,
-    ) -> ToolOperationRecord:
-        async def attempt() -> ToolOperationRecord:
-            def value(
-                current: ToolOperationRecord, now: datetime
-            ) -> ToolOperationRecord:
-                return replace(
-                    current,
-                    status=ToolOperationStatus.FAILED,
-                    error_code=error_code,
-                    lease_expires_at=None,
-                    updated_at=now,
-                )
-
-            return await self._finish_tool(
-                tool_operation_id,
-                tenant_id=tenant_id,
-                owner=owner,
-                fence=fence,
-                terminal_status=ToolOperationStatus.FAILED,
-                requested_error=error_code,
-                value=value,
-            )
-
-        return await self._retry_storage_conflict(attempt)
-
     async def fail_payload(
         self,
         tool_operation_id: str,
@@ -4491,7 +4462,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         owner: str,
         fence: int,
         error_code: str,
-        error_payload: StoredPayload | None,
+        error_payload: StoredPayload,
     ) -> ToolOperationRecord:
         async def attempt() -> ToolOperationRecord:
             return await self._finish_tool(
@@ -4634,6 +4605,11 @@ class ToolRepositoryImpl(_RepositoryBase):
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         validate_lease_owner(owner)
+        if terminal_status is ToolOperationStatus.FAILED:
+            validate_tool_operation_failure(
+                requested_error,
+                requested_error_payload,
+            )
 
         async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
             record = await transaction.get_record(self._tool_key(tool_operation_id))
@@ -4712,7 +4688,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         owner: str,
         fence: int,
         error_code: str,
-        error_payload: StoredPayload | None,
+        error_payload: StoredPayload,
     ) -> ToolOperationRecord:
         return await self._finish_tool(
             tool_operation_id,

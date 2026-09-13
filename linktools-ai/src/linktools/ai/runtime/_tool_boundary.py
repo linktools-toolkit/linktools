@@ -7,18 +7,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
-from pydantic import ValidationError
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
-    ModelRetry,
     SkipToolExecution,
-    ToolFailed,
-    ToolFailedError,
-    ToolRetryError,
 )
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
@@ -26,16 +21,20 @@ from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
 from ..capability import (
     AgentContext,
+    ToolCallFailed,
+    ToolCallRejected,
     tool_class_from_metadata,
     tool_effect_from_metadata,
     tool_path_fields_from_metadata,
-    workspace_model_retry_message,
 )
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..workspace import SandboxSession, WorkspaceToolPermissionPolicy
 from ._tool import ToolOperationBridge
-from ._tool_metrics import _ToolMetricContext
+from ._tool_metrics import (
+    TOOL_METRICS_MANAGED_METADATA_KEY,
+    _ToolMetricContext,
+)
 
 
 class RepositoryInstructionBoundary(Protocol):
@@ -192,9 +191,11 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
                     if self._descriptor is None:
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     self._descriptors[name] = self._descriptor
+                metadata = dict(raw_tool.tool_def.metadata or {})
+                metadata[TOOL_METRICS_MANAGED_METADATA_KEY] = True
                 result[name] = ToolsetTool(
                     toolset=self,
-                    tool_def=raw_tool.tool_def,
+                    tool_def=replace(raw_tool.tool_def, metadata=metadata),
                     max_retries=raw_tool.max_retries,
                     args_validator=raw_tool.args_validator,
                     args_validator_func=raw_tool.args_validator_func,
@@ -216,6 +217,10 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         path_fields = descriptor.workspace_path_fields
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
+        call_id = ctx.tool_call_id
+        if not isinstance(call_id, str) or not call_id:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        raw_call = ToolCallPart(name, args=tool_args, tool_call_id=call_id)
         try:
             final_args = await self._canonicalize_args(tool_args, path_fields)
         except AIError as error:
@@ -223,28 +228,67 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
                 "filesystem.read",
                 "filesystem.write",
                 "shell",
+            } and error.code in {
+                ErrorCode.REQUEST_FIELD_INVALID,
+                ErrorCode.STORAGE_NOT_FOUND,
+                ErrorCode.AUTHORIZATION_DENIED,
+                ErrorCode.TOOL_ARGUMENTS_TOO_LARGE,
             }:
-                message = workspace_model_retry_message(error)
-                if message is not None:
-                    raise ModelRetry(message) from error
-            raise
-        call_id = ctx.tool_call_id
-        if not isinstance(call_id, str) or not call_id:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
-        if self._repository_boundary is not None:
-            await self._repository_boundary.check(
-                tool_name=name,
-                tool_call_id=call_id,
-                arguments=final_args,
-                path_fields=path_fields,
+                if error.code is ErrorCode.STORAGE_NOT_FOUND:
+                    message = (
+                        "The requested workspace path does not exist, or its parent "
+                        "directory is missing. Correct the path and retry."
+                    )
+                elif error.code is ErrorCode.AUTHORIZATION_DENIED:
+                    message = (
+                        "The requested workspace path or command is not allowed. "
+                        "Choose an allowed target or command and retry."
+                    )
+                elif error.code is ErrorCode.TOOL_ARGUMENTS_TOO_LARGE:
+                    message = (
+                        "The workspace tool arguments are too large. Use a smaller "
+                        "request and retry."
+                    )
+                else:
+                    message = (
+                        "The workspace tool arguments or target are invalid. "
+                        "Correct them and retry."
+                    )
+                signal = ToolCallRejected(message)
+                self._record_pre_effect_error(
+                    raw_call,
+                    tool.tool_def,
+                    signal,
+                )
+                raise signal from error
+            self._record_pre_effect_error(
+                raw_call,
+                tool.tool_def,
+                error,
             )
-        await self._authorize(
-            name,
-            descriptor,
-            final_args,
-            approved=ctx.tool_call_approved,
-        )
+            raise
+        call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
+        try:
+            if self._repository_boundary is not None:
+                await self._repository_boundary.check(
+                    tool_name=name,
+                    tool_call_id=call_id,
+                    arguments=final_args,
+                    path_fields=path_fields,
+                )
+            await self._authorize(
+                name,
+                descriptor,
+                final_args,
+                approved=ctx.tool_call_approved,
+            )
+        except Exception as error:
+            self._record_pre_effect_error(
+                call,
+                tool.tool_def,
+                error,
+            )
+            raise
         if descriptor.effect_owner == "none":
             return await self._invoke(
                 call,
@@ -273,11 +317,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
 
         async def unknown_after_leaf(error: BaseException) -> None:
             await bridge.unknown(decision, error)
-            if replay_safe:
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
-            raise ToolFailed(
-                "TOOL_EFFECT_UNKNOWN: verify side effects before retry"
-            ) from error
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from error
 
         try:
             result = await self._invoke(
@@ -296,18 +336,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             if cancelled:
                 raise asyncio.CancelledError
             raise
-        except (
-            ValidationError,
-            ModelRetry,
-            ToolRetryError,
-            ToolFailed,
-            ToolFailedError,
-        ) as error:
-            if (
-                not replay_safe
-                and not _is_workspace_pre_effect_retry(error, descriptor)
-            ):
-                await unknown_after_leaf(error)
+        except (ToolCallRejected, ToolCallFailed) as error:
             cancelled = await bridge.fail(decision, error)
             if cancelled:
                 raise asyncio.CancelledError
@@ -357,6 +386,22 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             suppress_cancel=lambda: False,
         )
 
+    def _record_pre_effect_error(
+        self,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        error: BaseException,
+    ) -> None:
+        if self._tool_metrics is None or not isinstance(error, Exception):
+            return
+        if isinstance(error, (ApprovalRequired, CallDeferred, SkipToolExecution)):
+            return
+        self._tool_metrics.record_error(
+            call=call,
+            tool_def=tool_def,
+            error=error,
+        )
+
     async def _authorize(
         self,
         name: str,
@@ -376,7 +421,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT) from error
         if decision == "deny":
-            raise ToolFailed("workspace permission denied")
+            raise ToolCallFailed("workspace permission denied")
         if decision == "ask" and not approved:
             raise ApprovalRequired(
                 metadata={
@@ -421,22 +466,6 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             else:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return result
-
-
-def _is_workspace_pre_effect_retry(
-    error: BaseException,
-    descriptor: ManagedToolDescriptor,
-) -> bool:
-    return (
-        isinstance(error, ModelRetry)
-        and descriptor.tool_class in {
-            "filesystem.read",
-            "filesystem.write",
-            "shell",
-        }
-        and isinstance(error.__cause__, AIError)
-    )
-
 
 __all__ = [
     "ManagedToolDescriptor",

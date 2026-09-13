@@ -5,13 +5,13 @@
 from typing import Any
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.capability import ToolCallRejected
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -113,7 +113,7 @@ async def test_invalid_workspace_target_retries_before_instruction_lookup(
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ModelRetry):
+    with pytest.raises(ToolCallRejected):
         await toolset.call_tool(
             "_list_directory",
             {"path": path},

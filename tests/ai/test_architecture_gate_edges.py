@@ -89,3 +89,61 @@ def test_function_local_all_does_not_define_module_exports(tmp_path: Path) -> No
         },
     )
     assert not errors
+
+
+def test_pydantic_tool_controls_have_one_production_owner(tmp_path: Path) -> None:
+    errors = _errors(
+        tmp_path,
+        {
+            "runtime/_pydantic_tool_control.py": (
+                "from pydantic_ai.exceptions import ModelRetry, ToolFailed\n"
+                "__all__ = ['ModelRetry', 'ToolFailed']\n"
+            ),
+            "capability/tool.py": (
+                "from pydantic_ai.exceptions import ModelRetry\n"
+            ),
+        },
+    )
+    assert any("direct Pydantic tool control access" in error for error in errors)
+
+
+def test_pydantic_tool_control_attribute_alias_is_rejected(tmp_path: Path) -> None:
+    errors = _errors(
+        tmp_path,
+        {
+            "runtime/_pydantic_tool_control.py": "__all__ = []\n",
+            "capability/tool.py": (
+                "import pydantic_ai.exceptions as exceptions\n"
+                "value = exceptions.ModelRetry('retry')\n"
+            ),
+        },
+    )
+    assert any("direct Pydantic tool control access" in error for error in errors)
+
+
+def test_pydantic_tool_control_module_import_is_checked_at_use(tmp_path: Path) -> None:
+    errors = _errors(
+        tmp_path,
+        {
+            "runtime/_pydantic_tool_control.py": "__all__ = []\n",
+            "capability/tool.py": (
+                "from pydantic_ai import exceptions as pydantic_exceptions\n"
+                "value = pydantic_exceptions.ModelRetry('retry')\n"
+            ),
+        },
+    )
+    assert any("direct Pydantic tool control access" in error for error in errors)
+
+
+def test_unrelated_pydantic_module_import_is_allowed(tmp_path: Path) -> None:
+    errors = _errors(
+        tmp_path,
+        {
+            "runtime/_pydantic_tool_control.py": "__all__ = []\n",
+            "capability/tool.py": (
+                "import pydantic_ai\n"
+                "value = pydantic_ai.__name__\n"
+            ),
+        },
+    )
+    assert not any("direct Pydantic tool control access" in error for error in errors)

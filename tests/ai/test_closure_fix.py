@@ -37,7 +37,7 @@ from linktools.ai.task._local import (
     TaskNodeRunResult,
     _LeaseState,
 )
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
@@ -248,7 +248,7 @@ def test_managed_tool_descriptor_rejects_effect_free_mismatch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_replay_safe_model_retry_is_a_known_failure() -> None:
+async def test_replay_safe_third_party_model_retry_is_effect_unknown() -> None:
     bridge = _ToolBridge(ToolOperationDecision("operation", "owner", 1, True))
 
     async def retry_tool() -> None:
@@ -269,18 +269,19 @@ async def test_replay_safe_model_retry_is_a_known_failure() -> None:
     )
     context = _context()
     tools = await boundary.get_tools(context)
-    with pytest.raises(ModelRetry):
+    with pytest.raises(AIError) as raised:
         await boundary.call_tool(
             "retry_tool",
             {},
             context,
             tools["retry_tool"],
         )
-    assert bridge.calls == ["begin", "fail"]
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+    assert bridge.calls == ["begin", "unknown"]
 
 
 @pytest.mark.asyncio
-async def test_non_replay_safe_model_retry_requires_effect_verification() -> None:
+async def test_non_replay_safe_third_party_model_retry_is_effect_unknown() -> None:
     bridge = _ToolBridge(ToolOperationDecision("operation", "owner", 1, False))
 
     async def retry_tool() -> None:
@@ -301,13 +302,14 @@ async def test_non_replay_safe_model_retry_requires_effect_verification() -> Non
     )
     context = _context()
     tools = await boundary.get_tools(context)
-    with pytest.raises(ToolFailed, match="TOOL_EFFECT_UNKNOWN"):
+    with pytest.raises(AIError) as raised:
         await boundary.call_tool(
             "retry_tool",
             {},
             context,
             tools["retry_tool"],
         )
+    assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     assert bridge.calls == ["begin", "unknown"]
 
 

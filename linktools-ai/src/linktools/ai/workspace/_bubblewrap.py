@@ -377,7 +377,7 @@ class _BubblewrapSandboxSession:
                     item[1] for item in self._pending.values()
                 )
                 if business and pending_business >= _MAX_PENDING_REQUESTS:
-                    raise AIError(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
+                    raise AIError(ErrorCode.SANDBOX_BUSY)
                 self._pending[frame_id] = (future, business)
         sent = False
         try:

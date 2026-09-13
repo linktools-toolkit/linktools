@@ -5,7 +5,6 @@
 from pathlib import Path
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
@@ -13,6 +12,7 @@ from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.core import Principal
+from linktools.ai.capability import ToolCallRejected
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import DefaultExecutionService
@@ -22,7 +22,11 @@ from linktools.ai.runtime._tool_boundary import (
     RuntimeToolBoundaryToolset,
 )
 from linktools.ai.storage import StoredPayload
-from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
+from linktools.ai.workspace import (
+    SandboxResource,
+    SandboxSession,
+    WorkspacePolicy,
+)
 from ._runtime_test_helpers import semantic_tool
 
 
@@ -107,7 +111,7 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
 def _materializer(session: _Session) -> ExecutionInputMaterializer:
     return ExecutionInputMaterializer(
         WorkspaceAccess(_Sandbox(session), root=Path(".")),
-        Workspace.load(".", workspace_id="workspace").policy,
+        WorkspacePolicy(),
     )
 
 
@@ -265,7 +269,7 @@ async def test_final_tool_boundary_returns_model_retry_for_correctable_path_erro
     context = _context()
     tools = await boundary.get_tools(context)
 
-    with pytest.raises(ModelRetry, match="not allowed"):
+    with pytest.raises(ToolCallRejected, match="not allowed"):
         await boundary.call_tool(
             "_echo_path",
             {"path": "../secret.txt"},

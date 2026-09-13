@@ -16,7 +16,7 @@ from linktools.ai.runtime._input import (
     decode_user_content_payload,
 )
 from linktools.ai.runtime._input_contract import validate_user_content
-from linktools.ai.workspace import SandboxResource, SandboxSession, Workspace
+from linktools.ai.workspace import SandboxResource, SandboxSession, WorkspacePolicy
 
 
 class _CountingSession:
@@ -54,9 +54,8 @@ class _CountingSandbox:
 
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
-    workspace = Workspace.load(".", workspace_id="workspace")
-    access = WorkspaceAccess(_CountingSandbox(session), root=workspace.root)
-    return ExecutionInputMaterializer(access, workspace.policy), session
+    access = WorkspaceAccess(_CountingSandbox(session), root=Path(".").resolve())
+    return ExecutionInputMaterializer(access, WorkspacePolicy()), session
 
 
 def test_native_user_content_is_canonical_and_durable() -> None:

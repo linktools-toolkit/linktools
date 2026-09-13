@@ -3,9 +3,14 @@
 """Skill tool regression for model-correctable selection misses."""
 
 import pytest
-from linktools.ai.capability import LinkToolsSkills, SkillDefinition, SkillSourceRegistry
+from linktools.ai.capability import (
+    LinkToolsSkills,
+    SkillDefinition,
+    SkillSourceRegistry,
+    ToolCallFailed,
+    ToolCallRejected,
+)
 from linktools.ai.spec import SkillSpec
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -31,7 +36,7 @@ async def test_missing_skill_id_is_model_retry() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ModelRetry, match="skill id or resource path is invalid"):
+    with pytest.raises(ToolCallRejected, match="skill id or resource path is invalid"):
         await toolset.call_tool(
             "load_skill",
             {"skill_id": "missing"},
@@ -49,7 +54,7 @@ async def test_missing_skill_resource_is_tool_failure() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolFailed, match="skill resource is unavailable"):
+    with pytest.raises(ToolCallFailed, match="skill resource is unavailable"):
         await toolset.call_tool(
             "load_skill",
             {"skill_id": "known", "path": "missing.txt"},

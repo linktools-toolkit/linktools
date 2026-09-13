@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.capability import ToolCallFailed
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -341,15 +342,20 @@ def _failed_tool_record(
 
 
 @pytest.mark.asyncio
-async def test_tool_error_replay_preserves_diagnostics_and_safe_details() -> None:
+async def test_tool_error_replay_rejects_non_signal_failure() -> None:
     bridge = _tool_bridge()
     error = RuntimeError("tool provider disconnected")
-    code, payload = await bridge._error_payload(error)
+    with pytest.raises(TypeError):
+        await bridge._error_payload(error)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_tool_error_replay_restores_only_linktools_signal() -> None:
+    bridge = _tool_bridge()
+    signal = ToolCallFailed("tool execution failed")
+    code, payload = await bridge._error_payload(signal)
     decoded = await bridge._decode_error(
         _failed_tool_record(error_code=code, error_payload=payload)
     )
-    assert isinstance(decoded, AIError)
-    assert decoded.code is ErrorCode.TOOL_EXECUTION_FAILED
-    assert decoded.safe_details["phase"] == "tool_execution"
-    assert "tool provider disconnected" not in str(decoded.safe_details)
-    assert decoded.diagnostics == ErrorDiagnostics.from_exception(error)
+    assert isinstance(decoded, ToolCallFailed)
+    assert decoded.message == signal.message

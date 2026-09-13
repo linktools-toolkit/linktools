@@ -222,3 +222,47 @@ async def test_tool_terminal_cancellation_finishes_durable_retry_before_propagat
     assert tools.group.attempts == 2
     assert tools.current.status is ToolOperationStatus.COMPLETED
     assert tools.current.result_payload == payload
+
+
+@pytest.mark.asyncio
+async def test_tool_terminal_command_rejects_mixed_success_and_failure() -> None:
+    tools = _TerminalTools()
+    commands = object.__new__(RuntimeStateCommands)
+    commands._tools = tools
+    commands._background_tasks = set()
+    payload = StoredPayload.inline_bytes(b"result")
+
+    with pytest.raises(AIError) as raised:
+        await commands.commit_tool_terminal(
+            "operation",
+            tenant_id="tenant",
+            owner="owner",
+            fence=1,
+            result_payload=payload,
+            error_code=ErrorCode.TOOL_EXECUTION_FAILED.value,
+            error_payload=payload,
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert tools.group.attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_tool_terminal_command_rejects_malformed_failure_payload() -> None:
+    tools = _TerminalTools()
+    commands = object.__new__(RuntimeStateCommands)
+    commands._tools = tools
+    commands._background_tasks = set()
+
+    with pytest.raises(AIError) as raised:
+        await commands.commit_tool_terminal(
+            "operation",
+            tenant_id="tenant",
+            owner="owner",
+            fence=1,
+            error_code=ErrorCode.TOOL_EXECUTION_FAILED.value,
+            error_payload=StoredPayload.inline_bytes(b'{"version":1}'),
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert tools.group.attempts == 0

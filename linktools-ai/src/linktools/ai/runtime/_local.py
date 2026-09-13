@@ -13,7 +13,6 @@ from typing import Protocol, TypeVar, cast
 
 from linktools.core import environ
 from pydantic import ValidationError
-from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -28,7 +27,7 @@ from pydantic_ai.tools import (
 )
 
 from ..agent import AgentBinding, AgentCatalog, SubagentRef
-from ..capability import AgentContext, SubagentDelegate
+from ..capability import AgentContext, SubagentDelegate, ToolCallRejected
 from ..workspace import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
@@ -44,6 +43,7 @@ from ._agent_executor import (
 from ._harness_memory import select_harness_memory_tools
 from ._input import CanonicalUserInput, ExecutionInputMaterializer
 from ._plan import RuntimePlanStore
+from ._pydantic_tool_control import build_model_retry, build_tool_failed
 from ..core import (
     ApprovalStatus,
     ExecutionEventType,
@@ -231,7 +231,7 @@ class _RepositoryInstructionBoundary:
             )
         )
         if reconsider:
-            raise ToolFailed(_REPOSITORY_INSTRUCTION_RECONSIDER)
+            raise ToolCallRejected(_REPOSITORY_INSTRUCTION_RECONSIDER)
 
 
 _REPOSITORY_INSTRUCTION_RECONSIDER = (
@@ -1331,11 +1331,11 @@ class _RecoveryCoordinator:
             elif record.resolution_kind == "retry":
                 if not isinstance(result, str):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                deferred_results.calls[pending.tool_call_id] = ModelRetry(result)
+                deferred_results.calls[pending.tool_call_id] = build_model_retry(result)
             elif record.resolution_kind == "failed":
                 if not isinstance(result, str):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                deferred_results.calls[pending.tool_call_id] = ToolFailed(result)
+                deferred_results.calls[pending.tool_call_id] = build_tool_failed(result)
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             deferred_results.metadata[pending.tool_call_id] = dict(
@@ -5032,17 +5032,18 @@ class LocalExecutionBackend:
         self,
         execution: ExecutionRecord,
     ) -> StoredPayload:
+        del execution
         encoded = json.dumps(
             {
-                "kind": "error",
-                "code": ErrorCode.TOOL_EXECUTION_FAILED.value,
-                "safe_details": {"phase": "tool_effect_resolution"},
+                "version": 1,
+                "kind": "tool_call_failed",
+                "message": "Tool effect was confirmed failed during recovery.",
             },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        return await self._recovery_payload(execution, encoded)
+        return StoredPayload.inline_bytes(encoded)
 
     async def _recovery_payload(
         self,
