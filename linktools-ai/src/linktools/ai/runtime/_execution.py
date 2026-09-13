@@ -82,7 +82,7 @@ from .service_api import (
     ExecutionView,
     ForkExecutionRequest,
     ListExecutionRequest,
-    _project_execution_view,
+    project_execution_view as _project_execution_view,
     RetryExecutionRequest,
     TranscriptItem,
 )
