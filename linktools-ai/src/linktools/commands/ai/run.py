@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
 OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
 OPENAI_API_KEY = ConfigField(name="OPENAI_API_KEY", cast=str, default=None, secret=True)
+OPENAI_VISION = ConfigField(name="OPENAI_VISION", cast=bool, default=False)
 _logger = environ.get_logger("commands.ai.run")
 
 
@@ -46,6 +47,7 @@ class Command(BaseCommand):
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
+        parser.add_argument("--vision", action=ConfigAction, config=OPENAI_VISION)
         parser.add_argument(
             "--planning",
             action="store_true",
@@ -88,6 +90,7 @@ class Command(BaseCommand):
                     state=state,
                     models=ModelRegistry.openai(
                         model=args.model,
+                        vision=args.vision,
                         base_url=args.base_url,
                         api_key=args.api_key,
                     ),
