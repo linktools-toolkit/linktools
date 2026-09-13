@@ -69,7 +69,7 @@ class HarnessPlanStoreAdapter:
 
     async def add_item(self, item: HarnessPlanItem) -> HarnessPlanItem:
         values = await self.get_items()
-        if any(current.id == item.id for current in values):
+        if any(current.id == item.id for item in values):
             raise ValueError(f"A step with id {item.id!r} is already in this plan.")
         values.append(item.model_copy(deep=True))
         await self.set_items(values)
@@ -261,7 +261,7 @@ class HarnessStepStoreAdapter:
         tool_call_id: str,
     ) -> ToolEffectRecord | None:
         async with self._effects_lock:
-            value = self._effects.get((record.run_id, record.tool_call_id)) if False else self._effects.get((run_id, tool_call_id))
+            value = self._effects.get((run_id, tool_call_id))
             return None if value is None else replace(value)
 
     async def list_unresolved_tool_effects(
