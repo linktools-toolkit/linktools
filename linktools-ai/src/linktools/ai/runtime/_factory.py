@@ -803,7 +803,7 @@ async def _build_local_components(
                 owned_workspace_close=owned_workspace_close,
             )
         )
-        await _run_cleanup_actions(abort_actions, stop_on_error=False)
+        await _run_cleanup_actions(abort_actions)
         raise
     return _RuntimeComponents(
         catalog=catalog,
