@@ -132,6 +132,7 @@ from .state._step_contracts import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
+_PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -883,7 +884,11 @@ def _frozen_tool_metadata(
     metadata = contract.get("metadata")
     if not isinstance(metadata, Mapping):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    validate_tool_semantic_metadata(metadata, require_effect=True)
+    validate_tool_semantic_metadata(
+        metadata,
+        require_effect=True,
+        require_tool_class=True,
+    )
     return metadata
 
 
@@ -927,7 +932,10 @@ def _plan_mode_prepare(
             for tool_def in tool_defs:
                 metadata = tool_def.metadata
                 validate_tool_semantic_metadata(metadata)
-                if tool_compaction_keep_result_from_metadata(metadata):
+                if (
+                    tool_def.tool_kind in _PLAN_SAFE_FRAMEWORK_TOOL_KINDS
+                    or tool_compaction_keep_result_from_metadata(metadata)
+                ):
                     keep_result_tools.add(tool_def.name)
                 dedupe = tool_context_dedupe_from_metadata(metadata)
                 if dedupe is not None:
@@ -939,7 +947,8 @@ def _plan_mode_prepare(
         return [
             tool_def
             for tool_def in tool_defs
-            if tool_plan_safe_from_metadata(tool_def.metadata)
+            if tool_def.tool_kind in _PLAN_SAFE_FRAMEWORK_TOOL_KINDS
+            or tool_plan_safe_from_metadata(tool_def.metadata)
         ]
 
     return prepare
