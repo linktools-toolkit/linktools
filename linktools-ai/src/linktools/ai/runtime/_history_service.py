@@ -11,6 +11,8 @@ from ..core import (
     CursorSigner,
     Page,
     Principal,
+    ResourceKind,
+    ResourceRef,
     canonical_sha256,
     principal_identity_payload,
 )
@@ -83,17 +85,16 @@ class DefaultExecutionHistoryService:
                     continue
                 if request.agent_id is not None and record.agent_id != request.agent_id:
                     continue
-                header = await self._executions.get_header(
+                resource = ResourceRef(
+                    ResourceKind.EXECUTION,
                     record.execution_id,
-                    tenant_id=request.principal.tenant_id,
+                    request.principal.tenant_id,
                 )
-                if header is None:
-                    continue
                 try:
                     await self._authorization.authorize(
                         request.principal,
                         AuthorizationAction.EXECUTION_READ,
-                        header,
+                        resource,
                     )
                 except AIError as error:
                     if error.code is not ErrorCode.AUTHORIZATION_DENIED:
