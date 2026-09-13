@@ -82,7 +82,7 @@ async def test_text_materialization_keeps_text_codec() -> None:
     access = WorkspaceAccess(_Sandbox(_Session({})), root=Path("."))
     materializer = ExecutionInputMaterializer(
         access,
-        Workspace.load(".").policy,
+        Workspace.load(".", workspace_id="workspace").policy,
     )
     try:
         canonical = await materializer.materialize("plain text", ())
@@ -115,7 +115,7 @@ async def test_execution_freezes_materialized_input_once() -> None:
     access = WorkspaceAccess(_Sandbox(session), root=Path("."))
     materializer = ExecutionInputMaterializer(
         access,
-        Workspace.load(".").policy,
+        Workspace.load(".", workspace_id="workspace").policy,
     )
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]
