@@ -22,6 +22,7 @@ class _ModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:test"
+    vision = False
     fingerprint = "d" * 64
     semantic_payload: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
@@ -107,17 +108,13 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 assert result.status is ExecutionStatus.SUCCEEDED
 
         end = datetime.now(timezone.utc) + timedelta(seconds=1)
-        window = MetricWindow.between(start, end)
-        model_count = await metrics.query(
-            MetricQuery("linktools.model.request.count", window)
+        result = await metrics.query(
+            MetricQuery(
+                "linktools.agent.run.count",
+                MetricWindow.between(start, end),
+            )
         )
-        execution_count = await metrics.query(
-            MetricQuery("linktools.execution.count", window)
-        )
-
-        assert model_count.points[0].value == 3
-        assert model_count.points[0].sample_count == 3
-        assert execution_count.points[0].value == 3
-        assert execution_count.points[0].sample_count == 3
+        assert result.points[0].value == 3
+        assert result.points[0].sample_count == 3
     finally:
         await sql_engine.dispose()
