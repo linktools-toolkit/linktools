@@ -799,6 +799,8 @@ class ToolOperationRecord:
                     self.error_payload,
                 )
             except AIError as error:
+                if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+                    raise
                 raise ValueError("tool failure contract is invalid") from error
         try:
             validate_tenant_id(self.tenant_id)
