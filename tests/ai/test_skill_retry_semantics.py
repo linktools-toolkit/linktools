@@ -6,6 +6,7 @@ import pytest
 from linktools.ai.capability import (
     LinkToolsSkills,
     SkillDefinition,
+    SkillResourceView,
     SkillSourceRef,
     SkillSourceRegistry,
     ToolCallFailed,
@@ -25,7 +26,7 @@ class _OutsideRootSource:
     def id(self) -> str:
         return "source"
 
-    async def inspect(self, root: str):
+    async def inspect(self, root: str) -> SkillResourceView:
         del root
         raise AssertionError("inspect should not be called")
 
