@@ -421,7 +421,7 @@ class ConversationHistoryRecord:
 
     def __post_init__(self) -> None:
         if self.inherited_message_count < 0:
-            raise ValueError("inherited message count cannot be negative")
+            raise ValueError("history segment message count cannot be negative")
         if not self.history_id or not self.session_id or not self.tenant_id:
             raise ValueError("history descriptor identity cannot be empty")
         if self.parent_history_id is None:
@@ -799,6 +799,8 @@ class ToolOperationRecord:
                     self.error_payload,
                 )
             except AIError as error:
+                if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
+                    raise
                 raise ValueError("tool failure contract is invalid") from error
         try:
             validate_tenant_id(self.tenant_id)
@@ -1584,16 +1586,6 @@ class EventRepository(RuntimeRepository, Protocol):
     ) -> ExecutionEventRecord: ...
 
     async def append_expected(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-        expected_sequence: int,
-        event_type: str,
-        payload: JsonValue,
-    ) -> ExecutionEventRecord: ...
-
-    async def append(
         self,
         execution_id: str,
         *,
