@@ -33,6 +33,7 @@ from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._sandbox import (
+    SandboxOperationRejected,
     SandboxResource,
     SandboxSession,
     normalize_workspace_path,
@@ -184,6 +185,7 @@ class _WindowsJob:
             ctypes.c_uint32,
             ctypes.c_uint32,
         ]
+        kernel32.SetHandleInformation.restype = ctypes.c_int
         if not kernel32.SetHandleInformation(self._handle, 1, 0):
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
 
@@ -376,20 +378,32 @@ class _LocalSandboxSession:
         *,
         expected_hash: str | None = None,
     ) -> str:
-        normalized = _normalize_path(path)
-        expected = _validate_expected_hash(expected_hash)
-        validate_request_size(
-            "write_file",
-            {"path": path, "content": content, "expected_hash": expected_hash},
-        )
-        _validate_text(content)
+        try:
+            normalized = _normalize_path(path)
+            expected = _validate_expected_hash(expected_hash)
+            validate_request_size(
+                "write_file",
+                {"path": path, "content": content, "expected_hash": expected_hash},
+            )
+            _validate_text(content)
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
 
         def operation() -> str:
-            target = self._file_path(normalized, write=True)
-            with _file_lock(self._lock_root, _relative(self._root, target)):
+            try:
+                target = self._file_path(normalized, write=True)
                 if expected is not None:
                     current_hash = _read_optional_hash(target, normalized)
                     _check_expected_digest(current_hash, expected)
+            except AIError as error:
+                raise SandboxOperationRejected.from_error(error) from error
+            with _file_lock(self._lock_root, _relative(self._root, target)):
+                if expected is not None:
+                    try:
+                        current_hash = _read_optional_hash(target, normalized)
+                        _check_expected_digest(current_hash, expected)
+                    except AIError as error:
+                        raise SandboxOperationRejected.from_error(error) from error
                 _atomic_write(self._root, target, content)
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             return _write_result(normalized, digest)
@@ -404,33 +418,42 @@ class _LocalSandboxSession:
         *,
         expected_hash: str | None = None,
     ) -> str:
-        normalized = _normalize_path(path)
-        if not isinstance(old_text, str) or not old_text:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        expected = _validate_expected_hash(expected_hash)
-        validate_request_size(
-            "edit_file",
-            {
-                "path": path,
-                "old_text": old_text,
-                "new_text": new_text,
-                "expected_hash": expected_hash,
-            },
-        )
-        _validate_text(old_text)
-        _validate_text(new_text)
+        try:
+            normalized = _normalize_path(path)
+            if not isinstance(old_text, str) or not old_text:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            expected = _validate_expected_hash(expected_hash)
+            validate_request_size(
+                "edit_file",
+                {
+                    "path": path,
+                    "old_text": old_text,
+                    "new_text": new_text,
+                    "expected_hash": expected_hash,
+                },
+            )
+            _validate_text(old_text)
+            _validate_text(new_text)
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
 
         def operation() -> str:
-            target = self._file_path(normalized, write=True)
+            try:
+                target = self._file_path(normalized, write=True)
+            except AIError as error:
+                raise SandboxOperationRejected.from_error(error) from error
             with _file_lock(self._lock_root, _relative(self._root, target)):
-                current = _read_optional_text(target, normalized)
-                _check_expected_hash(current, expected)
-                if current is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                if current.count(old_text) != 1:
-                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                updated = current.replace(old_text, new_text)
-                _validate_text(updated)
+                try:
+                    current = _read_optional_text(target, normalized)
+                    _check_expected_hash(current, expected)
+                    if current is None:
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                    if current.count(old_text) != 1:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                    updated = current.replace(old_text, new_text)
+                    _validate_text(updated)
+                except AIError as error:
+                    raise SandboxOperationRejected.from_error(error) from error
                 _atomic_write(self._root, target, updated)
             digest = hashlib.sha256(updated.encode("utf-8")).hexdigest()
             return _write_result(normalized, digest)
@@ -597,20 +620,26 @@ class _LocalSandboxSession:
         return await self._run_sync(operation)
 
     async def create_directory(self, path: str) -> str:
-        normalized = _normalize_path(path)
-        validate_request_size("create_directory", {"path": path})
+        try:
+            normalized = _normalize_path(path)
+            validate_request_size("create_directory", {"path": path})
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
 
         def operation() -> str:
-            if _is_protected(normalized):
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            target = self._directory_path(normalized, allow_missing=True)
-            relative = _relative(self._root, target)
-            with _file_lock(self._lock_root, relative):
+            try:
+                if _is_protected(normalized):
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                target = self._directory_path(normalized, allow_missing=True)
+                relative = _relative(self._root, target)
                 if _is_protected(relative):
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 if target.exists():
                     return _write_result(normalized, "directory", status="exists")
                 _check_parent_chain(self._root, target.parent)
+            except AIError as error:
+                raise SandboxOperationRejected.from_error(error) from error
+            with _file_lock(self._lock_root, relative):
                 try:
                     target.mkdir(parents=True, exist_ok=True)
                 except FileNotFoundError as error:
@@ -668,13 +697,16 @@ class _LocalSandboxSession:
         *,
         timeout_seconds: float | None = None,
     ) -> str:
-        validate_request_size(
-            "run_command",
-            {"command": command, "timeout_seconds": timeout_seconds},
-        )
-        _validate_command_input(command)
-        _validate_command(command)
-        timeout = _command_timeout(timeout_seconds)
+        try:
+            validate_request_size(
+                "run_command",
+                {"command": command, "timeout_seconds": timeout_seconds},
+            )
+            _validate_command_input(command)
+            _validate_command(command)
+            timeout = _command_timeout(timeout_seconds)
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
         await self._ensure_open()
         process = await self._start_process(command)
         cleanup_succeeded = True
@@ -711,13 +743,16 @@ class _LocalSandboxSession:
         return _command_result(process)
 
     async def start_command(self, command: str) -> str:
-        validate_request_size("start_command", {"command": command})
-        _validate_command_input(command)
-        _validate_command(command)
+        try:
+            validate_request_size("start_command", {"command": command})
+            _validate_command_input(command)
+            _validate_command(command)
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
         await self._ensure_open()
         async with self._process_lock:
             if len(self._processes) + self._starting_background >= 256:
-                raise AIError(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
+                raise SandboxOperationRejected(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
             self._starting_background += 1
         try:
             process = await self._start_process(command)
@@ -739,10 +774,15 @@ class _LocalSandboxSession:
         return _command_result(process, status=status)
 
     async def stop_command(self, command_id: str) -> str:
-        validate_request_size("stop_command", {"command_id": command_id})
+        try:
+            validate_request_size("stop_command", {"command_id": command_id})
+            if not command_id:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        except AIError as error:
+            raise SandboxOperationRejected.from_error(error) from error
         process = await self._get_process(command_id)
         if process is None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise SandboxOperationRejected(ErrorCode.REQUEST_FIELD_INVALID)
         await _stop_process(process, force=False)
         return _command_result(process)
 
@@ -1296,7 +1336,7 @@ def _append_process_output(state: _ProcessState, channel: str, text: str) -> Non
         state.stderr_chars = chars
 
 
-async def _wait_process(state: _ProcessState) -> None:
+async def _wait_process(state: "_ProcessState") -> None:
     cleanup_error: BaseException | None = None
     try:
         group_cleanup_needed = await _observe_process_exit(state)
@@ -1314,9 +1354,7 @@ async def _wait_process(state: _ProcessState) -> None:
         if pending_readers:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(
-                        *(asyncio.shield(task) for task in pending_readers)
-                    ),
+                    asyncio.gather(*(asyncio.shield(task) for task in pending_readers)),
                     2.0,
                 )
             except asyncio.TimeoutError:
