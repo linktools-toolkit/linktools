@@ -14,6 +14,8 @@ ModelRequestPurpose = Literal["agent", "compaction"]
 REQUEST_PURPOSE_METADATA_KEY = "linktools.ai.request_purpose"
 REQUEST_SEQUENCE_METADATA_KEY = "linktools.ai.request_sequence"
 OUTPUT_RETRY_INDEX_METADATA_KEY = "linktools.ai.output_retry_index"
+OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
+DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"
 MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
 MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
 MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
@@ -47,11 +49,11 @@ class ModelRequestFact:
             REQUEST_PURPOSE_METADATA_KEY: self.purpose,
         }
         if include_observation:
-            values["linktools.ai.observation_id"] = self.observation_id
+            values[OBSERVATION_ID_METADATA_KEY] = self.observation_id
         if self.output_retry_index is not None:
             values[OUTPUT_RETRY_INDEX_METADATA_KEY] = str(self.output_retry_index)
         if self.duration_ns is not None:
-            values["linktools.ai.duration_ns"] = str(self.duration_ns)
+            values[DURATION_NS_METADATA_KEY] = str(self.duration_ns)
         return values
 
 
@@ -154,6 +156,7 @@ class ModelRequestJournal:
 
 
 __all__ = [
+    "DURATION_NS_METADATA_KEY",
     "MODEL_USAGE_CACHE_READ_METADATA_KEY",
     "MODEL_USAGE_CACHE_WRITE_METADATA_KEY",
     "MODEL_USAGE_INPUT_METADATA_KEY",
@@ -162,6 +165,7 @@ __all__ = [
     "ModelRequestFact",
     "ModelRequestJournal",
     "ModelRequestPurpose",
+    "OBSERVATION_ID_METADATA_KEY",
     "OUTPUT_RETRY_INDEX_METADATA_KEY",
     "REQUEST_PURPOSE_METADATA_KEY",
     "REQUEST_SEQUENCE_METADATA_KEY",
