@@ -108,13 +108,17 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 assert result.status is ExecutionStatus.SUCCEEDED
 
         end = datetime.now(timezone.utc) + timedelta(seconds=1)
-        result = await metrics.query(
-            MetricQuery(
-                "linktools.agent.run.count",
-                MetricWindow.between(start, end),
-            )
+        window = MetricWindow.between(start, end)
+        model_count = await metrics.query(
+            MetricQuery("linktools.model.request.count", window)
         )
-        assert result.points[0].value == 3
-        assert result.points[0].sample_count == 3
+        execution_count = await metrics.query(
+            MetricQuery("linktools.execution.count", window)
+        )
+
+        assert model_count.points[0].value == 3
+        assert model_count.points[0].sample_count == 3
+        assert execution_count.points[0].value == 3
+        assert execution_count.points[0].sample_count == 3
     finally:
         await sql_engine.dispose()
