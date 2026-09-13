@@ -826,7 +826,8 @@ class ToolOperationRecord:
             if (
                 self.result_payload is not None
                 or self.error_payload is not None
-                or self.error_code != ErrorCode.TOOL_EFFECT_UNKNOWN.value
+                or self.error_code
+                not in {None, ErrorCode.TOOL_EFFECT_UNKNOWN.value}
             ):
                 raise ValueError("unknown-effect tool operation payload is invalid")
         else:
