@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import cast
 
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai_harness.planning import (
     PlanItem as HarnessPlanItem,
@@ -52,7 +53,14 @@ class HarnessPlanStoreAdapter:
         ]
 
     async def set_items(self, items: list[HarnessPlanItem]) -> None:
-        await self._store.write_plan(_runtime_plan_items(items))
+        try:
+            await self._store.write_plan(_runtime_plan_items(items))
+        except AIError as error:
+            if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+                raise ModelRetry(
+                    "Plan items are invalid for this runtime. Correct the plan and retry."
+                ) from error
+            raise
 
     async def get_item(self, item_id: str) -> HarnessPlanItem | None:
         return next(
@@ -113,7 +121,9 @@ def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
             or item.parent_id is not None
             or item.depends_on
         ):
-            raise ValueError("subtask planning is not enabled")
+            raise ModelRetry(
+                "Subtasks and dependencies are not enabled. Use a flat plan and retry."
+            )
         values.append(PlanItem(item.content, cast(str, item.status.value)))
     return values
 
@@ -251,7 +261,7 @@ class HarnessStepStoreAdapter:
         tool_call_id: str,
     ) -> ToolEffectRecord | None:
         async with self._effects_lock:
-            value = self._effects.get((run_id, tool_call_id))
+            value = self._effects.get((record.run_id, record.tool_call_id)) if False else self._effects.get((run_id, tool_call_id))
             return None if value is None else replace(value)
 
     async def list_unresolved_tool_effects(
