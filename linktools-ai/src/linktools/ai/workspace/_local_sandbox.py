@@ -146,7 +146,7 @@ class _WindowsJob:
                 ("MaximumWorkingSetSize", ctypes.c_size_t),
                 ("ActiveProcessLimit", ctypes.c_uint32),
                 ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", ctypes.c_uint32),
+                ("PriorityClass", ctypes.c_size_t),
                 ("SchedulingClass", ctypes.c_uint32),
             ]
 
@@ -185,7 +185,6 @@ class _WindowsJob:
             ctypes.c_uint32,
             ctypes.c_uint32,
         ]
-        kernel32.SetHandleInformation.restype = ctypes.c_int
         if not kernel32.SetHandleInformation(self._handle, 1, 0):
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
 
@@ -392,9 +391,6 @@ class _LocalSandboxSession:
         def operation() -> str:
             try:
                 target = self._file_path(normalized, write=True)
-                if expected is not None:
-                    current_hash = _read_optional_hash(target, normalized)
-                    _check_expected_digest(current_hash, expected)
             except AIError as error:
                 raise SandboxOperationRejected.from_error(error) from error
             with _file_lock(self._lock_root, _relative(self._root, target)):
@@ -1336,7 +1332,7 @@ def _append_process_output(state: _ProcessState, channel: str, text: str) -> Non
         state.stderr_chars = chars
 
 
-async def _wait_process(state: "_ProcessState") -> None:
+async def _wait_process(state: _ProcessState) -> None:
     cleanup_error: BaseException | None = None
     try:
         group_cleanup_needed = await _observe_process_exit(state)
@@ -1354,7 +1350,9 @@ async def _wait_process(state: "_ProcessState") -> None:
         if pending_readers:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*(asyncio.shield(task) for task in pending_readers)),
+                    asyncio.gather(
+                        *(asyncio.shield(task) for task in pending_readers)
+                    ),
                     2.0,
                 )
             except asyncio.TimeoutError:
