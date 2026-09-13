@@ -685,7 +685,11 @@ def contribution_semantic_contract(
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if kind == "tool" and isinstance(value, Tool):
         definition = value.tool_def
-        validate_tool_semantic_metadata(definition.metadata)
+        validate_tool_semantic_metadata(
+            definition.metadata,
+            require_effect=True,
+            require_tool_class=True,
+        )
         contract: dict[str, JsonValue] = {
             "version": 1,
             "description": definition.description,
