@@ -4164,9 +4164,12 @@ class LocalExecutionBackend:
                         raise _secondary_execution_error(commit_error, error) from error
                 metric_status = current.status.value
                 metric_error_code = current.error_code
-                _logger.exception(
-                    "local execution failed: execution=%s",
+                _logger.error(
+                    "local execution failed: execution=%s code=%s safe_error_details=%s",
                     execution_id,
+                    current.error_code,
+                    current.safe_error_details,
+                    exc_info=environ.debug,
                 )
                 return
             if isinstance(result, DeferredToolRequests):
