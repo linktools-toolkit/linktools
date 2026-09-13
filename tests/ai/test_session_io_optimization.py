@@ -29,7 +29,10 @@ class _Sessions:
         *,
         tenant_id: str,
     ) -> ResourceRef | None:
-        if session_id != self._record.session_id or tenant_id != self._record.tenant_id:
+        if (
+            session_id != self._record.session_id
+            or tenant_id != self._record.tenant_id
+        ):
             return None
         return ResourceRef(
             ResourceKind.SESSION,
@@ -44,7 +47,10 @@ class _Sessions:
         *,
         tenant_id: str,
     ) -> SessionRecord | None:
-        if session_id != self._record.session_id or tenant_id != self._record.tenant_id:
+        if (
+            session_id != self._record.session_id
+            or tenant_id != self._record.tenant_id
+        ):
             return None
         return self._record
 
