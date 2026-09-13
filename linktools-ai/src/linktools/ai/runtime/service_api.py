@@ -163,7 +163,8 @@ class ExecutionView:
     session_id: str | None = None
 
 
-def _project_execution_view(source: _ExecutionViewSource) -> ExecutionView:
+def project_execution_view(source: _ExecutionViewSource) -> ExecutionView:
+    """Project an internal execution source into the stable public view."""
     return ExecutionView(
         source.execution_id,
         source.agent_id,
@@ -1063,4 +1064,5 @@ __all__ = [
     "TaskGraphRunEvent",
     "TranscriptItem",
     "UpdateSessionRequest",
+    "project_execution_view",
 ]
