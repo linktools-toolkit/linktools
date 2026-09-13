@@ -54,6 +54,31 @@ async def test_plan_mode_keeps_workspace_file_reads_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_plan_mode_keeps_pydantic_framework_control_kinds() -> None:
+    compaction_policy = RuntimeCompactionPolicy()
+    prepare = _plan_mode_prepare(
+        plan_mode=True,
+        compaction_policy=compaction_policy,
+    )
+    tools = [
+        ToolDefinition(name="arbitrary_loader", tool_kind="capability-load"),
+        ToolDefinition(name="arbitrary_search", tool_kind="tool-search"),
+        ToolDefinition(name="ordinary"),
+    ]
+
+    selected = await prepare(None, tools)  # type: ignore[arg-type]
+
+    assert [tool.name for tool in selected] == [
+        "arbitrary_loader",
+        "arbitrary_search",
+    ]
+    assert compaction_policy.keep_result_tools == {
+        "arbitrary_loader",
+        "arbitrary_search",
+    }
+
+
+@pytest.mark.asyncio
 async def test_plan_mode_prepare_captures_wrapped_per_run_tool_semantics() -> None:
     async def control(_ctx: RunContext[None]) -> str:
         return "control"
