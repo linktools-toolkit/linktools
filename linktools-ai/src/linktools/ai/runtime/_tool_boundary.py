@@ -218,23 +218,6 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
         try:
             final_args = await self._canonicalize_args(tool_args, path_fields)
-            call_id = ctx.tool_call_id
-            if not isinstance(call_id, str) or not call_id:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
-            if self._repository_boundary is not None:
-                await self._repository_boundary.check(
-                    tool_name=name,
-                    tool_call_id=call_id,
-                    arguments=final_args,
-                    path_fields=path_fields,
-                )
-            await self._authorize(
-                name,
-                descriptor,
-                final_args,
-                approved=ctx.tool_call_approved,
-            )
         except AIError as error:
             if descriptor.tool_class in {
                 "filesystem.read",
@@ -245,6 +228,23 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
                 if message is not None:
                     raise ModelRetry(message) from error
             raise
+        call_id = ctx.tool_call_id
+        if not isinstance(call_id, str) or not call_id:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        call = ToolCallPart(name, args=final_args, tool_call_id=call_id)
+        if self._repository_boundary is not None:
+            await self._repository_boundary.check(
+                tool_name=name,
+                tool_call_id=call_id,
+                arguments=final_args,
+                path_fields=path_fields,
+            )
+        await self._authorize(
+            name,
+            descriptor,
+            final_args,
+            approved=ctx.tool_call_approved,
+        )
         if descriptor.effect_owner == "none":
             return await self._invoke(
                 call,
