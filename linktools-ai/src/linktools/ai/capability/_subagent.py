@@ -99,6 +99,7 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
                 if error.code in {
                     ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                     ErrorCode.REQUEST_FIELD_INVALID,
+                    ErrorCode.PROMPT_TOO_LARGE,
                 }:
                     raise ModelRetry("requested subagent, task, or files are invalid") from error
                 raise
