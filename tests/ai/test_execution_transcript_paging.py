@@ -10,7 +10,12 @@ from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserProm
 
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
-from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, HmacCursorSigner, step_run_id
+from linktools.ai.core import (
+    ExecutionLineageKind,
+    ExecutionStatus,
+    HmacCursorSigner,
+    step_run_id,
+)
 from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime.state._contracts import ExecutionRecord
 from linktools.ai.spec import AgentSpec
@@ -67,7 +72,10 @@ class _Executions:
         *,
         tenant_id: str,
     ) -> ExecutionRecord | None:
-        if execution_id != self._record.execution_id or tenant_id != self._record.tenant_id:
+        if (
+            execution_id != self._record.execution_id
+            or tenant_id != self._record.tenant_id
+        ):
             return None
         return self._record
 
