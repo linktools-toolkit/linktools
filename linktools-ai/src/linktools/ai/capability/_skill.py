@@ -175,6 +175,7 @@ class LinkToolsSkills(AbstractCapability[AgentContext[object]]):
                         "skill id or resource path is invalid"
                     ) from error
                 if error.code in {
+                    ErrorCode.ASSET_PATH_OUTSIDE_ROOT,
                     ErrorCode.ASSET_NOT_FOUND,
                     ErrorCode.ASSET_CODEC_UNKNOWN,
                 }:
