@@ -77,11 +77,14 @@ async def _boundary(
     workspace: Workspace,
     session: _AttachmentSession,
     repository: _RepositoryBoundary | None = None,
+    *,
+    vision: bool = True,
 ) -> tuple[RuntimeToolBoundaryToolset, object]:
     capability = workspace_capabilities(
         workspace,
         ("attach_files",),
         session=session,  # type: ignore[arg-type]
+        vision=vision,
     )[0]
     boundary = RuntimeToolBoundaryToolset(
         (capability.get_toolset(),),
@@ -212,4 +215,24 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
             tool,
         )
 
+    assert session.reads == []
+
+
+@pytest.mark.asyncio
+async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = _AttachmentSession({"evidence.png": b"png"})
+    boundary, tool = await _boundary(workspace, session, vision=False)
+
+    with pytest.raises(ModelRetry, match="does not support image attachments"):
+        await boundary.call_tool(  # type: ignore[arg-type]
+            "attach_files",
+            {"paths": ["evidence.png"]},
+            _context(),
+            tool,
+        )
+
+    assert session.canonicalized == ["evidence.png"]
     assert session.reads == []
