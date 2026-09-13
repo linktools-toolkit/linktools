@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..core import JsonValue
+from ..core import JsonValue, validate_user_prompt
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._context import AgentContext
@@ -87,6 +87,14 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
+                validate_user_prompt(task)
+            except AIError as error:
+                if error.code is ErrorCode.PROMPT_TOO_LARGE:
+                    raise ModelRetry(
+                        "The delegated task is invalid or too large. Shorten it and retry."
+                    ) from error
+                raise
+            try:
                 return await self.delegate_task(
                     subagent_id,
                     task,
@@ -99,7 +107,6 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
                 if error.code in {
                     ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                     ErrorCode.REQUEST_FIELD_INVALID,
-                    ErrorCode.PROMPT_TOO_LARGE,
                 }:
                     raise ModelRetry("requested subagent, task, or files are invalid") from error
                 raise
@@ -152,6 +159,7 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(task, str) or not task.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        validate_user_prompt(task)
         if not isinstance(invocation_id, str) or not invocation_id.strip():
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if not isinstance(files, Sequence) or isinstance(
