@@ -4,7 +4,7 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic_ai.messages import UserContent
 
@@ -163,17 +163,18 @@ class ExecutionView:
     session_id: str | None = None
 
 
-def project_execution_view(source: _ExecutionViewSource) -> ExecutionView:
+def project_execution_view(source: object) -> ExecutionView:
     """Project an internal execution source into the stable public view."""
+    value = cast(_ExecutionViewSource, source)
     return ExecutionView(
-        source.execution_id,
-        source.agent_id,
-        source.status,
-        source.lineage_kind,
-        source.parent_execution_id,
-        source.root_execution_id,
-        source.parent_invocation_id,
-        source.session_id,
+        value.execution_id,
+        value.agent_id,
+        value.status,
+        value.lineage_kind,
+        value.parent_execution_id,
+        value.root_execution_id,
+        value.parent_invocation_id,
+        value.session_id,
     )
 
 
