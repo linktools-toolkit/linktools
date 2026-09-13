@@ -423,6 +423,7 @@ def _build_default_models(workspace: Workspace) -> ModelRegistry:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
     return ModelRegistry.openai(
         model=model,
+        vision=environ.get_config("OPENAI_VISION", bool, default=False),
         base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
         api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
     )
