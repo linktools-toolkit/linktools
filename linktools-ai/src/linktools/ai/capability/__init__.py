@@ -42,6 +42,7 @@ from ._tool_semantic import (
 from ._workspace import (
     WorkspaceAccess,
     workspace_capabilities,
+    workspace_model_retry_message,
     workspace_tool_contributions,
 )
 
@@ -75,6 +76,7 @@ __all__ = [
     "mcp_server_namespace",
     "mcp_server_selector",
     "workspace_capabilities",
+    "workspace_model_retry_message",
     "workspace_tool_contributions",
     "tool_class_from_metadata",
     "tool_compaction_keep_result_from_metadata",
