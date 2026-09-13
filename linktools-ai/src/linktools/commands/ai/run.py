@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from collections.abc import AsyncIterator
 from argparse import Namespace
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
-from linktools.cli.argparse import ConfigAction
+from linktools.cli.argparse import BooleanOptionalAction, ConfigAction
 from linktools.core import ConfigField, environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
@@ -28,8 +29,17 @@ if TYPE_CHECKING:
 OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
 OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
 OPENAI_API_KEY = ConfigField(name="OPENAI_API_KEY", cast=str, default=None, secret=True)
-OPENAI_VISION = ConfigField(name="OPENAI_VISION", cast=bool, default=False)
 _logger = environ.get_logger("commands.ai.run")
+
+
+def _openai_vision_default() -> bool:
+    raw = os.getenv("OPENAI_VISION")
+    if raw is None or not raw.strip():
+        return False
+    try:
+        return environ.config.cast(raw, bool)
+    except (TypeError, ValueError) as error:
+        raise CommandError("OPENAI_VISION must be a boolean") from error
 
 
 class Command(BaseCommand):
@@ -47,7 +57,12 @@ class Command(BaseCommand):
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
-        parser.add_argument("--vision", action=ConfigAction, config=OPENAI_VISION)
+        parser.add_argument(
+            "--vision",
+            action=BooleanOptionalAction,
+            default=_openai_vision_default(),
+            help="allow image input for the selected model",
+        )
         parser.add_argument(
             "--planning",
             action="store_true",
