@@ -792,7 +792,27 @@ class ToolOperationRecord:
 
     def __post_init__(self) -> None:
         _validate_tool_arguments_payload(self.arguments_digest, self.arguments_payload)
-        if self.status is ToolOperationStatus.FAILED:
+        if self.status in {
+            ToolOperationStatus.PENDING,
+            ToolOperationStatus.CLAIMED,
+            ToolOperationStatus.CANCELLED,
+        }:
+            if (
+                self.result_payload is not None
+                or self.error_code is not None
+                or self.error_payload is not None
+            ):
+                raise ValueError("tool operation state cannot carry a terminal payload")
+        elif self.status is ToolOperationStatus.COMPLETED:
+            if (
+                self.result_payload is None
+                or self.error_code is not None
+                or self.error_payload is not None
+            ):
+                raise ValueError("completed tool operation payload is invalid")
+        elif self.status is ToolOperationStatus.FAILED:
+            if self.result_payload is not None:
+                raise ValueError("failed tool operation cannot carry a result payload")
             try:
                 validate_tool_operation_failure(
                     self.error_code,
@@ -802,6 +822,15 @@ class ToolOperationRecord:
                 if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
                     raise
                 raise ValueError("tool failure contract is invalid") from error
+        elif self.status is ToolOperationStatus.EFFECT_UNKNOWN:
+            if (
+                self.result_payload is not None
+                or self.error_payload is not None
+                or self.error_code != ErrorCode.TOOL_EFFECT_UNKNOWN.value
+            ):
+                raise ValueError("unknown-effect tool operation payload is invalid")
+        else:
+            raise ValueError("tool operation status is invalid")
         try:
             validate_tenant_id(self.tenant_id)
             validate_resource_id(self.execution_id)
