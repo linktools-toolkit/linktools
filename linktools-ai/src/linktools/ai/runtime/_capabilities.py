@@ -39,6 +39,7 @@ from ._harness_memory import (
 )
 from ._harness_planning import build_harness_planning
 from ._journal import (
+    DURATION_NS_METADATA_KEY,
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
@@ -110,7 +111,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             ),
         )
         if not self.model_observation_enabled:
-            metadata.pop("linktools.ai.duration_ns", None)
+            metadata.pop(DURATION_NS_METADATA_KEY, None)
         if response is not None:
             usage = response.usage
             metadata.update(
