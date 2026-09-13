@@ -36,6 +36,7 @@ class _TaskTestModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:task"
+    vision = False
     fingerprint = "a" * 64
     semantic_payload: dict[str, JsonValue] = {
         "provider": "test",
