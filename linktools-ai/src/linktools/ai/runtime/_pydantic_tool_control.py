@@ -15,6 +15,7 @@ from pydantic_ai.tools import ToolDefinition
 
 from ..capability import AgentContext, ToolCallFailed, ToolCallRejected
 
+_OWNS_PYDANTIC_TOOL_CONTROL = True
 _logger = environ.get_logger("ai.runtime.pydantic_tool_control")
 
 
