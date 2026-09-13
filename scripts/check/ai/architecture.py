@@ -343,7 +343,11 @@ def _validate_cross_owner_access(
                     aliases[bound] = target if alias.asname else alias.name.split(".", 1)[0]
                     errors.extend(_check_module_boundary(source, source_owner, target))
             else:
-                base = _resolve_from_module(name=source.name, is_package=source.path.name == "__init__.py", node=node)
+                base = _resolve_from_module(
+                    source.name,
+                    source.path.name == "__init__.py",
+                    node,
+                )
                 if base is None:
                     continue
                 if not base.startswith(_AI_ROOT) or base not in known:
