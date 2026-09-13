@@ -46,6 +46,7 @@ from ._journal import (
     MODEL_USAGE_OUTPUT_METADATA_KEY,
 )
 from ._memory import MemoryStore
+from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import StepStore
 
@@ -87,6 +88,11 @@ class _RuntimeStepPersistence(StepPersistence[None]):
             raise TypeError("store must be HarnessStepStoreAdapter")
 
     def get_ordering(self) -> CapabilityOrdering:
+        if self.model_journal is not None:
+            return CapabilityOrdering(
+                position="innermost",
+                wrapped_by=(RuntimeModelObservationCapability,),
+            )
         return CapabilityOrdering(position="innermost")
 
     @property
@@ -159,9 +165,17 @@ class _RuntimeStepPersistence(StepPersistence[None]):
         ctx: PydanticRunContext[None],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
+        if self.model_journal is None:
+            return await super().before_model_request(ctx, request_context)
         fact = self._current_model_fact(ctx)
         if fact is None:
-            return await super().before_model_request(ctx, request_context)
+            _logger.error(
+                "model request journal fact missing before persistence: "
+                "run=%s step=%s purpose=agent",
+                self.run_id or ctx.run_id,
+                ctx.run_step,
+            )
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         original = self._with_model_metadata(fact)
         try:
             return await super().before_model_request(ctx, request_context)
