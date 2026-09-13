@@ -306,11 +306,15 @@ class DefaultSessionService:
                 session_id, principal, AuthorizationAction.SESSION_READ
             )
             record = await self._reconcile_terminal_admission(record)
-            active_execution = await self._active_admitted_execution(record)
             active = (
-                () if active_execution is None else (active_execution.execution_id,)
+                ()
+                if record.active_execution_id is None
+                else (record.active_execution_id,)
             )
-            return LoadedSession(await self._view(record, principal), active)
+            return LoadedSession(
+                await self._view(record, principal, active=active),
+                active,
+            )
 
     async def load_model_context(
         self,
@@ -932,9 +936,20 @@ class DefaultSessionService:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
 
-    async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
-        active_execution = await self._active_admitted_execution(record)
-        active = () if active_execution is None else (active_execution.execution_id,)
+    async def _view(
+        self,
+        record: SessionRecord,
+        principal: Principal,
+        *,
+        active: "tuple[str, ...] | None" = None,
+    ) -> SessionView:
+        if active is None:
+            active_execution = await self._active_admitted_execution(record)
+            active = (
+                ()
+                if active_execution is None
+                else (active_execution.execution_id,)
+            )
         return SessionView(
             record.session_id,
             record.agent_id,
