@@ -73,10 +73,11 @@ def validate_tool_semantic_metadata(
     metadata: Mapping[str, object] | None,
     *,
     require_effect: bool = False,
+    require_tool_class: bool = False,
 ) -> None:
     """Validate LinkTools Tool metadata without coercing any value."""
     if metadata is None:
-        if require_effect:
+        if require_effect or require_tool_class:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return
     if not isinstance(metadata, Mapping):
@@ -100,6 +101,8 @@ def validate_tool_semantic_metadata(
     if tool_class is not None or TOOL_CLASS_METADATA_KEY in metadata:
         if not isinstance(tool_class, str) or tool_class not in _TOOL_CLASSES:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    elif require_tool_class:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     path_fields = metadata.get(TOOL_PATH_FIELDS_METADATA_KEY)
     if path_fields is not None or TOOL_PATH_FIELDS_METADATA_KEY in metadata:
