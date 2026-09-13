@@ -28,7 +28,7 @@ from ..workspace import (
 from ._context import AgentContext
 from ._group import CapabilityContribution
 from ._tool_signal import ToolCallRejected
-from ._tool_semantic import tool_semantic_metadata
+from ._tool_semantic import tool_effect_from_metadata, tool_semantic_metadata
 
 _ResultT = TypeVar("_ResultT")
 
@@ -107,7 +107,7 @@ _EFFECTFUL_WORKSPACE_TOOLS = frozenset(
     {
         name
         for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items()
-        if metadata.get("linktools.tool.effect") != "none"
+        if tool_effect_from_metadata(metadata, require=True) != "none"
     }
 )
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
