@@ -15,7 +15,7 @@ from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, OperationSt
 from linktools.ai.errors import ErrorCode
 from linktools.ai.runtime._agent_executor import AgentExecutor
 from linktools.ai.runtime._capabilities import compose_platform_capabilities
-from linktools.ai.runtime._compaction import RuntimeCompaction
+from linktools.ai.runtime._compaction import RuntimeCompaction, RuntimeCompactionPolicy
 from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
     DefaultExecutionService,
@@ -63,7 +63,9 @@ async def test_default_platform_composition_keeps_file_read_deduplication() -> N
         memory_scope=None,
         step_store=StagingStepStore(),
         memory_store=None,
-        runtime_tool_names=(),
+        ordinary_tool_policy=(),
+        compaction_policy=RuntimeCompactionPolicy(),
+        planning=False,
         context_target_tokens=None,
         parent_step_run_id=None,
         plan_store_resolver=None,

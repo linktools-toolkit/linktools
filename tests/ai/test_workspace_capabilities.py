@@ -8,12 +8,9 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import (
-    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_TOOL_NAMES,
-    WORKSPACE_SHELL_TOOL_NAMES,
     CapabilityGroup,
+    tool_class_from_metadata,
     workspace_capabilities,
-    workspace_tool_class,
     workspace_tool_contributions,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -190,17 +187,40 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
     contributions = workspace_tool_contributions(workspace)
 
     assert tuple(item.id for item in contributions) == (
-        *WORKSPACE_FILESYSTEM_TOOL_NAMES,
-        *WORKSPACE_SHELL_TOOL_NAMES,
+        "attach_files",
+        "create_directory",
+        "edit_file",
+        "file_info",
+        "find_files",
+        "list_directory",
+        "read_file",
+        "search_files",
+        "write_file",
+        "check_command",
+        "run_command",
+        "start_command",
+        "stop_command",
     )
     assert all(item.kind == "tool" for item in contributions)
     assert all(len(item.fingerprint) == 64 for item in contributions)
-    assert tuple(workspace_tool_class(item.value) for item in contributions) == tuple(
-        "filesystem.read"
-        if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
-        else "filesystem.write"
-        for name in WORKSPACE_FILESYSTEM_TOOL_NAMES
-    ) + tuple("shell" for _ in WORKSPACE_SHELL_TOOL_NAMES)
+    assert tuple(
+        tool_class_from_metadata(item.value.tool_def.metadata)
+        for item in contributions
+    ) == (
+        "filesystem.read",
+        "filesystem.write",
+        "filesystem.write",
+        "filesystem.read",
+        "filesystem.read",
+        "filesystem.read",
+        "filesystem.read",
+        "filesystem.read",
+        "filesystem.write",
+        "shell",
+        "shell",
+        "shell",
+        "shell",
+    )
     assert tuple(item.fingerprint for item in contributions) == tuple(
         item.fingerprint for item in workspace_tool_contributions(workspace)
     )
@@ -256,7 +276,21 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
     expected = {item.id: item.semantic_contract for item in contributions}
     capability = workspace_capabilities(
         workspace,
-        (*WORKSPACE_FILESYSTEM_TOOL_NAMES, *WORKSPACE_SHELL_TOOL_NAMES),
+        (
+            "attach_files",
+            "create_directory",
+            "edit_file",
+            "file_info",
+            "find_files",
+            "list_directory",
+            "read_file",
+            "search_files",
+            "write_file",
+            "check_command",
+            "run_command",
+            "start_command",
+            "stop_command",
+        ),
         session=await sandbox.open(root=workspace.root),
     )[0]
     run_toolset = capability.get_toolset()

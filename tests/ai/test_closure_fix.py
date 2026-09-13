@@ -43,6 +43,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
+from ._runtime_test_helpers import semantic_tool
 
 
 class _StepStore:
@@ -253,14 +254,15 @@ async def test_replay_safe_model_retry_is_a_known_failure() -> None:
     async def retry_tool() -> None:
         raise ModelRetry("retry")
 
+    descriptor = ManagedToolDescriptor(
+        effect_owner="tool_operation",
+        effect="replay_safe",
+        tool_class="business",
+    )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([retry_tool]),),
+        (FunctionToolset([semantic_tool(retry_tool, descriptor)]),),
         {
-            "retry_tool": ManagedToolDescriptor(
-                effect_owner="tool_operation",
-                effect="replay_safe",
-                tool_class="business",
-            )
+            "retry_tool": descriptor
         },
         id="business",
         tool_operations=bridge,  # type: ignore[arg-type]
@@ -284,14 +286,15 @@ async def test_non_replay_safe_model_retry_requires_effect_verification() -> Non
     async def retry_tool() -> None:
         raise ModelRetry("retry")
 
+    descriptor = ManagedToolDescriptor(
+        effect_owner="tool_operation",
+        effect="non_replay_safe",
+        tool_class="business",
+    )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([retry_tool]),),
+        (FunctionToolset([semantic_tool(retry_tool, descriptor)]),),
         {
-            "retry_tool": ManagedToolDescriptor(
-                effect_owner="tool_operation",
-                effect="non_replay_safe",
-                tool_class="business",
-            )
+            "retry_tool": descriptor
         },
         id="business",
         tool_operations=bridge,  # type: ignore[arg-type]

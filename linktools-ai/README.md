@@ -98,6 +98,13 @@ async with Runtime.open(
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
+LinkTools-owned Tool declarations carry their runtime semantics in
+`ToolDefinition.metadata`. `CapabilityGroup.tool()` writes the registered
+`effect`, `plan_safe`, and `tool_class=business` values there; Workspace and
+MCP owners declare their own effect, class, path, and context semantics. Plan
+filtering, sandbox selection, leaf effect handling, and compaction consume
+these declarations instead of inferring behavior from Tool names.
+
 `CapabilityGroup.agent()` creates an `AgentSpec`; declarations themselves use the single v1 wire contract and do not expose a per-declaration revision field.
 
 ## 3. Workspace declarations
@@ -239,6 +246,13 @@ User prompt transport is also durable: plain text uses the `text` codec, while s
 
 URL and uploaded-file content remains an external reference: Runtime persists its declared metadata and does not implicitly download it. Inline binary content and workspace file inputs are frozen as bytes before execution reservation when their durable contract requires it. Model transport retries use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults to `tool_retries=10000`, and output correction defaults to `output_retries=3`.
 
+OpenAI model declarations accept explicit `vision=True` or `vision=False`
+(`False` by default). The value is part of the model semantic fingerprint. A
+model with `vision=False` rejects recognizable image content at the final
+request boundary before provider calls or transport retries; PDF, text, and
+other non-image attachments continue through the existing provider contract.
+LinkTools does not infer image support from model names, endpoints, or probes.
+
 Execution file input uses the same durable boundary:
 
 ```python
@@ -251,6 +265,46 @@ result = await agent.run(
 The Sandbox canonicalizes and deduplicates logical paths before reading them. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
 If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, reads the current Workspace contents, and sends those files only to the next model request. A later complete model response consumes them under the same transient rule. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same explicit `files=` execution input.
+
+### Runtime context and execution queries
+
+`Runtime.open()` is the stable Runtime construction entry point. Use
+`RuntimeContext` to provide the application object, tenant, correlation, and
+low-cardinality metric dimensions for the Runtime lifetime:
+
+```python
+from linktools.ai.runtime import RuntimeContext
+
+context = RuntimeContext(app, tenant_id="tenant-a")
+async with Runtime.open(workspace, models=models, context=context) as runtime:
+    ...
+```
+
+Execution metadata is available through the authorized public query surface:
+
+```python
+from linktools.ai.runtime import ListExecutionRequest
+
+page = await runtime.execution.list(
+    ListExecutionRequest(
+        principal=runtime.default_principal,
+        session_id="chat-1",
+        agent_id="audit",
+    )
+)
+```
+
+`RuntimeHistory.open()` provides the same read-only execution metadata and
+history projections without loading a ModelRegistry or compiling Agents.
+`RuntimeHistory.inspect_execution()` and `list_executions()` use the same
+authorization and filters as `Runtime.execution`. Execution list cursors are
+HMAC-protected, ordered weak-consistency continuations: they do not provide a
+cross-page MVCC snapshot, and a caller needing a closed set should query after
+the target set is stable or restart from the first page.
+
+Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
+private repositories directly. No durable schema or data migration is part of
+this Runtime query surface.
 
 ## 7. Runtime state
 
@@ -338,6 +392,6 @@ from linktools.ai import (
 )
 ```
 
-Package-specific public contracts remain available from their owning packages, for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`, and `linktools.ai.runtime`. `ErrorDiagnostics` is available from `linktools.ai.runtime`.
+Package-specific public contracts remain available from their owning packages, for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`, and `linktools.ai.runtime`. `ErrorDiagnostics` is available from `linktools.ai.errors`.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.

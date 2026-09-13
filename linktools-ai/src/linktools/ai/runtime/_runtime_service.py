@@ -913,8 +913,8 @@ class Runtime(Generic[AppT]):
                     task.result()
                 except asyncio.CancelledError:
                     pass
-                except BaseException:  # noqa: BLE001
-                    _logger.exception("runtime close failed after caller cancellation")
+                except BaseException as error:  # noqa: BLE001
+                    _log_secondary_cleanup("runtime.close", error)
             raise
         except BaseException:
             async with self._close_lock:
@@ -927,8 +927,8 @@ class Runtime(Generic[AppT]):
             task.result()
         except asyncio.CancelledError:
             pass
-        except BaseException:  # noqa: BLE001
-            _logger.exception("runtime close task failed")
+        except BaseException as error:  # noqa: BLE001
+            _log_secondary_cleanup("runtime.close", error)
 
     async def _cleanup(self) -> None:
         if self._close_callback is not None:
@@ -1008,18 +1008,31 @@ async def _open_runtime(
             metric_control=components.metric_control,
         )
     except BaseException:
-        await components.close_callback()
+        try:
+            await components.close_callback()
+        except BaseException as error:
+            _log_secondary_cleanup("runtime.construct", error)
         raise
     try:
         yield runtime
-    except BaseException as body_error:
+    except BaseException:
         try:
             await runtime.close()
-        except BaseException as close_error:
-            raise close_error from body_error
+        except BaseException as error:
+            _log_secondary_cleanup("runtime.body", error)
         raise
     else:
         await runtime.close()
+
+
+def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
+    code = error.code.value if isinstance(error, AIError) else None
+    _logger.error(
+        "secondary cleanup failed: phase=%s code=%s exception_type=%s",
+        phase,
+        code,
+        type(error).__name__,
+    )
 
 
 __all__ = ["Runtime"]

@@ -11,14 +11,19 @@ from pydantic import BaseModel
 from ..capability import (
     CapabilityContribution,
     SkillDefinition,
-    mcp_selector_server,
     mcp_server_namespace,
     mcp_server_selector,
 )
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
-from ..spec import AgentSpec, AgentSpecCodec, MCPServerSpecCodec, SubagentRef
+from ..spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    MCPServerSpecCodec,
+    SubagentRef,
+    parse_mcp_tool_selector,
+)
 from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
 from ._definition import AgentDefinition
 from ._output import bind_output, restore_output
@@ -257,7 +262,7 @@ class AgentCompiler:
         ordinary_policy: list[str] = []
         mcp_policy: list[str] = []
         for selector in spec.allow_tools:
-            parsed = mcp_selector_server(selector)
+            parsed = parse_mcp_tool_selector(selector)
             if parsed is None:
                 ordinary_policy.append(selector)
                 if selector in tools:
@@ -332,12 +337,16 @@ class AgentCompiler:
                 ),
             )
         ordinary = tuple(
-            sorted(selector for selector in spec.allow_tools if not selector.startswith("mcp__"))
+            sorted(
+                selector
+                for selector in spec.allow_tools
+                if parse_mcp_tool_selector(selector) is None
+            )
         )
         allowed_namespaces = {mcp_server_namespace(item.id) for item in selected_mcp}
         mcp_policy = []
         for selector in spec.allow_tools:
-            parsed = mcp_selector_server(selector)
+            parsed = parse_mcp_tool_selector(selector)
             if parsed is None:
                 continue
             if parsed[0] not in allowed_namespaces:

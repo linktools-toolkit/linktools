@@ -8,8 +8,37 @@ import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.model._openai import _RetryingModel
+from pydantic_ai.messages import (
+    BinaryContent,
+    ImageUrl,
+    ModelMessage,
+    ModelRequest,
+    UploadedFile,
+    UserPromptPart,
+)
+from pydantic_ai.models import ModelRequestParameters, ModelResponse, ModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
+
+
+class _CountingModel(TestModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def request(
+        self,
+        messages: list[ModelMessage],
+        model_settings: ModelSettings | None,
+        model_request_parameters: ModelRequestParameters,
+    ) -> ModelResponse:
+        self.calls += 1
+        return await super().request(
+            messages,
+            model_settings,
+            model_request_parameters,
+        )
 
 
 def test_openai_operational_settings_do_not_change_durable_identity() -> None:
@@ -43,8 +72,146 @@ def test_openai_custom_endpoint_is_operational_configuration() -> None:
     assert dict(binding.semantic_payload) == {
         "provider": "openai",
         "model_identity": "openai:gpt-test",
+        "vision": False,
         "settings": {},
     }
+
+
+def test_openai_vision_is_durable_model_semantics() -> None:
+    without_vision = ModelRegistry.openai(
+        model="gpt-test",
+        vision=False,
+    ).snapshot().resolve("default")
+    with_vision = ModelRegistry.openai(
+        model="gpt-test",
+        vision=True,
+    ).snapshot().resolve("default")
+
+    assert dict(without_vision.semantic_payload)["vision"] is False
+    assert dict(with_vision.semantic_payload)["vision"] is True
+    assert without_vision.fingerprint != with_vision.fingerprint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    (
+        BinaryContent(b"image", media_type="image/png"),
+        ImageUrl("https://example.com/image"),
+        UploadedFile("report.png", "openai"),
+    ),
+)
+async def test_openai_without_vision_rejects_images_before_provider(
+    content: Any,
+) -> None:
+    wrapped = _CountingModel()
+    model = _RetryingModel(wrapped, 2, 0, vision=False)
+
+    with pytest.raises(AIError) as raised:
+        await model.request(
+            [ModelRequest(parts=[UserPromptPart([content])])],
+            None,
+            ModelRequestParameters(),
+        )
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert raised.value.retryable is False
+    assert raised.value.safe_details == {
+        "reason": "image_input_not_supported",
+    }
+    assert wrapped.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_openai_without_vision_rejects_stream_images_before_provider() -> None:
+    wrapped = _CountingModel()
+    model = _RetryingModel(wrapped, 2, 0, vision=False)
+
+    with pytest.raises(AIError) as raised:
+        async with model.request_stream(
+            [
+                ModelRequest(
+                    parts=[
+                        UserPromptPart(
+                            [BinaryContent(b"image", media_type="image/png")]
+                        )
+                    ]
+                )
+            ],
+            None,
+            ModelRequestParameters(),
+        ):
+            raise AssertionError("vision guard should reject before stream entry")
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert raised.value.retryable is False
+    assert wrapped.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_type", ("application/pdf", "text/plain"))
+async def test_openai_without_vision_allows_non_image_attachments(
+    media_type: str,
+) -> None:
+    wrapped = _CountingModel()
+    model = _RetryingModel(wrapped, 2, 0, vision=False)
+
+    await model.request(
+        [
+            ModelRequest(
+                parts=[
+                    UserPromptPart(
+                        [BinaryContent(b"document", media_type=media_type)]
+                    )
+                ]
+            )
+        ],
+        None,
+        ModelRequestParameters(),
+    )
+
+    assert wrapped.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_vision_policy_is_independent_per_binding() -> None:
+    parent_provider = _CountingModel()
+    child_provider = _CountingModel()
+    parent_model = _RetryingModel(parent_provider, 2, 0, vision=False)
+    child_model = _RetryingModel(child_provider, 2, 0, vision=True)
+    messages = [
+        ModelRequest(
+            parts=[
+                UserPromptPart(
+                    [BinaryContent(b"image", media_type="image/png")]
+                )
+            ]
+        )
+    ]
+
+    with pytest.raises(AIError):
+        await parent_model.request(messages, None, ModelRequestParameters())
+    await child_model.request(messages, None, ModelRequestParameters())
+
+    assert parent_provider.calls == 0
+    assert child_provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_without_vision_does_not_guess_opaque_uploaded_file_type() -> None:
+    wrapped = _CountingModel()
+    model = _RetryingModel(wrapped, 2, 0, vision=False)
+
+    uploaded = UploadedFile("file-image", "openai")
+    assert uploaded.media_type == "application/octet-stream"
+
+    await model.request(
+        [ModelRequest(parts=[UserPromptPart([uploaded])])],
+        None,
+        ModelRequestParameters(),
+    )
+
+    assert wrapped.calls == 1
 
 
 def test_openai_max_tokens_changes_durable_identity() -> None:

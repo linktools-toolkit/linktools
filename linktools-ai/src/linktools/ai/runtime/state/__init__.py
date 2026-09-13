@@ -7,6 +7,7 @@ from ._plan import (
     RuntimeRetentionMode,
     RuntimeStatePlan,
     RuntimeStateRoute,
+    runtime_domain_uses_object_store,
 )
 from ._root import RuntimeState
 
@@ -16,4 +17,5 @@ __all__ = [
     "RuntimeState",
     "RuntimeStatePlan",
     "RuntimeStateRoute",
+    "runtime_domain_uses_object_store",
 ]

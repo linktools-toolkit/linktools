@@ -6,20 +6,28 @@ import json
 
 import pytest
 from pydantic_ai.models.test import TestModel
+from pydantic_ai import Tool
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import (
+    CapabilityGroup,
     LinkToolsSkills,
     SkillDefinition,
     SkillSourceRegistry,
+    tool_semantic_metadata,
+    validate_tool_semantic_metadata,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._capabilities import select_runtime_tool_names
+from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
+)
+from linktools.ai.runtime.state import (
+    RuntimeDomain,
+    runtime_domain_uses_object_store,
 )
 from linktools.ai.spec import (
     AgentSpec,
@@ -32,28 +40,92 @@ from linktools.ai.spec import (
 )
 
 
-def test_runtime_tool_selection_keeps_framework_tools_outside_allow_tools() -> None:
-    assert select_runtime_tool_names(
-        ordinary_tool_policy=("write_plan",),
-        memory_scope="memory",
-    ) == ()
-    assert select_runtime_tool_names(
-        ordinary_tool_policy=(),
-        memory_scope=None,
-        planning=True,
-    ) == ("write_plan",)
-    assert select_runtime_tool_names(
-        ordinary_tool_policy=(),
-        memory_scope=None,
-        subagent_available=True,
-    ) == ("delegate_task", "list_subagents")
+def test_memory_owner_selects_only_its_declared_tools() -> None:
+    assert select_harness_memory_tools(("write_plan",)) == ()
+    assert select_harness_memory_tools(("read_memory",)) == ("read_memory",)
+    assert select_harness_memory_tools(("*",)) == (
+        "delete_memory",
+        "read_memory",
+        "search_memory",
+        "write_memory",
+    )
 
 
-def test_runtime_tool_selection_honors_memory_wildcard() -> None:
-    assert select_runtime_tool_names(
-        ordinary_tool_policy=("*",),
-        memory_scope="memory",
-    ) == ("delete_memory", "read_memory", "search_memory", "write_memory")
+def test_tool_semantic_metadata_preserves_upstream_values() -> None:
+    metadata = tool_semantic_metadata(
+        base={"upstream": "retained"},
+        effect="replay_safe",
+        plan_safe=True,
+        tool_class="business",
+    )
+
+    assert metadata["upstream"] == "retained"
+    assert metadata["linktools.ai.effect"] == "replay_safe"
+    assert metadata["linktools.ai.plan_safe"] is True
+    assert metadata["linktools.ai.tool_class"] == "business"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        {"linktools.ai.effect": "unknown"},
+        {"linktools.ai.plan_safe": 1},
+        {"linktools.ai.tool_class": "filesystem"},
+        {"linktools.ai.path_fields": ("path",)},
+        {"linktools.ai.path_fields": ["path", "path"]},
+        {"linktools.ai.context_dedupe": "legacy"},
+    ),
+)
+def test_invalid_tool_semantics_fail_without_fallback(
+    metadata: dict[str, object],
+) -> None:
+    with pytest.raises(AIError) as error:
+        validate_tool_semantic_metadata(metadata)
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.asyncio
+async def test_business_tool_semantics_are_frozen_in_tool_metadata() -> None:
+    async def business_tool(
+        _ctx: RunContext[None],
+        value: str,
+    ) -> str:
+        return value
+
+    group = CapabilityGroup[None]("business")
+    tool = group.tool(
+        business_tool,
+        effect="replay_safe",
+        plan_safe=True,
+    )
+
+    candidate = (await group.freeze())[0]
+
+    assert tool.tool_def.metadata == {
+        "linktools.ai.effect": "replay_safe",
+        "linktools.ai.plan_safe": True,
+        "linktools.ai.tool_class": "business",
+    }
+    assert candidate.semantic_contract["metadata"] == tool.tool_def.metadata
+    assert "config" not in candidate.semantic_contract
+
+
+def test_runtime_domain_object_store_trait_has_one_owner() -> None:
+    object_domains = {
+        RuntimeDomain.CONVERSATION,
+        RuntimeDomain.EXECUTION,
+        RuntimeDomain.MEMORY,
+        RuntimeDomain.ARTIFACT,
+        RuntimeDomain.TASK,
+        RuntimeDomain.RECOVERY,
+    }
+
+    assert {
+        domain
+        for domain in RuntimeDomain
+        if runtime_domain_uses_object_store(domain)
+    } == object_domains
+    assert not runtime_domain_uses_object_store(RuntimeDomain.EVALUATION)
 
 
 def test_agent_spec_codec_rejects_invalid_v1_payload() -> None:
@@ -175,7 +247,19 @@ def _context() -> RunContext[None]:
 @pytest.mark.asyncio
 async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> None:
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([_business]),),
+        (
+            FunctionToolset(
+                [
+                    Tool(
+                        _business,
+                        metadata=tool_semantic_metadata(
+                            effect="none",
+                            tool_class="business",
+                        ),
+                    )
+                ]
+            ),
+        ),
         {
             "_business": ManagedToolDescriptor(
                 effect_owner="none",
@@ -205,3 +289,39 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
     with pytest.raises(AIError) as error:
         await unknown.get_tools(context)
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.asyncio
+async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> None:
+    boundary = RuntimeToolBoundaryToolset(
+        (
+            FunctionToolset(
+                [
+                    Tool(
+                        _business,
+                        metadata={"linktools.ai.effect": "invalid"},
+                    )
+                ]
+            ),
+        ),
+        {
+            "_business": ManagedToolDescriptor(
+                effect_owner="none",
+                effect="none",
+                tool_class="business",
+            )
+        },
+        id="business",
+    )
+    context = _context()
+    tools = await boundary.get_tools(context)
+
+    assert (
+        await boundary.call_tool(
+            "_business",
+            {"value": "ok"},
+            context,
+            tools["_business"],
+        )
+        == "ok"
+    )

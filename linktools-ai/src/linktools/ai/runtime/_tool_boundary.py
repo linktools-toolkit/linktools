@@ -24,7 +24,12 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
-from ..capability import AgentContext, workspace_tool_path_fields_from_metadata
+from ..capability import (
+    AgentContext,
+    tool_class_from_metadata,
+    tool_effect_from_metadata,
+    tool_path_fields_from_metadata,
+)
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..workspace import SandboxSession, WorkspaceToolPermissionPolicy
@@ -84,6 +89,25 @@ class ManagedToolDescriptor:
             raise ValueError("tool-operation tools require an effect")
 
 
+def managed_tool_descriptor_from_metadata(
+    metadata: Mapping[str, object] | None,
+) -> ManagedToolDescriptor:
+    """Build a leaf descriptor from one validated Tool semantic declaration."""
+    effect = tool_effect_from_metadata(metadata, require=True)
+    tool_class = tool_class_from_metadata(metadata)
+    path_fields = tool_path_fields_from_metadata(metadata)
+    if effect is None or tool_class is None:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if tool_class == "business" and path_fields:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return ManagedToolDescriptor(
+        effect_owner="none" if effect == "none" else "tool_operation",
+        effect=effect,
+        tool_class=tool_class,
+        workspace_path_fields=path_fields,
+    )
+
+
 class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
     """Apply workspace policy and effect durability at the final leaf call."""
 
@@ -93,7 +117,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         descriptors: Mapping[str, ManagedToolDescriptor],
         *,
         id: str,
-        default_descriptor: ManagedToolDescriptor | None = None,
+        descriptor: ManagedToolDescriptor | None = None,
         workspace_policy: WorkspaceToolPermissionPolicy | None = None,
         sandbox_session: SandboxSession | None = None,
         tool_operations: ToolOperationBridge | None = None,
@@ -105,8 +129,8 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             raise ValueError("toolset id must be non-empty")
         self._toolsets = tuple(toolsets)
         self._descriptors = dict(descriptors)
+        self._descriptor = descriptor
         self._id = id
-        self._default_descriptor = default_descriptor
         self._workspace_policy = workspace_policy
         self._sandbox_session = sandbox_session
         self._tool_operations = tool_operations
@@ -163,8 +187,10 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             for name, raw_tool in raw_tools.items():
                 if name in result:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                if name not in self._descriptors and self._default_descriptor is None:
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                if name not in self._descriptors:
+                    if self._descriptor is None:
+                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                    self._descriptors[name] = self._descriptor
                 result[name] = ToolsetTool(
                     toolset=self,
                     tool_def=raw_tool.tool_def,
@@ -184,16 +210,10 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
     ) -> Any:
         if not isinstance(tool_args, dict):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        descriptor = self._descriptors.get(name, self._default_descriptor)
+        descriptor = self._descriptors.get(name)
         if descriptor is None or tool.toolset is not self:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         path_fields = descriptor.workspace_path_fields
-        if descriptor.tool_class.startswith("filesystem"):
-            declared_fields = workspace_tool_path_fields_from_metadata(
-                tool.tool_def.metadata
-            )
-            if declared_fields:
-                path_fields = declared_fields
         raw_toolset, raw_tool = await self._raw_tool(name, ctx)
         final_args = await self._canonicalize_args(tool_args, path_fields)
         call_id = ctx.tool_call_id
@@ -408,6 +428,7 @@ def _is_workspace_pre_effect_retry(
 
 __all__ = [
     "ManagedToolDescriptor",
+    "managed_tool_descriptor_from_metadata",
     "RepositoryInstructionBoundary",
     "RuntimeToolBoundaryToolset",
 ]

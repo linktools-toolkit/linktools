@@ -9,14 +9,8 @@ from ._group import (
     CapabilityLoadContext,
     CapabilityLoadEntry,
     CapabilityLoader,
-    PLAN_SAFE_METADATA_KEY,
 )
-from ._mcp import (
-    mcp_selector_server,
-    mcp_server_namespace,
-    mcp_server_selector,
-)
-from ._names import SKILL_TOOL_NAMES, SUBAGENT_TOOL_NAMES
+from ._mcp import mcp_server_namespace, mcp_server_selector
 from ._skill import LinkToolsSkills, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
@@ -29,15 +23,26 @@ from ._skill_source import (
 )
 from ._subagent import LinkToolsSubagents, SubagentDelegate
 from ._task import TaskExpander, TaskExpansionContext
+from ._tool_semantic import (
+    TOOL_CLASS_METADATA_KEY,
+    TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
+    TOOL_CONTEXT_DEDUPE_METADATA_KEY,
+    TOOL_EFFECT_METADATA_KEY,
+    TOOL_PATH_FIELDS_METADATA_KEY,
+    TOOL_PLAN_SAFE_METADATA_KEY,
+    tool_class_from_metadata,
+    tool_compaction_keep_result_from_metadata,
+    tool_context_dedupe_from_metadata,
+    tool_effect_from_metadata,
+    tool_path_fields_from_metadata,
+    tool_plan_safe_from_metadata,
+    tool_semantic_metadata,
+    validate_tool_semantic_metadata,
+)
 from ._workspace import (
-    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_TOOL_NAMES,
-    WORKSPACE_SHELL_TOOL_NAMES,
     WorkspaceAccess,
     workspace_capabilities,
-    workspace_tool_class,
     workspace_tool_contributions,
-    workspace_tool_path_fields_from_metadata,
 )
 
 __all__ = [
@@ -51,27 +56,32 @@ __all__ = [
     "LinkToolsSkills",
     "LinkToolsSubagents",
     "LocalSkillResourceSource",
-    "PLAN_SAFE_METADATA_KEY",
+    "TOOL_CLASS_METADATA_KEY",
+    "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
+    "TOOL_CONTEXT_DEDUPE_METADATA_KEY",
+    "TOOL_EFFECT_METADATA_KEY",
+    "TOOL_PATH_FIELDS_METADATA_KEY",
+    "TOOL_PLAN_SAFE_METADATA_KEY",
     "SkillDefinition",
     "SkillLocation",
     "SkillResourceSource",
     "SkillResourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
-    "SKILL_TOOL_NAMES",
-    "SUBAGENT_TOOL_NAMES",
     "SubagentDelegate",
     "TaskExpander",
     "TaskExpansionContext",
-    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
-    "WORKSPACE_SHELL_TOOL_NAMES",
     "WorkspaceAccess",
-    "mcp_selector_server",
     "mcp_server_namespace",
     "mcp_server_selector",
     "workspace_capabilities",
-    "workspace_tool_class",
     "workspace_tool_contributions",
-    "workspace_tool_path_fields_from_metadata",
+    "tool_class_from_metadata",
+    "tool_compaction_keep_result_from_metadata",
+    "tool_context_dedupe_from_metadata",
+    "tool_effect_from_metadata",
+    "tool_path_fields_from_metadata",
+    "tool_plan_safe_from_metadata",
+    "tool_semantic_metadata",
+    "validate_tool_semantic_metadata",
 ]

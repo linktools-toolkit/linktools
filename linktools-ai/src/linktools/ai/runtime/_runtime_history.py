@@ -5,6 +5,8 @@
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 
+from linktools.core import environ
+
 from ..core import (
     AuthorizationPolicy,
     HmacCursorSigner,
@@ -18,8 +20,17 @@ from ..workspace import Workspace
 from ._factory import _default_runtime_state, _grant_key
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
-from .service_api import ExecutionHistoryItem, ExecutionTraceItem, TranscriptItem
+from .service_api import (
+    ExecutionHistoryItem,
+    ExecutionHistoryService,
+    ExecutionTraceItem,
+    ExecutionView,
+    ListExecutionRequest,
+    TranscriptItem,
+)
 from .state import RuntimeDomain, RuntimeState
+
+_logger = environ.get_logger("ai.runtime.history")
 
 
 class RuntimeHistory:
@@ -27,7 +38,7 @@ class RuntimeHistory:
 
     def __init__(
         self,
-        service: DefaultExecutionHistoryService,
+        service: ExecutionHistoryService,
         *,
         tenant_id: str,
     ) -> None:
@@ -37,6 +48,16 @@ class RuntimeHistory:
     @property
     def tenant_id(self) -> str:
         return self._tenant_id
+
+    async def inspect_execution(
+        self, execution_id: str, *, principal: Principal
+    ) -> ExecutionView:
+        return await self._service.inspect(execution_id, principal=principal)
+
+    async def list_executions(
+        self, request: ListExecutionRequest
+    ) -> Page[ExecutionView]:
+        return await self._service.list(request)
 
     @classmethod
     def open(
@@ -115,6 +136,7 @@ async def _open_runtime_history(
     if not isinstance(selected_state, RuntimeState):
         raise TypeError("state must be RuntimeState")
     initialized = False
+    body_error: BaseException | None = None
     try:
         await selected_state.initialize(
             namespace=workspace.workspace_id,
@@ -143,11 +165,30 @@ async def _open_runtime_history(
                 else authorization
             ),
             reader,
+            cursor_signer=HmacCursorSigner("execution", _grant_key(workspace)),
         )
         yield RuntimeHistory(service, tenant_id=effective_tenant_id)
+    except BaseException as error:
+        body_error = error
+        raise
     finally:
         if initialized:
-            await selected_state.close()
+            try:
+                await selected_state.close()
+            except BaseException as error:
+                if body_error is None:
+                    raise
+                _log_secondary_cleanup("history.close", error)
+
+
+def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
+    code = error.code.value if isinstance(error, AIError) else None
+    _logger.error(
+        "secondary cleanup failed: phase=%s code=%s exception_type=%s",
+        phase,
+        code,
+        type(error).__name__,
+    )
 
 
 __all__ = ["RuntimeHistory"]

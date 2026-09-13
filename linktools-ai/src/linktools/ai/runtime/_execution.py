@@ -75,11 +75,14 @@ from .service_api import (
     ExecutionHandle,
     ExecutionHistoryItem,
     ExecutionHistoryReader,
+    ExecutionHistoryService,
     ExecutionRequest,
     ExecutionResult,
     ExecutionTraceItem,
     ExecutionView,
     ForkExecutionRequest,
+    ListExecutionRequest,
+    project_execution_view as _project_execution_view,
     RetryExecutionRequest,
     TranscriptItem,
 )
@@ -352,6 +355,7 @@ class DefaultExecutionService:
         live_broker: _LiveExecutionStreamBroker,
         operation_ids: "Callable[[], str] | None" = None,
         history_reader: ExecutionHistoryReader,
+        history_service: "ExecutionHistoryService | None" = None,
         release_terminal: _ExecutionReleaseCallback | None = None,
         instruction_resolver: "_RepositoryInstructionResolver | None" = None,
         object_key_factory: "RuntimeObjectKeyFactory | None" = None,
@@ -369,6 +373,7 @@ class DefaultExecutionService:
         self._live_broker = live_broker
         self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
         self._history_reader = history_reader
+        self._history_service = history_service
         self._release_terminal = release_terminal or _no_release_terminal
         if not isinstance(session_execution_ready, bool):
             raise TypeError("session_execution_ready must be bool")
@@ -1672,6 +1677,11 @@ class DefaultExecutionService:
                 raise failure
         return _execution_view(execution)
 
+    async def list(self, request: ListExecutionRequest) -> Page[ExecutionView]:
+        if self._history_service is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._history_service.list(request)
+
     @consumed_query
     async def result(
         self, execution_id: str, *, principal: Principal
@@ -2664,15 +2674,7 @@ class DefaultExecutionService:
 
 
 def _execution_view(execution: ExecutionRecord) -> ExecutionView:
-    return ExecutionView(
-        execution.execution_id,
-        execution.binding.agent_spec.id,
-        execution.status,
-        execution.lineage_kind,
-        execution.parent_execution_id,
-        execution.root_execution_id,
-        execution.parent_invocation_id,
-    )
+    return _project_execution_view(execution)
 
 
 def _terminal_error(

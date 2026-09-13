@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
-from dataclasses import replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
+from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, WrapModelRequestHandler
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
@@ -31,24 +32,15 @@ from ._message import binary_content_usage, project_transient_binary_content
 
 _KEEP_COMPLETED_PAIRS = 3
 _SUMMARY_TAIL_MESSAGES = 20
-_CONTROL_TOOL_NAMES = frozenset(
-    {
-        "delegate_task",
-        "list_skills",
-        "list_subagents",
-        "load_skill",
-        "load_subagent",
-        "memory",
-        "read_memory",
-        "search_memory",
-        "write_memory",
-        "delete_memory",
-        "search_tools",
-        "subagent",
-        "tool_search",
-        "write_plan",
-    }
-)
+_logger = environ.get_logger("ai.runtime.compaction")
+
+
+@dataclass(slots=True)
+class RuntimeCompactionPolicy:
+    """Ephemeral compaction rules derived for one agent run."""
+
+    keep_result_tools: frozenset[str] = field(default_factory=frozenset)
+    context_dedupe_by_tool: Mapping[str, str] = field(default_factory=dict)
 
 
 class ExternalModelRequestObserver(Protocol):
@@ -156,7 +148,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         journal: ModelRequestJournal | None = None,
         observer: ExternalModelRequestObserver | None = None,
         projection_sink: _ContextProjectionSink | None = None,
-        workspace_read_available: bool = False,
+        policy: RuntimeCompactionPolicy | None = None,
     ) -> None:
         self.id = "linktools.ai.compaction"
         if target_tokens is not None and (
@@ -165,17 +157,18 @@ class RuntimeCompaction(AbstractCapability[None]):
             or target_tokens <= 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if not isinstance(workspace_read_available, bool):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         self._target_tokens = target_tokens
         self._journal = journal
         self._observer = observer
         self._projection_sink = projection_sink
+        self._policy = policy
+        self._keep_result_tools: frozenset[str] = frozenset()
+        self._context_dedupe_by_tool: dict[str, str] = {}
+        self._refresh_policy()
         self._deduplicate = DeduplicateFileReads(
-            file_key=(
-                _workspace_file_key
-                if workspace_read_available
-                else lambda _call: None
+            file_key=lambda call: _context_dedupe_file_key(
+                call,
+                self._context_dedupe_by_tool,
             )
         )
 
@@ -186,6 +179,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
+        self._refresh_policy()
         source = tuple(request_context.messages)
         binary_projected = project_transient_binary_content(source)
         projected_context = replace(
@@ -213,7 +207,7 @@ class RuntimeCompaction(AbstractCapability[None]):
                     ClearToolResults(
                         max_tokens=1,
                         keep_pairs=_KEEP_COMPLETED_PAIRS,
-                        exclude_tools=_CONTROL_TOOL_NAMES,
+                        exclude_tools=self._keep_result_tools,
                     ),
                     SummarizingCompaction(
                         model=summary_model,
@@ -235,6 +229,29 @@ class RuntimeCompaction(AbstractCapability[None]):
             )
         return await handler(projected_context)
 
+    def _refresh_policy(self) -> None:
+        if self._policy is None:
+            return
+        keep_result_tools = frozenset(self._policy.keep_result_tools)
+        context_dedupe_by_tool = dict(self._policy.context_dedupe_by_tool)
+        if any(
+            value != "workspace_file_read_v1"
+            for value in context_dedupe_by_tool.values()
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if (
+            keep_result_tools == self._keep_result_tools
+            and context_dedupe_by_tool == self._context_dedupe_by_tool
+        ):
+            return
+        self._keep_result_tools = keep_result_tools
+        self._context_dedupe_by_tool = context_dedupe_by_tool
+        _logger.debug(
+            "runtime compaction policy refreshed: keep_results=%s dedupe_tools=%s",
+            tuple(sorted(keep_result_tools)),
+            tuple(sorted(context_dedupe_by_tool)),
+        )
+
 
 def _validate_pending_binary_content(
     ctx: PydanticRunContext[Any],
@@ -252,9 +269,16 @@ def _validate_pending_binary_content(
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
-def _workspace_file_key(call: ToolCallPart) -> str | None:
-    if call.tool_name != "read_file":
+def _context_dedupe_file_key(
+    call: ToolCallPart,
+    policies: Mapping[str, str],
+) -> str | None:
+    if policies.get(call.tool_name) != "workspace_file_read_v1":
         return None
+    return _workspace_file_key(call)
+
+
+def _workspace_file_key(call: ToolCallPart) -> str | None:
     try:
         arguments = call.args_as_dict()
     except (TypeError, ValueError):
@@ -285,4 +309,7 @@ def _workspace_file_key(call: ToolCallPart) -> str | None:
     )
 
 
-__all__ = ["ExternalModelRequestObserver", "RuntimeCompaction"]
+__all__ = [
+    "ExternalModelRequestObserver",
+    "RuntimeCompaction",
+]

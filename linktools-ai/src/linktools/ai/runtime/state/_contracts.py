@@ -502,6 +502,22 @@ class ExecutionRecord:
     def binding_digest(self) -> str:
         return self.binding.binding_digest
 
+    @property
+    def agent_id(self) -> str:
+        return self.binding.agent_spec.id
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCandidate:
+    record: ExecutionRecord
+    cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCandidatePage:
+    items: tuple[ExecutionCandidate, ...]
+    has_more: bool
+
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRunSealHead:
@@ -1349,6 +1365,15 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def list_children(
         self, execution_id: str, *, tenant_id: str
     ) -> tuple[ExecutionRecord, ...]: ...
+    async def list_candidates(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str | None,
+        parent_execution_id: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> ExecutionCandidatePage: ...
     async def claim_start(self, claim: ExecutionStartClaim) -> ExecutionRecord: ...
     async def reserve_start(
         self, reservation: ExecutionStartReservation

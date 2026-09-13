@@ -27,16 +27,19 @@ from ..spec import (
     SkillMarkdownSpecCodec,
     SkillSpecCodec,
     ThinkingValue,
+    parse_mcp_tool_selector,
 )
 from ..task import TaskExpanderRef, TaskNodeHandler
 from ._context import AgentContext
-from ._names import SKILL_TOOL_NAMES, SUBAGENT_TOOL_NAMES
 from ._skill import SkillDefinition
 from ._skill_source import AssetSkillResourceSource, SkillResourceSource, SkillSourceRef
 from ._task import TaskExpander
+from ._tool_semantic import (
+    tool_semantic_metadata,
+    validate_tool_semantic_metadata,
+)
 
 AppT = TypeVar("AppT")
-PLAN_SAFE_METADATA_KEY = "linktools.ai.plan_safe"
 
 
 ContributionKind = Literal[
@@ -56,17 +59,6 @@ ContributionSemanticValue: TypeAlias = (
     | AbstractCapability
     | TaskNodeHandler[object]
     | TaskExpander
-)
-_RESERVED_TOOL_NAMES = frozenset(
-    {
-        *SKILL_TOOL_NAMES,
-        *SUBAGENT_TOOL_NAMES,
-        "write_plan",
-        "delete_memory",
-        "read_memory",
-        "search_memory",
-        "write_memory",
-    }
 )
 _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -154,14 +146,15 @@ class CapabilityContribution(Generic[AppT]):
         identity: str,
         value: "Tool[AgentContext[AppT]] | AbstractCapability[AgentContext[AppT]]",
         *,
-        revision: int = 1,
+        revision: "int | None" = None,
         semantic_id: "str | None" = None,
         semantic_config: "Mapping[str, JsonValue] | None" = None,
     ) -> "CapabilityContribution[AppT]":
         """Create an opaque Python Tool or Capability from its public semantic inputs."""
         if kind not in {"tool", "capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        _validate_revision(revision)
+        if revision is not None:
+            _validate_revision(revision)
         contract = contribution_semantic_contract(
             kind,
             identity,
@@ -355,13 +348,18 @@ class CapabilityGroup(Generic[AppT]):
         tool_name = name or function.__name__
         _validate_business_tool_name(tool_name)
         adapted = _adapt_tool(function, name=tool_name)
+        adapted.metadata = tool_semantic_metadata(
+            effect=effect,
+            plan_safe=plan_safe,
+            tool_class="business",
+            base=adapted.metadata,
+        )
         self._contributions.append(
             CapabilityContribution.from_opaque(
                 "tool",
                 tool_name,
                 adapted,
                 revision=revision,
-                semantic_config={"effect": effect, "plan_safe": plan_safe},
             )
         )
         return adapted
@@ -513,10 +511,11 @@ class CapabilityGroup(Generic[AppT]):
                 if any(not isinstance(item, CapabilityContribution) for item in loaded):
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 contributions.extend(loaded)
-        _validate_unique(contributions)
-        generic = [item for item in contributions if item.kind == "capability"]
+        frozen = tuple(_freeze_contribution(item) for item in contributions)
+        _validate_unique(frozen)
+        generic = [item for item in frozen if item.kind == "capability"]
         declarations = sorted(
-            (item for item in contributions if item.kind != "capability"),
+            (item for item in frozen if item.kind != "capability"),
             key=lambda item: (item.kind, item.id, item.fingerprint),
         )
         return tuple((*declarations, *generic))
@@ -631,6 +630,20 @@ def _declaration_contribution(
     )
 
 
+def _freeze_contribution(
+    value: CapabilityContribution[AppT],
+) -> CapabilityContribution[AppT]:
+    if isinstance(value, _SemanticContribution):
+        return value
+    return _SemanticContribution(
+        value.kind,
+        value.id,
+        value.fingerprint,
+        value.value,
+        value.semantic_contract,
+    )
+
+
 def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
     if not callable(function):
         raise TypeError("tool function must be callable")
@@ -668,10 +681,15 @@ def contribution_semantic_contract(
     semantic_id: "str | None" = None,
     semantic_config: "Mapping[str, JsonValue] | None" = None,
 ) -> "dict[str, JsonValue]":
-    if semantic_config is not None and kind not in {"tool", "capability"}:
+    if semantic_config is not None and kind != "capability":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if kind == "tool" and isinstance(value, Tool):
         definition = value.tool_def
+        validate_tool_semantic_metadata(
+            definition.metadata,
+            require_effect=True,
+            require_tool_class=True,
+        )
         contract: dict[str, JsonValue] = {
             "version": 1,
             "description": definition.description,
@@ -682,11 +700,6 @@ def contribution_semantic_contract(
         }
         if semantic_revision is not None:
             contract["semantic_revision"] = semantic_revision
-        if semantic_config is not None:
-            try:
-                contract.update(dict(ImmutableJsonMapping(semantic_config)))
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
     if kind == "agent" and isinstance(value, AgentSpec):
         return AgentSpecCodec().to_payload(value)
@@ -779,9 +792,10 @@ def _validate_business_tool_name(value: str) -> None:
     if (
         not isinstance(value, str)
         or _TOOL_NAME.fullmatch(value) is None
-        or value.startswith("mcp__")
-        or value in _RESERVED_TOOL_NAMES
+        or value.startswith("linktools.")
     ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if parse_mcp_tool_selector(value) is not None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
@@ -843,7 +857,6 @@ __all__ = [
     "CapabilityLoadContext",
     "CapabilityLoadEntry",
     "CapabilityLoader",
-    "PLAN_SAFE_METADATA_KEY",
     "capability_fingerprint",
     "contribution_semantic_contract",
 ]

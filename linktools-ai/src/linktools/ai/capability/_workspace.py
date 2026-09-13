@@ -26,63 +26,82 @@ from ..workspace import (
     normalize_workspace_path,
 )
 from ._context import AgentContext
-from ._group import (
-    CapabilityContribution,
-    capability_fingerprint,
-    contribution_semantic_contract,
-)
+from ._group import CapabilityContribution
+from ._tool_semantic import tool_semantic_metadata
 
 _ResultT = TypeVar("_ResultT")
 
-_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES = (
-    "attach_files",
-    "create_directory",
-    "edit_file",
-    "file_info",
-    "find_files",
-    "list_directory",
-    "read_file",
-    "search_files",
-    "write_file",
-)
-_BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
-    "attach_files",
-    "file_info",
-    "find_files",
-    "list_directory",
-    "read_file",
-    "search_files",
-)
-WORKSPACE_FILESYSTEM_TOOL_NAMES = (
-    *_BASE_WORKSPACE_FILESYSTEM_TOOL_NAMES,
-)
-WORKSPACE_FILESYSTEM_READ_TOOL_NAMES = (
-    *_BASE_WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-)
-WORKSPACE_SHELL_TOOL_NAMES = (
-    "check_command",
-    "run_command",
-    "start_command",
-    "stop_command",
-)
-_WORKSPACE_TOOL_NAMES = (
-    *WORKSPACE_FILESYSTEM_TOOL_NAMES,
-    *WORKSPACE_SHELL_TOOL_NAMES,
-)
-_WORKSPACE_TOOL_CLASSES = {
-    **{
-        name: "filesystem.read"
-        for name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
-    },
-    **{
-        name: "filesystem.write"
-        for name in WORKSPACE_FILESYSTEM_TOOL_NAMES
-        if name not in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
-    },
-    **{name: "shell" for name in WORKSPACE_SHELL_TOOL_NAMES},
+_WORKSPACE_TOOL_DECLARATIONS: dict[str, Mapping[str, object]] = {
+    "attach_files": tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="filesystem.read",
+        path_fields=("paths",),
+    ),
+    "create_directory": tool_semantic_metadata(
+        effect="non_replay_safe",
+        tool_class="filesystem.write",
+        path_fields=("path",),
+    ),
+    "edit_file": tool_semantic_metadata(
+        effect="non_replay_safe",
+        tool_class="filesystem.write",
+        path_fields=("path",),
+    ),
+    "file_info": tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="filesystem.read",
+        path_fields=("path",),
+    ),
+    "find_files": tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="filesystem.read",
+        path_fields=("path",),
+    ),
+    "list_directory": tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="filesystem.read",
+        path_fields=("path",),
+    ),
+    "read_file": tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="filesystem.read",
+        path_fields=("path",),
+        context_dedupe="workspace_file_read_v1",
+    ),
+    "search_files": tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="filesystem.read",
+        path_fields=("path",),
+    ),
+    "write_file": tool_semantic_metadata(
+        effect="non_replay_safe",
+        tool_class="filesystem.write",
+        path_fields=("path",),
+    ),
+    "check_command": tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="shell",
+    ),
+    "run_command": tool_semantic_metadata(
+        effect="non_replay_safe",
+        tool_class="shell",
+    ),
+    "start_command": tool_semantic_metadata(
+        effect="non_replay_safe",
+        tool_class="shell",
+    ),
+    "stop_command": tool_semantic_metadata(
+        effect="non_replay_safe",
+        tool_class="shell",
+    ),
 }
-_WORKSPACE_METADATA_KEY = "linktools.ai.workspace_tool_class"
-_WORKSPACE_PATH_FIELDS_KEY = "linktools.ai.workspace_path_fields"
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
 _MODEL_CORRECTABLE_ERRORS = {
     ErrorCode.REQUEST_FIELD_INVALID,
@@ -161,29 +180,6 @@ class WorkspaceAccess:
             self._session = None
         if session is not None:
             await session.close()
-
-
-def workspace_tool_path_fields(tool: Tool[Any]) -> tuple[str, ...]:
-    metadata = tool.tool_def.metadata or {}
-    return workspace_tool_path_fields_from_metadata(metadata)
-
-
-def workspace_tool_path_fields_from_metadata(
-    metadata: Mapping[str, object] | None,
-) -> tuple[str, ...]:
-    value = None if metadata is None else metadata.get(_WORKSPACE_PATH_FIELDS_KEY)
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(item for item in value if isinstance(item, str))
-
-
-def workspace_tool_path_metadata(fields: Sequence[str]) -> dict[str, object]:
-    values = tuple(fields)
-    if not values or any(not isinstance(field, str) or not field for field in values):
-        raise ValueError("workspace path fields must be non-empty strings")
-    if len(values) != len(set(values)):
-        raise ValueError("workspace path fields must be unique")
-    return {_WORKSPACE_PATH_FIELDS_KEY: list(values)}
 
 
 class _WorkspaceToolSurface:
@@ -489,7 +485,13 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
         surface = _WorkspaceToolSurface(session, policy)
         for name in selected_tool_names:
-            self.add_tool(_workspace_tool(surface, name))
+            self.add_tool(
+                _workspace_tool(
+                    surface,
+                    name,
+                    _WORKSPACE_TOOL_DECLARATIONS[name],
+                )
+            )
 
 
 class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
@@ -518,17 +520,9 @@ def workspace_tool_contributions(
     """Return the stable workspace tool definitions used by the compiler."""
     surface = _WorkspaceToolSurface(None, workspace.policy)
     result: list[CapabilityContribution[object]] = []
-    for name in _WORKSPACE_TOOL_NAMES:
-        tool = _workspace_tool(surface, name)
-        semantic = contribution_semantic_contract("tool", name, tool)
-        result.append(
-            CapabilityContribution(
-                "tool",
-                name,
-                capability_fingerprint("tool", name, semantic),
-                tool,
-            )
-        )
+    for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items():
+        tool = _workspace_tool(surface, name, metadata)
+        result.append(CapabilityContribution.from_opaque("tool", name, tool))
     return tuple(result)
 
 
@@ -540,14 +534,16 @@ def workspace_capabilities(
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened session."""
     selected = frozenset(selected_tool_names)
-    unknown = selected.difference(_WORKSPACE_TOOL_NAMES)
+    unknown = selected.difference(_WORKSPACE_TOOL_DECLARATIONS)
     if unknown:
         raise ValueError(f"unknown workspace tools: {tuple(sorted(unknown))}")
     if not selected:
         return ()
     if session is None:
         raise AIError(ErrorCode.SANDBOX_SESSION_CLOSED)
-    ordered = tuple(name for name in _WORKSPACE_TOOL_NAMES if name in selected)
+    ordered = tuple(
+        name for name in _WORKSPACE_TOOL_DECLARATIONS if name in selected
+    )
     _logger.debug(
         "workspace capability materialized: tools=%s session_open=%s",
         ordered,
@@ -556,47 +552,21 @@ def workspace_capabilities(
     return (_WorkspaceCapability(ordered, session, workspace.policy),)
 
 
-def workspace_tool_class(tool: Tool[Any]) -> str | None:
-    if not isinstance(tool, Tool):
-        return None
-    expected = _WORKSPACE_TOOL_CLASSES.get(tool.name)
-    if expected is None:
-        return None
-    metadata = tool.tool_def.metadata or {}
-    if metadata.get(_WORKSPACE_METADATA_KEY) != expected:
-        return None
-    return expected
-
-
-def _workspace_tool(surface: _WorkspaceToolSurface, name: str) -> Tool[Any]:
-    tool_class = (
-        "filesystem.read"
-        if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
-        else "filesystem.write"
-        if name in WORKSPACE_FILESYSTEM_TOOL_NAMES
-        else "shell"
-    )
-    metadata: dict[str, object] = {_WORKSPACE_METADATA_KEY: tool_class}
-    if tool_class in {"filesystem.read", "filesystem.write"}:
-        fields = ("paths",) if name == "attach_files" else ("path",)
-        metadata.update(workspace_tool_path_metadata(fields))
+def _workspace_tool(
+    surface: _WorkspaceToolSurface,
+    name: str,
+    metadata: Mapping[str, object],
+) -> Tool[Any]:
     return Tool(
         cast(Any, getattr(surface, name)),
         takes_ctx=False,
         name=name,
-        metadata=metadata,
+        metadata=dict(metadata),
     )
 
 
 __all__ = [
-    "WORKSPACE_FILESYSTEM_READ_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
-    "WORKSPACE_SHELL_TOOL_NAMES",
     "WorkspaceAccess",
     "workspace_capabilities",
-    "workspace_tool_class",
-    "workspace_tool_path_fields",
-    "workspace_tool_path_fields_from_metadata",
-    "workspace_tool_path_metadata",
     "workspace_tool_contributions",
 ]

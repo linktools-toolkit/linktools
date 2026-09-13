@@ -12,7 +12,12 @@ import pytest
 from linktools.ai.core import Page, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics, Observation
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import (
+    ListExecutionRequest,
+    Runtime,
+    RuntimeMetricFlushResult,
+    RuntimeMetricStatus,
+)
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._execution import _overlay_execution_correlation
@@ -144,6 +149,12 @@ def test_runtime_correlation_overlay_is_explicit_and_bounded() -> None:
     }
 
 
+def test_runtime_public_contract_exports() -> None:
+    assert ListExecutionRequest is not None
+    assert RuntimeMetricStatus is not None
+    assert RuntimeMetricFlushResult is not None
+
+
 def test_retry_and_fork_correlation_inherit_source_then_overlay() -> None:
     source = {"audit_run_id": "audit-1", "stage": "collect"}
 
@@ -181,10 +192,12 @@ async def test_disabled_runtime_metric_control_has_stable_public_contract() -> N
     )
 
     status = runtime.metric_status()
+    assert isinstance(status, RuntimeMetricStatus)
     assert status.enabled is False
     assert status.accepting is False
     assert status.pending == 0
     flushed = await runtime.flush_metrics(timeout_seconds=0)
+    assert isinstance(flushed, RuntimeMetricFlushResult)
     assert flushed.completed is True
     assert flushed.status == status
     with pytest.raises(AIError) as raised:

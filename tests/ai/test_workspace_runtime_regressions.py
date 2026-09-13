@@ -64,7 +64,7 @@ async def test_memory_capability_is_harness_owned_over_runtime_state() -> None:
         )
         capability = build_harness_memory(
             store,
-            selected_tool_names=(
+            allow_tools=(
                 "delete_memory",
                 "read_memory",
                 "search_memory",

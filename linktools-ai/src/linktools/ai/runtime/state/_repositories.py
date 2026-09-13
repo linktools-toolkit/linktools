@@ -57,6 +57,8 @@ from ._contracts import (
     ConversationHistoryIndexNodeRecord,
     ConversationHistoryRecord,
     EvaluationRecord,
+    ExecutionCandidate,
+    ExecutionCandidatePage,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionEventRecord,
@@ -298,6 +300,40 @@ class _RepositoryBase:
             ) > (last.sort_key, last.key_digest):
                 return (*records, probe[0])
             return records
+
+        return await self._store.read(read)
+
+    async def _has_records(
+        self,
+        kind: str,
+        *,
+        scope: bytes | None = None,
+        parent: bytes | None = None,
+        states: frozenset[str] | None = None,
+        sort_key_prefix: str | None = None,
+        cursor: str | None = None,
+    ) -> bool:
+        after_sort_key, after_key_digest = _decode_record_cursor(cursor)
+
+        async def read(transaction: StateTransaction) -> bool:
+            records = await transaction.list_records(
+                RecordQuery(
+                    partition_digest=(
+                        self._partition(kind)
+                        if scope is None and parent is None
+                        else None
+                    ),
+                    scope_digest=scope,
+                    parent_digest=parent,
+                    kind=kind,
+                    states=states,
+                    sort_key_prefix=sort_key_prefix,
+                    after_sort_key=after_sort_key,
+                    after_key_digest=after_key_digest,
+                    limit=1,
+                )
+            )
+            return bool(records)
 
         return await self._store.read(read)
 
@@ -1961,6 +1997,62 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         return tuple(
             [await self._decode(record, ExecutionRecord) for record in records]
+        )
+
+    async def list_candidates(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str | None,
+        parent_execution_id: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> ExecutionCandidatePage:
+        if tenant_id != self._tenant_id:
+            return ExecutionCandidatePage((), False)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        scope = (
+            None
+            if session_id is None or parent_execution_id is not None
+            else self._scope("execution", "session", session_id)
+        )
+        parent = (
+            None
+            if parent_execution_id is None
+            else self._parent("execution", "execution", parent_execution_id)
+        )
+        records = await self._records(
+            "execution",
+            scope=scope,
+            parent=parent,
+            cursor=cursor,
+            limit=limit,
+        )
+        selected = records[:limit]
+        candidates: list[ExecutionCandidate] = []
+        for record in selected:
+            candidates.append(
+                ExecutionCandidate(
+                    await self._decode(record, ExecutionRecord),
+                    _record_cursor(record),
+                )
+            )
+        has_more = False
+        if len(records) == limit:
+            has_more = await self._has_records(
+                "execution",
+                scope=scope,
+                parent=parent,
+                cursor=_record_cursor(records[-1]),
+            )
+        return ExecutionCandidatePage(
+            tuple(candidates),
+            has_more,
         )
 
     async def get_in_transaction(

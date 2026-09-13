@@ -29,6 +29,7 @@ from linktools.ai.runtime._tool_boundary import (
     RuntimeToolBoundaryToolset,
 )
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from ._runtime_test_helpers import semantic_tool
 
 
 class _GeneratedOutputAlpha(BaseModel):
@@ -188,15 +189,14 @@ async def test_tool_operation_records_the_args_that_reach_the_handler() -> None:
         return value
 
     operations = _RecordingToolOperations()
+    descriptor = ManagedToolDescriptor(
+        effect_owner="tool_operation",
+        effect="replay_safe",
+        tool_class="business",
+    )
     boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([business]),),
-        {
-            "business": ManagedToolDescriptor(
-                effect_owner="tool_operation",
-                effect="replay_safe",
-                tool_class="business",
-            )
-        },
+        (FunctionToolset([semantic_tool(business, descriptor)]),),
+        {"business": descriptor},
         id="business",
         tool_operations=operations,  # type: ignore[arg-type]
     )

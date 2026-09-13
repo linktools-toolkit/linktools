@@ -4,7 +4,11 @@
 
 from ..task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphService
 from ._agent import Agent, Execution, Session
+from ._context import RuntimeContext
+from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
 from ._runtime_service import Runtime
+from ._runtime_history import RuntimeHistory
+from ._task import TaskGraphRun
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -54,6 +58,7 @@ from .service_api import (
     ExternalSupplyResult,
     ForkExecutionRequest,
     ForkSessionRequest,
+    ListExecutionRequest,
     ListSessionRequest,
     LoadedSession,
     Page,
@@ -123,6 +128,7 @@ __all__ = [
     "ExternalSupplyResult",
     "ForkExecutionRequest",
     "ForkSessionRequest",
+    "ListExecutionRequest",
     "ListSessionRequest",
     "LoadedSession",
     "Page",
@@ -131,6 +137,10 @@ __all__ = [
     "ResumeSessionRequest",
     "RetryExecutionRequest",
     "RuntimeDomain",
+    "RuntimeContext",
+    "RuntimeHistory",
+    "RuntimeMetricFlushResult",
+    "RuntimeMetricStatus",
     "RuntimeRetentionMode",
     "RuntimeState",
     "RuntimeStatePlan",
@@ -142,6 +152,7 @@ __all__ = [
     "StartEvaluationRequest",
     "TaskEvent",
     "TaskEventType",
+    "TaskGraphRun",
     "TaskGraphRunEvent",
     "TaskGraphService",
     "ToolEffectApplied",

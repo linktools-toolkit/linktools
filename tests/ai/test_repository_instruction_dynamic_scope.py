@@ -19,6 +19,7 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
+from ._runtime_test_helpers import semantic_tool
 
 
 class _Session:
@@ -80,16 +81,19 @@ def _boundary(
     policy: WorkspaceToolPermissionPolicy | None = None,
     path_fields: tuple[str, ...] = ("path",),
 ) -> RuntimeToolBoundaryToolset:
+    descriptor = ManagedToolDescriptor(
+        effect_owner="none",
+        effect="none",
+        tool_class="filesystem.read",
+        workspace_path_fields=path_fields,
+    )
+    toolset.tools[name].metadata = semantic_tool(
+        toolset.tools[name].function,
+        descriptor,
+    ).metadata
     return RuntimeToolBoundaryToolset(
         (toolset,),
-        {
-            name: ManagedToolDescriptor(
-                effect_owner="none",
-                effect="none",
-                tool_class="filesystem.read",
-                workspace_path_fields=path_fields,
-            )
-        },
+        {name: descriptor},
         id="workspace",
         sandbox_session=_Session(),  # type: ignore[arg-type]
         workspace_policy=(

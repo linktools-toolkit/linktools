@@ -12,9 +12,10 @@ from linktools.ai.runtime._plan import (
     _validated_items,
 )
 from linktools.ai.runtime._capabilities import (
-    PLANNING_TOOL_NAMES,
     compose_platform_capabilities,
 )
+from linktools.ai.runtime._harness_planning import HarnessPlanning
+from linktools.ai.runtime._compaction import RuntimeCompactionPolicy
 from linktools.ai.runtime.state._steps import (
     StagingStepStore,
 )
@@ -42,15 +43,19 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         memory_scope=None,
         step_store=StagingStepStore(),
         memory_store=None,
-        runtime_tool_names=PLANNING_TOOL_NAMES,
+        ordinary_tool_policy=(),
+        compaction_policy=RuntimeCompactionPolicy(),
+        planning=True,
         context_target_tokens=None,
         parent_step_run_id=None,
         plan_store_resolver=lambda _ctx: None,  # type: ignore[return-value]
     )
     planning = next(
-        capability for capability in capabilities if isinstance(capability, Planning)
+        capability
+        for capability in capabilities
+        if isinstance(capability, HarnessPlanning)
     )
-    assert tuple(planning.get_toolset().tools) == PLANNING_TOOL_NAMES
+    assert tuple(planning.get_toolset().tools) == ("write_plan",)
 
 
 async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> None:
@@ -58,7 +63,7 @@ async def test_harness_planning_prompt_is_request_scoped_and_cache_safe() -> Non
     await store.set_items([PlanItem(content="ship it", status=TaskStatus.in_progress)])
     capability = Planning(
         store=store,
-        tools=PLANNING_TOOL_NAMES,
+        tools=("write_plan",),
         id="linktools-planning",
     )
     context = RunContext(

@@ -21,6 +21,9 @@ class ModelBinding(Protocol):
     def model_identity(self) -> str: ...
 
     @property
+    def vision(self) -> bool: ...
+
+    @property
     def semantic_payload(self) -> Mapping[str, JsonValue]: ...
 
     @property

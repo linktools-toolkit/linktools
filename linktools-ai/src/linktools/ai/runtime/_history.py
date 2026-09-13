@@ -26,6 +26,13 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ._journal import (
+    DURATION_NS_METADATA_KEY,
+    MODEL_USAGE_CACHE_READ_METADATA_KEY,
+    MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
+    MODEL_USAGE_INPUT_METADATA_KEY,
+    MODEL_USAGE_METADATA_KEYS,
+    MODEL_USAGE_OUTPUT_METADATA_KEY,
+    OBSERVATION_ID_METADATA_KEY,
     OUTPUT_RETRY_INDEX_METADATA_KEY,
     REQUEST_PURPOSE_METADATA_KEY,
     REQUEST_SEQUENCE_METADATA_KEY,
@@ -45,20 +52,6 @@ from .state._views import (
 )
 
 _logger = environ.get_logger("ai.runtime.history")
-_MODEL_USAGE_INPUT_METADATA_KEY = "linktools.ai.model_usage.input_tokens"
-_MODEL_USAGE_OUTPUT_METADATA_KEY = "linktools.ai.model_usage.output_tokens"
-_MODEL_USAGE_CACHE_READ_METADATA_KEY = "linktools.ai.model_usage.cache_read_tokens"
-_MODEL_USAGE_CACHE_WRITE_METADATA_KEY = "linktools.ai.model_usage.cache_write_tokens"
-_OBSERVATION_ID_METADATA_KEY = "linktools.ai.observation_id"
-_DURATION_NS_METADATA_KEY = "linktools.ai.duration_ns"
-_MODEL_USAGE_METADATA_KEYS = frozenset(
-    {
-        _MODEL_USAGE_INPUT_METADATA_KEY,
-        _MODEL_USAGE_OUTPUT_METADATA_KEY,
-        _MODEL_USAGE_CACHE_READ_METADATA_KEY,
-        _MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -787,12 +780,12 @@ def _trace_item(
         "depth": depth,
         "occurred_at": _event_timestamp(event).isoformat(),
     }
-    observation_id = event.metadata.get(_OBSERVATION_ID_METADATA_KEY)
+    observation_id = event.metadata.get(OBSERVATION_ID_METADATA_KEY)
     if observation_id is not None:
         if not observation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["observation_id"] = observation_id
-    duration_ns = event.metadata.get(_DURATION_NS_METADATA_KEY)
+    duration_ns = event.metadata.get(DURATION_NS_METADATA_KEY)
     if duration_ns is not None:
         if not duration_ns.isdigit():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -831,25 +824,25 @@ def _trace_item(
 
 def _model_token_usage(event: StepEvent) -> "dict[str, JsonValue] | None":
     metadata = event.metadata
-    present = _MODEL_USAGE_METADATA_KEYS.intersection(metadata)
+    present = MODEL_USAGE_METADATA_KEYS.intersection(metadata)
     if not present:
         return None
     if (
-        _MODEL_USAGE_INPUT_METADATA_KEY not in metadata
-        or _MODEL_USAGE_OUTPUT_METADATA_KEY not in metadata
+        MODEL_USAGE_INPUT_METADATA_KEY not in metadata
+        or MODEL_USAGE_OUTPUT_METADATA_KEY not in metadata
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return {
-        "input_tokens": _metadata_token(metadata, _MODEL_USAGE_INPUT_METADATA_KEY),
-        "output_tokens": _metadata_token(metadata, _MODEL_USAGE_OUTPUT_METADATA_KEY),
+        "input_tokens": _metadata_token(metadata, MODEL_USAGE_INPUT_METADATA_KEY),
+        "output_tokens": _metadata_token(metadata, MODEL_USAGE_OUTPUT_METADATA_KEY),
         "cache_read_tokens": _metadata_token(
             metadata,
-            _MODEL_USAGE_CACHE_READ_METADATA_KEY,
+            MODEL_USAGE_CACHE_READ_METADATA_KEY,
             required=False,
         ),
         "cache_write_tokens": _metadata_token(
             metadata,
-            _MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
+            MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
             required=False,
         ),
     }

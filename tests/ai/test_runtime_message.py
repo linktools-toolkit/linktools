@@ -8,7 +8,12 @@ from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from pydantic_ai import RequestUsage
-from pydantic_ai.messages import ModelRequest, ModelResponse, UserPromptPart
+from pydantic_ai.messages import (
+    ModelRequest,
+    ModelResponse,
+    UploadedFile,
+    UserPromptPart,
+)
 
 
 def test_model_message_round_trip_is_canonical() -> None:
@@ -39,6 +44,20 @@ def test_model_message_round_trip_preserves_usage_extensions() -> None:
     assert decoded[0].usage == usage
     assert decoded[0].usage.__dict__["future_tokens"] == 42
     assert decoded[0].usage.__dict__["label"] == "original"
+
+
+def test_model_message_round_trip_preserves_uploaded_file_media_type() -> None:
+    messages = (
+        ModelRequest(
+            parts=[UserPromptPart([UploadedFile("report.png", "openai")])]
+        ),
+    )
+
+    decoded = decode_model_messages(encode_model_messages(messages))
+
+    uploaded = decoded[0].parts[0].content[0]
+    assert isinstance(uploaded, UploadedFile)
+    assert uploaded.media_type == "image/png"
 
 
 def test_model_message_reader_accepts_pydantic_legacy_usage() -> None:

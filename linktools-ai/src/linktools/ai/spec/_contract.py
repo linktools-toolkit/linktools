@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Immutable declaration contracts for Agent, Skill, and MCP specifications."""
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -12,6 +13,35 @@ from ..core import (
     normalize_thinking,
 )
 from ..errors import AIError, ErrorCode
+
+_MCP_NAMESPACE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def parse_mcp_tool_selector(selector: str) -> "tuple[str, str | None] | None":
+    """Parse one MCP selector into its namespace and optional exact tool."""
+    if not isinstance(selector, str) or not selector.startswith("mcp__"):
+        return None
+    parts = selector[5:].split("__")
+    if len(parts) == 1:
+        namespace = parts[0]
+        tool = None
+    elif len(parts) == 2:
+        namespace, tool = parts
+        if not tool or tool == "*":
+            if tool != "*":
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            tool = None
+    else:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not namespace or _MCP_NAMESPACE.fullmatch(namespace) is None:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if tool is not None and (
+        not tool
+        or tool != tool.strip()
+        or "*" in tool
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return namespace, tool
 
 
 def canonical_selectors(
@@ -31,30 +61,31 @@ def canonical_selectors(
         if not mcp and "*" in raw:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid selector")
         selector = raw
-        if mcp and raw.startswith("mcp__"):
-            parts = raw.split("__")
-            if len(parts) == 2 and parts[1]:
-                selector = f"{raw}__*"
-            elif len(parts) != 3 or not parts[1] or not parts[2]:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid MCP selector")
-            elif "*" in parts[2] and parts[2] != "*":
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid MCP selector")
+        parsed = parse_mcp_tool_selector(raw) if mcp else None
+        if parsed is not None:
+            namespace, tool = parsed
+            selector = (
+                f"mcp__{namespace}__*"
+                if tool is None
+                else f"mcp__{namespace}__{tool}"
+            )
         elif "*" in raw:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid selector")
         selectors.add(selector)
     if mcp:
         wildcard_servers = {
-            selector.removesuffix("__*")
+            parsed[0]
             for selector in selectors
-            if selector.startswith("mcp__") and selector.endswith("__*")
+            if (parsed := parse_mcp_tool_selector(selector)) is not None
+            and parsed[1] is None
         }
         selectors = {
             selector
             for selector in selectors
-            if not (
-                selector.startswith("mcp__")
-                and any(selector.startswith(f"{server}__") for server in wildcard_servers)
-                and selector not in {f"{server}__*" for server in wildcard_servers}
+            if (
+                (parsed := parse_mcp_tool_selector(selector)) is None
+                or parsed[0] not in wildcard_servers
+                or parsed[1] is None
             )
         }
     return tuple(sorted(selectors))
@@ -247,4 +278,5 @@ __all__ = [
     "ThinkingValue",
     "canonical_selectors",
     "normalize_thinking",
+    "parse_mcp_tool_selector",
 ]

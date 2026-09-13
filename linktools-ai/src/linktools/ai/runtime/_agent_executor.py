@@ -6,12 +6,17 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterable, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncIterable,
+    Awaitable,
+    Callable,
+    Mapping,
+)
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic_ns
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from linktools.core import environ
 from openai import (
@@ -69,17 +74,17 @@ from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
     AgentContext,
+    CapabilityContribution,
     LinkToolsSkills,
     LinkToolsSubagents,
-    PLAN_SAFE_METADATA_KEY,
-    SKILL_TOOL_NAMES,
     SkillSourceRegistry,
     SubagentDelegate,
-    WORKSPACE_FILESYSTEM_READ_TOOL_NAMES,
-    WORKSPACE_FILESYSTEM_TOOL_NAMES,
-    WORKSPACE_SHELL_TOOL_NAMES,
+    tool_compaction_keep_result_from_metadata,
+    tool_class_from_metadata,
+    tool_context_dedupe_from_metadata,
+    tool_plan_safe_from_metadata,
+    validate_tool_semantic_metadata,
     workspace_capabilities,
-    workspace_tool_class,
 )
 from ..core import (
     ExecutionDeltaType,
@@ -102,10 +107,9 @@ if TYPE_CHECKING:
     from ..workspace import RepositoryInstructions
 
 from ._capabilities import (
-    SUBAGENT_TOOL_NAMES,
     compose_platform_capabilities,
-    select_runtime_tool_names,
 )
+from ._compaction import RuntimeCompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import materialize_mcp_servers
@@ -117,6 +121,7 @@ from ._tool_boundary import (
     ManagedToolDescriptor,
     RepositoryInstructionBoundary,
     RuntimeToolBoundaryToolset,
+    managed_tool_descriptor_from_metadata,
 )
 from ._tool_metrics import _ToolMetricContext
 from ._tool_return_codec import (
@@ -127,6 +132,7 @@ from .state._step_contracts import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
 _SECONDARY_ERROR_CODE_KEY = "secondary_error_code"
+_PLAN_SAFE_FRAMEWORK_TOOL_KINDS = frozenset({"capability-load", "tool-search"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,7 +377,10 @@ class AgentExecutor:
         selected = tuple(
             candidate.id
             for candidate in scope.binding.definition.selected_tools
-            if workspace_tool_class(cast(Tool, candidate.value)) is not None
+            if tool_class_from_metadata(
+                _frozen_tool_metadata(candidate)
+            )
+            in {"filesystem.read", "filesystem.write", "shell"}
         )
         resources, resource_keys = await _skill_sandbox_resources(
             scope.binding.definition,
@@ -417,9 +426,12 @@ class AgentExecutor:
                     raise primary_error from cleanup_cancel.__cause__
                 raise primary_error
             except AIError as cleanup_error:
-                _logger.exception(
-                    "workspace sandbox cleanup failed after agent error: step=%s",
+                _logger.warning(
+                    "workspace sandbox cleanup failed after agent error: "
+                    "step=%s code=%s exception_type=%s",
                     scope.step_run_id,
+                    cleanup_error.code.value,
+                    type(cleanup_error).__name__,
                 )
                 raise primary_error from cleanup_error
             raise
@@ -452,11 +464,7 @@ class AgentExecutor:
             execution_id=scope.context.execution_id,
             step_run_id=scope.step_run_id,
         )
-        (
-            agent,
-            capabilities,
-            runtime_tool_names,
-        ) = await _materialize_agent(
+        agent, capabilities = await _materialize_agent(
             scope,
             model=model,
             skill_sources=self._skill_sources,
@@ -480,14 +488,15 @@ class AgentExecutor:
             _event_stream_capability(cast(EventSink, scope.event_sink)),
         )
         _logger.debug(
-            "agent execution started: agent=%s definition=%s step=%s mode=%s planning=%s thinking=%s runtime_tools=%s",
+            "agent execution started: agent=%s definition=%s step=%s "
+            "mode=%s planning=%s thinking=%s selected_tools=%s",
             definition.spec.id,
             definition.digest,
             scope.step_run_id,
             scope.mode,
             scope.planning,
             scope.thinking,
-            runtime_tool_names,
+            len(definition.selected_tools),
         )
         user_prompt = scope.user_prompt
         deferred_kwargs: dict[str, object] = {}
@@ -625,82 +634,77 @@ async def _materialize_agent(
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
-    tuple[str, ...],
 ]:
     definition = scope.binding.definition
     business_tools: list[Tool[AgentContext[object]]] = []
     workspace_names: list[str] = []
     business_descriptors: dict[str, ManagedToolDescriptor] = {}
-    business_plan_safe: set[str] = set()
+    workspace_descriptors: dict[str, ManagedToolDescriptor] = {}
+    compaction_policy = RuntimeCompactionPolicy()
     for candidate in definition.selected_tools:
-        tool = cast("Tool[AgentContext[object]]", candidate.value)
-        tool_class = workspace_tool_class(tool)
+        source_tool = cast("Tool[AgentContext[object]]", candidate.value)
+        metadata = _frozen_tool_metadata(candidate)
+        tool = _tool_with_metadata(source_tool, metadata)
+        tool_class = tool_class_from_metadata(metadata)
         if tool_class is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        descriptor = managed_tool_descriptor_from_metadata(metadata)
+        if tool_class == "business":
             business_tools.append(tool)
-            contract = candidate.semantic_contract
-            effect = contract.get("effect", "non_replay_safe")
-            plan_safe = contract.get("plan_safe", False)
-            if effect not in {"none", "replay_safe", "non_replay_safe"}:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            if not isinstance(plan_safe, bool):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            business_descriptors[candidate.id] = ManagedToolDescriptor(
-                effect_owner=("none" if effect == "none" else "tool_operation"),
-                effect=cast(
-                    "Literal['none', 'replay_safe', 'non_replay_safe']",
-                    effect,
-                ),
-                tool_class="business",
-            )
-            if plan_safe:
-                business_plan_safe.add(candidate.id)
-        else:
+            business_descriptors[candidate.id] = descriptor
+        elif tool_class in {
+            "filesystem.read",
+            "filesystem.write",
+            "shell",
+        }:
             workspace_names.append(candidate.id)
-
-    runtime_tool_names = select_runtime_tool_names(
-        ordinary_tool_policy=definition.ordinary_tool_policy,
-        memory_scope=scope.context.memory_scope,
-        planning=scope.planning,
-        subagent_available=scope.subagent_available
-        and bool(scope.binding.snapshot.subagents),
-    )
+            workspace_descriptors[candidate.id] = descriptor
+        else:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     capabilities: list[AbstractCapability[AgentContext[object]]] = []
     for candidate in definition.selected_capabilities:
         if not isinstance(candidate.value, AbstractCapability):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capabilities.append(
-            cast("AbstractCapability[AgentContext[object]]", candidate.value)
+        capability = cast(
+            "AbstractCapability[AgentContext[object]]",
+            candidate.value,
         )
+        capabilities.append(capability)
     if definition.skill_definitions:
-        capabilities.append(
-            LinkToolsSkills(
-                definition.skill_definitions,
-                skill_sources,
-                resource_paths=scope.skill_resource_paths,
-                preloaded_skill_ids=definition.spec.preload_skills,
-                max_preloaded_bytes=(
-                    scope.context.workspace.policy.max_preloaded_skill_bytes
-                ),
-            )
+        skill_capability = LinkToolsSkills(
+            definition.skill_definitions,
+            skill_sources,
+            resource_paths=scope.skill_resource_paths,
+            preloaded_skill_ids=definition.spec.preload_skills,
+            max_preloaded_bytes=(
+                scope.context.workspace.policy.max_preloaded_skill_bytes
+            ),
         )
-    if any(name in SUBAGENT_TOOL_NAMES for name in runtime_tool_names):
+        capabilities.append(skill_capability)
+    if scope.subagent_available and scope.binding.snapshot.subagents:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        capabilities.append(
-            LinkToolsSubagents(
-                scope.binding.snapshot.subagents,
-                scope.subagent_delegate,
-                scope.subagent_descriptions,
-            )
+        subagent_capability = LinkToolsSubagents(
+            scope.binding.snapshot.subagents,
+            scope.subagent_delegate,
+            scope.subagent_descriptions,
         )
-    if scope.mode == "plan":
-        prepare_tools = _plan_mode_prepare(
-            business_descriptors=business_descriptors,
-            business_plan_safe=frozenset(business_plan_safe),
-            plan_mode=True,
+        capabilities.append(subagent_capability)
+    prepare_tools = _plan_mode_prepare(
+        plan_mode=scope.mode == "plan",
+        compaction_policy=compaction_policy,
+    )
+    capabilities.append(
+        PrepareTools(
+            prepare_tools,
+            id=(
+                "linktools.plan-mode"
+                if scope.mode == "plan"
+                else "linktools.semantic-capture"
+            ),
         )
-        capabilities.append(PrepareTools(prepare_tools, id="linktools.plan-mode"))
+    )
 
     tool_metrics = (
         None
@@ -728,7 +732,6 @@ async def _materialize_agent(
         if (toolset := capability.get_toolset()) is not None
     )
     if workspace_toolset_values:
-        workspace_descriptors = _workspace_descriptors(workspace_names)
         raw_toolsets.append(
             RuntimeToolBoundaryToolset(
                 workspace_toolset_values,
@@ -754,25 +757,21 @@ async def _materialize_agent(
             ),
             execution_root=str(scope.context.workspace.root),
         )
-        for mcp_toolset in mcp_toolsets:
+        for materialized in mcp_toolsets:
             raw_toolsets.append(
                 RuntimeToolBoundaryToolset(
                     (
                         cast(
                             "AbstractToolset[AgentContext[object]]",
-                            mcp_toolset,
+                            materialized.toolset,
                         ),
                     ),
                     {},
                     id="linktools.mcp",
+                    descriptor=materialized.descriptor,
                     tool_operations=scope.tool_operations,
                     tool_metrics=tool_metrics,
                     background_tasks=scope.background_tasks,
-                    default_descriptor=ManagedToolDescriptor(
-                        effect_owner="tool_operation",
-                        effect="non_replay_safe",
-                        tool_class="mcp",
-                    ),
                 )
             )
     if business_tools:
@@ -808,12 +807,10 @@ async def _materialize_agent(
         memory_scope=scope.context.memory_scope,
         step_store=scope.step_store,
         memory_store=scope.memory_store,
-        runtime_tool_names=runtime_tool_names,
+        ordinary_tool_policy=definition.ordinary_tool_policy,
+        compaction_policy=compaction_policy,
+        planning=scope.planning,
         context_target_tokens=scope.context_target_tokens,
-        workspace_read_available=(
-            scope.sandbox_session is not None
-            and any(name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES for name in workspace_names)
-        ),
         parent_step_run_id=scope.parent_step_run_id,
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
@@ -877,96 +874,82 @@ async def _materialize_agent(
             toolsets=tuple(raw_toolsets),
         ),
     )
-    return (
-        agent,
-        tuple(capabilities),
-        runtime_tool_names,
+    return agent, tuple(capabilities)
+
+
+def _frozen_tool_metadata(
+    candidate: "CapabilityContribution[object]",
+) -> Mapping[str, object]:
+    contract = candidate.semantic_contract
+    metadata = contract.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    validate_tool_semantic_metadata(
+        metadata,
+        require_effect=True,
+        require_tool_class=True,
     )
+    return metadata
 
 
-def _workspace_descriptors(
-    names: Sequence[str],
-) -> dict[str, ManagedToolDescriptor]:
-    descriptors: dict[str, ManagedToolDescriptor] = {}
-    for name in names:
-        if name in WORKSPACE_FILESYSTEM_TOOL_NAMES:
-            tool_class = (
-                "filesystem.read"
-                if name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES
-                else "filesystem.write"
-            )
-            effect = "none" if tool_class == "filesystem.read" else "non_replay_safe"
-            descriptors[name] = ManagedToolDescriptor(
-                effect_owner=("none" if effect == "none" else "tool_operation"),
-                effect=cast(
-                    "Literal['none', 'replay_safe', 'non_replay_safe']",
-                    effect,
-                ),
-                tool_class=cast(
-                    "Literal['filesystem.read', 'filesystem.write']",
-                    tool_class,
-                ),
-                workspace_path_fields=("path",),
-            )
-        elif name in WORKSPACE_SHELL_TOOL_NAMES:
-            effect = "none" if name == "check_command" else "non_replay_safe"
-            descriptors[name] = ManagedToolDescriptor(
-                effect_owner=("none" if effect == "none" else "tool_operation"),
-                effect=cast(
-                    "Literal['none', 'replay_safe', 'non_replay_safe']",
-                    effect,
-                ),
-                tool_class="shell",
-            )
-        else:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return descriptors
+def _tool_with_metadata(
+    tool: "Tool[AgentContext[object]]",
+    metadata: Mapping[str, object],
+) -> "Tool[AgentContext[object]]":
+    return Tool(
+        tool.function,
+        takes_ctx=tool.takes_ctx,
+        max_retries=tool.max_retries,
+        name=tool.name,
+        description=tool.description,
+        prepare=tool.prepare,
+        args_validator=tool.args_validator,
+        docstring_format=tool.docstring_format,
+        require_parameter_descriptions=tool.require_parameter_descriptions,
+        strict=tool.strict,
+        sequential=tool.sequential,
+        requires_approval=tool.requires_approval,
+        metadata=dict(metadata),
+        timeout=tool.timeout,
+        defer_loading=tool.defer_loading,
+        include_return_schema=tool.include_return_schema,
+        function_schema=tool.function_schema,
+    )
 
 
 def _plan_mode_prepare(
     *,
-    business_descriptors: Mapping[str, ManagedToolDescriptor],
-    business_plan_safe: frozenset[str],
     plan_mode: bool,
+    compaction_policy: RuntimeCompactionPolicy | None = None,
 ) -> Callable[[PydanticRunContext[AgentContext[object]], list[ToolDefinition]], Any]:
     async def prepare(
         _ctx: PydanticRunContext[AgentContext[object]],
         tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
+        if compaction_policy is not None:
+            keep_result_tools: set[str] = set()
+            context_dedupe_by_tool: dict[str, str] = {}
+            for tool_def in tool_defs:
+                metadata = tool_def.metadata
+                validate_tool_semantic_metadata(metadata)
+                if (
+                    tool_def.tool_kind in _PLAN_SAFE_FRAMEWORK_TOOL_KINDS
+                    or tool_compaction_keep_result_from_metadata(metadata)
+                ):
+                    keep_result_tools.add(tool_def.name)
+                dedupe = tool_context_dedupe_from_metadata(metadata)
+                if dedupe is not None:
+                    context_dedupe_by_tool[tool_def.name] = dedupe
+            compaction_policy.keep_result_tools = frozenset(keep_result_tools)
+            compaction_policy.context_dedupe_by_tool = context_dedupe_by_tool
         if not plan_mode:
             return tool_defs
-        selected: list[ToolDefinition] = []
-        for tool_def in tool_defs:
-            if tool_def.tool_kind in {"capability-load", "tool-search"}:
-                selected.append(tool_def)
-                continue
-            if tool_def.name in SKILL_TOOL_NAMES:
-                selected.append(tool_def)
-                continue
-            if tool_def.name in {
-                "read_memory",
-                "search_memory",
-                "write_plan",
-                "list_subagents",
-            }:
-                selected.append(tool_def)
-                continue
-            descriptor = business_descriptors.get(tool_def.name)
-            if descriptor is not None:
-                if tool_def.name in business_plan_safe:
-                    selected.append(tool_def)
-                continue
-            if tool_def.name in WORKSPACE_FILESYSTEM_TOOL_NAMES:
-                if tool_def.name in WORKSPACE_FILESYSTEM_READ_TOOL_NAMES:
-                    selected.append(tool_def)
-                continue
-            if tool_def.name == "check_command":
-                selected.append(tool_def)
-                continue
-            metadata = tool_def.metadata or {}
-            if metadata.get(PLAN_SAFE_METADATA_KEY) is True:
-                selected.append(tool_def)
-        return selected
+        return [
+            tool_def
+            for tool_def in tool_defs
+            if tool_def.tool_kind in _PLAN_SAFE_FRAMEWORK_TOOL_KINDS
+            or tool_plan_safe_from_metadata(tool_def.metadata)
+        ]
 
     return prepare
 

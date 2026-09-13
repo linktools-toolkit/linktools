@@ -4,7 +4,7 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic_ai.messages import UserContent
 
@@ -140,6 +140,17 @@ class ExecutionHandle:
     execution_id: str
 
 
+class _ExecutionViewSource(Protocol):
+    execution_id: str
+    agent_id: str
+    status: ExecutionStatus
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
+    session_id: str | None
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
@@ -149,6 +160,22 @@ class ExecutionView:
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
+    session_id: str | None = None
+
+
+def project_execution_view(source: object) -> ExecutionView:
+    """Project an internal execution source into the stable public view."""
+    value = cast(_ExecutionViewSource, source)
+    return ExecutionView(
+        value.execution_id,
+        value.agent_id,
+        value.status,
+        value.lineage_kind,
+        value.parent_execution_id,
+        value.root_execution_id,
+        value.parent_invocation_id,
+        value.session_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,6 +373,24 @@ class ListSessionRequest:
     principal: Principal
     cursor: "str | None" = None
     limit: int = 100
+
+
+@dataclass(frozen=True, slots=True)
+class ListExecutionRequest:
+    principal: Principal
+    session_id: str | None = None
+    agent_id: str | None = None
+    parent_execution_id: str | None = None
+    cursor: str | None = None
+    limit: int = 100
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or not 1 <= self.limit <= 200
+        ):
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,6 +764,14 @@ class ArtifactDownload:
 
 
 class ExecutionHistoryService(Protocol):
+    async def inspect(
+        self, execution_id: str, *, principal: Principal
+    ) -> ExecutionView: ...
+
+    async def list(
+        self, request: ListExecutionRequest
+    ) -> "Page[ExecutionView]": ...
+
     async def trace(
         self,
         execution_id: str,
@@ -786,6 +839,9 @@ class ExecutionService(Protocol):
     async def inspect(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionView: ...
+    async def list(
+        self, request: ListExecutionRequest
+    ) -> "Page[ExecutionView]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
@@ -994,6 +1050,7 @@ __all__ = [
     "ExternalSupplyResult",
     "ForkExecutionRequest",
     "ForkSessionRequest",
+    "ListExecutionRequest",
     "ListSessionRequest",
     "LoadedSession",
     "Page",
@@ -1008,4 +1065,5 @@ __all__ = [
     "TaskGraphRunEvent",
     "TranscriptItem",
     "UpdateSessionRequest",
+    "project_execution_view",
 ]

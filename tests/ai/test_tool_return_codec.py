@@ -88,7 +88,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
 
     async def materialize(*args: object, **kwargs: object) -> object:
         del args, kwargs
-        return _Agent(), (), ()
+        return _Agent(), ()
 
     monkeypatch.setattr(agent_executor, "_materialize_agent", materialize)
 
@@ -111,6 +111,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         digest="definition",
         model=SimpleNamespace(materialize=lambda: TestModel()),
         spec=SimpleNamespace(id="agent"),
+        selected_tools=(),
     )
     binding = SimpleNamespace(
         definition=definition,

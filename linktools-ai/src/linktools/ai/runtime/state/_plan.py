@@ -25,6 +25,25 @@ class RuntimeDomain(str, Enum):
     RECOVERY = "recovery"
 
 
+_OBJECT_STORE_DOMAINS = frozenset(
+    {
+        RuntimeDomain.CONVERSATION,
+        RuntimeDomain.EXECUTION,
+        RuntimeDomain.MEMORY,
+        RuntimeDomain.ARTIFACT,
+        RuntimeDomain.TASK,
+        RuntimeDomain.RECOVERY,
+    }
+)
+
+
+def runtime_domain_uses_object_store(domain: RuntimeDomain) -> bool:
+    """Return whether a Runtime domain owns object-store data."""
+    if not isinstance(domain, RuntimeDomain):
+        raise TypeError("domain must be RuntimeDomain")
+    return domain in _OBJECT_STORE_DOMAINS
+
+
 class RuntimeRetentionMode(str, Enum):
     __str__ = str.__str__
     __format__ = str.__format__
@@ -253,4 +272,10 @@ def _normalize_path(value: "str | Path") -> Path:
     return Path(value).expanduser().resolve(strict=False)
 
 
-__all__ = ["RuntimeDomain", "RuntimeRetentionMode", "RuntimeStatePlan", "RuntimeStateRoute"]
+__all__ = [
+    "RuntimeDomain",
+    "RuntimeRetentionMode",
+    "RuntimeStatePlan",
+    "RuntimeStateRoute",
+    "runtime_domain_uses_object_store",
+]
