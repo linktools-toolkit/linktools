@@ -34,6 +34,22 @@ async def _text_model(messages: list[ModelMessage], info: AgentInfo) -> ModelRes
     return ModelResponse(parts=[TextPart("done")])
 
 
+async def _usage_model(
+    messages: list[ModelMessage],
+    info: AgentInfo,
+) -> ModelResponse:
+    del messages, info
+    return ModelResponse(
+        parts=[TextPart("done")],
+        usage=_response_usage(
+            input_tokens=101,
+            output_tokens=202,
+            cache_read_tokens=303,
+            cache_write_tokens=404,
+        ),
+    )
+
+
 def _response_usage(
     *,
     input_tokens: int,
@@ -90,6 +106,8 @@ def _model_usage_metadata(response: ModelResponse) -> dict[str, str]:
 def _persistence(
     store: StagingStepStore,
     run_id: str,
+    *,
+    reverse_registration: bool = False,
 ) -> CombinedCapability[object]:
     journal = ModelRequestJournal(
         source_namespace="workspace",
@@ -113,7 +131,10 @@ def _persistence(
         agent_id="usage-test",
         journal=journal,
     )
-    return CombinedCapability([observation, persistence])
+    capabilities = [observation, persistence]
+    if reverse_registration:
+        capabilities.reverse()
+    return CombinedCapability(capabilities)
 
 
 async def _completed_usage(
@@ -127,6 +148,86 @@ async def _completed_usage(
     ]
     assert all(value is not None for value in values)
     return [value for value in values if value is not None]
+
+
+@pytest.mark.asyncio
+async def test_model_usage_trace_does_not_depend_on_registration_order() -> None:
+    store = StagingStepStore()
+    run_id = "reverse-registration-run"
+    agent = Agent(
+        FunctionModel(_usage_model),
+        capabilities=[
+            _persistence(
+                store,
+                run_id,
+                reverse_registration=True,
+            )
+        ],
+    )
+
+    await agent.run("hello")
+
+    events = await store.list_events(run_id=run_id)
+    started = [
+        event
+        for event in events
+        if event.kind == "model_request_started"
+    ]
+    assert len(started) == 1
+    assert started[0].metadata["linktools.ai.request_sequence"] == "1"
+    assert started[0].metadata["linktools.ai.request_purpose"] == "agent"
+
+    completed = [
+        event
+        for event in events
+        if event.kind == "model_request_completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0].metadata["linktools.ai.request_sequence"] == "1"
+    assert completed[0].metadata["linktools.ai.request_purpose"] == "agent"
+    assert _project_event(completed[0]) == {
+        "input_tokens": 101,
+        "output_tokens": 202,
+        "cache_read_tokens": 303,
+        "cache_write_tokens": 404,
+    }
+
+
+@pytest.mark.asyncio
+async def test_model_journal_wiring_failure_happens_before_model_call() -> None:
+    store = StagingStepStore()
+    called = False
+
+    async def model(
+        messages: list[ModelMessage],
+        info: AgentInfo,
+    ) -> ModelResponse:
+        nonlocal called
+        del messages, info
+        called = True
+        return ModelResponse(parts=[TextPart("unexpected")])
+
+    journal = ModelRequestJournal(
+        source_namespace="workspace",
+        tenant_id="tenant",
+        execution_id="execution",
+        step_run_id="broken-wiring-run",
+    )
+    persistence = _RuntimeStepPersistence(
+        store=HarnessStepStoreAdapter(store, execution_id=None),
+        agent_name="usage-test",
+        run_id="broken-wiring-run",
+        model_journal=journal,
+    )
+    agent = Agent(FunctionModel(model), capabilities=[persistence])
+
+    with pytest.raises(AIError) as error:
+        await agent.run("hello")
+
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert called is False
+    events = await store.list_events(run_id="broken-wiring-run")
+    assert not any(event.kind.startswith("model_request_") for event in events)
 
 
 @pytest.mark.asyncio
