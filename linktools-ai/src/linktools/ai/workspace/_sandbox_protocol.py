@@ -14,8 +14,11 @@ from typing import Any
 from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 
-PROTOCOL_VERSION = 1
-WORKER_BUILD = "linktools-ai-sandbox-worker-v1"
+PROTOCOL_VERSION = 2
+WORKER_BUILD = "linktools-ai-sandbox-worker-v2"
+ERROR_EFFECT_NOT_APPLIED = "not_applied"
+ERROR_EFFECT_UNKNOWN = "unknown"
+ERROR_EFFECT_VALUES = frozenset({ERROR_EFFECT_NOT_APPLIED, ERROR_EFFECT_UNKNOWN})
 GUARDIAN_EXIT_OK = 0
 GUARDIAN_EXIT_SESSION_FAILED = 1
 GUARDIAN_EXIT_CLEANUP_FAILED = 2
@@ -145,15 +148,26 @@ async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
     return value
 
 
-def protocol_error(code: ErrorCode, *, reason: str) -> dict[str, Any]:
+def protocol_error(
+    code: ErrorCode,
+    *,
+    reason: str,
+    effect: str = ERROR_EFFECT_UNKNOWN,
+) -> dict[str, Any]:
     """Create the bounded error shape sent by the worker."""
+    if effect not in ERROR_EFFECT_VALUES:
+        raise ValueError("sandbox error effect is invalid")
     return {
         "code": code.value,
         "safe_details": {"reason": reason[:256]},
+        "effect": effect,
     }
 
 
 __all__ = [
+    "ERROR_EFFECT_NOT_APPLIED",
+    "ERROR_EFFECT_UNKNOWN",
+    "ERROR_EFFECT_VALUES",
     "GUARDIAN_EXIT_CLEANUP_FAILED",
     "GUARDIAN_EXIT_OK",
     "GUARDIAN_EXIT_SESSION_FAILED",
