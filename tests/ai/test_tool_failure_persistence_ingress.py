@@ -5,7 +5,7 @@
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from linktools.ai.core import JsonValue, ToolOperationStatus
@@ -48,10 +48,13 @@ def _record() -> ToolOperationRecord:
     )
 
 
-def _decode_with_error_payload(payload: StoredPayload) -> ToolOperationRecord:
-    encoded_payload = _encode_persisted_domain(payload)
+def _decode_with_fields(**overrides: object) -> ToolOperationRecord:
+    encoded_overrides = {
+        name: _encode_persisted_domain(cast(Any, value))
+        for name, value in overrides.items()
+    }
 
-    def replace_error_payload(value: JsonValue) -> JsonValue:
+    def replace_fields(value: JsonValue) -> JsonValue:
         restored = _restore_lease_fields(value, ToolOperationRecord)
         assert isinstance(restored, Mapping)
         fields = restored.get("fields")
@@ -62,7 +65,7 @@ def _decode_with_error_payload(payload: StoredPayload) -> ToolOperationRecord:
                 **restored,
                 "fields": {
                     **fields,
-                    "error_payload": encoded_payload,
+                    **encoded_overrides,
                 },
             },
         )
@@ -70,8 +73,12 @@ def _decode_with_error_payload(payload: StoredPayload) -> ToolOperationRecord:
     return _decode_enveloped_domain(
         cast("Mapping[str, JsonValue]", _domain_data(_record())),
         ToolOperationRecord,
-        payload_transform=replace_error_payload,
+        payload_transform=replace_fields,
     )
+
+
+def _decode_with_error_payload(payload: StoredPayload) -> ToolOperationRecord:
+    return _decode_with_fields(error_payload=payload)
 
 
 @pytest.mark.parametrize(
@@ -110,4 +117,28 @@ def test_persisted_tool_failure_rejects_corrupt_current_payload(
         _decode_with_error_payload(
             StoredPayload.inline_bytes(json.dumps(value).encode("utf-8"))
         )
+    assert captured.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"result_payload": StoredPayload.inline_bytes(b"result")},
+        {
+            "status": ToolOperationStatus.COMPLETED,
+            "result_payload": StoredPayload.inline_bytes(b"result"),
+        },
+        {"status": ToolOperationStatus.PENDING},
+        {"status": ToolOperationStatus.CANCELLED},
+        {
+            "status": ToolOperationStatus.EFFECT_UNKNOWN,
+            "error_code": ErrorCode.TOOL_EFFECT_UNKNOWN.value,
+        },
+    ),
+)
+def test_persisted_tool_operation_rejects_conflicting_state_payloads(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(AIError) as captured:
+        _decode_with_fields(**overrides)
     assert captured.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
