@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
@@ -35,13 +36,33 @@ class _Session:
 
     async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
         self.reads.append(path)
-        value = self.values[path]
+        try:
+            value = self.values[path]
+        except KeyError as error:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
         if max_bytes is not None and len(value) > max_bytes:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return value
 
     async def close(self) -> None:
         return None
+
+
+class _ErrorSession(_Session):
+    def __init__(self, error: ErrorCode, *, canonicalize: bool) -> None:
+        super().__init__({"evidence.txt": b"evidence"})
+        self.error = error
+        self.fail_canonicalize = canonicalize
+
+    async def canonicalize_path(self, path: str) -> str:
+        if self.fail_canonicalize:
+            raise AIError(self.error)
+        return path
+
+    async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        if not self.fail_canonicalize:
+            raise AIError(self.error)
+        return await super().read_bytes(path, max_bytes=max_bytes)
 
 
 class _Sandbox:
@@ -64,6 +85,12 @@ class _UnavailableAccess:
         raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
 
 
+class _DeniedAccess:
+    async def canonicalize_path(self, path: str) -> str:
+        del path
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+
 def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
     return ExecutionRequest(
         user_prompt="inspect",
@@ -77,13 +104,16 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
     )
 
 
-@pytest.mark.asyncio
-async def test_text_materialization_keeps_text_codec() -> None:
-    access = WorkspaceAccess(_Sandbox(_Session({})), root=Path("."))
-    materializer = ExecutionInputMaterializer(
-        access,
+def _materializer(session: _Session) -> ExecutionInputMaterializer:
+    return ExecutionInputMaterializer(
+        WorkspaceAccess(_Sandbox(session), root=Path(".")),
         Workspace.load(".", workspace_id="workspace").policy,
     )
+
+
+@pytest.mark.asyncio
+async def test_text_materialization_keeps_text_codec() -> None:
+    materializer = _materializer(_Session({}))
     try:
         canonical = await materializer.materialize("plain text", ())
         stored = await materializer.store(canonical, tenant_id="tenant")
@@ -112,11 +142,7 @@ def test_invalid_user_content_is_rejected_at_request_boundary() -> None:
 @pytest.mark.asyncio
 async def test_execution_freezes_materialized_input_once() -> None:
     session = _Session({"evidence.txt": b"evidence"})
-    access = WorkspaceAccess(_Sandbox(session), root=Path("."))
-    materializer = ExecutionInputMaterializer(
-        access,
-        Workspace.load(".", workspace_id="workspace").policy,
-    )
+    materializer = _materializer(session)
     service = object.__new__(DefaultExecutionService)
     service._input_materializer = materializer  # type: ignore[attr-defined]
 
@@ -137,6 +163,54 @@ async def test_execution_freezes_materialized_input_once() -> None:
         await materializer.close()
 
 
+@pytest.mark.asyncio
+async def test_execution_file_path_domain_error_becomes_request_error() -> None:
+    materializer = _materializer(
+        _ErrorSession(ErrorCode.AUTHORIZATION_DENIED, canonicalize=True)
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            await materializer.canonicalize_files(("../secret.txt",))
+    finally:
+        await materializer.close()
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert raised.value.safe_details == {
+        "field": "files",
+        "reason": "path_not_allowed",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execution_missing_file_becomes_request_error() -> None:
+    materializer = _materializer(_Session({}))
+    try:
+        with pytest.raises(AIError) as raised:
+            await materializer.materialize("inspect", ("missing.txt",))
+    finally:
+        await materializer.close()
+
+    assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    assert raised.value.safe_details == {
+        "field": "files",
+        "reason": "file_not_found",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execution_file_infrastructure_error_is_not_downgraded() -> None:
+    materializer = _materializer(
+        _ErrorSession(ErrorCode.STORAGE_UNAVAILABLE, canonicalize=False)
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            await materializer.materialize("inspect", ("evidence.txt",))
+    finally:
+        await materializer.close()
+
+    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+
+
 async def _echo_path(path: str) -> str:
     return path
 
@@ -151,21 +225,25 @@ def _context() -> RunContext[None]:
     )
 
 
-@pytest.mark.asyncio
-async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
-    session = _Session({})
+def _workspace_boundary(sandbox_session: object) -> RuntimeToolBoundaryToolset:
     descriptor = ManagedToolDescriptor(
         effect_owner="none",
         effect="none",
         tool_class="filesystem.read",
         workspace_path_fields=("path",),
     )
-    boundary = RuntimeToolBoundaryToolset(
+    return RuntimeToolBoundaryToolset(
         (FunctionToolset([semantic_tool(_echo_path, descriptor)]),),
         {"_echo_path": descriptor},
         id="workspace",
-        sandbox_session=session,  # type: ignore[arg-type]
+        sandbox_session=sandbox_session,  # type: ignore[arg-type]
     )
+
+
+@pytest.mark.asyncio
+async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
+    session = _Session({})
+    boundary = _workspace_boundary(session)
     context = _context()
     tools = await boundary.get_tools(context)
     args = {"path": "file.txt"}
@@ -182,19 +260,23 @@ async def test_final_tool_boundary_canonicalizes_workspace_arguments() -> None:
 
 
 @pytest.mark.asyncio
+async def test_final_tool_boundary_returns_model_retry_for_correctable_path_error() -> None:
+    boundary = _workspace_boundary(_DeniedAccess())
+    context = _context()
+    tools = await boundary.get_tools(context)
+
+    with pytest.raises(ModelRetry, match="not allowed"):
+        await boundary.call_tool(
+            "_echo_path",
+            {"path": "../secret.txt"},
+            context,
+            tools["_echo_path"],
+        )
+
+
+@pytest.mark.asyncio
 async def test_final_tool_boundary_does_not_freeze_transient_sandbox_failure() -> None:
-    descriptor = ManagedToolDescriptor(
-        effect_owner="none",
-        effect="none",
-        tool_class="filesystem.read",
-        workspace_path_fields=("path",),
-    )
-    boundary = RuntimeToolBoundaryToolset(
-        (FunctionToolset([semantic_tool(_echo_path, descriptor)]),),
-        {"_echo_path": descriptor},
-        id="workspace",
-        sandbox_session=_UnavailableAccess(),  # type: ignore[arg-type]
-    )
+    boundary = _workspace_boundary(_UnavailableAccess())
     context = _context()
     tools = await boundary.get_tools(context)
 
