@@ -3,12 +3,18 @@
 """Session timeline storage invariants."""
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.core import SessionStatus
 from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._contracts import SessionRecord
+from linktools.ai.runtime.state._commands import _timeline_turn_message_range
+from linktools.ai.runtime.state._contracts import (
+    ConversationCursor,
+    ConversationHistoryRecord,
+    SessionRecord,
+)
 
 
 def _session() -> SessionRecord:
@@ -78,3 +84,42 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
         ]
     finally:
         await state.close()
+
+
+def test_timeline_range_uses_committed_cursor_when_snapshot_is_already_materialized() -> None:
+    history = ConversationHistoryRecord(
+        history_id="history",
+        session_id="session",
+        tenant_id="tenant",
+        parent_history_id="parent",
+        prefix_index_head_id="node",
+        inherited_message_count=3,
+    )
+    prepared = SimpleNamespace(
+        snapshots=(SimpleNamespace(chunks=()),),
+        target_transcript_message_count=5,
+    )
+    expected = ConversationCursor(
+        "previous",
+        history_id="history",
+        message_count=4,
+    )
+
+    assert _timeline_turn_message_range(history, prepared, expected) == (4, 8)
+
+
+def test_timeline_range_allows_root_recovery_after_transcript_materialization() -> None:
+    history = ConversationHistoryRecord(
+        history_id="history",
+        session_id="session",
+        tenant_id="tenant",
+        parent_history_id=None,
+        prefix_index_head_id=None,
+        inherited_message_count=0,
+    )
+    prepared = SimpleNamespace(
+        snapshots=(SimpleNamespace(chunks=()),),
+        target_transcript_message_count=2,
+    )
+
+    assert _timeline_turn_message_range(history, prepared, None) == (0, 2)

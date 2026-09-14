@@ -81,6 +81,31 @@ from ._store import StateGroupTransaction, StateStore, StateTransaction
 _logger = environ.get_logger("ai.runtime.state.commands")
 
 
+def _timeline_turn_message_range(
+    history: ConversationHistoryRecord,
+    prepared: PreparedStepSnapshotBatch,
+    expected_cursor: ConversationCursor | None,
+) -> tuple[int | None, int]:
+    if not prepared.snapshots:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    local_start = min(
+        (chunk.first_message_index for chunk in prepared.snapshots[0].chunks),
+        default=None,
+    )
+    end = history.inherited_message_count + prepared.target_transcript_message_count
+    if local_start is not None:
+        start: int | None = history.inherited_message_count + local_start
+    elif expected_cursor is None:
+        if history.inherited_message_count != 0:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        start = 0
+    else:
+        start = expected_cursor.message_count
+    if start is not None and end <= start:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return start, end
+
+
 class RuntimeStateCommands:
     """Named semantic commands that may enlist several Runtime domains."""
 
@@ -1437,6 +1462,35 @@ class RuntimeStateCommands:
                 conversation_run,
                 (conversation_snapshot,),
             )
+        timeline_range: tuple[int | None, int] | None = None
+        if prepared_conversation:
+            if (
+                session_id is None
+                or next_cursor is None
+                or next_cursor.history_id is None
+                or self._conversation_history is None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            timeline_history = await self._conversation_history.get(
+                next_cursor.history_id,
+                tenant_id=commit.execution.tenant_id,
+            )
+            if (
+                timeline_history is None
+                or timeline_history.session_id != session_id
+                or timeline_history.tenant_id != commit.execution.tenant_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            timeline_range = _timeline_turn_message_range(
+                timeline_history,
+                prepared_conversation,
+                expected_cursor,
+            )
+            next_cursor = replace(
+                next_cursor,
+                message_count=timeline_range[1],
+            )
+
         prepared_recovery = ()
         if (
             self._recovery_steps is not None
@@ -1536,27 +1590,15 @@ class RuntimeStateCommands:
                             next_cursor=next_cursor,
                             history_quality="complete",
                         )
-                        local_start = min(
-                            (
-                                chunk.first_message_index
-                                for chunk in prepared_conversation[0].chunks
-                            ),
-                            default=None,
-                        )
+                        if timeline_range is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         await self._conversation.commit_timeline_turn_in_transaction(
                             conversation_transaction,
                             session_id,
                             tenant_id=commit.execution.tenant_id,
                             execution_id=commit.execution.execution_id,
-                            start_message_index=(
-                                None
-                                if local_start is None
-                                else history.inherited_message_count + local_start
-                            ),
-                            end_message_index=(
-                                history.inherited_message_count
-                                + prepared_conversation.target_transcript_message_count
-                            ),
+                            start_message_index=timeline_range[0],
+                            end_message_index=timeline_range[1],
                         )
                 if recovery_checkpoint is not None:
                     if recovery_run is not None or recovery_snapshot is not None:
@@ -1839,27 +1881,15 @@ class RuntimeStateCommands:
                         release_execution=False,
                         history_quality="complete",
                     )
-                    local_start = min(
-                        (
-                            chunk.first_message_index
-                            for chunk in prepared_conversation[0].chunks
-                        ),
-                        default=None,
-                    )
+                    if timeline_range is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     await self._conversation.commit_timeline_turn_in_transaction(
                         transaction,
                         session_id,
                         tenant_id=commit.execution.tenant_id,
                         execution_id=commit.execution.execution_id,
-                        start_message_index=(
-                            None
-                            if local_start is None
-                            else history.inherited_message_count + local_start
-                        ),
-                        end_message_index=(
-                            history.inherited_message_count
-                            + prepared_conversation.target_transcript_message_count
-                        ),
+                        start_message_index=timeline_range[0],
+                        end_message_index=timeline_range[1],
                     )
 
                 for attempt in range(2):

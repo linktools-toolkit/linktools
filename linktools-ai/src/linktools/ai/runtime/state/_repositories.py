@@ -1566,9 +1566,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if committed.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if start_message_index is not None and (
-                committed.start_message_index != start_message_index
-                or committed.end_message_index != end_message_index
+            if committed.end_message_index != end_message_index or (
+                start_message_index is not None
+                and committed.start_message_index != start_message_index
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return committed
