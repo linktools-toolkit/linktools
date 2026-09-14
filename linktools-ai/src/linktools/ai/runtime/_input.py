@@ -250,18 +250,17 @@ class ExecutionInputMaterializer:
     ) -> "StoredUserInput":
         from .state._contracts import StoredUserInput
 
-        view = (
-            dict(value.view)
-            if isinstance(value, _MaterializedUserContent)
-            else _input_view(value)
-        )
         canonical = validate_user_input(value)
         if isinstance(canonical, str):
             return StoredUserInput(
                 _TEXT_CODEC,
                 StoredPayload.inline_text(canonical),
-                view,
             )
+        view = (
+            dict(value.view)
+            if isinstance(value, _MaterializedUserContent)
+            else _input_view(value)
+        )
         payload = StoredPayload.inline_json(_encode_user_content(canonical))
         if not payload_fits_inline(payload, self._payload_policy):
             if self._object_store is None or self._object_key_factory is None:
