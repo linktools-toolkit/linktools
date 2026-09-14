@@ -110,8 +110,6 @@ class RuntimePlanStore:
         self,
         edit: Callable[[list[PlanItem]], list[PlanItem]],
     ) -> tuple[list[PlanItem], list[PlanItem], int]:
-        if not callable(edit):
-            raise TypeError("plan edit must be callable")
         observed: tuple[list[PlanItem], list[PlanItem], int] | None = None
 
         async def mutate(
