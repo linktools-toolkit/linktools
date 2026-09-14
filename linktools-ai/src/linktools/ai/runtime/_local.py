@@ -5524,8 +5524,9 @@ class LocalExecutionBackend:
                     stores.append(archive.state_store)
             if execution.session_id is not None and status is ExecutionStatus.SUCCEEDED:
                 archive = self._step_reads[RuntimeDomain.CONVERSATION]
-                if isinstance(archive, StateStepArchive):
-                    stores.append(archive.state_store)
+                if not isinstance(archive, StateStepArchive):
+                    return False
+                stores.append(archive.state_store)
         return all(
             store.storage_group is stores[0].storage_group for store in stores[1:]
         )
