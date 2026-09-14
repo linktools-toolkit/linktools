@@ -52,6 +52,9 @@ async def test_committed_turn_range_may_skip_uncommitted_turns() -> None:
             execution_id="success",
             expected=None,
         )
+        assert await state.conversation.sessions.timeline_head(
+            "session", tenant_id="tenant"
+        ) == 2
 
         async def commit(transaction) -> None:
             await state.conversation.sessions.commit_timeline_turn_in_transaction(
