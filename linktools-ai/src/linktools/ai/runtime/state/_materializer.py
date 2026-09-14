@@ -227,9 +227,11 @@ async def materialize_runtime_state(
 
         for key, domains in sql_groups.items():
             route = sql_routes[key]
+            bootstrap_local_schema = False
             if key[0] == "sqlite":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                bootstrap_local_schema = not route.path.exists()
                 await asyncio.to_thread(
                     route.path.parent.mkdir, parents=True, exist_ok=True
                 )
@@ -255,7 +257,7 @@ async def materialize_runtime_state(
                     for domain in domains
                 ):
                     build_object_sql_metadata(metadata=metadata)
-                if key[0] == "sqlite":
+                if bootstrap_local_schema:
                     await context.initialize()
                     async with context.engine.begin() as connection:
                         await connection.run_sync(metadata.create_all)
