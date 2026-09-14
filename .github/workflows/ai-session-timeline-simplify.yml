@@ -1,0 +1,157 @@
+name: Apply session timeline simplification
+
+on:
+  push:
+    branches:
+      - feat/ai-session-timeline
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply focused simplification
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, got {count}: {old[:100]!r}")
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # In-memory archives own runs, not Session history identities. Remove the
+          # heuristic history-id scan and route Session reads through RuntimeStepStore
+          # with the Session's explicit continuation run.
+          path = "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
+          replace_once(
+              path,
+              '''    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:\n        if self._runtime_domain is not RuntimeDomain.CONVERSATION:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        candidates: list[ContinuableSnapshot] = []\n        for run in self._runs.values():\n            if run.metadata.get("history_id") != history_id:\n                continue\n            snapshot = self.latest_snapshot_local(run.run_id)\n            if snapshot is not None:\n                candidates.append(snapshot)\n        if not candidates:\n            return None\n        return max(\n            candidates,\n            key=lambda value: (len(value.messages), value.timestamp, value.run_id),\n        )\n\n    async def session_message_count(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> int:\n        del tenant_id\n        snapshot = self._session_snapshot(history_id)\n        if snapshot is None:\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        return len(snapshot.messages)\n\n    async def iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]:\n        del tenant_id\n        if start < 0 or end < start:\n            raise AIError(ErrorCode.STORAGE_CONFLICT)\n        snapshot = self._session_snapshot(history_id)\n        if snapshot is None:\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        if end > len(snapshot.messages):\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        for message in snapshot.messages[start:end]:\n            yield message\n\n''',
+              '',
+          )
+          replace_once(
+              path,
+              '''    async def session_message_count(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> int:\n        archive = self._archives.get(RuntimeDomain.CONVERSATION)\n        if isinstance(archive, StateStepArchive):\n            return await archive.transcript_repository.history_message_count(\n                history_id,\n                tenant_id=tenant_id,\n            )\n        if isinstance(archive, InMemoryStepArchive):\n            return await archive.session_message_count(\n                history_id,\n                tenant_id=tenant_id,\n            )\n        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)\n\n    def iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]:\n        return self._iter_session_message_range(\n            history_id,\n            tenant_id=tenant_id,\n            start=start,\n            end=end,\n        )\n\n    async def _iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]:\n        archive = self._archives.get(RuntimeDomain.CONVERSATION)\n        if not isinstance(archive, StateStepArchive):\n            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)\n        async for message in archive.transcript_repository.iter_session_message_range(\n            history_id,\n            tenant_id=tenant_id,\n            start=start,\n            end=end,\n        ):\n            yield message\n\n    async def load_session_model_context(\n        self,\n        history_id: str,\n    ) -> LoadedModelContext:\n        archive = self._archives.get(RuntimeDomain.CONVERSATION)\n        if not isinstance(archive, StateStepArchive):\n            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)\n        return await archive.load_loaded_model_context(\n            owner_id=history_id,\n        )\n''',
+              '''    async def conversation_message_count(\n        self,\n        *,\n        history_id: str | None,\n        step_run_id: str,\n        tenant_id: str,\n    ) -> int:\n        archive = self._archives.get(RuntimeDomain.CONVERSATION)\n        if isinstance(archive, StateStepArchive):\n            if history_id is None:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            return await archive.transcript_repository.history_message_count(\n                history_id,\n                tenant_id=tenant_id,\n            )\n        if isinstance(archive, InMemoryStepArchive):\n            return await archive.transcript_message_count(step_run_id)\n        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)\n\n    def iter_conversation_message_range(\n        self,\n        *,\n        history_id: str | None,\n        step_run_id: str,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]:\n        return self._iter_conversation_message_range(\n            history_id=history_id,\n            step_run_id=step_run_id,\n            tenant_id=tenant_id,\n            start=start,\n            end=end,\n        )\n\n    async def _iter_conversation_message_range(\n        self,\n        *,\n        history_id: str | None,\n        step_run_id: str,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]:\n        archive = self._archives.get(RuntimeDomain.CONVERSATION)\n        if isinstance(archive, StateStepArchive):\n            if history_id is None:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            async for message in archive.transcript_repository.iter_session_message_range(\n                history_id,\n                tenant_id=tenant_id,\n                start=start,\n                end=end,\n            ):\n                yield message\n            return\n        if isinstance(archive, InMemoryStepArchive):\n            async for message in archive.iter_message_range(\n                run_id=step_run_id,\n                start=start,\n                end=end,\n            ):\n                yield message\n            return\n        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)\n\n    async def load_conversation_model_context(\n        self,\n        *,\n        history_id: str | None,\n        step_run_id: str,\n        tenant_id: str,\n    ) -> tuple[object, ...]:\n        archive = self._archives.get(RuntimeDomain.CONVERSATION)\n        if isinstance(archive, StateStepArchive):\n            if history_id is None:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            return await archive.load_session_model_context(\n                history_id,\n                tenant_id=tenant_id,\n            )\n        if isinstance(archive, InMemoryStepArchive):\n            return await archive.load_model_context(run_id=step_run_id)\n        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)\n''',
+          )
+
+          # Recovery asks the RuntimeStepStore composition boundary for the same
+          # conversation coordinate used by Session reads.
+          path = "linktools-ai/src/linktools/ai/runtime/_local.py"
+          replace_once(
+              path,
+              '''        end_message_index = await self._steps.session_message_count(\n            history_id,\n            tenant_id=checkpoint.tenant_id,\n        )\n''',
+              '''        end_message_index = await self._steps.conversation_message_count(\n            history_id=history_id,\n            step_run_id=intent.next_cursor.step_run_id,\n            tenant_id=checkpoint.tenant_id,\n        )\n''',
+          )
+
+          # Session service consumes only the composition-level Conversation view;
+          # it no longer requires every archive backend to emulate history_id reads.
+          path = "linktools-ai/src/linktools/ai/runtime/_session.py"
+          replace_once(
+              path,
+              '''class _SessionTranscriptStore(Protocol):\n    async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...\n\n    async def iter_session_messages(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> AsyncIterator[object]: ...\n\n    async def iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[ModelMessage]: ...\n\n    async def load_session_model_context(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> tuple[object, ...]: ...\n\n    async def load_model_context(\n        self,\n        *,\n        run_id: str,\n    ) -> tuple[object, ...]: ...\n\n    async def latest_snapshot(\n        self,\n        *,\n        run_id: str,\n        include_interrupted: bool = False,\n    ) -> ContinuableSnapshot | None: ...\n''',
+              '''class _SessionTranscriptStore(Protocol):\n    def iter_conversation_message_range(\n        self,\n        *,\n        history_id: str | None,\n        step_run_id: str,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]: ...\n\n    async def load_conversation_model_context(\n        self,\n        *,\n        history_id: str | None,\n        step_run_id: str,\n        tenant_id: str,\n    ) -> tuple[object, ...]: ...\n''',
+          )
+          replace_once(
+              path,
+              '''                if record.history_id is None:\n                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n                range_start = min(item.start_message_index for item in committed)\n                range_end = max(item.end_message_index for item in committed)\n                loaded = cast(\n                    tuple[ModelMessage, ...],\n                    tuple(\n                        [\n                            item\n                            async for item in self._transcript_store.iter_session_message_range(\n                                record.history_id,\n                                tenant_id=record.tenant_id,\n                                start=range_start,\n                                end=range_end,\n                            )\n                        ]\n                    ),\n                )\n''',
+              '''                if record.continuation is None:\n                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n                range_start = min(item.start_message_index for item in committed)\n                range_end = max(item.end_message_index for item in committed)\n                loaded = cast(\n                    tuple[ModelMessage, ...],\n                    tuple(\n                        [\n                            item\n                            async for item in self._transcript_store.iter_conversation_message_range(\n                                history_id=record.history_id,\n                                step_run_id=record.continuation.step_run_id,\n                                tenant_id=record.tenant_id,\n                                start=range_start,\n                                end=range_end,\n                            )\n                        ]\n                    ),\n                )\n''',
+          )
+          replace_once(
+              path,
+              '''            history_id = record.continuation.history_id or record.history_id\n            if history_id is not None:\n                return await self._transcript_store.load_session_model_context(\n                    history_id,\n                    tenant_id=record.tenant_id,\n                )\n            return await self._transcript_store.load_model_context(\n                run_id=record.continuation.step_run_id,\n            )\n''',
+              '''            history_id = record.continuation.history_id or record.history_id\n            return await self._transcript_store.load_conversation_model_context(\n                history_id=history_id,\n                step_run_id=record.continuation.step_run_id,\n                tenant_id=record.tenant_id,\n            )\n''',
+          )
+
+          path = "linktools-ai/src/linktools/ai/runtime/_factory.py"
+          replace_once(
+              path,
+              '            transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),\n',
+              '            transcript_store=state.steps,\n',
+          )
+
+          # Reuse StateStore's domain-separated subject identity and remove a check
+          # that latest=True could never prove unique.
+          path = "linktools-ai/src/linktools/ai/runtime/state/_repositories.py"
+          replace_once(
+              path,
+              '''    @staticmethod\n    def _timeline_subject(execution_id: str) -> bytes:\n        return hashlib.sha256(canonical_json_bytes(execution_id)).digest()\n''',
+              '''    @staticmethod\n    def _timeline_subject(execution_id: str) -> bytes:\n        return subject_digest(execution_id)\n''',
+          )
+          replace_once(
+              path,
+              '        if len(turns) != 1:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n',
+              '        if not turns:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n',
+          )
+
+          # Direct SessionService test now uses the same RuntimeStepStore boundary
+          # as production. Add a stale longer snapshot to prove continuation wins.
+          path = "tests/ai/test_session_timeline.py"
+          replace_once(
+              path,
+              '            transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),\n',
+              '            transcript_store=state.steps,\n',
+          )
+          replace_once(
+              path,
+              '''        await state.conversation.sessions.state_store.mutate(commit_success)\n\n        await state.conversation.sessions.admit_execution(\n''',
+              '''        await state.conversation.sessions.state_store.mutate(commit_success)\n\n        stale_run_id = "stale-timeline-run"\n        stale_conversation_id = step_conversation_id(\n            namespace="session-timeline",\n            tenant_id="tenant",\n            execution_id="stale",\n        )\n        stale_now = datetime.now(timezone.utc)\n        await state.steps.register_run(\n            RunRecord(\n                run_id=stale_run_id,\n                conversation_id=stale_conversation_id,\n                parent_run_id=None,\n                agent_name="agent",\n                metadata={"agent_name": "agent", "history_id": created.history_id},\n                started_at=stale_now,\n            )\n        )\n        stale_messages = [\n            ModelResponse(\n                parts=[TextPart(content=f"stale answer {index}")],\n                conversation_id=stale_conversation_id,\n            )\n            for index in range(3)\n        ]\n        await state.steps.save_snapshot(\n            ContinuableSnapshot(\n                run_id=stale_run_id,\n                step_index=1,\n                messages=stale_messages,\n                conversation_id=stale_conversation_id,\n                parent_run_id=None,\n                agent_name="agent",\n                timestamp=stale_now,\n                state="complete",\n            )\n        )\n        await state.steps.materialize_conversation(step_run_id=stale_run_id)\n\n        await state.conversation.sessions.admit_execution(\n''',
+          )
+          replace_once(
+              path,
+              '        assert "INTERNAL RETRY PROMPT" not in rendered\n',
+              '        assert "INTERNAL RETRY PROMPT" not in rendered\n        assert "stale answer" not in rendered\n',
+          )
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run focused validation
+        run: |
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            linktools-ai/src/linktools/ai/runtime/_session.py \
+            linktools-ai/src/linktools/ai/runtime/_factory.py \
+            linktools-ai/src/linktools/ai/runtime/state/_steps.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py
+          python -m pytest -q \
+            tests/ai/test_session_timeline.py \
+            tests/ai/test_session_timeline_fork.py \
+            tests/ai/test_session_timeline_recovery.py \
+            tests/ai/test_session_timeline_runtime.py \
+            tests/ai/test_session_timeline_storage.py
+          git diff --check
+      - name: Commit focused repair
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/ai-session-timeline-simplify.yml
+          git add \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            linktools-ai/src/linktools/ai/runtime/_session.py \
+            linktools-ai/src/linktools/ai/runtime/_factory.py \
+            linktools-ai/src/linktools/ai/runtime/state/_steps.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            tests/ai/test_session_timeline.py
+          git commit -m "fix(ai): simplify session timeline reads"
+          git push origin HEAD:feat/ai-session-timeline
