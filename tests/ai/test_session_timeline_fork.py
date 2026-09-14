@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.agent._output import bind_output
 from linktools.ai.spec import AgentSpec
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -30,15 +29,12 @@ from linktools.ai.storage import StoredPayload
 
 def _binding() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
-        AgentSpec(id="agent"),
-        (),
-        (),
-        (),
-        (),
-        (),
-        (),
-        bind_output(),
-        "0" * 64,
+        agent_spec=AgentSpec("agent", model="model"),
+        base_model={"version": 1, "id": "model"},
+        selected=(),
+        subagents=(),
+        output_mode="text",
+        output_schema={"type": "object"},
     )
 
 
