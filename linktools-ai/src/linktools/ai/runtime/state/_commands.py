@@ -1576,7 +1576,7 @@ class RuntimeStateCommands:
                             session_id,
                             tenant_id=commit.execution.tenant_id,
                         )
-                        history = await self._promote_history_in_transaction(
+                        await self._promote_history_in_transaction(
                             conversation_transaction,
                             session,
                             prepared_conversation[0],
@@ -1793,7 +1793,7 @@ class RuntimeStateCommands:
                     session_id,
                     tenant_id=commit.execution.tenant_id,
                 )
-                history = await self._promote_history_in_transaction(
+                await self._promote_history_in_transaction(
                     conversation_transaction,
                     session,
                     prepared_conversation[0],
@@ -1854,7 +1854,7 @@ class RuntimeStateCommands:
                         session_id,
                         tenant_id=commit.execution.tenant_id,
                     )
-                    history = await self._promote_history_in_transaction(
+                    await self._promote_history_in_transaction(
                         transaction,
                         session,
                         prepared_conversation[0],
