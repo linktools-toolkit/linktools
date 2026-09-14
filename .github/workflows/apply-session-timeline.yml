@@ -1,0 +1,55 @@
+name: Apply session timeline patch
+
+on:
+  push:
+    branches:
+      - feat/ai-session-timeline
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply reviewed patch
+        run: |
+          set -euo pipefail
+          python .github/session_timeline_apply_1.py
+          python .github/session_timeline_apply_2.py
+          python .github/session_timeline_apply_3.py
+          python .github/session_timeline_apply_4.py
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/_input.py \
+            linktools-ai/src/linktools/ai/runtime/state/_contracts.py \
+            linktools-ai/src/linktools/ai/runtime/state/_codec.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            linktools-ai/src/linktools/ai/runtime/state/_commands.py \
+            linktools-ai/src/linktools/ai/runtime/service_api.py \
+            linktools-ai/src/linktools/ai/runtime/_session.py \
+            linktools-ai/src/linktools/ai/runtime/_agent.py \
+            linktools-ai/src/linktools/ai/runtime/__init__.py \
+            tests/ai/test_file_input_regressions.py \
+            tests/ai/test_session_timeline.py
+          git diff --check
+      - name: Commit source changes
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/session_timeline_apply_1.py \
+            .github/session_timeline_apply_2.py \
+            .github/session_timeline_apply_3.py \
+            .github/session_timeline_apply_4.py \
+            .github/workflows/apply-session-timeline.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat(ai): add durable session timeline'
+          git push origin HEAD:${GITHUB_REF_NAME}
