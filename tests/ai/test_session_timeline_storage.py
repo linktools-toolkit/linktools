@@ -6,19 +6,16 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from pydantic_ai.messages import ModelResponse, TextPart
 
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
+from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._commands import _timeline_turn_message_range
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ConversationHistoryRecord,
     SessionRecord,
 )
-from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
-from linktools.ai.runtime.state._steps import InMemoryStepArchive
 from linktools.ai.runtime.state._store import StoredFact
 
 
@@ -183,63 +180,3 @@ async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
         assert captured.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
-
-@pytest.mark.asyncio
-async def test_in_memory_session_history_uses_latest_materialized_run() -> None:
-    archive = InMemoryStepArchive(RuntimeDomain.CONVERSATION)
-    await archive.initialize()
-    try:
-        now = datetime.now(timezone.utc)
-        older = RunRecord(
-            run_id="older",
-            metadata={"history_id": "history"},
-            started_at=now,
-        )
-        latest = RunRecord(
-            run_id="latest",
-            metadata={"history_id": "history"},
-            started_at=now,
-        )
-        await archive.materialize_snapshot(
-            older,
-            ContinuableSnapshot(
-                run_id="older",
-                step_index=1,
-                messages=[
-                    ModelResponse(parts=[TextPart(content="old-1")]),
-                    ModelResponse(parts=[TextPart(content="old-2")]),
-                ],
-                timestamp=now,
-                state="complete",
-            ),
-        )
-        await archive.materialize_snapshot(
-            latest,
-            ContinuableSnapshot(
-                run_id="latest",
-                step_index=1,
-                messages=[ModelResponse(parts=[TextPart(content="new")])],
-                timestamp=now,
-                state="complete",
-            ),
-        )
-
-        assert await archive.session_message_count(
-            "history", tenant_id="tenant"
-        ) == 1
-        messages = [
-            message
-            async for message in archive.iter_session_message_range(
-                "history",
-                tenant_id="tenant",
-                start=0,
-                end=1,
-            )
-        ]
-        assert len(messages) == 1
-        assert isinstance(messages[0], ModelResponse)
-        assert len(messages[0].parts) == 1
-        assert isinstance(messages[0].parts[0], TextPart)
-        assert messages[0].parts[0].content == "new"
-    finally:
-        await archive.close()

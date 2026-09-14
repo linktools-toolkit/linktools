@@ -63,9 +63,6 @@ from .state._contracts import (
     SessionTurnCommitRef,
     SessionTurnRef,
 )
-from .state._step_contracts import (
-    ContinuableSnapshot,
-)
 from .state._contracts import (
     ConversationCursor,
 )
@@ -195,43 +192,23 @@ class _SessionExecutionService(ExecutionService, Protocol):
 
 
 class _SessionTranscriptStore(Protocol):
-    async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...
-
-    async def iter_session_messages(
+    def iter_conversation_message_range(
         self,
-        history_id: str,
         *,
-        tenant_id: str,
-    ) -> AsyncIterator[object]: ...
-
-    async def iter_session_message_range(
-        self,
-        history_id: str,
-        *,
+        history_id: str | None,
+        step_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
-    ) -> AsyncIterator[ModelMessage]: ...
+    ) -> AsyncIterator[object]: ...
 
-    async def load_session_model_context(
+    async def load_conversation_model_context(
         self,
-        history_id: str,
         *,
+        history_id: str | None,
+        step_run_id: str,
         tenant_id: str,
     ) -> tuple[object, ...]: ...
-
-    async def load_model_context(
-        self,
-        *,
-        run_id: str,
-    ) -> tuple[object, ...]: ...
-
-    async def latest_snapshot(
-        self,
-        *,
-        run_id: str,
-        include_interrupted: bool = False,
-    ) -> ContinuableSnapshot | None: ...
 
 
 async def _no_release_terminal(
@@ -441,7 +418,7 @@ class DefaultSessionService:
                     commits[(record.session_id, item.sequence)] = item
                 if not committed:
                     continue
-                if record.history_id is None:
+                if record.continuation is None:
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 range_start = min(item.start_message_index for item in committed)
                 range_end = max(item.end_message_index for item in committed)
@@ -450,8 +427,9 @@ class DefaultSessionService:
                     tuple(
                         [
                             item
-                            async for item in self._transcript_store.iter_session_message_range(
-                                record.history_id,
+                            async for item in self._transcript_store.iter_conversation_message_range(
+                                history_id=record.history_id,
+                                step_run_id=record.continuation.step_run_id,
                                 tenant_id=record.tenant_id,
                                 start=range_start,
                                 end=range_end,
@@ -681,13 +659,10 @@ class DefaultSessionService:
             if self._transcript_store is None or record.continuation is None:
                 return ()
             history_id = record.continuation.history_id or record.history_id
-            if history_id is not None:
-                return await self._transcript_store.load_session_model_context(
-                    history_id,
-                    tenant_id=record.tenant_id,
-                )
-            return await self._transcript_store.load_model_context(
-                run_id=record.continuation.step_run_id,
+            return await self._transcript_store.load_conversation_model_context(
+                history_id=history_id,
+                step_run_id=record.continuation.step_run_id,
+                tenant_id=record.tenant_id,
             )
 
     async def _iter_session_messages(

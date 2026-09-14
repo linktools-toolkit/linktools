@@ -3174,8 +3174,9 @@ class LocalExecutionBackend:
         history_id = session.history_id or intent.next_cursor.history_id
         if history_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        end_message_index = await self._steps.session_message_count(
-            history_id,
+        end_message_index = await self._steps.conversation_message_count(
+            history_id=history_id,
+            step_run_id=intent.next_cursor.step_run_id,
             tenant_id=checkpoint.tenant_id,
         )
         effective_next_cursor = replace(

@@ -534,7 +534,6 @@ class InMemoryStepArchive(StagingStepStore):
     def __init__(self, runtime_domain: RuntimeDomain) -> None:
         super().__init__()
         self._runtime_domain = runtime_domain
-        self._session_history_owners: dict[str, str] = {}
 
     @property
     def runtime_domain(self) -> RuntimeDomain:
@@ -563,12 +562,6 @@ class InMemoryStepArchive(StagingStepStore):
             for snapshot in snapshots:
                 if snapshot not in snapshot_values:
                     snapshot_values.append(snapshot)
-            if self._runtime_domain is RuntimeDomain.CONVERSATION and any(
-                snapshot.state == "complete" for snapshot in snapshots
-            ):
-                history_id = run.metadata.get("history_id")
-                if history_id:
-                    self._session_history_owners[history_id] = run.run_id
 
     async def materialize_snapshot(
         self,
@@ -583,17 +576,6 @@ class InMemoryStepArchive(StagingStepStore):
             snapshots=(snapshot,),
             execution_id=execution_id,
         )
-
-    def release_run_local(self, run_id: str) -> None:
-        run = self._runs.get(run_id)
-        history_id = (
-            None
-            if run is None or self._runtime_domain is not RuntimeDomain.CONVERSATION
-            else run.metadata.get("history_id")
-        )
-        super().release_run_local(run_id)
-        if history_id is not None and self._session_history_owners.get(history_id) == run_id:
-            self._session_history_owners.pop(history_id, None)
 
     async def resolve_transcript_message_refs(
         self,
@@ -629,43 +611,6 @@ class InMemoryStepArchive(StagingStepStore):
         if snapshot is not None:
             for message in snapshot.messages[start:end]:
                 yield message
-
-    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:
-        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        run_id = self._session_history_owners.get(history_id)
-        return None if run_id is None else self.latest_snapshot_local(run_id)
-
-    async def session_message_count(
-        self,
-        history_id: str,
-        *,
-        tenant_id: str,
-    ) -> int:
-        del tenant_id
-        snapshot = self._session_snapshot(history_id)
-        if snapshot is None:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        return len(snapshot.messages)
-
-    async def iter_session_message_range(
-        self,
-        history_id: str,
-        *,
-        tenant_id: str,
-        start: int,
-        end: int,
-    ) -> AsyncIterator[object]:
-        del tenant_id
-        if start < 0 or end < start:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        snapshot = self._session_snapshot(history_id)
-        if snapshot is None:
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        if end > len(snapshot.messages):
-            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
-        for message in snapshot.messages[start:end]:
-            yield message
 
     async def load_model_context(self, *, run_id: str) -> tuple[object, ...]:
         snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
@@ -2243,69 +2188,91 @@ class RuntimeStepStore(StepStore):
         ):
             yield message
 
-    async def session_message_count(
+    async def conversation_message_count(
         self,
-        history_id: str,
         *,
+        history_id: str | None,
+        step_run_id: str,
         tenant_id: str,
     ) -> int:
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
         if isinstance(archive, StateStepArchive):
-            return await archive.transcript_repository.history_message_count(
-                history_id,
-                tenant_id=tenant_id,
-            )
-        if isinstance(archive, InMemoryStepArchive):
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return await archive.session_message_count(
                 history_id,
                 tenant_id=tenant_id,
             )
+        if isinstance(archive, InMemoryStepArchive):
+            return await archive.transcript_message_count(step_run_id)
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-    def iter_session_message_range(
+    def iter_conversation_message_range(
         self,
-        history_id: str,
         *,
+        history_id: str | None,
+        step_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
     ) -> AsyncIterator[object]:
-        return self._iter_session_message_range(
-            history_id,
+        return self._iter_conversation_message_range(
+            history_id=history_id,
+            step_run_id=step_run_id,
             tenant_id=tenant_id,
             start=start,
             end=end,
         )
 
-    async def _iter_session_message_range(
+    async def _iter_conversation_message_range(
         self,
-        history_id: str,
         *,
+        history_id: str | None,
+        step_run_id: str,
         tenant_id: str,
         start: int,
         end: int,
     ) -> AsyncIterator[object]:
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        async for message in archive.transcript_repository.iter_session_message_range(
-            history_id,
-            tenant_id=tenant_id,
-            start=start,
-            end=end,
-        ):
-            yield message
+        if isinstance(archive, StateStepArchive):
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            async for message in archive.iter_session_message_range(
+                history_id,
+                tenant_id=tenant_id,
+                start=start,
+                end=end,
+            ):
+                yield message
+            return
+        if isinstance(archive, InMemoryStepArchive):
+            async for message in archive.iter_message_range(
+                run_id=step_run_id,
+                start=start,
+                end=end,
+            ):
+                yield message
+            return
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-    async def load_session_model_context(
+    async def load_conversation_model_context(
         self,
-        history_id: str,
-    ) -> LoadedModelContext:
+        *,
+        history_id: str | None,
+        step_run_id: str,
+        tenant_id: str,
+    ) -> tuple[object, ...]:
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        return await archive.load_loaded_model_context(
-            owner_id=history_id,
-        )
+        if isinstance(archive, StateStepArchive):
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return await archive.load_session_model_context(
+                history_id,
+                tenant_id=tenant_id,
+            )
+        if isinstance(archive, InMemoryStepArchive):
+            return await archive.load_model_context(run_id=step_run_id)
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     async def materialize_recovery_snapshot(self, *, step_run_id: str, require_complete: bool) -> None:
         snapshot = await self._staging.latest_snapshot(run_id=step_run_id, include_interrupted=True)
