@@ -1988,6 +1988,7 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
     custom_encoders = {
         "object_ref",
+        "stored_user_input",
         "task_graph_view",
         "task_node",
         "task_node_view",
