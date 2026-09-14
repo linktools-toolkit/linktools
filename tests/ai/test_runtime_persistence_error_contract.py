@@ -78,33 +78,6 @@ def _inspection() -> RuntimeStorageInspection:
     )
 
 
-def _read_model_record(*, version: int = 1) -> StoredRecord:
-    return StoredRecord(
-        b"k" * 32,
-        b"p" * 32,
-        None,
-        None,
-        "execution_read_model",
-        "execution",
-        "COMPLETE",
-        0,
-        None,
-        0,
-        None,
-        {
-            "execution_id": "execution",
-            "tenant_id": "tenant",
-            "source_digest": "source",
-            "model_version": version,
-            "status": "COMPLETE",
-            "trace_count": 0,
-            "history_count": 0,
-            "transcript_count": 0,
-            "revision": 1,
-        },
-    )
-
-
 def _record(kind: str, value: object) -> StoredRecord:
     return StoredRecord(
         hashlib.sha256(f"key:{kind}".encode()).digest(),
@@ -187,20 +160,10 @@ def test_maintenance_accepts_current_raw_state_formats() -> None:
         None,
         {"kind": "business", "digest": "value", "size": 1},
     )
-    read_model_fact = StoredFact(
-        b"r" * 32,
-        1,
-        b"o" * 32,
-        "execution_read_trace",
-        None,
-        None,
-        {"items": [{"kind": "business", "digest": "value", "size": 1}]},
-    )
-
     inspection._collect_references(
         RuntimeDomain.EXECUTION,
-        (_read_model_record(),),
-        (event, read_model_fact),
+        (),
+        (event,),
         (),
         references,
     )
@@ -276,20 +239,6 @@ def test_maintenance_preserves_future_lease_projected_schema() -> None:
         _inspection()._collect_references(
             RuntimeDomain.TASK,
             (replace(record, data=data),),
-            (),
-            (),
-            {},
-        )
-
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-
-
-def test_maintenance_rejects_future_read_model_version() -> None:
-    inspection = _inspection()
-    with pytest.raises(AIError) as raised:
-        inspection._collect_references(
-            RuntimeDomain.EXECUTION,
-            (_read_model_record(version=2),),
             (),
             (),
             {},

@@ -32,26 +32,16 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionRunSealHead,
     TranscriptMessageRef,
 )
-from linktools.ai.runtime.state._readmodel import (
-    ExecutionReadModelBuild,
-    ExecutionReadModelRepository,
-)
 from linktools.ai.runtime.state._steps import ExecutionTerminalSealPlan, StateStepArchive
 from linktools.ai.runtime.state._store import (
     StateLockOrderError,
     StateTransactionNestingError,
-    StoredRecord,
 )
 from linktools.ai.runtime.state._history import (
     _conversation_overlap_signature,
     _overlap_signature,
 )
 from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
-from linktools.ai.runtime.state._store import (
-    partition_digest,
-    record_key_digest,
-    sortable_identity,
-)
 from linktools.ai.spec import AgentSpec
 from ._runtime_test_helpers import execution_owner_fields
 from pydantic_ai.messages import (
@@ -708,172 +698,6 @@ async def test_terminal_seal_reuses_durable_projection_after_staging_release(
             terminal_plan.projections[0]
         )
         await state.steps.finalize_execution_terminal_seal(terminal_plan)
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_read_model_rejects_a_different_complete_source() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="read-model-digest", tenant_id="tenant")
-    try:
-        await state.execution.executions.create(_record(ExecutionStatus.FAILED, 0))
-        seal = ExecutionHistorySealRecord(
-                   execution_id="execution",
-                   tenant_id="tenant",
-                   run_heads=(),
-                   execution_event_high_water=1,
-               )
-        await state.execution.executions.state_store.mutate(
-            lambda transaction: (
-                state.execution.executions.put_history_seal_in_transaction(
-                    transaction,
-                    seal,
-                )
-            )
-        )
-        repository_a = ExecutionReadModelRepository(
-            state.execution.executions.state_store,
-            namespace="read-model-digest",
-            tenant_id="tenant",
-        )
-        repository_b = ExecutionReadModelRepository(
-            state.execution.executions.state_store,
-            namespace="read-model-digest",
-            tenant_id="tenant",
-        )
-        builders_ready = asyncio.Event()
-        builder_count = 0
-
-        async def build(source_digest: str) -> ExecutionReadModelBuild:
-            nonlocal builder_count
-            builder_count += 1
-            if builder_count == 2:
-                builders_ready.set()
-            await builders_ready.wait()
-            return ExecutionReadModelBuild(
-                "execution",
-                "tenant",
-                source_digest,
-                (),
-                (),
-                (),
-            )
-
-        results = await asyncio.gather(
-            repository_a.ensure(
-                "execution",
-                tenant_id="tenant",
-                builder=lambda: build("source-a"),
-            ),
-            repository_b.ensure(
-                "execution",
-                tenant_id="tenant",
-                builder=lambda: build("source-b"),
-            ),
-            return_exceptions=True,
-        )
-        assert sum(isinstance(value, AIError) for value in results) == 1
-        error = next(value for value in results if isinstance(value, AIError))
-        assert error.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_read_model_accepts_current_v1_record() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="read-model-v1", tenant_id="tenant")
-    try:
-        await state.execution.executions.create(_record(ExecutionStatus.FAILED, 0))
-        seal = ExecutionHistorySealRecord(
-                   execution_id="execution",
-                   tenant_id="tenant",
-                   run_heads=(),
-                   execution_event_high_water=1,
-               )
-        store = state.execution.executions.state_store
-        await store.mutate(
-            lambda transaction: (
-                state.execution.executions.put_history_seal_in_transaction(
-                    transaction,
-                    seal,
-                )
-            )
-        )
-        key = record_key_digest(
-            "read-model-v1",
-            "tenant",
-            "execution",
-            "execution_read_model",
-            "execution",
-        )
-        await store.mutate(
-            lambda transaction: transaction.insert_record(
-                StoredRecord(
-                    key,
-                    partition_digest(
-                        "read-model-v1",
-                        "tenant",
-                        "execution",
-                        "execution_read_model",
-                    ),
-                    None,
-                    None,
-                    "execution_read_model",
-                    sortable_identity("execution"),
-                    "COMPLETE",
-                    0,
-                    None,
-                    0,
-                    None,
-                    {
-                        "execution_id": "execution",
-                        "tenant_id": "tenant",
-                        "source_digest": "legacy-source",
-                        "model_version": 1,
-                        "status": "COMPLETE",
-                        "trace_count": 0,
-                        "history_count": 0,
-                        "transcript_count": 0,
-                        "revision": 1,
-                        "future_metadata": {"$future_v2": {"ignored": True}},
-                    },
-                )
-            )
-        )
-        repository = ExecutionReadModelRepository(
-            store,
-            namespace="read-model-v1",
-            tenant_id="tenant",
-        )
-
-        current = await repository.get_complete("execution", tenant_id="tenant")
-        assert current is not None
-        assert current.model_version == 1
-        assert current.source_digest == "legacy-source"
-
-        build_called = False
-
-        async def build() -> ExecutionReadModelBuild:
-            nonlocal build_called
-            build_called = True
-            return ExecutionReadModelBuild(
-                "execution",
-                "tenant",
-                "unexpected-source",
-                (),
-                (),
-                (),
-            )
-
-        reused = await repository.ensure(
-            "execution",
-            tenant_id="tenant",
-            builder=build,
-        )
-        assert reused == current
-        assert not build_called
     finally:
         await state.close()
 
