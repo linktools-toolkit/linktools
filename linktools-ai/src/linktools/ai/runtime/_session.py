@@ -475,6 +475,8 @@ class DefaultSessionService:
                 commit = commits.get((ref.session_id, ref.sequence))
                 items: tuple[SessionTurnItem, ...] = ()
                 if commit is not None:
+                    if commit.execution_id != ref.execution_id:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     base = message_bases[ref.session_id]
                     source = messages[ref.session_id]
                     start = commit.start_message_index - base
