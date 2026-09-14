@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Default local Runtime state I/O layout."""
+"""Local Runtime state I/O layout."""
 
 import hashlib
 import sqlite3
@@ -80,8 +80,7 @@ async def test_existing_incompatible_sqlite_is_not_implicitly_migrated(
     assert tables == {"marker"}
 
 
-@pytest.mark.asyncio
-async def test_default_runtime_state_uses_one_sqlite_group_for_durable_domains(
+def test_default_runtime_state_keeps_filesystem_durable_domains(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path, workspace_id="workspace")
@@ -94,8 +93,7 @@ async def test_default_runtime_state_uses_one_sqlite_group_for_durable_domains(
     )
 
     routes = tuple(state.plan.route(domain) for domain in durable)
-    assert {route.kind for route in routes} == {"sqlite"}
-    assert len({route.path for route in routes}) == 1
+    assert {route.kind for route in routes} == {"filesystem"}
     assert all(
         route.retention is RuntimeRetentionMode.DURABLE
         for route in routes
@@ -103,11 +101,3 @@ async def test_default_runtime_state_uses_one_sqlite_group_for_durable_domains(
     assert state.plan.route(RuntimeDomain.MEMORY).retention is RuntimeRetentionMode.VOLATILE
     assert state.plan.route(RuntimeDomain.ARTIFACT).retention is RuntimeRetentionMode.VOLATILE
     assert state.plan.route(RuntimeDomain.EVALUATION).retention is RuntimeRetentionMode.VOLATILE
-
-    await state.initialize(namespace=workspace.workspace_id, tenant_id="tenant")
-    try:
-        object_stores = tuple(state.object_store(domain) for domain in durable)
-        assert all(isinstance(store, FilesystemObjectStore) for store in object_stores)
-        assert len({id(store) for store in object_stores}) == 1
-    finally:
-        await state.close()
