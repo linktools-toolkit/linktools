@@ -250,22 +250,19 @@ def _result_payload(result: ExecutionResult) -> dict[str, object]:
     }
 
 
+def _payload_text(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    if isinstance(payload.get("text"), str):
+        return payload["text"]
+    if isinstance(payload.get("tool_name"), str):
+        return payload["tool_name"]
+    return ""
+
+
 def _write_stderr(value: str) -> None:
     sys.stderr.write(value + "\n")
     sys.stderr.flush()
 
 
-def _payload_text(payload: object) -> str:
-    if isinstance(payload, dict):
-        try:
-            return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        except (TypeError, ValueError):
-            return repr(payload)
-    return str(payload)
-
-
-def __cap_ai_run__() -> type[Command]:
-    return Command
-
-
-__all__ = []
+command = Command()
