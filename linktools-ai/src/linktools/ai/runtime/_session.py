@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from binascii import Error as Base64Error
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -88,15 +88,6 @@ class _SessionExecutionService(ExecutionService, Protocol):
     ) -> ExecutionHandle: ...
 
 
-class _SessionExecutionRepository(ExecutionRepository, Protocol):
-    async def get_many(
-        self,
-        execution_ids: Sequence[str],
-        *,
-        tenant_id: str,
-    ) -> Mapping[str, ExecutionRecord]: ...
-
-
 class _SessionTranscriptStore(Protocol):
     async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...
 
@@ -148,7 +139,7 @@ class DefaultSessionService:
     def __init__(
         self,
         conversation: ConversationState,
-        executions: _SessionExecutionRepository,
+        executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
         execution: _SessionExecutionService,
         cursor_signer: CursorSigner,
