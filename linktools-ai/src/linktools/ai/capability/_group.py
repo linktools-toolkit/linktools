@@ -278,19 +278,14 @@ class CapabilityLoadContext:
         return data
 
     async def _preload(self, keys: Sequence[AssetKey]) -> None:
+        requested = tuple(dict.fromkeys(keys))
+        if any(key not in self._by_key for key in requested):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         pending = tuple(
             self._by_key[key]
-            for key in dict.fromkeys(keys)
-            if key not in self._cache and key in self._by_key
+            for key in requested
+            if key not in self._cache
         )
-        if len(pending) != len(
-            [
-                key
-                for key in dict.fromkeys(keys)
-                if key not in self._cache
-            ]
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
         if not pending:
             return
         values = await self._store.get_many(tuple(entry.key for entry in pending))
@@ -587,11 +582,13 @@ class _BuiltinDeclarationLoader:
         declaration_keys = tuple(
             entry.key
             for entry in entries
-            if entry.key.kind in {"agent", "mcp"}
-            or entry.key.kind == "skill"
-            and (
-                entry.key.id.endswith("/SKILL.md")
-                or not _inside_skill_root(entry.key.id, directory_roots)
+            if (
+                entry.key.kind in {"agent", "mcp"}
+                or entry.key.kind == "skill"
+                and (
+                    entry.key.id.endswith("/SKILL.md")
+                    or not _inside_skill_root(entry.key.id, directory_roots)
+                )
             )
         )
         await context._preload(declaration_keys)
