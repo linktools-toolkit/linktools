@@ -29,27 +29,20 @@ jobs:
           from pathlib import Path
           path = Path('tests/ai/test_session_timeline_storage.py')
           text = path.read_text(encoding='utf-8')
-          old = '''        assert len(messages) == 1
-          assert messages[0] == latest_snapshot_message = ModelResponse(
-              parts=[TextPart(content="new")]
+          old = (
+              "        assert len(messages) == 1\n"
+              "        assert messages[0] == latest_snapshot_message = ModelResponse(\n"
+              "            parts=[TextPart(content=\"new\")]\n"
+              "        )\n"
+              "        assert latest_snapshot_message.parts[0].content == \"new\"\n"
           )
-          assert latest_snapshot_message.parts[0].content == "new"
-          '''
-          # YAML strips the indentation shared by this run block, so normalize
-          # the generated test block rather than the temporary patch source.
-          if old not in text:
-              old = '''        assert len(messages) == 1
-        assert messages[0] == latest_snapshot_message = ModelResponse(
-            parts=[TextPart(content="new")]
-        )
-        assert latest_snapshot_message.parts[0].content == "new"
-'''
-          new = '''        assert len(messages) == 1
-        assert isinstance(messages[0], ModelResponse)
-        assert len(messages[0].parts) == 1
-        assert isinstance(messages[0].parts[0], TextPart)
-        assert messages[0].parts[0].content == "new"
-'''
+          new = (
+              "        assert len(messages) == 1\n"
+              "        assert isinstance(messages[0], ModelResponse)\n"
+              "        assert len(messages[0].parts) == 1\n"
+              "        assert isinstance(messages[0].parts[0], TextPart)\n"
+              "        assert messages[0].parts[0].content == \"new\"\n"
+          )
           if text.count(old) != 1:
               raise SystemExit('generated assertion block did not match exactly once')
           path.write_text(text.replace(old, new), encoding='utf-8')
