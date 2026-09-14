@@ -1,0 +1,183 @@
+name: Apply session timeline simplification
+
+on:
+  push:
+    branches:
+      - feat/ai-session-timeline
+
+permissions:
+  contents: write
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply focused simplification
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, got {count}: {old[:100]!r}")
+              target.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          # Explicit conversation-history capability contract.
+          path = "linktools-ai/src/linktools/ai/runtime/state/_step_contracts.py"
+          replace_once(
+              path,
+              "from typing import Literal, Protocol\n",
+              "from typing import Literal, Protocol, runtime_checkable\n",
+          )
+          replace_once(
+              path,
+              "\n\nclass StepStore(Protocol):\n",
+              '''\n\n@runtime_checkable\nclass SessionHistoryStepStore(Protocol):\n    async def session_message_count(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> int: ...\n\n    def iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]: ...\n\n\nclass StepStore(Protocol):\n''',
+          )
+          replace_once(
+              path,
+              '    "RunRecord",\n    "SnapshotState",\n',
+              '    "RunRecord",\n    "SessionHistoryStepStore",\n    "SnapshotState",\n',
+          )
+
+          # In-memory history uses an explicit current materialized owner instead
+          # of scanning runs and guessing by message count/timestamp.
+          path = "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
+          replace_once(
+              path,
+              '''    def __init__(self, runtime_domain: RuntimeDomain) -> None:\n        super().__init__()\n        self._runtime_domain = runtime_domain\n''',
+              '''    def __init__(self, runtime_domain: RuntimeDomain) -> None:\n        super().__init__()\n        self._runtime_domain = runtime_domain\n        self._session_history_owners: dict[str, str] = {}\n''',
+          )
+          replace_once(
+              path,
+              '''            for snapshot in snapshots:\n                if snapshot not in snapshot_values:\n                    snapshot_values.append(snapshot)\n''',
+              '''            for snapshot in snapshots:\n                if snapshot not in snapshot_values:\n                    snapshot_values.append(snapshot)\n            if self._runtime_domain is RuntimeDomain.CONVERSATION:\n                history_id = run.metadata.get("history_id")\n                if history_id and any(\n                    snapshot.state == "complete" for snapshot in snapshots\n                ):\n                    self._session_history_owners[history_id] = run.run_id\n''',
+          )
+          replace_once(
+              path,
+              '''    async def resolve_transcript_message_refs(\n        self,\n        refs: Sequence[TranscriptMessageRef],\n    ) -> tuple[LoadedContextMessage, ...]:\n''',
+              '''    def release_run_local(self, run_id: str) -> None:\n        run = self._runs.get(run_id)\n        history_id = (\n            None\n            if run is None or self._runtime_domain is not RuntimeDomain.CONVERSATION\n            else run.metadata.get("history_id")\n        )\n        super().release_run_local(run_id)\n        if (\n            history_id is not None\n            and self._session_history_owners.get(history_id) == run_id\n        ):\n            self._session_history_owners.pop(history_id, None)\n\n    async def resolve_transcript_message_refs(\n        self,\n        refs: Sequence[TranscriptMessageRef],\n    ) -> tuple[LoadedContextMessage, ...]:\n''',
+          )
+          replace_once(
+              path,
+              '''    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:\n        if self._runtime_domain is not RuntimeDomain.CONVERSATION:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        candidates: list[ContinuableSnapshot] = []\n        for run in self._runs.values():\n            if run.metadata.get("history_id") != history_id:\n                continue\n            snapshot = self.latest_snapshot_local(run.run_id)\n            if snapshot is not None:\n                candidates.append(snapshot)\n        if not candidates:\n            return None\n        return max(\n            candidates,\n            key=lambda value: (len(value.messages), value.timestamp, value.run_id),\n        )\n''',
+              '''    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:\n        if self._runtime_domain is not RuntimeDomain.CONVERSATION:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        owner = self._session_history_owners.get(history_id)\n        return None if owner is None else self.latest_snapshot_local(owner)\n''',
+          )
+
+          # Recovery requires the explicit session-history contract. No partial
+          # fallback that advances continuation without timeline ownership.
+          path = "linktools-ai/src/linktools/ai/runtime/_local.py"
+          replace_once(
+              path,
+              '''from .state._step_contracts import (\n    ContinuableSnapshot,\n    RunRecord,\n    StepEvent,\n    StepStore,\n)\n''',
+              '''from .state._step_contracts import (\n    ContinuableSnapshot,\n    RunRecord,\n    SessionHistoryStepStore,\n    StepEvent,\n    StepStore,\n)\n''',
+          )
+          replace_once(
+              path,
+              '''        session_message_count = getattr(\n            conversation_archive, "session_message_count", None\n        )\n        if session_message_count is None:\n            if session.continuation == intent.next_cursor:\n                return\n            if session.status is SessionStatus.CLOSED:\n                raise AIError(ErrorCode.SESSION_CONFLICT)\n            if session.active_execution_id != checkpoint.execution_id:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            if session.continuation != intent.expected_cursor:\n                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n            await self._conversation.sessions.advance_continuation(\n                intent.session_id,\n                tenant_id=checkpoint.tenant_id,\n                execution_id=checkpoint.execution_id,\n                expected=intent.expected_cursor,\n                next_cursor=intent.next_cursor,\n            )\n            return\n        history_id = session.history_id or intent.next_cursor.history_id\n''',
+              '''        if not isinstance(conversation_archive, SessionHistoryStepStore):\n            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)\n        history_id = session.history_id or intent.next_cursor.history_id\n''',
+          )
+          replace_once(
+              path,
+              '''        end_message_index = await session_message_count(\n            history_id,\n            tenant_id=checkpoint.tenant_id,\n        )\n''',
+              '''        end_message_index = await conversation_archive.session_message_count(\n            history_id,\n            tenant_id=checkpoint.tenant_id,\n        )\n''',
+          )
+
+          # Web timeline is an explicit allow-list surface; unknown model parts
+          # remain available through Session.history() only.
+          path = "linktools-ai/src/linktools/ai/runtime/_session.py"
+          replace_once(
+              path,
+              '_TIMELINE_PROJECTION_VERSION = 1\n',
+              '_TIMELINE_PROJECTION_VERSION = 1\n_TIMELINE_RESPONSE_ITEM_KINDS = frozenset({"assistant", "thinking", "tool_call"})\n',
+          )
+          replace_once(
+              path,
+              '''        if isinstance(message, ModelRequest):\n            projected = tuple(\n                item for item in projected if item.item_kind == "tool_result"\n            )\n        elif not isinstance(message, ModelResponse):\n            continue\n''',
+              '''        if isinstance(message, ModelRequest):\n            projected = tuple(\n                item for item in projected if item.item_kind == "tool_result"\n            )\n        elif isinstance(message, ModelResponse):\n            projected = tuple(\n                item\n                for item in projected\n                if item.item_kind in _TIMELINE_RESPONSE_ITEM_KINDS\n            )\n        else:\n            continue\n''',
+          )
+
+          # Reuse the StateStore subject identity and remove a uniqueness check
+          # that latest=True could never actually prove.
+          path = "linktools-ai/src/linktools/ai/runtime/state/_repositories.py"
+          replace_once(
+              path,
+              '''    stream_digest,\n)\n''',
+              '''    stream_digest,\n    subject_digest,\n)\n''',
+          )
+          replace_once(
+              path,
+              '''    @staticmethod\n    def _timeline_subject(execution_id: str) -> bytes:\n        return hashlib.sha256(canonical_json_bytes(execution_id)).digest()\n''',
+              '''    @staticmethod\n    def _timeline_subject(execution_id: str) -> bytes:\n        return subject_digest(execution_id)\n''',
+          )
+          replace_once(
+              path,
+              '''        if len(turns) != 1:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        turn = self._decode_timeline_turn(session_id, turns[0])\n''',
+              '''        if not turns:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        turn = self._decode_timeline_turn(session_id, turns[0])\n''',
+          )
+
+          # Focused regressions for the two simplification boundaries.
+          path = "tests/ai/test_session_timeline.py"
+          replace_once(
+              path,
+              'from linktools.ai.runtime._session import DefaultSessionService\nfrom linktools.ai.runtime.service_api import ExecutionView\n',
+              'from linktools.ai.runtime._session import DefaultSessionService, _timeline_items\nfrom linktools.ai.runtime.service_api import SessionHistoryItem\n',
+          )
+          replace_once(
+              path,
+              'from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord\n',
+              'from linktools.ai.runtime.state._step_contracts import (\n    ContinuableSnapshot,\n    RunRecord,\n    SessionHistoryStepStore,\n)\n',
+          )
+          with Path(path).open("a", encoding="utf-8") as stream:
+              stream.write('''\n\ndef test_timeline_filters_unknown_model_response_parts(monkeypatch: pytest.MonkeyPatch) -> None:\n    response = ModelResponse(parts=[TextPart(content="visible")])\n    projected = (\n        SessionHistoryItem(1, "assistant", "visible"),\n        SessionHistoryItem(1, "future_internal", {"secret": True}),\n    )\n    monkeypatch.setattr(\n        "linktools.ai.runtime._session.project_session_history_message",\n        lambda _message: projected,\n    )\n\n    items = _timeline_items((response,))\n\n    assert [item.item_kind for item in items] == ["assistant"]\n    assert items[0].content == "visible"\n\n\n@pytest.mark.asyncio\nasync def test_in_memory_session_history_uses_last_materialized_run() -> None:\n    state = RuntimeState.in_memory()\n    await state.initialize(namespace="session-timeline-owner", tenant_id="tenant")\n    try:\n        created = await state.conversation.sessions.create(_session())\n        assert created.history_id is not None\n        archive = state.steps.read_store(RuntimeDomain.CONVERSATION)\n        assert isinstance(archive, SessionHistoryStepStore)\n\n        async def materialize(run_id: str, messages: list[ModelResponse]) -> None:\n            conversation_id = step_conversation_id(\n                namespace="session-timeline-owner",\n                tenant_id="tenant",\n                execution_id=run_id,\n            )\n            now = datetime.now(timezone.utc)\n            await state.steps.register_run(\n                RunRecord(\n                    run_id=run_id,\n                    conversation_id=conversation_id,\n                    agent_name="agent",\n                    metadata={"agent_name": "agent", "history_id": created.history_id},\n                    started_at=now,\n                )\n            )\n            for message in messages:\n                message.conversation_id = conversation_id\n            await state.steps.save_snapshot(\n                ContinuableSnapshot(\n                    run_id=run_id,\n                    step_index=1,\n                    messages=list(messages),\n                    conversation_id=conversation_id,\n                    agent_name="agent",\n                    timestamp=now,\n                    state="complete",\n                )\n            )\n            await state.steps.materialize_conversation(step_run_id=run_id)\n\n        first = [\n            ModelResponse(parts=[TextPart(content="older-1")]),\n            ModelResponse(parts=[TextPart(content="older-2")]),\n        ]\n        latest = [ModelResponse(parts=[TextPart(content="latest")])]\n        await materialize("older-run", first)\n        await materialize("latest-run", latest)\n\n        assert await archive.session_message_count(\n            created.history_id, tenant_id="tenant"\n        ) == 1\n        loaded = [\n            message\n            async for message in archive.iter_session_message_range(\n                created.history_id,\n                tenant_id="tenant",\n                start=0,\n                end=1,\n            )\n        ]\n        assert loaded == latest\n    finally:\n        await state.close()\n''')
+          PY
+      - name: Install tooling
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -U -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Run focused validation
+        run: |
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            linktools-ai/src/linktools/ai/runtime/_session.py \
+            linktools-ai/src/linktools/ai/runtime/state/_step_contracts.py \
+            linktools-ai/src/linktools/ai/runtime/state/_steps.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py
+          python -m pytest -q \
+            tests/ai/test_session_timeline.py \
+            tests/ai/test_session_timeline_fork.py \
+            tests/ai/test_session_timeline_recovery.py \
+            tests/ai/test_session_timeline_runtime.py \
+            tests/ai/test_session_timeline_storage.py
+          git diff --check
+      - name: Commit focused repair
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/ai-session-timeline-simplify.yml
+          git add \
+            linktools-ai/src/linktools/ai/runtime/_local.py \
+            linktools-ai/src/linktools/ai/runtime/_session.py \
+            linktools-ai/src/linktools/ai/runtime/state/_step_contracts.py \
+            linktools-ai/src/linktools/ai/runtime/state/_steps.py \
+            linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+            tests/ai/test_session_timeline.py
+          git commit -m "fix(ai): simplify session timeline contracts"
+          git push origin HEAD:feat/ai-session-timeline
