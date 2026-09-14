@@ -1808,27 +1808,15 @@ class RuntimeStateCommands:
                     release_execution=False,
                     history_quality="complete",
                 )
-                local_start = min(
-                    (
-                        chunk.first_message_index
-                        for chunk in prepared_conversation[0].chunks
-                    ),
-                    default=None,
-                )
+                if timeline_range is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self._conversation.commit_timeline_turn_in_transaction(
                     conversation_transaction,
                     session_id,
                     tenant_id=commit.execution.tenant_id,
                     execution_id=commit.execution.execution_id,
-                    start_message_index=(
-                        None
-                        if local_start is None
-                        else history.inherited_message_count + local_start
-                    ),
-                    end_message_index=(
-                        history.inherited_message_count
-                        + prepared_conversation.target_transcript_message_count
-                    ),
+                    start_message_index=timeline_range[0],
+                    end_message_index=timeline_range[1],
                 )
 
             if _same_group(conversation_stores):
