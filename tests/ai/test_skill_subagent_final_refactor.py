@@ -3,6 +3,7 @@
 """Final Skill/Subagent refactor acceptance and durable-contract regressions."""
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -471,6 +472,13 @@ class _CountingAssetStore(AssetStore):
     async def get(self, key: AssetKey) -> "bytes | None":
         self.read_keys.append(key)
         return await super().get(key)
+
+    async def get_many(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[bytes | None, ...]":
+        self.read_keys.extend(keys)
+        return await super().get_many(keys)
 
 
 @pytest.mark.asyncio
