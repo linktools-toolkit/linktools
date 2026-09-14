@@ -51,17 +51,17 @@ class Command(BaseCommand):
         parser.add_argument(
             "--planning",
             action="store_true",
-            help="enable planning for the execution",
+            help="enable planning for this execution",
         )
         parser.add_argument(
             "--thinking",
             action="store_true",
-            help="enable model thinking for the execution",
+            help="enable model thinking for this execution",
         )
         parser.add_argument(
             "--json",
             action="store_true",
-            help="emit one terminal JSON result",
+            help="emit one final JSON result",
         )
 
     def run(self, args: Namespace) -> int:
