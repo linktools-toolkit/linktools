@@ -366,6 +366,16 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
         assert "stale answer" not in rendered
         assert older.next_cursor is None
         assert executions.get_many_calls == 2
+
+        restored = [
+            message
+            async for message in service.iter_session_messages(
+                "session", principal=principal
+            )
+        ]
+        restored_text = repr(restored)
+        assert "visible answer" in restored_text
+        assert "stale answer" not in restored_text
     finally:
         await state.close()
 

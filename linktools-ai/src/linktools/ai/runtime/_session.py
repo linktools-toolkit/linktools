@@ -192,6 +192,14 @@ class _SessionExecutionService(ExecutionService, Protocol):
 
 
 class _SessionTranscriptStore(Protocol):
+    def iter_conversation_messages(
+        self,
+        *,
+        history_id: str | None,
+        step_run_id: str,
+        tenant_id: str,
+    ) -> AsyncIterator[object]: ...
+
     def iter_conversation_message_range(
         self,
         *,
@@ -678,15 +686,10 @@ class DefaultSessionService:
             if self._transcript_store is None or record.continuation is None:
                 return
             history_id = record.continuation.history_id or record.history_id
-            if history_id is not None:
-                async for message in self._transcript_store.iter_session_messages(
-                    history_id,
-                    tenant_id=record.tenant_id,
-                ):
-                    yield message
-                return
-            async for message in self._transcript_store.iter_messages(
-                run_id=record.continuation.step_run_id,
+            async for message in self._transcript_store.iter_conversation_messages(
+                history_id=history_id,
+                step_run_id=record.continuation.step_run_id,
+                tenant_id=record.tenant_id,
             ):
                 yield message
 

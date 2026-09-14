@@ -2188,6 +2188,42 @@ class RuntimeStepStore(StepStore):
         ):
             yield message
 
+    def iter_conversation_messages(
+        self,
+        *,
+        history_id: str | None,
+        step_run_id: str,
+        tenant_id: str,
+    ) -> AsyncIterator[object]:
+        return self._iter_conversation_messages(
+            history_id=history_id,
+            step_run_id=step_run_id,
+            tenant_id=tenant_id,
+        )
+
+    async def _iter_conversation_messages(
+        self,
+        *,
+        history_id: str | None,
+        step_run_id: str,
+        tenant_id: str,
+    ) -> AsyncIterator[object]:
+        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+        if isinstance(archive, StateStepArchive):
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            async for message in archive.iter_session_messages(
+                history_id,
+                tenant_id=tenant_id,
+            ):
+                yield message
+            return
+        if isinstance(archive, InMemoryStepArchive):
+            async for message in archive.iter_messages(run_id=step_run_id):
+                yield message
+            return
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
     async def conversation_message_count(
         self,
         *,
