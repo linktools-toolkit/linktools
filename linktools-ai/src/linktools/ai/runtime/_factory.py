@@ -693,7 +693,7 @@ async def _build_local_components(
             execution,
             HmacCursorSigner("session", grant_key),
             history_reader=session_history_reader,
-            transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
+            transcript_store=state.steps,
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )

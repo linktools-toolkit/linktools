@@ -259,6 +259,44 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
 
         await state.conversation.sessions.state_store.mutate(commit_success)
 
+        stale_run_id = "stale-timeline-run"
+        stale_conversation_id = step_conversation_id(
+            namespace="session-timeline",
+            tenant_id="tenant",
+            execution_id="stale",
+        )
+        stale_now = datetime.now(timezone.utc)
+        await state.steps.register_run(
+            RunRecord(
+                run_id=stale_run_id,
+                conversation_id=stale_conversation_id,
+                parent_run_id=None,
+                agent_name="agent",
+                metadata={"agent_name": "agent", "history_id": created.history_id},
+                started_at=stale_now,
+            )
+        )
+        stale_messages = [
+            ModelResponse(
+                parts=[TextPart(content=f"stale answer {index}")],
+                conversation_id=stale_conversation_id,
+            )
+            for index in range(3)
+        ]
+        await state.steps.save_snapshot(
+            ContinuableSnapshot(
+                run_id=stale_run_id,
+                step_index=1,
+                messages=stale_messages,
+                conversation_id=stale_conversation_id,
+                parent_run_id=None,
+                agent_name="agent",
+                timestamp=stale_now,
+                state="complete",
+            )
+        )
+        await state.steps.materialize_conversation(step_run_id=stale_run_id)
+
         await state.conversation.sessions.admit_execution(
             "session",
             tenant_id="tenant",
@@ -283,7 +321,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             _ExecutionService(),  # type: ignore[arg-type]
             HmacCursorSigner("session", b"session-timeline-key"),
             history_reader=object(),  # type: ignore[arg-type]
-            transcript_store=state.steps.read_store(RuntimeDomain.CONVERSATION),
+            transcript_store=state.steps,
         )
         principal = Principal("owner", "tenant")
 
@@ -325,6 +363,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
         assert "SECRET SYSTEM INSTRUCTION" not in rendered
         assert "Workspace file path" not in rendered
         assert "INTERNAL RETRY PROMPT" not in rendered
+        assert "stale answer" not in rendered
         assert older.next_cursor is None
         assert executions.get_many_calls == 2
     finally:
