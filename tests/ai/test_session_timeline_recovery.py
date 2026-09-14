@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from linktools.ai.core import ExecutionEventType, SessionStatus, StopReason, UsageMetrics
+from linktools.ai.core import (
+    ExecutionEventType,
+    ExecutionStatus,
+    SessionStatus,
+    StopReason,
+    UsageMetrics,
+)
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state._contracts import (
@@ -102,7 +108,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         )
         handoff = RecoveryTerminalHandoff(
             RecoveryTerminalOutcome(
-                terminal_status="SUCCEEDED",
+                terminal_status=ExecutionStatus.SUCCEEDED,
                 error_code=None,
                 safe_error_details={},
                 stop_reason=StopReason.END_TURN,
