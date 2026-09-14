@@ -36,7 +36,22 @@ jobs:
           path = "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
           replace_once(
               path,
-              '''    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:\n        if self._runtime_domain is not RuntimeDomain.CONVERSATION:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        candidates: list[ContinuableSnapshot] = []\n        for run in self._runs.values():\n            if run.metadata.get("history_id") != history_id:\n                continue\n            snapshot = self.latest_snapshot_local(run.run_id)\n            if snapshot is not None:\n                candidates.append(snapshot)\n        if not candidates:\n            return None\n        return max(\n            candidates,\n            key=lambda value: (len(value.messages), value.timestamp, value.run_id),\n        )\n\n    async def session_message_count(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> int:\n        del tenant_id\n        snapshot = self._session_snapshot(history_id)\n        if snapshot is None:\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        return len(snapshot.messages)\n\n    async def iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]:\n        del tenant_id\n        if start < 0 or end < start:\n            raise AIError(ErrorCode.STORAGE_CONFLICT)\n        snapshot = self._session_snapshot(history_id)\n        if snapshot is None:\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        if end > len(snapshot.messages):\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        for message in snapshot.messages[start:end]:\n            yield message\n\n''',
+              '''    def __init__(self, runtime_domain: RuntimeDomain) -> None:\n        super().__init__()\n        self._runtime_domain = runtime_domain\n        self._session_history_owners: dict[str, str] = {}\n''',
+              '''    def __init__(self, runtime_domain: RuntimeDomain) -> None:\n        super().__init__()\n        self._runtime_domain = runtime_domain\n''',
+          )
+          replace_once(
+              path,
+              '''            for snapshot in snapshots:\n                if snapshot not in snapshot_values:\n                    snapshot_values.append(snapshot)\n            if self._runtime_domain is RuntimeDomain.CONVERSATION and any(\n                snapshot.state == "complete" for snapshot in snapshots\n            ):\n                history_id = run.metadata.get("history_id")\n                if history_id:\n                    self._session_history_owners[history_id] = run.run_id\n''',
+              '''            for snapshot in snapshots:\n                if snapshot not in snapshot_values:\n                    snapshot_values.append(snapshot)\n''',
+          )
+          replace_once(
+              path,
+              '''    def release_run_local(self, run_id: str) -> None:\n        run = self._runs.get(run_id)\n        history_id = (\n            None\n            if run is None or self._runtime_domain is not RuntimeDomain.CONVERSATION\n            else run.metadata.get("history_id")\n        )\n        super().release_run_local(run_id)\n        if history_id is not None and self._session_history_owners.get(history_id) == run_id:\n            self._session_history_owners.pop(history_id, None)\n\n''',
+              '',
+          )
+          replace_once(
+              path,
+              '''    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:\n        if self._runtime_domain is not RuntimeDomain.CONVERSATION:\n            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n        run_id = self._session_history_owners.get(history_id)\n        return None if run_id is None else self.latest_snapshot_local(run_id)\n\n    async def session_message_count(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> int:\n        del tenant_id\n        snapshot = self._session_snapshot(history_id)\n        if snapshot is None:\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        return len(snapshot.messages)\n\n    async def iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[object]:\n        del tenant_id\n        if start < 0 or end < start:\n            raise AIError(ErrorCode.STORAGE_CONFLICT)\n        snapshot = self._session_snapshot(history_id)\n        if snapshot is None:\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        if end > len(snapshot.messages):\n            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)\n        for message in snapshot.messages[start:end]:\n            yield message\n\n''',
               '',
           )
           replace_once(
@@ -53,6 +68,11 @@ jobs:
           )
 
           path = "linktools-ai/src/linktools/ai/runtime/_session.py"
+          replace_once(
+              path,
+              '''from .state._step_contracts import (\n    ContinuableSnapshot,\n)\n''',
+              '',
+          )
           replace_once(
               path,
               '''class _SessionTranscriptStore(Protocol):\n    async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...\n\n    async def iter_session_messages(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> AsyncIterator[object]: ...\n\n    async def iter_session_message_range(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n        start: int,\n        end: int,\n    ) -> AsyncIterator[ModelMessage]: ...\n\n    async def load_session_model_context(\n        self,\n        history_id: str,\n        *,\n        tenant_id: str,\n    ) -> tuple[object, ...]: ...\n\n    async def load_model_context(\n        self,\n        *,\n        run_id: str,\n    ) -> tuple[object, ...]: ...\n\n    async def latest_snapshot(\n        self,\n        *,\n        run_id: str,\n        include_interrupted: bool = False,\n    ) -> ContinuableSnapshot | None: ...\n''',
@@ -124,5 +144,5 @@ jobs:
             linktools-ai/src/linktools/ai/runtime/_factory.py \
             linktools-ai/src/linktools/ai/runtime/state/_steps.py \
             tests/ai/test_session_timeline.py
-          git commit -m "fix(ai): remove in-memory timeline heuristic"
+          git commit -m "fix(ai): remove in-memory timeline owner state"
           git push origin HEAD:feat/ai-session-timeline
