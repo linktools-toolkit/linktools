@@ -23,7 +23,6 @@ from ...storage import (
     build_object_sql_metadata,
     create_sql_storage_context,
     namespace_digest,
-    provision_sql,
 )
 from ._contracts import (
     ArtifactState,
@@ -257,7 +256,9 @@ async def materialize_runtime_state(
                 ):
                     build_object_sql_metadata(metadata=metadata)
                 if key[0] == "sqlite":
-                    await provision_sql(context.engine, metadata)
+                    await context.initialize()
+                    async with context.engine.begin() as connection:
+                        await connection.run_sync(metadata.create_all)
                 group = SqlStateStorageGroup(
                     context,
                     metadata,
@@ -280,6 +281,8 @@ async def materialize_runtime_state(
                     await store.close()
                 if group is not None:
                     await group.close()
+                elif key[0] == "sqlite":
+                    await context.close()
                 raise
             cleanups.extend(store.close for store in group_stores)
             if group is not None:
