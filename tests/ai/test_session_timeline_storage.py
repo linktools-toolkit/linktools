@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.core import SessionStatus
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._commands import _timeline_turn_message_range
 from linktools.ai.runtime.state._contracts import (
@@ -15,6 +16,7 @@ from linktools.ai.runtime.state._contracts import (
     ConversationHistoryRecord,
     SessionRecord,
 )
+from linktools.ai.runtime.state._store import StoredFact
 
 
 def _session() -> SessionRecord:
@@ -123,3 +125,51 @@ def test_timeline_range_allows_root_recovery_after_transcript_materialization() 
     )
 
     assert _timeline_turn_message_range(history, prepared, None) == (0, 2)
+
+@pytest.mark.asyncio
+async def test_timeline_commit_rejects_duplicate_admission_fact() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="session-timeline-duplicate", tenant_id="tenant")
+    try:
+        repository = state.conversation.sessions
+        await repository.create(_session())
+        await repository.admit_execution(
+            "session",
+            tenant_id="tenant",
+            execution_id="duplicate",
+            expected=None,
+        )
+
+        async def duplicate(transaction) -> None:
+            sequence = await transaction.next_sequence(
+                repository._timeline_sequence_key("session")
+            )
+            await transaction.insert_fact(
+                StoredFact(
+                    repository._timeline_stream("session"),
+                    sequence,
+                    repository._key("session", "session"),
+                    "session_turn",
+                    repository._timeline_subject("duplicate"),
+                    None,
+                    {"version": 1, "execution_id": "duplicate"},
+                )
+            )
+
+        await repository.state_store.mutate(duplicate)
+
+        async def commit(transaction) -> None:
+            await repository.commit_timeline_turn_in_transaction(
+                transaction,
+                "session",
+                tenant_id="tenant",
+                execution_id="duplicate",
+                start_message_index=0,
+                end_message_index=2,
+            )
+
+        with pytest.raises(AIError) as captured:
+            await repository.state_store.mutate(commit)
+        assert captured.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()

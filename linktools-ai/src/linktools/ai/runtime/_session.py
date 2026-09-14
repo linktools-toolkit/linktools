@@ -83,7 +83,13 @@ def _timeline_items(messages: tuple[ModelMessage, ...]) -> tuple[SessionTurnItem
             projected = tuple(
                 item for item in projected if item.item_kind == "tool_result"
             )
-        elif not isinstance(message, ModelResponse):
+        elif isinstance(message, ModelResponse):
+            projected = tuple(
+                item
+                for item in projected
+                if item.item_kind in {"assistant", "thinking", "tool_call"}
+            )
+        else:
             continue
         for item in projected:
             values.append(

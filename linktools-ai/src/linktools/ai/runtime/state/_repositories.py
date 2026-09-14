@@ -112,6 +112,7 @@ from ._store import (
     sequence_key,
     sortable_identity,
     stream_digest,
+    subject_digest,
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
@@ -1024,7 +1025,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
 
     @staticmethod
     def _timeline_subject(execution_id: str) -> bytes:
-        return hashlib.sha256(canonical_json_bytes(execution_id)).digest()
+        return subject_digest(execution_id)
 
     def _decode_timeline_turn(
         self, session_id: str, fact: StoredFact
@@ -1541,7 +1542,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         *,
         tenant_id: str,
         execution_id: str,
-        start_message_index: int | None,
+        start_message_index: int,
         end_message_index: int,
     ) -> SessionTurnCommitRef:
         _require_repository_tenant(tenant_id, self._tenant_id)
@@ -1550,7 +1551,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             FactQuery(
                 self._timeline_stream(session_id),
                 subject_digest=subject,
-                latest=True,
             )
         )
         if len(turns) != 1:
@@ -1566,17 +1566,13 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if committed.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if committed.end_message_index != end_message_index or (
-                start_message_index is not None
-                and committed.start_message_index != start_message_index
+            if (
+                committed.end_message_index != end_message_index
+                or committed.start_message_index != start_message_index
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return committed
-        if (
-            start_message_index is None
-            or start_message_index < 0
-            or end_message_index <= start_message_index
-        ):
+        if start_message_index < 0 or end_message_index <= start_message_index:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         committed = SessionTurnCommitRef(
             session_id,

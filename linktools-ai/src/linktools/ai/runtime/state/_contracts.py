@@ -1361,7 +1361,7 @@ class SessionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         execution_id: str,
-        start_message_index: int | None,
+        start_message_index: int,
         end_message_index: int,
     ) -> SessionTurnCommitRef: ...
     async def compare_and_swap(

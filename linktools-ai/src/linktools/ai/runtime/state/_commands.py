@@ -85,7 +85,7 @@ def _timeline_turn_message_range(
     history: ConversationHistoryRecord,
     prepared: PreparedStepSnapshotBatch,
     expected_cursor: ConversationCursor | None,
-) -> tuple[int | None, int]:
+) -> tuple[int, int]:
     if not prepared.snapshots:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     local_start = min(
@@ -94,14 +94,16 @@ def _timeline_turn_message_range(
     )
     end = history.inherited_message_count + prepared.target_transcript_message_count
     if local_start is not None:
-        start: int | None = history.inherited_message_count + local_start
+        start = history.inherited_message_count + local_start
     elif expected_cursor is None:
         if history.inherited_message_count != 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         start = 0
+    elif expected_cursor.message_count is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     else:
         start = expected_cursor.message_count
-    if start is not None and end <= start:
+    if end <= start:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return start, end
 
@@ -1462,7 +1464,7 @@ class RuntimeStateCommands:
                 conversation_run,
                 (conversation_snapshot,),
             )
-        timeline_range: tuple[int | None, int] | None = None
+        timeline_range: tuple[int, int] | None = None
         if prepared_conversation:
             if (
                 session_id is None

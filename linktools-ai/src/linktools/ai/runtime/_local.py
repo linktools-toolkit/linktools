@@ -3171,30 +3171,10 @@ class LocalExecutionBackend:
             )
             if target_snapshot is None or target_snapshot.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        session_message_count = getattr(
-            conversation_archive, "session_message_count", None
-        )
-        if session_message_count is None:
-            if session.continuation == intent.next_cursor:
-                return
-            if session.status is SessionStatus.CLOSED:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            if session.active_execution_id != checkpoint.execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if session.continuation != intent.expected_cursor:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._conversation.sessions.advance_continuation(
-                intent.session_id,
-                tenant_id=checkpoint.tenant_id,
-                execution_id=checkpoint.execution_id,
-                expected=intent.expected_cursor,
-                next_cursor=intent.next_cursor,
-            )
-            return
         history_id = session.history_id or intent.next_cursor.history_id
         if history_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        end_message_index = await session_message_count(
+        end_message_index = await self._steps.session_message_count(
             history_id,
             tenant_id=checkpoint.tenant_id,
         )
@@ -3205,12 +3185,13 @@ class LocalExecutionBackend:
         )
         if session.continuation == effective_next_cursor:
             return
-        start_message_index = (
-            0
-            if intent.expected_cursor is None
-            else intent.expected_cursor.message_count
-        )
-        if start_message_index is None or end_message_index <= start_message_index:
+        if intent.expected_cursor is None:
+            start_message_index = 0
+        else:
+            start_message_index = intent.expected_cursor.message_count
+            if start_message_index is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if end_message_index <= start_message_index:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def commit_conversation(transaction) -> None:

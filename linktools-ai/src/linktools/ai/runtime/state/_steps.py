@@ -2243,12 +2243,17 @@ class RuntimeStepStore(StepStore):
         tenant_id: str,
     ) -> int:
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if not isinstance(archive, StateStepArchive):
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        return await archive.transcript_repository.history_message_count(
-            history_id,
-            tenant_id=tenant_id,
-        )
+        if isinstance(archive, StateStepArchive):
+            return await archive.transcript_repository.history_message_count(
+                history_id,
+                tenant_id=tenant_id,
+            )
+        if isinstance(archive, InMemoryStepArchive):
+            return await archive.session_message_count(
+                history_id,
+                tenant_id=tenant_id,
+            )
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     def iter_session_message_range(
         self,

@@ -96,7 +96,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         backend._conversation = state.conversation
         backend._conversation_durable = True
         backend._step_reads = {RuntimeDomain.CONVERSATION: archive}
-        backend._steps = object()
+        backend._steps = state.steps
         backend._step_lifecycle = Lifecycle()
 
         intent = RecoveryConversationIntent(
