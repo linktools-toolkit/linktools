@@ -18,7 +18,6 @@ from linktools.core import ConfigField, environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Execution, ExecutionResult, Runtime, RuntimeState
 from linktools.ai.workspace import Workspace
@@ -125,16 +124,7 @@ async def _open_runtime_state(
     if storage != "sqlite":
         raise ValueError(f"unsupported Runtime storage backend: {storage}")
 
-    path = workspace.storage_root / "runtime.db"
-    await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    bootstrap_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    try:
-        await provision_runtime_database(bootstrap_engine)
-    finally:
-        _logger.debug("ai run SQL bootstrap engine disposing: path=%s", path)
-        await bootstrap_engine.dispose()
+    path = workspace.storage_root / "runtime" / "state.sqlite"
     _logger.info("ai run storage selected: backend=sqlite path=%s", path)
     yield RuntimeState.sqlite(path)
 
@@ -260,19 +250,22 @@ def _result_payload(result: ExecutionResult) -> dict[str, object]:
     }
 
 
-def _payload_text(payload: object) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    if isinstance(payload.get("text"), str):
-        return payload["text"]
-    if isinstance(payload.get("tool_name"), str):
-        return payload["tool_name"]
-    return ""
-
-
 def _write_stderr(value: str) -> None:
     sys.stderr.write(value + "\n")
     sys.stderr.flush()
 
 
-command = Command()
+def _payload_text(payload: object) -> str:
+    if isinstance(payload, dict):
+        try:
+            return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return repr(payload)
+    return str(payload)
+
+
+def __cap_ai_run__() -> type[Command]:
+    return Command
+
+
+__all__ = []
