@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 from linktools.ai.core import ApprovalStatus
 from linktools.ai.migrate import provision_database
+from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
+from linktools.ai.runtime._plan import RuntimePlanStore
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._contracts import (
     ApprovalRecord,
@@ -26,6 +28,7 @@ from linktools.ai.runtime.state._recovery_repositories import (
 from linktools.ai.runtime.state._sql import SqlStateStore
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.storage import _object as object_module
+from pydantic_ai_harness.planning import PlanItem as HarnessPlanItem
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -258,6 +261,51 @@ async def test_approval_cancel_batches_known_record_sql(
         ]
         assert sum(statement.lstrip().startswith("SELECT") for statement in record_sql) == 1
         assert sum(statement.lstrip().startswith("UPDATE") for statement in record_sql) == 1
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
+        await store.close()
+        await engine.dispose()
+
+
+async def test_plan_add_uses_one_record_read_and_insert_sql(tmp_path: Path) -> None:
+    path = tmp_path / "plan.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    store = SqlStateStore(engine)
+    await store.initialize()
+    adapter = HarnessPlanStoreAdapter(
+        RuntimePlanStore(
+            store,
+            namespace="io-plan",
+            tenant_id="tenant",
+            owner_kind="execution",
+            owner_id="execution",
+        )
+    )
+    statements: list[str] = []
+
+    def capture_sql(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
+    try:
+        item = await adapter.add_item(HarnessPlanItem(content="first"))
+        assert item.content == "first"
+        record_sql = [
+            statement.upper()
+            for statement in statements
+            if "AI_STATE_RECORDS" in statement.upper()
+        ]
+        assert sum(statement.lstrip().startswith("SELECT") for statement in record_sql) == 1
+        assert sum(statement.lstrip().startswith("INSERT") for statement in record_sql) == 1
+        assert sum(statement.lstrip().startswith("UPDATE") for statement in record_sql) == 0
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
         await store.close()
