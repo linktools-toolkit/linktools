@@ -21,8 +21,9 @@ class _Session:
         return path
 
     async def read_bytes(self, path: str, *, max_bytes: int | None = None) -> bytes:
-        assert path == "evidence.png"
-        value = b"png"
+        values = {"evidence.png": b"png", "second.png": b"two"}
+        assert path in values
+        value = values[path]
         assert max_bytes is None or len(value) <= max_bytes
         return value
 
@@ -103,3 +104,68 @@ async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path
     assert result.output == "done"
     assert observed_binary == [(0, 0), (1, 3), (0, 0)]
     assert binary_content_usage(result.all_messages()) == (1, 3)
+
+
+@pytest.mark.asyncio
+async def test_sequential_attach_files_do_not_accumulate_binary_context(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = _Session()
+    toolset = workspace_capabilities(
+        workspace,
+        ("attach_files",),
+        session=session,  # type: ignore[arg-type]
+    )[0].get_toolset()
+    observed_binary: list[tuple[int, int]] = []
+
+    def model_function(
+        messages: list[ModelMessage],
+        _info: AgentInfo,
+    ) -> ModelResponse:
+        observed_binary.append(binary_content_usage(messages))
+        if len(observed_binary) == 1:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "attach_files",
+                        {"paths": ["evidence.png"]},
+                        "attach-first",
+                    )
+                ]
+            )
+        if len(observed_binary) == 2:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        "attach_files",
+                        {"paths": ["second.png"]},
+                        "attach-second",
+                    )
+                ]
+            )
+        return ModelResponse(parts=[TextPart("done")])
+
+    deps = AgentContext(
+        app=None,
+        principal=Principal("user", "tenant", "local_trusted"),
+        workspace=workspace,
+        session_id=None,
+        execution_id="execution",
+        session_metadata={},
+    )
+    agent = PydanticAgent(
+        FunctionModel(model_function),
+        deps_type=AgentContext,
+        toolsets=(toolset,),
+    )
+
+    result = await agent.run(
+        "inspect both files",
+        deps=deps,
+        capabilities=(RuntimeCompaction(None),),
+    )
+
+    assert result.output == "done"
+    assert observed_binary == [(0, 0), (1, 3), (1, 3)]
+    assert binary_content_usage(result.all_messages()) == (2, 6)
