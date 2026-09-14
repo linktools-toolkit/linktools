@@ -6,8 +6,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ...core import SessionStatus, step_run_id
-from ...errors import AIError, ErrorCode
+from ...core import step_run_id
 from ...storage import ObjectStore
 from ._contracts import ConversationCursor, ConversationState, ExecutionState
 from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
@@ -95,64 +94,8 @@ class RuntimeRetentionController:
         tenant_id: str,
         continuation: ConversationCursor | None,
     ) -> None:
-        if RuntimeDomain.CONVERSATION not in self._transient_domains:
-            return
-        sessions = await self._conversation.sessions.list(tenant_id=tenant_id)
-        by_id = {record.session_id: record for record in sessions}
-        if session_id not in by_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        protected_sessions: set[str] = set()
-        protected_runs: set[str] = set()
-        for record in sessions:
-            if record.status is SessionStatus.CLOSED:
-                continue
-            if record.continuation is not None:
-                protected_runs.add(record.continuation.step_run_id)
-            parent_id = record.timeline_parent_session_id
-            visited = {record.session_id}
-            while parent_id is not None:
-                if parent_id in visited:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                visited.add(parent_id)
-                parent = by_id.get(parent_id)
-                if parent is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                protected_sessions.add(parent_id)
-                if parent.continuation is not None:
-                    protected_runs.add(parent.continuation.step_run_id)
-                parent_id = parent.timeline_parent_session_id
-
-        candidates = []
-        candidate_id: str | None = session_id
-        visited: set[str] = set()
-        while candidate_id is not None:
-            if candidate_id in visited:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            visited.add(candidate_id)
-            record = by_id.get(candidate_id)
-            if record is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            candidates.append(record)
-            candidate_id = record.timeline_parent_session_id
-
-        released_runs: set[str] = set()
-        for record in candidates:
-            if record.status is not SessionStatus.CLOSED:
-                continue
-            candidate_continuation = (
-                continuation if record.session_id == session_id else record.continuation
-            )
-            if candidate_continuation is not None:
-                run_id = candidate_continuation.step_run_id
-                if run_id not in protected_runs and run_id not in released_runs:
-                    await self._steps.release_archive(RuntimeDomain.CONVERSATION, run_id)
-                    released_runs.add(run_id)
-            if record.session_id not in protected_sessions:
-                await self._objects.release_object_scope(
-                    RuntimeDomain.CONVERSATION,
-                    owner_scope=f"session:{record.session_id}",
-                )
+        # Forked sessions may still reference transient conversation state.
+        del session_id, tenant_id, continuation
 
     async def release_evaluation(self, evaluation_id: str, *, tenant_id: str) -> None:
         del evaluation_id, tenant_id
