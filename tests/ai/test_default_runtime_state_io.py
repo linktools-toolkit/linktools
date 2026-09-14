@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._factory import _default_runtime_state
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
@@ -54,6 +55,29 @@ async def test_local_sqlite_self_provisions_and_keeps_objects_out_of_sql(
         assert "ai_objects" not in tables
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_existing_incompatible_sqlite_is_not_implicitly_migrated(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "runtime.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE marker (id INTEGER PRIMARY KEY)")
+
+    state = RuntimeState.sqlite(database)
+    with pytest.raises(AIError) as error:
+        await state.initialize(namespace="sqlite-existing", tenant_id="tenant")
+
+    assert error.value.code is ErrorCode.STORAGE_CAPABILITY_MISSING
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    assert tables == {"marker"}
 
 
 @pytest.mark.asyncio
