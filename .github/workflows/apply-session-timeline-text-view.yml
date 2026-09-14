@@ -1,0 +1,40 @@
+name: Apply session timeline text view deduplication
+
+on:
+  push:
+    branches:
+      - feat/ai-session-timeline
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply reviewed input deduplication
+        run: |
+          set -euo pipefail
+          python .github/session_timeline_text_view_patch.py
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/runtime/_input.py \
+            tests/ai/test_file_input_regressions.py
+          git diff --check
+      - name: Commit source changes
+        run: |
+          set -euo pipefail
+          rm -f \
+            .github/session_timeline_text_view_patch.py \
+            .github/workflows/apply-session-timeline-text-view.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+ice-black-tea@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf(ai): avoid duplicate text input views'
+          git push origin HEAD:${GITHUB_REF_NAME}
