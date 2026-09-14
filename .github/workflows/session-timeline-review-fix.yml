@@ -1,0 +1,46 @@
+name: Session Timeline Review Fix
+
+on:
+  push:
+    branches:
+      - feat/ai-session-timeline
+    paths:
+      - .github/session_timeline_review_fix.py
+      - .github/workflows/session-timeline-review-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/ai-session-timeline
+          fetch-depth: 0
+      - name: Apply review fixes
+        run: python .github/session_timeline_review_fix.py
+      - name: Verify syntax and diff
+        run: |
+          python -m compileall -q linktools-ai/src/linktools/ai tests/ai/test_session_timeline.py tests/ai/test_session_timeline_runtime.py tests/ai/test_session_timeline_recovery.py tests/ai/test_session_timeline_storage.py
+          git diff --check
+      - name: Commit fixes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add linktools-ai/src/linktools/ai/runtime/_session.py \
+                  linktools-ai/src/linktools/ai/runtime/_local.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_steps.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_retention.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_repositories.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_contracts.py \
+                  linktools-ai/src/linktools/ai/runtime/state/_commands.py \
+                  tests/ai/test_session_timeline.py \
+                  tests/ai/test_session_timeline_runtime.py \
+                  tests/ai/test_session_timeline_recovery.py \
+                  tests/ai/test_session_timeline_storage.py
+          git rm .github/session_timeline_review_fix.py .github/workflows/session-timeline-review-fix.yml
+          git diff --cached --check
+          git commit -m "fix(ai): simplify session timeline recovery"
+          git push origin HEAD:feat/ai-session-timeline
