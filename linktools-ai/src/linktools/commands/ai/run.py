@@ -51,17 +51,17 @@ class Command(BaseCommand):
         parser.add_argument(
             "--planning",
             action="store_true",
-            help="enable planning for this execution",
+            help="enable planning for the execution",
         )
         parser.add_argument(
             "--thinking",
             action="store_true",
-            help="enable model thinking for this execution",
+            help="enable model thinking for the execution",
         )
         parser.add_argument(
             "--json",
             action="store_true",
-            help="emit one final JSON result",
+            help="emit one terminal JSON result",
         )
 
     def run(self, args: Namespace) -> int:
@@ -124,7 +124,7 @@ async def _open_runtime_state(
     if storage != "sqlite":
         raise ValueError(f"unsupported Runtime storage backend: {storage}")
 
-    path = workspace.storage_root / "runtime" / "state.sqlite"
+    path = workspace.storage_root / "runtime.db"
     _logger.info("ai run storage selected: backend=sqlite path=%s", path)
     yield RuntimeState.sqlite(path)
 
