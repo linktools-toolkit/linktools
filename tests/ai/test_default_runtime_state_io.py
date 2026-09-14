@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Default local Runtime state I/O layout."""
+
+import hashlib
+import sqlite3
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+
+from linktools.ai.runtime import RuntimeState
+from linktools.ai.runtime._factory import _default_runtime_state
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.storage import FilesystemObjectStore
+from linktools.ai.workspace import Workspace
+
+
+async def _chunks(value: bytes) -> AsyncIterator[bytes]:
+    yield value
+
+
+@pytest.mark.asyncio
+async def test_local_sqlite_self_provisions_and_keeps_objects_out_of_sql(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "runtime.sqlite"
+    state = RuntimeState.sqlite(database)
+
+    await state.initialize(namespace="sqlite-io", tenant_id="tenant")
+    try:
+        store = state.object_store(RuntimeDomain.EXECUTION)
+        assert isinstance(store, FilesystemObjectStore)
+
+        payload = b"runtime-object"
+        digest = hashlib.sha256(payload).hexdigest()
+        stored = await store.put(
+            "payload",
+            _chunks(payload),
+            expected_size=len(payload),
+            expected_digest=digest,
+        )
+        assert stored.digest == digest
+        assert database.exists()
+
+        with sqlite3.connect(database) as connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        assert "ai_state_records" in tables
+        assert "ai_objects" not in tables
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_default_runtime_state_uses_one_sqlite_group_for_durable_domains(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    state = _default_runtime_state(workspace)
+    durable = (
+        RuntimeDomain.CONVERSATION,
+        RuntimeDomain.EXECUTION,
+        RuntimeDomain.RECOVERY,
+        RuntimeDomain.TASK,
+    )
+
+    routes = tuple(state.plan.route(domain) for domain in durable)
+    assert {route.kind for route in routes} == {"sqlite"}
+    assert len({route.path for route in routes}) == 1
+    assert all(
+        route.retention is RuntimeRetentionMode.DURABLE
+        for route in routes
+    )
+    assert state.plan.route(RuntimeDomain.MEMORY).retention is RuntimeRetentionMode.VOLATILE
+    assert state.plan.route(RuntimeDomain.ARTIFACT).retention is RuntimeRetentionMode.VOLATILE
+    assert state.plan.route(RuntimeDomain.EVALUATION).retention is RuntimeRetentionMode.VOLATILE
+
+    await state.initialize(namespace=workspace.workspace_id, tenant_id="tenant")
+    try:
+        object_stores = tuple(state.object_store(domain) for domain in durable)
+        assert all(isinstance(store, FilesystemObjectStore) for store in object_stores)
+        assert len({id(store) for store in object_stores}) == 1
+    finally:
+        await state.close()
