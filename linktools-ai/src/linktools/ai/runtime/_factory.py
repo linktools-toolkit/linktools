@@ -443,25 +443,13 @@ def _build_default_models(workspace: Workspace) -> ModelRegistry:
 
 
 def _default_runtime_state(workspace: Workspace) -> RuntimeState:
-    runtime_root = workspace.storage_root / "runtime"
+    route = RuntimeStateRoute.sqlite(workspace.storage_root / "runtime" / "state.sqlite")
     return RuntimeState.from_plan(
         RuntimeStatePlan(
-            conversation=RuntimeStateRoute.filesystem(
-                runtime_root / "conversation",
-                transaction_root=runtime_root,
-            ),
-            execution=RuntimeStateRoute.filesystem(
-                runtime_root / "execution",
-                transaction_root=runtime_root,
-            ),
-            recovery=RuntimeStateRoute.filesystem(
-                runtime_root / "recovery",
-                transaction_root=runtime_root,
-            ),
-            task=RuntimeStateRoute.filesystem(
-                runtime_root / "task",
-                transaction_root=runtime_root,
-            ),
+            conversation=route,
+            execution=route,
+            recovery=route,
+            task=route,
         )
     )
 
