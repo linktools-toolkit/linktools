@@ -1689,7 +1689,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 execution_id=execution_id,
                 expected=expected,
                 next_cursor=next_cursor,
-                release_execution=True,
                 history_quality=history_quality,
             )
         )
@@ -3859,6 +3858,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                     operation_record.sequence,
                 )
                 return False, False
+            # A zero revision represents a completed missing-read observation.
             if expected_revision == 0:
                 value = await self._decode(current, MemoryRecord)
                 if (
