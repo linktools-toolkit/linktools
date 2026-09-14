@@ -81,6 +81,8 @@ from ._contracts import (
     RecoveryCheckpointState,
     ResultRecord,
     SessionRecord,
+    SessionTurnCommitRef,
+    SessionTurnRef,
     ToolOperationAdmission,
     validate_tool_operation_failure,
     TranscriptHeadRecord,
@@ -110,6 +112,7 @@ from ._store import (
     sequence_key,
     sortable_identity,
     stream_digest,
+    subject_digest,
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
@@ -972,6 +975,118 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             value_type=SessionRecord,
         )
 
+
+    def _timeline_sequence_key(self, session_id: str) -> bytes:
+        return sequence_key(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            "session_turn",
+            [session_id],
+        )
+
+    def _timeline_stream(self, session_id: str) -> bytes:
+        return stream_digest(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            "session_turn",
+            [session_id],
+        )
+
+    def _timeline_commit_key(self, session_id: str, sequence: int) -> bytes:
+        return self._key("session_turn_commit", [session_id, sequence])
+
+    def _stored_timeline_commit(
+        self, value: SessionTurnCommitRef
+    ) -> StoredRecord:
+        identity = [value.session_id, value.sequence]
+        return StoredRecord(
+            self._timeline_commit_key(value.session_id, value.sequence),
+            self._partition("session_turn_commit"),
+            self._scope("session_turn_commit", "session", value.session_id),
+            None,
+            "session_turn_commit",
+            sortable_identity(identity),
+            None,
+            0,
+            None,
+            0,
+            None,
+            {
+                "version": 1,
+                "session_id": value.session_id,
+                "sequence": value.sequence,
+                "execution_id": value.execution_id,
+                "start_message_index": value.start_message_index,
+                "end_message_index": value.end_message_index,
+            },
+        )
+
+    @staticmethod
+    def _timeline_subject(execution_id: str) -> bytes:
+        return subject_digest(execution_id)
+
+    def _decode_timeline_turn(
+        self, session_id: str, fact: StoredFact
+    ) -> SessionTurnRef:
+        if (
+            fact.kind != "session_turn"
+            or fact.owner_key_digest != self._key("session", session_id)
+            or set(fact.data) != {"version", "execution_id"}
+            or fact.data.get("version") != 1
+            or not isinstance(fact.data.get("execution_id"), str)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        execution_id = str(fact.data["execution_id"])
+        if fact.subject_digest != self._timeline_subject(execution_id):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return SessionTurnRef(session_id, fact.sequence, execution_id)
+
+    def _decode_timeline_commit(
+        self, session_id: str, sequence: int, record: StoredRecord
+    ) -> SessionTurnCommitRef:
+        if (
+            record.key_digest != self._timeline_commit_key(session_id, sequence)
+            or record.partition_digest != self._partition("session_turn_commit")
+            or record.scope_digest
+            != self._scope("session_turn_commit", "session", session_id)
+            or record.parent_digest is not None
+            or record.kind != "session_turn_commit"
+            or record.sort_key != sortable_identity([session_id, sequence])
+            or record.state is not None
+            or set(record.data)
+            != {
+                "version",
+                "session_id",
+                "sequence",
+                "execution_id",
+                "start_message_index",
+                "end_message_index",
+            }
+            or record.data.get("version") != 1
+            or record.data.get("session_id") != session_id
+            or record.data.get("sequence") != sequence
+            or not isinstance(record.data.get("execution_id"), str)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        execution_id = str(record.data["execution_id"])
+        start = record.data.get("start_message_index")
+        end = record.data.get("end_message_index")
+        if (
+            isinstance(start, bool)
+            or not isinstance(start, int)
+            or isinstance(end, bool)
+            or not isinstance(end, int)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            return SessionTurnCommitRef(
+                session_id, sequence, execution_id, start, end
+            )
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
     def _list_generation_key(self, owner_principal_id: str | None = None) -> bytes:
         return sequence_key(
             self._namespace,
@@ -1195,6 +1310,21 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     )
                     prefix_head = node.node_id
             inherited = source_history.inherited_message_count + local_messages
+            turn_head = await transaction.get_sequence(
+                self._timeline_sequence_key(source_session_id)
+            )
+            if source.active_execution_id is not None:
+                if turn_head < 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                timeline_cutoff = turn_head - 1
+            else:
+                timeline_cutoff = turn_head
+            if timeline_cutoff > 0:
+                timeline_parent = source.session_id
+                timeline_parent_cutoff = timeline_cutoff
+            else:
+                timeline_parent = source.timeline_parent_session_id
+                timeline_parent_cutoff = source.timeline_parent_turn_sequence
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=target.session_id,
@@ -1207,6 +1337,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 target,
                 history_id=child_history_id,
                 history_quality="complete",
+                timeline_parent_session_id=timeline_parent,
+                timeline_parent_turn_sequence=timeline_parent_cutoff,
                 continuation=(
                     None
                     if target.continuation is None
@@ -1334,6 +1466,123 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             record.history_id,
         )
         return record.inherited_message_count + local_messages
+
+    async def timeline_head(self, session_id: str, *, tenant_id: str) -> int:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        return await self._store.read(
+            lambda transaction: transaction.get_sequence(
+                self._timeline_sequence_key(session_id)
+            )
+        )
+
+    async def list_timeline_turns(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        start_sequence: int,
+        end_sequence: int,
+    ) -> tuple[SessionTurnRef, ...]:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if start_sequence < 1 or end_sequence < start_sequence:
+            raise ValueError("session timeline range is invalid")
+        if start_sequence == end_sequence:
+            return ()
+        facts = await self._store.read(
+            lambda transaction: transaction.list_facts(
+                FactQuery(
+                    self._timeline_stream(session_id),
+                    after_sequence=start_sequence - 1,
+                    limit=end_sequence - start_sequence,
+                )
+            )
+        )
+        selected = tuple(
+            fact for fact in facts if fact.sequence < end_sequence
+        )
+        if tuple(fact.sequence for fact in selected) != tuple(
+            range(start_sequence, end_sequence)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return tuple(
+            self._decode_timeline_turn(session_id, fact) for fact in selected
+        )
+
+    async def list_timeline_commits(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        start_sequence: int,
+        end_sequence: int,
+    ) -> tuple[SessionTurnCommitRef, ...]:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if start_sequence < 1 or end_sequence < start_sequence:
+            raise ValueError("session timeline range is invalid")
+        if start_sequence == end_sequence:
+            return ()
+        sequences = tuple(range(start_sequence, end_sequence))
+        keys = tuple(
+            self._timeline_commit_key(session_id, sequence)
+            for sequence in sequences
+        )
+        records = await self._store.read(
+            lambda transaction: transaction.get_records(keys)
+        )
+        return tuple(
+            self._decode_timeline_commit(session_id, sequence, records[key])
+            for sequence, key in zip(sequences, keys)
+            if key in records
+        )
+
+    async def commit_timeline_turn_in_transaction(
+        self,
+        transaction: StateTransaction,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        start_message_index: int,
+        end_message_index: int,
+    ) -> SessionTurnCommitRef:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        subject = self._timeline_subject(execution_id)
+        turns = await transaction.list_facts(
+            FactQuery(
+                self._timeline_stream(session_id),
+                subject_digest=subject,
+            )
+        )
+        if len(turns) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        turn = self._decode_timeline_turn(session_id, turns[0])
+        if turn.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        commit_key = self._timeline_commit_key(session_id, turn.sequence)
+        existing = await transaction.get_record(commit_key)
+        if existing is not None:
+            committed = self._decode_timeline_commit(
+                session_id, turn.sequence, existing
+            )
+            if committed.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                committed.end_message_index != end_message_index
+                or committed.start_message_index != start_message_index
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return committed
+        if start_message_index < 0 or end_message_index <= start_message_index:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        committed = SessionTurnCommitRef(
+            session_id,
+            turn.sequence,
+            execution_id,
+            start_message_index,
+            end_message_index,
+        )
+        await transaction.insert_record(self._stored_timeline_commit(committed))
+        return committed
 
     async def list(
         self, *, tenant_id: str, owner_principal_id: str | None = None
@@ -1612,6 +1861,21 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 next_value = replace(value, active_execution_id=execution_id)
             candidate = _projected_record(self, current, next_value)
             await _replace_checked(transaction, candidate, current.storage_version)
+            if not release:
+                sequence = await transaction.next_sequence(
+                    self._timeline_sequence_key(session_id)
+                )
+                await transaction.insert_fact(
+                    StoredFact(
+                        self._timeline_stream(session_id),
+                        sequence,
+                        self._key("session", session_id),
+                        "session_turn",
+                        self._timeline_subject(execution_id),
+                        None,
+                        {"version": 1, "execution_id": execution_id},
+                    )
+                )
             return next_value
 
         if transaction is not None:

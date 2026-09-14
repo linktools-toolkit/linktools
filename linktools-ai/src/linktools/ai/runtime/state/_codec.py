@@ -599,14 +599,34 @@ def _decode_v1_object_ref(
     )
 
 
+
+def _encode_v1_stored_user_input(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, StoredUserInput):
+        raise TypeError("V1 stored_user_input encoder received the wrong type")
+    encoded: dict[str, JsonValue] = {
+        "codec": _encode_domain(value.codec, codec, persisted=persisted),
+        "payload": _encode_domain(value.payload, codec, persisted=persisted),
+    }
+    if value.view is not None:
+        encoded["view"] = _encode_domain(value.view, codec, persisted=persisted)
+    return encoded
+
+
 def _decode_v1_stored_user_input(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
 ) -> StoredUserInput:
+    required = frozenset({"codec", "payload"})
+    if "view" in raw_fields:
+        required = frozenset({"codec", "payload", "view"})
     _require_contract_fields(
         raw_fields,
-        frozenset({"codec", "payload"}),
+        required,
         persisted=persisted,
     )
     codec_name = _decode_domain(
@@ -617,8 +637,22 @@ def _decode_v1_stored_user_input(
     payload = _decode_domain(
         raw_fields["payload"], StoredPayload, codec, persisted=persisted
     )
+    view = (
+        None
+        if "view" not in raw_fields
+        else _decode_domain(
+            raw_fields["view"],
+            Mapping[str, JsonValue] | None,
+            codec,
+            persisted=persisted,
+        )
+    )
     try:
-        return StoredUserInput(codec_name, payload)
+        return StoredUserInput(
+            codec_name,
+            payload,
+            cast(Mapping[str, JsonValue] | None, view),
+        )
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
@@ -626,6 +660,7 @@ def _decode_v1_stored_user_input(
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "object_ref": _encode_v1_object_ref,
+        "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         "task_node": _encode_v1_task_node,
         "task_node_view": _encode_v1_task_node_view,
@@ -1953,6 +1988,7 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
     custom_encoders = {
         "object_ref",
+        "stored_user_input",
         "task_graph_view",
         "task_node",
         "task_node_view",

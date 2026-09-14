@@ -26,6 +26,7 @@ from .service_api import (
     ExecutionTreeEvent,
     ReplayEvaluationRequest,
     SessionHistoryItem,
+    SessionTurn,
     SessionView,
     StartEvaluationRequest,
     TranscriptItem,
@@ -295,6 +296,20 @@ class Session(Generic[AppT]):
         limit: int = 100,
     ) -> "Page[SessionHistoryItem]":
         return await self._runtime.session.history(
+            self.session_id,
+            principal=self._runtime._resolve_principal(principal or self._principal),
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def timeline(
+        self,
+        *,
+        principal: "Principal | None" = None,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[SessionTurn]":
+        return await self._runtime.session.timeline(
             self.session_id,
             principal=self._runtime._resolve_principal(principal or self._principal),
             cursor=cursor,
