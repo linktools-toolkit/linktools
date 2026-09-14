@@ -22,9 +22,9 @@ def append_once(path: str, marker: str, content: str) -> None:
     target.write_text(text.rstrip() + "\n\n" + content.rstrip() + "\n", encoding="utf-8")
 
 
-path = "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
+steps = "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
 replace_once(
-    path,
+    steps,
     '''class InMemoryStepArchive(StagingStepStore):
     def __init__(self, runtime_domain: RuntimeDomain) -> None:
         super().__init__()
@@ -38,7 +38,7 @@ replace_once(
 ''',
 )
 replace_once(
-    path,
+    steps,
     '''            for snapshot in snapshots:
                 if snapshot not in snapshot_values:
                     snapshot_values.append(snapshot)
@@ -59,13 +59,41 @@ replace_once(
 ''',
 )
 replace_once(
-    path,
-    '''    async def resolve_transcript_message_refs(
+    steps,
+    '''    async def materialize_snapshot(
+        self,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
+        await self.sync_projection(
+            run,
+            events=(),
+            snapshots=(snapshot,),
+            execution_id=execution_id,
+        )
+
+    async def resolve_transcript_message_refs(
         self,
         refs: Sequence[TranscriptMessageRef],
     ) -> tuple[LoadedContextMessage, ...]:
 ''',
-    '''    def release_run_local(self, run_id: str) -> None:
+    '''    async def materialize_snapshot(
+        self,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
+        await self.sync_projection(
+            run,
+            events=(),
+            snapshots=(snapshot,),
+            execution_id=execution_id,
+        )
+
+    def release_run_local(self, run_id: str) -> None:
         run = self._runs.get(run_id)
         history_id = (
             None
@@ -83,7 +111,7 @@ replace_once(
 ''',
 )
 replace_once(
-    path,
+    steps,
     '''    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -109,30 +137,28 @@ replace_once(
 ''',
 )
 
-path = "tests/ai/test_session_timeline_storage.py"
+test = "tests/ai/test_session_timeline_storage.py"
 replace_once(
-    path,
-    '''from datetime import datetime, timezone
-from types import SimpleNamespace
+    test,
+    '''import pytest
 
-import pytest
+from linktools.ai.core import SessionStatus
 ''',
-    '''from datetime import datetime, timezone
-from types import SimpleNamespace
-
-import pytest
+    '''import pytest
 from pydantic_ai.messages import ModelResponse, TextPart
+
+from linktools.ai.core import SessionStatus
 ''',
 )
 replace_once(
-    path,
+    test,
     '''from linktools.ai.runtime.state import RuntimeState
 ''',
     '''from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
 ''',
 )
 replace_once(
-    path,
+    test,
     '''from linktools.ai.runtime.state._store import StoredFact
 ''',
     '''from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
@@ -141,7 +167,7 @@ from linktools.ai.runtime.state._store import StoredFact
 ''',
 )
 append_once(
-    path,
+    test,
     "test_in_memory_session_history_uses_latest_materialized_run",
     '''@pytest.mark.asyncio
 async def test_in_memory_session_history_uses_latest_materialized_run() -> None:
@@ -196,10 +222,10 @@ async def test_in_memory_session_history_uses_latest_materialized_run() -> None:
             )
         ]
         assert len(messages) == 1
-        assert messages[0] == latest_snapshot_message = ModelResponse(
-            parts=[TextPart(content="new")]
-        )
-        assert latest_snapshot_message.parts[0].content == "new"
+        assert isinstance(messages[0], ModelResponse)
+        assert len(messages[0].parts) == 1
+        assert isinstance(messages[0].parts[0], TextPart)
+        assert messages[0].parts[0].content == "new"
     finally:
         await archive.close()
 ''',
