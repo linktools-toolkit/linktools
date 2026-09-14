@@ -4014,6 +4014,15 @@ class LocalExecutionBackend:
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
                 and history_id is not None
             )
+            session_history_owner: str | None = None
+            if session_history_source:
+                if isinstance(
+                    self._step_reads[RuntimeDomain.CONVERSATION],
+                    StateStepArchive,
+                ):
+                    session_history_owner = history_id
+                elif session is not None and session.continuation is not None:
+                    session_history_owner = session.continuation.step_run_id
             if source_replay_history is not None:
                 history = source_replay_history
             elif recovery_history_run_id is not None:
@@ -4022,16 +4031,15 @@ class LocalExecutionBackend:
                     recovery_history_run_id,
                 )
                 history = list(loaded_context.model_messages())
-            else:
-                if session_history_source:
+            elif session_history_source:
+                if session_history_owner is not None:
                     loaded_context = await self._steps.load_loaded_model_context(
                         RuntimeDomain.CONVERSATION,
-                        history_id,
+                        session_history_owner,
                     )
-                if session_history_source and loaded_context.messages:
-                    history = list(loaded_context.model_messages())
-                else:
-                    history = cast("list[ModelMessage]", await self._history(current))
+                history = list(loaded_context.model_messages())
+            else:
+                history = cast("list[ModelMessage]", await self._history(current))
             session_history_start = (
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
                 and bool(history)
