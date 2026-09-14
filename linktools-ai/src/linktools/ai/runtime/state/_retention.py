@@ -94,15 +94,8 @@ class RuntimeRetentionController:
         tenant_id: str,
         continuation: ConversationCursor | None,
     ) -> None:
-        if RuntimeDomain.CONVERSATION not in self._transient_domains:
-            return
-        if continuation is not None:
-            await self._steps.release_archive(
-                RuntimeDomain.CONVERSATION, continuation.step_run_id
-            )
-        await self._objects.release_object_scope(
-            RuntimeDomain.CONVERSATION, owner_scope=f"session:{session_id}"
-        )
+        # Forked sessions may still reference transient conversation state.
+        del session_id, tenant_id, continuation
 
     async def release_evaluation(self, evaluation_id: str, *, tenant_id: str) -> None:
         del evaluation_id, tenant_id

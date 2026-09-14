@@ -68,6 +68,19 @@ class InputIntent:
         ).hexdigest()
 
 
+class _MaterializedUserContent(tuple):
+    view: Mapping[str, JsonValue]
+
+    def __new__(
+        cls,
+        items: Sequence[UserContent],
+        view: Mapping[str, JsonValue],
+    ) -> "_MaterializedUserContent":
+        value = super().__new__(cls, items)
+        value.view = dict(view)
+        return value
+
+
 def input_intent(value: _UserPromptInput, files: Sequence[str]) -> InputIntent:
     canonical = validate_user_input(value)
     normalized_files = _require_files(files)
@@ -178,6 +191,7 @@ class ExecutionInputMaterializer:
             return canonical
 
         additions: list[UserContent] = []
+        file_views: list[dict[str, JsonValue]] = []
         for path in files:
             media_type = self._media_type(path)
             remaining = self._policy.max_binary_input_bytes - total_bytes
@@ -193,6 +207,14 @@ class ExecutionInputMaterializer:
             total_bytes += len(body)
             if total_bytes > self._policy.max_binary_input_bytes:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            file_views.append(
+                {
+                    "path": path,
+                    "media_type": media_type,
+                    "size": len(body),
+                    "digest": hashlib.sha256(body).hexdigest(),
+                }
+            )
             additions.extend(
                 (
                     f"Workspace file path: {json.dumps(path)}",
@@ -212,7 +234,13 @@ class ExecutionInputMaterializer:
             len(files),
             total_bytes,
         )
-        return materialized
+        return cast(
+            CanonicalUserInput,
+            _MaterializedUserContent(
+                cast(Sequence[UserContent], materialized),
+                _input_view(canonical, file_views),
+            ),
+        )
 
     async def store(
         self,
@@ -224,7 +252,15 @@ class ExecutionInputMaterializer:
 
         canonical = validate_user_input(value)
         if isinstance(canonical, str):
-            return StoredUserInput(_TEXT_CODEC, StoredPayload.inline_text(canonical))
+            return StoredUserInput(
+                _TEXT_CODEC,
+                StoredPayload.inline_text(canonical),
+            )
+        view = (
+            dict(value.view)
+            if isinstance(value, _MaterializedUserContent)
+            else _input_view(value)
+        )
         payload = StoredPayload.inline_json(_encode_user_content(canonical))
         if not payload_fits_inline(payload, self._payload_policy):
             if self._object_store is None or self._object_key_factory is None:
@@ -243,7 +279,7 @@ class ExecutionInputMaterializer:
                 body,
             )
             payload = StoredPayload.object(reference)
-        return StoredUserInput(_USER_CONTENT_CODEC, payload)
+        return StoredUserInput(_USER_CONTENT_CODEC, payload, view)
 
     async def restore(self, value: "StoredUserInput") -> CanonicalUserInput:
         from .state._contracts import StoredUserInput
@@ -370,6 +406,49 @@ def _draft_prompt(value: _UserPromptInput) -> DraftPrompt:
                 }
             )
     return result
+
+
+def _input_view(
+    value: _UserPromptInput,
+    files: Sequence[Mapping[str, JsonValue]] = (),
+) -> dict[str, JsonValue]:
+    canonical = validate_user_input(value)
+    prompt = _draft_prompt(canonical)
+    if not isinstance(canonical, str):
+        prompt = {"kind": "items", "items": prompt}
+    try:
+        normalized = normalize_json_value(
+            {
+                "version": 1,
+                "prompt": prompt,
+                "files": [dict(item) for item in files],
+            }
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(normalized, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return normalized
+
+
+def stored_user_input_view(value: "StoredUserInput") -> dict[str, JsonValue]:
+    from .state._contracts import StoredUserInput
+
+    if not isinstance(value, StoredUserInput):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value.view is not None:
+        return dict(value.view)
+    if value.payload.kind != "inline":
+        raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+    decoded = value.payload.decode()
+    if value.codec == _TEXT_CODEC:
+        if not isinstance(decoded, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return _input_view(decoded)
+    if value.codec != _USER_CONTENT_CODEC or not isinstance(decoded, Mapping):
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    content = _decode_user_content(cast(dict[str, JsonValue], decoded))
+    return _input_view(content)
 
 
 def _json_object_or_none(value: object) -> JsonValue:
@@ -551,6 +630,7 @@ __all__ = [
     "InputIntent",
     "decode_user_content_payload",
     "input_intent",
+    "stored_user_input_view",
     "task_prompt_draft",
     "validate_user_input",
 ]

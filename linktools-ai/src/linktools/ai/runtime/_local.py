@@ -3158,58 +3158,88 @@ class LocalExecutionBackend:
                 checkpoint.execution_id,
             )
             return
-        if self._step_reads.get(RuntimeDomain.CONVERSATION) is not self._steps:
+        conversation_archive = self._step_reads[RuntimeDomain.CONVERSATION]
+        if conversation_archive is not self._steps:
             if handoff.source_step_run_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._step_lifecycle.materialize_from_recovery(
                 target=RuntimeDomain.CONVERSATION,
                 step_run_id=handoff.source_step_run_id,
             )
-            target_snapshot = await self._step_reads[
-                RuntimeDomain.CONVERSATION
-            ].latest_snapshot(
+            target_snapshot = await conversation_archive.latest_snapshot(
                 run_id=handoff.source_step_run_id,
             )
             if target_snapshot is None or target_snapshot.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if session.continuation == intent.next_cursor:
+        history_id = session.history_id or intent.next_cursor.history_id
+        if history_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        end_message_index = await self._steps.conversation_message_count(
+            history_id=history_id,
+            step_run_id=intent.next_cursor.step_run_id,
+            tenant_id=checkpoint.tenant_id,
+        )
+        effective_next_cursor = replace(
+            intent.next_cursor,
+            history_id=history_id,
+            message_count=end_message_index,
+        )
+        if session.continuation == effective_next_cursor:
             return
-        if session.status is SessionStatus.CLOSED:
-            raise AIError(ErrorCode.SESSION_CONFLICT)
-        if session.active_execution_id != checkpoint.execution_id:
+        if intent.expected_cursor is None:
+            start_message_index = 0
+        else:
+            start_message_index = intent.expected_cursor.message_count
+            if start_message_index is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if end_message_index <= start_message_index:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if session.continuation != intent.expected_cursor:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            await self._conversation.sessions.advance_continuation(
+
+        async def commit_conversation(transaction) -> None:
+            current = await self._conversation.sessions.get_in_transaction(
+                transaction,
+                intent.session_id,
+                tenant_id=checkpoint.tenant_id,
+            )
+            if current.continuation == effective_next_cursor:
+                return
+            if current.status is SessionStatus.CLOSED:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if (
+                current.active_execution_id != checkpoint.execution_id
+                or current.continuation != intent.expected_cursor
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._conversation.sessions.advance_continuation_in_transaction(
+                transaction,
                 intent.session_id,
                 tenant_id=checkpoint.tenant_id,
                 execution_id=checkpoint.execution_id,
                 expected=intent.expected_cursor,
-                next_cursor=intent.next_cursor,
+                next_cursor=effective_next_cursor,
+                release_execution=False,
+                history_quality="complete",
             )
+            await self._conversation.sessions.commit_timeline_turn_in_transaction(
+                transaction,
+                intent.session_id,
+                tenant_id=checkpoint.tenant_id,
+                execution_id=checkpoint.execution_id,
+                start_message_index=start_message_index,
+                end_message_index=end_message_index,
+            )
+
+        try:
+            await self._conversation.sessions.state_store.mutate(commit_conversation)
         except AIError as error:
-            if error.code not in {
-                ErrorCode.STORAGE_CONFLICT,
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
-            }:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise
             latest = await self._conversation.sessions.get(
                 intent.session_id,
                 tenant_id=checkpoint.tenant_id,
             )
-            if latest is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if latest.continuation == intent.next_cursor:
-                return
-            if latest.status is SessionStatus.CLOSED:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            if (
-                latest.active_execution_id != checkpoint.execution_id
-                or latest.continuation != intent.expected_cursor
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            raise
+            if latest is None or latest.continuation != effective_next_cursor:
+                raise
 
     async def _advance_handoff(
         self, checkpoint: RecoveryCheckpoint, phase: RecoveryHandoffPhase
@@ -3966,6 +3996,15 @@ class LocalExecutionBackend:
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
                 and history_id is not None
             )
+            session_history_owner: str | None = None
+            if session_history_source:
+                if isinstance(
+                    self._step_reads[RuntimeDomain.CONVERSATION],
+                    StateStepArchive,
+                ):
+                    session_history_owner = history_id
+                elif session is not None and session.continuation is not None:
+                    session_history_owner = session.continuation.step_run_id
             if source_replay_history is not None:
                 history = source_replay_history
             elif recovery_history_run_id is not None:
@@ -3974,16 +4013,15 @@ class LocalExecutionBackend:
                     recovery_history_run_id,
                 )
                 history = list(loaded_context.model_messages())
-            else:
-                if session_history_source:
+            elif session_history_source:
+                if session_history_owner is not None:
                     loaded_context = await self._steps.load_loaded_model_context(
                         RuntimeDomain.CONVERSATION,
-                        history_id,
+                        session_history_owner,
                     )
-                if session_history_source and loaded_context.messages:
-                    history = list(loaded_context.model_messages())
-                else:
-                    history = cast("list[ModelMessage]", await self._history(current))
+                history = list(loaded_context.model_messages())
+            else:
+                history = cast("list[ModelMessage]", await self._history(current))
             session_history_start = (
                 current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
                 and bool(history)
@@ -4505,6 +4543,7 @@ class LocalExecutionBackend:
         execution: ExecutionRecord,
     ) -> ConversationCursor | None:
         history_id = None
+        session = None
         if execution.session_id is not None:
             session = await self._conversation.sessions.get(
                 execution.session_id,
@@ -4518,6 +4557,13 @@ class LocalExecutionBackend:
                 else session.continuation.history_id
             )
         if execution.conversation_step_run_id is not None:
+            if (
+                session is not None
+                and session.continuation is not None
+                and session.continuation.step_run_id
+                == execution.conversation_step_run_id
+            ):
+                return session.continuation
             return ConversationCursor(
                 execution.conversation_step_run_id,
                 history_id=history_id,
@@ -5468,8 +5514,9 @@ class LocalExecutionBackend:
                     stores.append(archive.state_store)
             if execution.session_id is not None and status is ExecutionStatus.SUCCEEDED:
                 archive = self._step_reads[RuntimeDomain.CONVERSATION]
-                if isinstance(archive, StateStepArchive):
-                    stores.append(archive.state_store)
+                if not isinstance(archive, StateStepArchive):
+                    return False
+                stores.append(archive.state_store)
         return all(
             store.storage_group is stores[0].storage_group for store in stores[1:]
         )

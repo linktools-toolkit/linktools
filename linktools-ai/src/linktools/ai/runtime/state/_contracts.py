@@ -221,12 +221,21 @@ class RuntimePayloadRef:
 class StoredUserInput:
     codec: str
     payload: StoredPayload
+    view: Mapping[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
         if self.codec not in {"text", "user-content-v1"}:
             raise ValueError("stored user input codec is invalid")
         if not isinstance(self.payload, StoredPayload):
             raise TypeError("stored user input payload is invalid")
+        if self.view is not None:
+            if not isinstance(self.view, Mapping) or self.view.get("version") != 1:
+                raise ValueError("stored user input view is invalid")
+            try:
+                canonical_sha256(self.view)
+            except (TypeError, ValueError) as error:
+                raise ValueError("stored user input view is invalid") from error
+            object.__setattr__(self, "view", dict(self.view))
 
     @property
     def digest(self) -> str:
@@ -237,6 +246,36 @@ class StoredUserInput:
                 "payload_size": self.payload.size,
             }
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurnRef:
+    session_id: str
+    sequence: int
+    execution_id: str
+
+    def __post_init__(self) -> None:
+        if not self.session_id or not self.execution_id or self.sequence < 1:
+            raise ValueError("session turn reference is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurnCommitRef:
+    session_id: str
+    sequence: int
+    execution_id: str
+    start_message_index: int
+    end_message_index: int
+
+    def __post_init__(self) -> None:
+        if (
+            not self.session_id
+            or not self.execution_id
+            or self.sequence < 1
+            or self.start_message_index < 0
+            or self.end_message_index <= self.start_message_index
+        ):
+            raise ValueError("session turn commit reference is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -451,6 +490,8 @@ class SessionRecord:
     continuation: ConversationCursor | None = None
     history_quality: str = "complete"
     history_id: str | None = None
+    timeline_parent_session_id: str | None = None
+    timeline_parent_turn_sequence: int = 0
 
     def __post_init__(self) -> None:
         try:
@@ -475,6 +516,15 @@ class SessionRecord:
                 raise ValueError("session cwd must be canonical")
         if self.history_quality not in {"complete", "conservative"}:
             raise ValueError("session history quality summary is invalid")
+        if self.timeline_parent_session_id is None:
+            if self.timeline_parent_turn_sequence != 0:
+                raise ValueError("root session timeline cannot have an ancestor cutoff")
+        elif (
+            not self.timeline_parent_session_id
+            or self.timeline_parent_session_id == self.session_id
+            or self.timeline_parent_turn_sequence < 1
+        ):
+            raise ValueError("session timeline ancestor is invalid")
 
 
 
@@ -1287,6 +1337,33 @@ class SessionRepository(RuntimeRepository, Protocol):
         self, session_id: str, *, tenant_id: str
     ) -> ResourceRef | None: ...
     async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
+    async def timeline_head(self, session_id: str, *, tenant_id: str) -> int: ...
+    async def list_timeline_turns(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        start_sequence: int,
+        end_sequence: int,
+    ) -> tuple[SessionTurnRef, ...]: ...
+    async def list_timeline_commits(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        start_sequence: int,
+        end_sequence: int,
+    ) -> tuple[SessionTurnCommitRef, ...]: ...
+    async def commit_timeline_turn_in_transaction(
+        self,
+        transaction: StateTransaction,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        start_message_index: int,
+        end_message_index: int,
+    ) -> SessionTurnCommitRef: ...
     async def compare_and_swap(
         self,
         session_id: str,
