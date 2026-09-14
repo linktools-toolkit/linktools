@@ -42,15 +42,7 @@ class HarnessPlanStoreAdapter:
         self._store = store
 
     async def get_items(self) -> list[HarnessPlanItem]:
-        values = await self._store.get_items()
-        return [
-            HarnessPlanItem(
-                id=_plan_item_id(index),
-                content=item.content,
-                status=TaskStatus(item.status),
-            )
-            for index, item in enumerate(values)
-        ]
+        return _harness_plan_items(await self._store.get_items())
 
     async def set_items(self, items: list[HarnessPlanItem]) -> None:
         await self._store.write_plan(_runtime_plan_items(items))
@@ -61,12 +53,19 @@ class HarnessPlanStoreAdapter:
         )
 
     async def add_item(self, item: HarnessPlanItem) -> HarnessPlanItem:
-        values = await self.get_items()
-        if any(current.id == item.id for current in values):
-            raise ValueError(f"A step with id {item.id!r} is already in this plan.")
-        values.append(item.model_copy(deep=True))
-        await self.set_items(values)
-        return item.model_copy(deep=True)
+        candidate = item.model_copy(deep=True)
+
+        def edit(current: list[PlanItem]) -> list[PlanItem]:
+            values = _harness_plan_items(current)
+            if any(value.id == candidate.id for value in values):
+                raise ValueError(
+                    f"A step with id {candidate.id!r} is already in this plan."
+                )
+            values.append(candidate.model_copy(deep=True))
+            return _runtime_plan_items(values)
+
+        await self._store.edit_items(edit)
+        return candidate.model_copy(deep=True)
 
     async def update_item(
         self,
@@ -78,30 +77,58 @@ class HarnessPlanStoreAdapter:
         parent_id: str | None = None,
         depends_on: list[str] | None = None,
     ) -> HarnessPlanItem | None:
-        values = await self.get_items()
-        selected = next((item for item in values if item.id == item_id), None)
-        if selected is None:
+        def edit(current: list[PlanItem]) -> list[PlanItem]:
+            values = _harness_plan_items(current)
+            selected = next((item for item in values if item.id == item_id), None)
+            if selected is None:
+                return current
+            if content is not None:
+                selected.content = content
+            if status is not None:
+                selected.status = status
+            if active_form is not None:
+                selected.active_form = active_form
+            if parent_id is not None:
+                selected.parent_id = parent_id
+            if depends_on is not None:
+                selected.depends_on = list(depends_on)
+            return _runtime_plan_items(values)
+
+        previous, current, _revision = await self._store.edit_items(edit)
+        if not any(item.id == item_id for item in _harness_plan_items(previous)):
             return None
-        if content is not None:
-            selected.content = content
-        if status is not None:
-            selected.status = status
+        selected = next(
+            (item for item in _harness_plan_items(current) if item.id == item_id),
+            None,
+        )
+        if selected is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if active_form is not None:
             selected.active_form = active_form
-        if parent_id is not None:
-            selected.parent_id = parent_id
         if depends_on is not None:
             selected.depends_on = list(depends_on)
-        await self.set_items(values)
         return selected.model_copy(deep=True)
 
     async def remove_item(self, item_id: str) -> bool:
-        values = await self.get_items()
-        next_values = [item for item in values if item.id != item_id]
-        if len(next_values) == len(values):
-            return False
-        await self.set_items(next_values)
-        return True
+        def edit(current: list[PlanItem]) -> list[PlanItem]:
+            values = _harness_plan_items(current)
+            return _runtime_plan_items(
+                [item for item in values if item.id != item_id]
+            )
+
+        previous, _current, _revision = await self._store.edit_items(edit)
+        return any(item.id == item_id for item in _harness_plan_items(previous))
+
+
+def _harness_plan_items(items: Sequence[PlanItem]) -> list[HarnessPlanItem]:
+    return [
+        HarnessPlanItem(
+            id=_plan_item_id(index),
+            content=item.content,
+            status=TaskStatus(item.status),
+        )
+        for index, item in enumerate(items)
+    ]
 
 
 def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
