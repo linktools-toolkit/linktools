@@ -4,6 +4,7 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol, cast
 
 from pydantic_ai.messages import UserContent
@@ -312,6 +313,35 @@ class SessionHistoryItem:
     def __post_init__(self) -> None:
         if self.sequence < 1 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("session history item is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurnItem:
+    ordinal: int
+    item_kind: str
+    content: JsonValue
+    tool_name: "str | None" = None
+    tool_call_id: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if self.ordinal < 1 or not self.item_kind:
+            raise ValueError("session timeline item is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurn:
+    execution_id: str
+    status: ExecutionStatus
+    created_at: datetime
+    updated_at: datetime
+    user_input: JsonValue
+    conversation_committed: bool
+    items: tuple[SessionTurnItem, ...]
+    error_code: "str | None" = None
+    safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
 
 
 class ExecutionHistoryReader(Protocol):
@@ -925,6 +955,14 @@ class SessionService(Protocol):
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> "Page[SessionHistoryItem]": ...
+    async def timeline(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[SessionTurn]": ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
     async def resume(
         self,
@@ -1060,6 +1098,8 @@ __all__ = [
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
+    "SessionTurn",
+    "SessionTurnItem",
     "SessionView",
     "StartEvaluationRequest",
     "TaskGraphRunEvent",

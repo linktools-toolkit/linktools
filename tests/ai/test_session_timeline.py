@@ -1,39 +1,4 @@
-from __future__ import annotations
-
-from pathlib import Path
-
-
-def load(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
-
-
-def save(path: str, text: str) -> None:
-    Path(path).write_text(text, encoding="utf-8")
-
-
-def replace_once(path: str, old: str, new: str) -> None:
-    text = load(path)
-    count = text.count(old)
-    if count != 1:
-        raise RuntimeError(f"{path}: expected one replacement, found {count}: {old[:80]!r}")
-    save(path, text.replace(old, new, 1))
-
-
-path = "tests/ai/test_file_input_regressions.py"
-replace_once(
-    path,
-    '''        assert stored.codec == "text"\n        assert stored.payload == StoredPayload.inline_text("plain text")\n''',
-    '''        assert stored.codec == "text"\n        assert stored.payload == StoredPayload.inline_text("plain text")\n        assert stored.view == {\n            "version": 1,\n            "prompt": {"kind": "text", "text": "plain text"},\n            "files": [],\n        }\n''',
-)
-replace_once(
-    path,
-    '''        assert prepared.stored_user_input is not None\n        assert isinstance(prepared.request.user_prompt, tuple)\n        assert session.reads == ["evidence.txt"]\n\n        replay = await materializer.restore(prepared.stored_user_input)\n''',
-    '''        assert prepared.stored_user_input is not None\n        assert isinstance(prepared.request.user_prompt, tuple)\n        assert session.reads == ["evidence.txt"]\n        assert prepared.stored_user_input.view == {\n            "version": 1,\n            "prompt": {"kind": "text", "text": "inspect"},\n            "files": [\n                {\n                    "path": "evidence.txt",\n                    "media_type": "text/plain",\n                    "size": 8,\n                    "digest": (\n                        "ee8250fb76e094b34b471f13a73dbbe51d1ae142e9df59d7c0d31ec20f0a0a8e"\n                    ),\n                }\n            ],\n        }\n        view_text = str(prepared.stored_user_input.view)\n        assert "Workspace file path" not in view_text\n        assert "ZXZpZGVuY2U=" not in view_text\n\n        replay = await materializer.restore(prepared.stored_user_input)\n''',
-)
-
-save(
-    "tests/ai/test_session_timeline.py",
-    '''#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Web Session timeline projection regressions."""
 
@@ -361,7 +326,3 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
         assert executions.get_many_calls == 2
     finally:
         await state.close()
-''',
-)
-
-print("session timeline patch part 4 applied")

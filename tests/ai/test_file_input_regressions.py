@@ -124,6 +124,11 @@ async def test_text_materialization_keeps_text_codec() -> None:
         assert canonical == "plain text"
         assert stored.codec == "text"
         assert stored.payload == StoredPayload.inline_text("plain text")
+        assert stored.view == {
+            "version": 1,
+            "prompt": {"kind": "text", "text": "plain text"},
+            "files": [],
+        }
     finally:
         await materializer.close()
 
@@ -159,6 +164,23 @@ async def test_execution_freezes_materialized_input_once() -> None:
         assert prepared.stored_user_input is not None
         assert isinstance(prepared.request.user_prompt, tuple)
         assert session.reads == ["evidence.txt"]
+        assert prepared.stored_user_input.view == {
+            "version": 1,
+            "prompt": {"kind": "text", "text": "inspect"},
+            "files": [
+                {
+                    "path": "evidence.txt",
+                    "media_type": "text/plain",
+                    "size": 8,
+                    "digest": (
+                        "ee8250fb76e094b34b471f13a73dbbe51d1ae142e9df59d7c0d31ec20f0a0a8e"
+                    ),
+                }
+            ],
+        }
+        view_text = str(prepared.stored_user_input.view)
+        assert "Workspace file path" not in view_text
+        assert "ZXZpZGVuY2U=" not in view_text
 
         replay = await materializer.restore(prepared.stored_user_input)
         assert replay == prepared.request.user_prompt

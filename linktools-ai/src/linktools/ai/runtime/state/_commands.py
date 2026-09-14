@@ -1522,7 +1522,7 @@ class RuntimeStateCommands:
                             session_id,
                             tenant_id=commit.execution.tenant_id,
                         )
-                        await self._promote_history_in_transaction(
+                        history = await self._promote_history_in_transaction(
                             conversation_transaction,
                             session,
                             prepared_conversation[0],
@@ -1535,6 +1535,28 @@ class RuntimeStateCommands:
                             expected=expected_cursor,
                             next_cursor=next_cursor,
                             history_quality="complete",
+                        )
+                        local_start = min(
+                            (
+                                chunk.first_message_index
+                                for chunk in prepared_conversation[0].chunks
+                            ),
+                            default=None,
+                        )
+                        await self._conversation.commit_timeline_turn_in_transaction(
+                            conversation_transaction,
+                            session_id,
+                            tenant_id=commit.execution.tenant_id,
+                            execution_id=commit.execution.execution_id,
+                            start_message_index=(
+                                None
+                                if local_start is None
+                                else history.inherited_message_count + local_start
+                            ),
+                            end_message_index=(
+                                history.inherited_message_count
+                                + prepared_conversation.target_transcript_message_count
+                            ),
                         )
                 if recovery_checkpoint is not None:
                     if recovery_run is not None or recovery_snapshot is not None:
@@ -1729,7 +1751,7 @@ class RuntimeStateCommands:
                     session_id,
                     tenant_id=commit.execution.tenant_id,
                 )
-                await self._promote_history_in_transaction(
+                history = await self._promote_history_in_transaction(
                     conversation_transaction,
                     session,
                     prepared_conversation[0],
@@ -1743,6 +1765,28 @@ class RuntimeStateCommands:
                     next_cursor=next_cursor,
                     release_execution=False,
                     history_quality="complete",
+                )
+                local_start = min(
+                    (
+                        chunk.first_message_index
+                        for chunk in prepared_conversation[0].chunks
+                    ),
+                    default=None,
+                )
+                await self._conversation.commit_timeline_turn_in_transaction(
+                    conversation_transaction,
+                    session_id,
+                    tenant_id=commit.execution.tenant_id,
+                    execution_id=commit.execution.execution_id,
+                    start_message_index=(
+                        None
+                        if local_start is None
+                        else history.inherited_message_count + local_start
+                    ),
+                    end_message_index=(
+                        history.inherited_message_count
+                        + prepared_conversation.target_transcript_message_count
+                    ),
                 )
 
             if _same_group(conversation_stores):
