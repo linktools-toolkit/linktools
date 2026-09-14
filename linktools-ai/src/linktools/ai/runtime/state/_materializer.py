@@ -474,7 +474,6 @@ def _build_object_router(
         route = plan.route(domain)
         if route.retention is RuntimeRetentionMode.DURABLE and external is not None:
             values[domain] = external
-            close_guard_stores.append(external)
         elif route.retention is RuntimeRetentionMode.VOLATILE:
             store = InMemoryObjectStore()
             values[domain] = store
