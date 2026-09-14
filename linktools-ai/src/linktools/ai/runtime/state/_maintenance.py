@@ -11,6 +11,7 @@ from linktools.core import environ
 from ...core import ExecutionEventType
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStoreInspection, ObjectStoreMaintenance
+from ...task import TaskEventType
 from ._codec import (
     _VERSION_CODECS,
     _decode_domain,
@@ -38,7 +39,17 @@ _ENVELOPED_FACT_KINDS = frozenset(
         "transcript_chunk",
     }
 )
-_EXECUTION_EVENT_FACT_KINDS = frozenset(value.value for value in ExecutionEventType)
+_REFERENCE_FREE_RECORD_VERSIONS = {
+    "agent_plan": 1,
+    "session_turn_commit": 1,
+}
+_REFERENCE_FREE_FACT_VERSIONS = {
+    "session_turn": 1,
+    **{value.value: 1 for value in TaskEventType},
+}
+_REFERENCE_FREE_UNVERSIONED_FACT_KINDS = frozenset(
+    value.value for value in ExecutionEventType
+)
 _LEASE_PROJECTED_WIRE_IDS = frozenset({"task_node_view", "tool_operation"})
 _LEASE_FIELDS = frozenset({"owner", "fence", "lease_expires_at"})
 
@@ -204,14 +215,28 @@ class RuntimeStorageInspection:
         references: dict[int, set[str]],
     ) -> None:
         for record in records:
+            expected_version = _REFERENCE_FREE_RECORD_VERSIONS.get(record.kind)
+            if expected_version is not None:
+                _validate_reference_free_version(
+                    record.data,
+                    expected_version=expected_version,
+                )
+                continue
             self._collect_enveloped_references(domain, record.data, references)
         for fact in facts:
             if fact.kind in _ENVELOPED_FACT_KINDS:
                 self._collect_enveloped_references(domain, fact.data, references)
-            elif fact.kind in _EXECUTION_EVENT_FACT_KINDS:
                 continue
-            else:
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            expected_version = _REFERENCE_FREE_FACT_VERSIONS.get(fact.kind)
+            if expected_version is not None:
+                _validate_reference_free_version(
+                    fact.data,
+                    expected_version=expected_version,
+                )
+                continue
+            if fact.kind in _REFERENCE_FREE_UNVERSIONED_FACT_KINDS:
+                continue
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         for operation in operations:
             self._collect_enveloped_references(domain, operation.data, references)
 
@@ -261,6 +286,18 @@ class OfflineRuntimeStorageMaintenance:
                         object_store.offline_exclusivity()
                     )
                 return await self._inspection._compact_objects()
+
+
+def _validate_reference_free_version(
+    value: Mapping[str, object],
+    *,
+    expected_version: int,
+) -> None:
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != expected_version:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 def _validate_enveloped_value(value: Mapping[str, object]) -> None:
