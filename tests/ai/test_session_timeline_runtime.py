@@ -8,7 +8,12 @@ import pytest
 
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
+from linktools.ai.runtime.state import (
+    RuntimeDomain,
+    RuntimeState,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 
 from .test_runtime_composition_regressions import (
     _RuntimeUsageModels,
@@ -52,11 +57,13 @@ async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_in_memory_fork_survives_parent_close_and_releases_on_child_close(
+async def test_transient_fork_survives_parent_close_and_releases_on_child_close(
     tmp_path: Path,
 ) -> None:
     workspace = _runtime_usage_workspace(tmp_path / "workspace-fork")
-    state = RuntimeState.in_memory()
+    state = RuntimeState.from_plan(
+        RuntimeStatePlan(conversation=RuntimeStateRoute.transient())
+    )
 
     async with Runtime.open(
         workspace,
