@@ -271,7 +271,9 @@ class _FilesystemCache:
             if not 1 <= sequence <= info.last_sequence:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             subjects[subject] = sequence
-        info.subjects.update(subjects)
+        for subject, sequence in subjects.items():
+            if info.subjects.get(subject, 0) < sequence:
+                info.subjects[subject] = sequence
         info.subjects_loaded = True
         self._business_files_read += len(subjects)
 
@@ -2307,34 +2309,69 @@ class _FilesystemTransaction:
             self._delete(_sequence_path(self._root, key))
 
     async def insert_fact(self, fact: StoredFact) -> None:
-        if fact.owner_key_digest not in self.guarded_record_keys:
-            raise RuntimeError("fact owner must be guarded in the current transaction")
-        info = await self._own_fact_stream(fact.stream_digest)
-        if info is None:
-            info = _FactStreamInfo(fact.stream_digest, fact.owner_key_digest, 0, {})
-            self.fact_streams[fact.stream_digest] = info
-            self._owned_fact_streams.add(fact.stream_digest)
-        if info.owner_key_digest != fact.owner_key_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        key = (fact.stream_digest, fact.sequence)
-        if fact.sequence <= info.last_sequence and key not in self._deleted_facts:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if fact.sequence != info.last_sequence + 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        info.last_sequence = fact.sequence
-        self._deleted_facts.discard(key)
-        self._facts[key] = fact
-        self._write(
-            _fact_item_path(self._root, fact.stream_digest, fact.sequence),
-            encode_fact(fact),
-        )
-        self._sync_fact_stream(
-            info, subject=fact.subject_digest, sequence=fact.sequence
-        )
+        await self.insert_facts((fact,))
 
     async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
+        if not facts:
+            return
+        streams: dict[bytes, list[StoredFact]] = {}
+        seen: set[tuple[bytes, int]] = set()
         for fact in facts:
-            await self.insert_fact(fact)
+            if fact.owner_key_digest not in self.guarded_record_keys:
+                raise RuntimeError(
+                    "fact owner must be guarded in the current transaction"
+                )
+            key = (fact.stream_digest, fact.sequence)
+            if key in seen:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            seen.add(key)
+            streams.setdefault(fact.stream_digest, []).append(fact)
+
+        owned: dict[bytes, _FactStreamInfo] = {}
+        for stream, values in streams.items():
+            info = await self._own_fact_stream(stream)
+            if info is None:
+                info = _FactStreamInfo(stream, values[0].owner_key_digest, 0, {})
+                self.fact_streams[stream] = info
+                self._owned_fact_streams.add(stream)
+            for fact in values:
+                if info.owner_key_digest != fact.owner_key_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if fact.sequence <= info.last_sequence:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if fact.sequence != info.last_sequence + 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                info.last_sequence = fact.sequence
+            owned[stream] = info
+
+        subject_count = 0
+        for stream, values in streams.items():
+            info = owned[stream]
+            subjects: dict[bytes, int] = {}
+            for fact in values:
+                key = (fact.stream_digest, fact.sequence)
+                self._deleted_facts.discard(key)
+                self._facts[key] = fact
+                self._write(
+                    _fact_item_path(self._root, fact.stream_digest, fact.sequence),
+                    encode_fact(fact),
+                )
+                if (
+                    fact.subject_digest is not None
+                    and subjects.get(fact.subject_digest, 0) < fact.sequence
+                ):
+                    subjects[fact.subject_digest] = fact.sequence
+            for subject, sequence in subjects.items():
+                if info.subjects.get(subject, 0) < sequence:
+                    info.subjects[subject] = sequence
+            subject_count += len(subjects)
+            self._sync_fact_stream(info, subjects=subjects)
+        _logger.debug(
+            "filesystem fact batch staged: facts=%s streams=%s subjects=%s",
+            len(facts),
+            len(streams),
+            subject_count,
+        )
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         if query.stream_digest in self.fact_streams.deleted():
@@ -2500,6 +2537,7 @@ class _FilesystemTransaction:
             info = await self._own_fact_stream(stream)
             if info is None:
                 continue
+            await self._load_fact_subjects(info)
             for sequence in range(1, info.last_sequence + 1):
                 self._deleted_facts.add((info.stream_digest, sequence))
                 self._delete(_fact_item_path(self._root, info.stream_digest, sequence))
@@ -2691,7 +2729,6 @@ class _FilesystemTransaction:
             info = await asyncio.to_thread(self._cache.get_fact_stream, stream)
         if info is None or stream in self._owned_fact_streams:
             return info
-        await self._load_fact_subjects(info)
         owned = _FactStreamInfo(
             info.stream_digest,
             info.owner_key_digest,
@@ -2712,8 +2749,7 @@ class _FilesystemTransaction:
         self,
         info: _FactStreamInfo,
         *,
-        subject: bytes | None = None,
-        sequence: int | None = None,
+        subjects: Mapping[bytes, int] | None = None,
     ) -> None:
         if info.last_sequence == 0:
             self._delete(_fact_meta_path(self._root, info.stream_digest))
@@ -2723,10 +2759,6 @@ class _FilesystemTransaction:
                 )
             info.subjects.clear()
             return
-        if sequence is None:
-            raise ValueError("fact stream update requires a sequence")
-        if subject is not None and info.subjects.get(subject, 0) < sequence:
-            info.subjects[subject] = sequence
         self._write(
             _fact_meta_path(self._root, info.stream_digest),
             {
@@ -2735,10 +2767,10 @@ class _FilesystemTransaction:
                 "last_sequence": info.last_sequence,
             },
         )
-        if subject is not None:
+        for subject, sequence in ({} if subjects is None else subjects).items():
             self._write(
                 _fact_subject_path(self._root, info.stream_digest, subject),
-                {"sequence": info.subjects[subject]},
+                {"sequence": sequence},
             )
 
     def _sync_record_index(

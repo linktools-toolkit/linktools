@@ -3,7 +3,7 @@
 """Focused I/O invariants for Runtime storage optimization."""
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +13,12 @@ from linktools.ai.core import ApprovalStatus
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
 from linktools.ai.runtime._plan import RuntimePlanStore
+from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._codec import (
+    _encode_persisted_domain,
+    encode_envelope,
+)
 from linktools.ai.runtime.state._contracts import (
     ApprovalRecord,
     ContextProjection,
@@ -21,12 +26,32 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptHeadRecord,
     TranscriptSeekDimension,
 )
+from linktools.ai.runtime.state._filesystem import (
+    FilesystemStateStore,
+    _FilesystemTransaction,
+)
 from linktools.ai.runtime.state._history import TranscriptRepository
+from linktools.ai.runtime.state._maintenance import (
+    OfflineRuntimeStorageMaintenance,
+    RuntimeStorageInspection,
+)
+from linktools.ai.runtime.state._memory import (
+    MemoryStateStorageGroup,
+    MemoryStateStore,
+)
 from linktools.ai.runtime.state._recovery_repositories import (
     RecoveryApprovalRepositoryImpl,
 )
+from linktools.ai.runtime.state._store import FactQuery, StoredFact, StoredRecord
 from linktools.ai.runtime.state._sql import SqlStateStore
-from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
+from linktools.ai.storage import (
+    FilesystemObjectStore,
+    InMemoryObjectStore,
+    ObjectRef,
+    ObjectStat,
+    SqlObjectStore,
+    StoredPayload,
+)
 from linktools.ai.storage import _object as object_module
 from pydantic_ai_harness.planning import PlanItem as HarnessPlanItem
 from sqlalchemy import event
@@ -37,6 +62,391 @@ pytestmark = pytest.mark.asyncio
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
     yield value
+
+
+class _CountingObjectStore(InMemoryObjectStore):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__("runtime")
+        self.events = events
+        self.validation_calls = 0
+        self.list_calls = 0
+        self.delete_calls: list[tuple[str, str]] = []
+
+    async def validate_integrity(self) -> None:
+        self.events.append("object_validate")
+        self.validation_calls += 1
+
+    def list_objects(self) -> AsyncIterator[ObjectStat]:
+        self.events.append("object_list")
+        self.list_calls += 1
+        return super().list_objects()
+
+    async def delete_object(self, key: str, *, expected_digest: str) -> bool:
+        self.events.append("object_delete")
+        self.delete_calls.append((key, expected_digest))
+        return await super().delete_object(key, expected_digest=expected_digest)
+
+
+def _filesystem_fact_record(owner: bytes) -> StoredRecord:
+    return StoredRecord(
+        owner,
+        b"p" * 32,
+        None,
+        None,
+        "owner",
+        "owner",
+        None,
+        0,
+        None,
+        0,
+        None,
+        {},
+    )
+
+
+def _filesystem_fact(
+    stream: bytes,
+    sequence: int,
+    owner: bytes,
+    subject: bytes | None,
+) -> StoredFact:
+    return StoredFact(
+        stream,
+        sequence,
+        owner,
+        "test_fact",
+        subject,
+        None,
+        {"sequence": sequence},
+    )
+
+
+async def test_filesystem_fact_batch_limits_stream_and_subject_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "state"
+    owner = b"o" * 32
+    stream = b"s" * 32
+    subject_a = b"a" * 32
+    subject_b = b"b" * 32
+    store = FilesystemStateStore(
+        root,
+        namespace="fact-batch",
+        tenant_id="tenant",
+        runtime_domain="execution",
+    )
+    await store.initialize()
+    try:
+        async def seed(transaction: _FilesystemTransaction) -> None:
+            await transaction.insert_record(_filesystem_fact_record(owner))
+            await transaction.insert_facts(
+                (
+                    _filesystem_fact(stream, 1, owner, subject_a),
+                    _filesystem_fact(stream, 2, owner, subject_b),
+                )
+            )
+
+        await store.mutate(seed)
+    finally:
+        await store.close()
+
+    reopened = FilesystemStateStore(
+        root,
+        namespace="fact-batch",
+        tenant_id="tenant",
+        runtime_domain="execution",
+    )
+    await reopened.initialize()
+    try:
+        staged: list[str] = []
+        subject_loads = 0
+        appended = (
+            _filesystem_fact(stream, 3, owner, subject_a),
+            _filesystem_fact(stream, 4, owner, subject_a),
+            _filesystem_fact(stream, 5, owner, None),
+        )
+
+        async def append(
+            transaction: _FilesystemTransaction,
+        ) -> tuple[StoredFact, ...]:
+            nonlocal subject_loads
+            original_write = transaction._write
+            original_load = transaction._cache.load_fact_subjects
+
+            def write(relative: object, value: object) -> None:
+                staged.append(str(relative))
+                original_write(relative, value)
+
+            def load_subjects(info: object) -> None:
+                nonlocal subject_loads
+                subject_loads += 1
+                original_load(info)
+
+            assert await transaction.guard_record(
+                owner,
+                expected_storage_version=0,
+            ) is not None
+            monkeypatch.setattr(transaction, "_write", write)
+            monkeypatch.setattr(transaction._cache, "load_fact_subjects", load_subjects)
+            await transaction.insert_facts(appended)
+            assert subject_loads == 0
+            values = await transaction.list_facts(
+                FactQuery(stream, after_sequence=None)
+            )
+            latest = await transaction.list_facts(
+                FactQuery(stream, subject_digest=subject_a, latest=True)
+            )
+            assert tuple(value.sequence for value in values) == (1, 2, 3, 4, 5)
+            assert tuple(value.sequence for value in latest) == (4,)
+            return values
+
+        await reopened.mutate(append)
+        assert sum(path.endswith("/meta.json") for path in staged) == 1
+        assert sum("/subjects/" in path for path in staged) == 1
+        assert sum("/items/" in path for path in staged) == 3
+
+        values = await reopened.read(
+            lambda transaction: transaction.list_facts(FactQuery(stream))
+        )
+        assert tuple(value.sequence for value in values) == (1, 2, 3, 4, 5)
+        latest = await reopened.read(
+            lambda transaction: transaction.list_facts(
+                FactQuery(stream, subject_digest=subject_a, latest=True)
+            )
+        )
+        assert tuple(value.sequence for value in latest) == (4,)
+    finally:
+        await reopened.close()
+
+
+async def test_filesystem_fact_batch_stages_each_stream_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "state"
+    owner = b"o" * 32
+    stream_a = b"a" * 32
+    stream_b = b"b" * 32
+    subject_a = b"c" * 32
+    subject_b = b"d" * 32
+    store = FilesystemStateStore(
+        root,
+        namespace="fact-batch-multi",
+        tenant_id="tenant",
+        runtime_domain="execution",
+    )
+    await store.initialize()
+    try:
+        async def seed(transaction: _FilesystemTransaction) -> None:
+            await transaction.insert_record(_filesystem_fact_record(owner))
+            await transaction.insert_facts(
+                (
+                    _filesystem_fact(stream_a, 1, owner, subject_a),
+                    _filesystem_fact(stream_b, 1, owner, subject_b),
+                )
+            )
+
+        await store.mutate(seed)
+    finally:
+        await store.close()
+
+    reopened = FilesystemStateStore(
+        root,
+        namespace="fact-batch-multi",
+        tenant_id="tenant",
+        runtime_domain="execution",
+    )
+    await reopened.initialize()
+    try:
+        staged: list[str] = []
+
+        async def append(transaction: _FilesystemTransaction) -> None:
+            assert await transaction.guard_record(
+                owner,
+                expected_storage_version=0,
+            ) is not None
+            original_write = transaction._write
+
+            def write(relative: object, value: object) -> None:
+                staged.append(str(relative))
+                original_write(relative, value)
+
+            monkeypatch.setattr(transaction, "_write", write)
+            await transaction.insert_facts(
+                (
+                    _filesystem_fact(stream_a, 2, owner, subject_a),
+                    _filesystem_fact(stream_b, 2, owner, subject_b),
+                    _filesystem_fact(stream_a, 3, owner, subject_a),
+                )
+            )
+
+        await reopened.mutate(append)
+        assert sum("/items/" in path for path in staged) == 3
+        assert sum(path.endswith("/meta.json") for path in staged) == 2
+        assert sum("/subjects/" in path for path in staged) == 2
+        expected_sequences = {stream_a: (1, 2, 3), stream_b: (1, 2)}
+        for stream, expected in expected_sequences.items():
+            values = await reopened.read(
+                lambda transaction, current_stream=stream: transaction.list_facts(
+                    FactQuery(current_stream)
+                )
+            )
+            assert tuple(value.sequence for value in values) == expected
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.parametrize("backend", ("filesystem", "sqlite"))
+async def test_shared_runtime_state_group_is_validated_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+) -> None:
+    state = (
+        RuntimeState.filesystem(tmp_path / "runtime")
+        if backend == "filesystem"
+        else RuntimeState.sqlite(tmp_path / "runtime.sqlite")
+    )
+    await state.initialize(namespace=f"validate-{backend}", tenant_id="tenant")
+    calls: list[RuntimeDomain] = []
+    validator_calls = 0
+    stores = {
+        RuntimeDomain.CONVERSATION: state.conversation.sessions.state_store,
+        RuntimeDomain.EXECUTION: state.execution.executions.state_store,
+    }
+    try:
+        for domain, store in stores.items():
+            original_validate = store.validate_integrity
+
+            async def validate(
+                original: Callable[[], Awaitable[None]] = original_validate,
+                current_domain: RuntimeDomain = domain,
+            ) -> None:
+                calls.append(current_domain)
+                await original()
+
+            monkeypatch.setattr(store, "validate_integrity", validate)
+
+        async def validate_semantics() -> None:
+            nonlocal validator_calls
+            validator_calls += 1
+
+        inspection = RuntimeStorageInspection(
+            stores,
+            state,
+            durable_domains=frozenset(stores),
+            state_validators=(validate_semantics,),
+        )
+        await inspection.validate_state_stores()
+    finally:
+        await state.close()
+
+    assert len(calls) == 1
+    assert validator_calls == 1
+
+
+async def test_compaction_validates_once_and_preserves_referenced_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    group = MemoryStateStorageGroup()
+    stores = {
+        RuntimeDomain.CONVERSATION: MemoryStateStore(group),
+        RuntimeDomain.EXECUTION: MemoryStateStore(group),
+    }
+    for store in stores.values():
+        await store.initialize()
+    events: list[str] = []
+    object_store = _CountingObjectStore(events)
+    referenced_payload = b"referenced"
+    orphan_payload = b"orphan"
+    referenced_digest = hashlib.sha256(referenced_payload).hexdigest()
+    orphan_digest = hashlib.sha256(orphan_payload).hexdigest()
+    reference = ObjectRef(
+        "runtime",
+        "referenced",
+        referenced_digest,
+        len(referenced_payload),
+    )
+    await object_store.put(
+        "referenced",
+        _chunks(referenced_payload),
+        expected_size=len(referenced_payload),
+        expected_digest=referenced_digest,
+    )
+    await object_store.put(
+        "orphan",
+        _chunks(orphan_payload),
+        expected_size=len(orphan_payload),
+        expected_digest=orphan_digest,
+    )
+    record = StoredRecord(
+        b"r" * 32,
+        b"p" * 32,
+        None,
+        None,
+        "test",
+        "i:test",
+        None,
+        0,
+        None,
+        0,
+        None,
+        encode_envelope(
+            {
+                "type": "stored_payload",
+                "payload": _encode_persisted_domain(StoredPayload.object(reference)),
+            }
+        ),
+    )
+    await stores[RuntimeDomain.EXECUTION].mutate(
+        lambda transaction: transaction.insert_record(record)
+    )
+
+    state_validation_calls: list[RuntimeDomain] = []
+    for domain, store in stores.items():
+        async def validate(current_domain: RuntimeDomain = domain) -> None:
+            events.append("state_validate")
+            state_validation_calls.append(current_domain)
+
+        monkeypatch.setattr(store, "validate_integrity", validate)
+
+    class _Objects:
+        def object_store(self, _domain: RuntimeDomain) -> object:
+            return object_store
+
+    semantic_validations = 0
+
+    async def validate_semantics() -> None:
+        nonlocal semantic_validations
+        events.append("semantic_validate")
+        semantic_validations += 1
+
+    inspection = RuntimeStorageInspection(
+        stores,
+        _Objects(),
+        durable_domains=frozenset(stores),
+        state_validators=(validate_semantics,),
+    )
+    maintenance = OfflineRuntimeStorageMaintenance(inspection, object_store)
+
+    deleted = await maintenance.compact_objects()
+
+    assert deleted == 1
+    assert object_store.validation_calls == 1
+    assert object_store.list_calls == 1
+    assert object_store.delete_calls == [("orphan", orphan_digest)]
+    assert len(state_validation_calls) == 1
+    assert semantic_validations == 1
+    assert events == [
+        "state_validate",
+        "semantic_validate",
+        "object_validate",
+        "object_list",
+        "object_delete",
+    ]
+    assert await object_store.stat("referenced") is not None
+    assert await object_store.stat("orphan") is None
 
 
 async def test_filesystem_object_store_syncs_payload_before_publish(

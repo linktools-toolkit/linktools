@@ -11,6 +11,7 @@ from linktools.core import environ
 from ...core import ExecutionEventType
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStoreInspection, ObjectStoreMaintenance
+from ...task import TaskEventType
 from ._codec import (
     _VERSION_CODECS,
     _decode_domain,
@@ -38,27 +39,16 @@ _ENVELOPED_FACT_KINDS = frozenset(
         "transcript_chunk",
     }
 )
-_EXECUTION_EVENT_FACT_KINDS = frozenset(value.value for value in ExecutionEventType)
-_READ_MODEL_RECORD_KIND = "execution_read_model"
-_READ_MODEL_FACT_KINDS = frozenset(
-    {
-        "execution_read_history",
-        "execution_read_trace",
-        "execution_read_transcript",
-    }
-)
-_READ_MODEL_FIELDS = frozenset(
-    {
-        "execution_id",
-        "tenant_id",
-        "source_digest",
-        "model_version",
-        "status",
-        "trace_count",
-        "history_count",
-        "transcript_count",
-        "revision",
-    }
+_REFERENCE_FREE_RECORD_VERSIONS = {
+    "agent_plan": 1,
+    "session_turn_commit": 1,
+}
+_REFERENCE_FREE_FACT_VERSIONS = {
+    "session_turn": 1,
+    **{value.value: 1 for value in TaskEventType},
+}
+_REFERENCE_FREE_UNVERSIONED_FACT_KINDS = frozenset(
+    value.value for value in ExecutionEventType
 )
 _LEASE_PROJECTED_WIRE_IDS = frozenset({"task_node_view", "tool_operation"})
 _LEASE_FIELDS = frozenset({"owner", "fence", "lease_expires_at"})
@@ -89,8 +79,11 @@ class RuntimeStorageInspection:
         self._state_validators = tuple(state_validators)
 
     async def inspect_objects(self) -> Mapping[int, frozenset[str]]:
-        references: dict[int, set[str]] = {}
         await self.validate_state_stores()
+        return await self._scan_object_references()
+
+    async def _scan_object_references(self) -> Mapping[int, frozenset[str]]:
+        references: dict[int, set[str]] = {}
         for domain in self._durable_domains:
             store = self._stores[domain]
             record_cursor: RecordScanCursor | None = None
@@ -134,8 +127,17 @@ class RuntimeStorageInspection:
         return {key: frozenset(value) for key, value in references.items()}
 
     async def validate_state_stores(self) -> None:
+        representatives: dict[int, StateStore] = {}
         for domain in self._durable_domains:
-            await self._stores[domain].validate_integrity()
+            store = self._stores[domain]
+            representatives.setdefault(id(store.storage_group), store)
+        _logger.debug(
+            "runtime state physical validation: domains=%s groups=%s",
+            len(self._durable_domains),
+            len(representatives),
+        )
+        for store in representatives.values():
+            await store.validate_integrity()
         for validator in self._state_validators:
             await validator()
 
@@ -174,18 +176,18 @@ class RuntimeStorageInspection:
         return tuple(stores.values())
 
     async def _compact_objects(self) -> int:
-        references = dict(await self.inspect_objects())
+        await self.validate_state_stores()
         object_stores = {
             id(value): value for value in self.object_maintenance_stores()
         }
+        for object_store in object_stores.values():
+            await object_store.validate_integrity()
+        references = dict(await self._scan_object_references())
         candidates: dict[int, tuple[object, ...]] = {}
         for object_store_id, object_store in object_stores.items():
             candidates[object_store_id] = tuple(
                 [value async for value in object_store.list_objects()]
             )
-        await self.validate_state_stores()
-        for object_store in object_stores.values():
-            await object_store.validate_integrity()
         deleted = 0
         for object_store_id, values in candidates.items():
             object_store = object_stores[object_store_id]
@@ -197,8 +199,6 @@ class RuntimeStorageInspection:
                     expected_digest=value.digest,
                 ):
                     deleted += 1
-        for object_store in object_stores.values():
-            await object_store.validate_integrity()
         _logger.info(
             "runtime object compaction completed: stores=%s deleted=%s",
             len(object_stores),
@@ -215,19 +215,28 @@ class RuntimeStorageInspection:
         references: dict[int, set[str]],
     ) -> None:
         for record in records:
-            if record.kind == _READ_MODEL_RECORD_KIND:
-                _validate_read_model_record(record.data)
-            else:
-                self._collect_enveloped_references(domain, record.data, references)
+            expected_version = _REFERENCE_FREE_RECORD_VERSIONS.get(record.kind)
+            if expected_version is not None:
+                _validate_reference_free_version(
+                    record.data,
+                    expected_version=expected_version,
+                )
+                continue
+            self._collect_enveloped_references(domain, record.data, references)
         for fact in facts:
             if fact.kind in _ENVELOPED_FACT_KINDS:
                 self._collect_enveloped_references(domain, fact.data, references)
-            elif fact.kind in _EXECUTION_EVENT_FACT_KINDS:
                 continue
-            elif fact.kind in _READ_MODEL_FACT_KINDS:
-                _validate_read_model_fact(fact.data)
-            else:
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            expected_version = _REFERENCE_FREE_FACT_VERSIONS.get(fact.kind)
+            if expected_version is not None:
+                _validate_reference_free_version(
+                    fact.data,
+                    expected_version=expected_version,
+                )
+                continue
+            if fact.kind in _REFERENCE_FREE_UNVERSIONED_FACT_KINDS:
+                continue
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         for operation in operations:
             self._collect_enveloped_references(domain, operation.data, references)
 
@@ -271,13 +280,24 @@ class OfflineRuntimeStorageMaintenance:
         if self._exclusive_guard is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         async with self._exclusive_guard.offline_exclusivity():
-            await self._inspection.validate_state_stores()
             async with AsyncExitStack() as stack:
                 for object_store in self._inspection.object_maintenance_stores():
                     await stack.enter_async_context(
                         object_store.offline_exclusivity()
                     )
                 return await self._inspection._compact_objects()
+
+
+def _validate_reference_free_version(
+    value: Mapping[str, object],
+    *,
+    expected_version: int,
+) -> None:
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != expected_version:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 def _validate_enveloped_value(value: Mapping[str, object]) -> None:
@@ -330,26 +350,6 @@ def _restore_projected_lease_fields(value: object) -> object:
         **fields,
     }
     return restored
-
-
-def _validate_read_model_record(value: Mapping[str, object]) -> None:
-    if not _READ_MODEL_FIELDS.issubset(value):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    version = value.get("model_version")
-    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if version != 1:
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-
-def _validate_read_model_fact(value: Mapping[str, object]) -> None:
-    if "items" not in value:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    items = value.get("items")
-    if not isinstance(items, list) or any(
-        not isinstance(item, Mapping) for item in items
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 __all__ = [
