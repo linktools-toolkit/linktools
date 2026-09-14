@@ -1815,14 +1815,57 @@ class RuntimeStateCommands:
                     conversation_run,
                     prepared_conversation,
                 )
+
+                async def commit_conversation_state(
+                    transaction: StateTransaction,
+                ) -> None:
+                    session = await self._conversation.get_in_transaction(
+                        transaction,
+                        session_id,
+                        tenant_id=commit.execution.tenant_id,
+                    )
+                    history = await self._promote_history_in_transaction(
+                        transaction,
+                        session,
+                        prepared_conversation[0],
+                    )
+                    await self._conversation.advance_continuation_in_transaction(
+                        transaction,
+                        session_id,
+                        tenant_id=commit.execution.tenant_id,
+                        execution_id=commit.execution.execution_id,
+                        expected=expected_cursor,
+                        next_cursor=next_cursor,
+                        release_execution=False,
+                        history_quality="complete",
+                    )
+                    local_start = min(
+                        (
+                            chunk.first_message_index
+                            for chunk in prepared_conversation[0].chunks
+                        ),
+                        default=None,
+                    )
+                    await self._conversation.commit_timeline_turn_in_transaction(
+                        transaction,
+                        session_id,
+                        tenant_id=commit.execution.tenant_id,
+                        execution_id=commit.execution.execution_id,
+                        start_message_index=(
+                            None
+                            if local_start is None
+                            else history.inherited_message_count + local_start
+                        ),
+                        end_message_index=(
+                            history.inherited_message_count
+                            + prepared_conversation.target_transcript_message_count
+                        ),
+                    )
+
                 for attempt in range(2):
                     try:
-                        await self._conversation.advance_continuation(
-                            session_id,
-                            tenant_id=commit.execution.tenant_id,
-                            execution_id=commit.execution.execution_id,
-                            expected=expected_cursor,
-                            next_cursor=next_cursor,
+                        await self._conversation.state_store.mutate(
+                            commit_conversation_state
                         )
                         break
                     except AIError as error:

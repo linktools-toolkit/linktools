@@ -10,10 +10,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Protocol, cast
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelRequest, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 from ..core import (
     AuthorizationAction,
@@ -60,6 +60,7 @@ from .state._contracts import (
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
+    SessionTurnCommitRef,
     SessionTurnRef,
 )
 from .state._step_contracts import (
@@ -74,7 +75,7 @@ from .state._views import project_session_history_message
 _TIMELINE_PROJECTION_VERSION = 1
 
 
-def _timeline_items(messages: tuple[object, ...]) -> tuple[SessionTurnItem, ...]:
+def _timeline_items(messages: tuple[ModelMessage, ...]) -> tuple[SessionTurnItem, ...]:
     values: list[SessionTurnItem] = []
     for message in messages:
         projected = project_session_history_message(message)
@@ -196,6 +197,15 @@ class _SessionTranscriptStore(Protocol):
         *,
         tenant_id: str,
     ) -> AsyncIterator[object]: ...
+
+    async def iter_session_message_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[ModelMessage]: ...
 
     async def load_session_model_context(
         self,
@@ -371,7 +381,11 @@ class DefaultSessionService:
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> Page[SessionTurn]:
-        if not 1 <= limit <= 200:
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 200
+        ):
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         async with self._session_consumer(session_id, principal.tenant_id):
             root = await self._authorized(
@@ -403,8 +417,8 @@ class DefaultSessionService:
             if len(executions) != len(execution_ids):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-            commits: dict[tuple[str, int], object] = {}
-            messages: dict[str, tuple[object, ...]] = {}
+            commits: dict[tuple[str, int], SessionTurnCommitRef] = {}
+            messages: dict[str, tuple[ModelMessage, ...]] = {}
             message_bases: dict[str, int] = {}
             for record, values in blocks:
                 if not values:
@@ -425,16 +439,19 @@ class DefaultSessionService:
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 range_start = min(item.start_message_index for item in committed)
                 range_end = max(item.end_message_index for item in committed)
-                loaded = tuple(
-                    [
-                        item
-                        async for item in self._transcript_store.iter_session_message_range(
-                            record.history_id,
-                            tenant_id=record.tenant_id,
-                            start=range_start,
-                            end=range_end,
-                        )
-                    ]
+                loaded = cast(
+                    tuple[ModelMessage, ...],
+                    tuple(
+                        [
+                            item
+                            async for item in self._transcript_store.iter_session_message_range(
+                                record.history_id,
+                                tenant_id=record.tenant_id,
+                                start=range_start,
+                                end=range_end,
+                            )
+                        ]
+                    ),
                 )
                 if len(loaded) != range_end - range_start:
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
