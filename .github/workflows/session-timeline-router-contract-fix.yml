@@ -26,21 +26,20 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+          import re
 
-          def replace_once(path: str, old: str, new: str) -> None:
+          def replace_once(path: str, pattern: str, replacement: str, *, flags: int = 0) -> None:
               target = Path(path)
               text = target.read_text(encoding='utf-8')
-              count = text.count(old)
+              updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
               if count != 1:
-                  raise SystemExit(f'{path}: expected one match, got {count}')
-              target.write_text(text.replace(old, new, 1), encoding='utf-8')
+                  raise SystemExit(f'{path}: expected one match, got {count}: {pattern[:100]!r}')
+              target.write_text(updated, encoding='utf-8')
 
           path = 'linktools-ai/src/linktools/ai/runtime/_session.py'
           replace_once(
               path,
-              '''class _SessionTranscriptStore(Protocol):
-              def iter_conversation_message_range(
-              ''',
+              r'class _SessionTranscriptStore\(Protocol\):\n',
               '''class _SessionTranscriptStore(Protocol):
               def iter_conversation_messages(
                   self,
@@ -50,39 +49,39 @@ jobs:
                   tenant_id: str,
               ) -> AsyncIterator[object]: ...
 
-              def iter_conversation_message_range(
               ''',
           )
           replace_once(
               path,
-              '''            history_id = record.continuation.history_id or record.history_id
-              if history_id is not None:
-                  async for message in self._transcript_store.iter_session_messages(
-                      history_id,
-                      tenant_id=record.tenant_id,
-                  ):
-                      yield message
-                  return
-              async for message in self._transcript_store.iter_messages(
-                  run_id=record.continuation.step_run_id,
-              ):
-                  yield message
+              r'    async def _iter_session_messages\(.*?(?=    def iter_session_messages\()' ,
+              '''    async def _iter_session_messages(
+                  self,
+                  session_id: str,
+                  *,
+                  principal: Principal,
+              ) -> AsyncIterator[object]:
+                  async with self._session_consumer(session_id, principal.tenant_id):
+                      record = await self._authorized(
+                          session_id, principal, AuthorizationAction.SESSION_READ
+                      )
+                      if self._transcript_store is None or record.continuation is None:
+                          return
+                      history_id = record.continuation.history_id or record.history_id
+                      async for message in self._transcript_store.iter_conversation_messages(
+                          history_id=history_id,
+                          step_run_id=record.continuation.step_run_id,
+                          tenant_id=record.tenant_id,
+                      ):
+                          yield message
+
               ''',
-              '''            history_id = record.continuation.history_id or record.history_id
-              async for message in self._transcript_store.iter_conversation_messages(
-                  history_id=history_id,
-                  step_run_id=record.continuation.step_run_id,
-                  tenant_id=record.tenant_id,
-              ):
-                  yield message
-              ''',
+              flags=re.S,
           )
 
           path = 'linktools-ai/src/linktools/ai/runtime/state/_steps.py'
           replace_once(
               path,
-              '''    async def conversation_message_count(
-              ''',
+              r'    async def conversation_message_count\(',
               '''    def iter_conversation_messages(
                   self,
                   *,
@@ -119,27 +118,13 @@ jobs:
                       return
                   raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-              async def conversation_message_count(
-              ''',
+              async def conversation_message_count(''',
           )
 
           path = 'linktools-ai/src/linktools/ai/runtime/_local.py'
           replace_once(
               path,
-              '''            session_history_source = (
-                  current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
-                  and history_id is not None
-              )
-              session_history_owner: str | None = None
-              if session_history_source:
-                  if isinstance(
-                      self._step_reads[RuntimeDomain.CONVERSATION],
-                      StateStepArchive,
-                  ):
-                      session_history_owner = history_id
-                  elif session is not None and session.continuation is not None:
-                      session_history_owner = session.continuation.step_run_id
-              ''',
+              r'            session_history_source = \(.*?(?=            if source_replay_history is not None:)',
               '''            session_history_continuation = (
                   session.continuation
                   if current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
@@ -147,17 +132,11 @@ jobs:
                   else None
               )
               ''',
+              flags=re.S,
           )
           replace_once(
               path,
-              '''            elif session_history_source:
-                  if session_history_owner is not None:
-                      loaded_context = await self._steps.load_loaded_model_context(
-                          RuntimeDomain.CONVERSATION,
-                          session_history_owner,
-                      )
-                  history = list(loaded_context.model_messages())
-              ''',
+              r'            elif session_history_source:\n.*?            else:\n                history = cast\("list\[ModelMessage\]", await self\._history\(current\)\)',
               '''            elif session_history_continuation is not None:
                   loaded = await self._steps.load_conversation_model_context(
                       history_id=history_id,
@@ -168,18 +147,16 @@ jobs:
                   loaded_context = LoadedModelContext(
                       tuple(LoadedContextMessage(message, None) for message in loaded)
                   )
-              ''',
+              else:
+                  history = cast("list[ModelMessage]", await self._history(current))''',
+              flags=re.S,
           )
 
           path = 'tests/ai/test_session_timeline.py'
           replace_once(
               path,
-              '''        assert older.next_cursor is None
-              assert executions.get_many_calls == 2
-              ''',
-              '''        assert older.next_cursor is None
-              assert executions.get_many_calls == 2
-
+              r'(        assert executions\.get_many_calls == 2\n)',
+              '''\1
               restored = [
                   message
                   async for message in service.iter_session_messages(
