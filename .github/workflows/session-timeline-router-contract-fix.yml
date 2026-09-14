@@ -22,153 +22,118 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.10'
-      - name: Apply router cleanup
+      - name: Apply reviewed cleanup
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-
-          def replace_once(path: str, pattern: str, replacement: str, *, flags: int = 0) -> None:
-              target = Path(path)
-              text = target.read_text(encoding='utf-8')
-              updated, count = re.subn(pattern, replacement, text, count=1, flags=flags)
-              if count != 1:
-                  raise SystemExit(f'{path}: expected one match, got {count}: {pattern[:100]!r}')
-              target.write_text(updated, encoding='utf-8')
-
-          path = 'linktools-ai/src/linktools/ai/runtime/_session.py'
-          replace_once(
-              path,
-              r'class _SessionTranscriptStore\(Protocol\):\n',
-              '''class _SessionTranscriptStore(Protocol):
-              def iter_conversation_messages(
-                  self,
-                  *,
-                  history_id: str | None,
-                  step_run_id: str,
-                  tenant_id: str,
-              ) -> AsyncIterator[object]: ...
-
-              ''',
-          )
-          replace_once(
-              path,
-              r'    async def _iter_session_messages\(.*?(?=    def iter_session_messages\()' ,
-              '''    async def _iter_session_messages(
-                  self,
-                  session_id: str,
-                  *,
-                  principal: Principal,
-              ) -> AsyncIterator[object]:
-                  async with self._session_consumer(session_id, principal.tenant_id):
-                      record = await self._authorized(
-                          session_id, principal, AuthorizationAction.SESSION_READ
-                      )
-                      if self._transcript_store is None or record.continuation is None:
-                          return
-                      history_id = record.continuation.history_id or record.history_id
-                      async for message in self._transcript_store.iter_conversation_messages(
-                          history_id=history_id,
-                          step_run_id=record.continuation.step_run_id,
-                          tenant_id=record.tenant_id,
-                      ):
-                          yield message
-
-              ''',
-              flags=re.S,
-          )
-
-          path = 'linktools-ai/src/linktools/ai/runtime/state/_steps.py'
-          replace_once(
-              path,
-              r'    async def conversation_message_count\(',
-              '''    def iter_conversation_messages(
-                  self,
-                  *,
-                  history_id: str | None,
-                  step_run_id: str,
-                  tenant_id: str,
-              ) -> AsyncIterator[object]:
-                  return self._iter_conversation_messages(
-                      history_id=history_id,
-                      step_run_id=step_run_id,
-                      tenant_id=tenant_id,
-                  )
-
-              async def _iter_conversation_messages(
-                  self,
-                  *,
-                  history_id: str | None,
-                  step_run_id: str,
-                  tenant_id: str,
-              ) -> AsyncIterator[object]:
-                  archive = self._archives.get(RuntimeDomain.CONVERSATION)
-                  if isinstance(archive, StateStepArchive):
-                      if history_id is None:
-                          raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                      async for message in self.iter_session_messages(
-                          history_id,
-                          tenant_id=tenant_id,
-                      ):
-                          yield message
-                      return
-                  if isinstance(archive, InMemoryStepArchive):
-                      async for message in archive.iter_messages(run_id=step_run_id):
-                          yield message
-                      return
-                  raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-
-              async def conversation_message_count(''',
-          )
-
-          path = 'linktools-ai/src/linktools/ai/runtime/_local.py'
-          replace_once(
-              path,
-              r'            session_history_source = \(.*?(?=            if source_replay_history is not None:)',
-              '''            session_history_continuation = (
-                  session.continuation
-                  if current.lineage_kind is ExecutionLineageKind.SESSION_RESUME
-                  and session is not None
-                  else None
-              )
-              ''',
-              flags=re.S,
-          )
-          replace_once(
-              path,
-              r'            elif session_history_source:\n.*?            else:\n                history = cast\("list\[ModelMessage\]", await self\._history\(current\)\)',
-              '''            elif session_history_continuation is not None:
-                  loaded = await self._steps.load_conversation_model_context(
-                      history_id=history_id,
-                      step_run_id=session_history_continuation.step_run_id,
-                      tenant_id=current.tenant_id,
-                  )
-                  history = cast("list[ModelMessage]", list(loaded))
-                  loaded_context = LoadedModelContext(
-                      tuple(LoadedContextMessage(message, None) for message in loaded)
-                  )
-              else:
-                  history = cast("list[ModelMessage]", await self._history(current))''',
-              flags=re.S,
-          )
-
-          path = 'tests/ai/test_session_timeline.py'
-          replace_once(
-              path,
-              r'(        assert executions\.get_many_calls == 2\n)',
-              '''\1
-              restored = [
-                  message
-                  async for message in service.iter_session_messages(
-                      "session", principal=principal
-                  )
-              ]
-              restored_text = repr(restored)
-              assert "visible answer" in restored_text
-              assert "stale answer" not in restored_text
-              ''',
-          )
-          PY
+          git checkout 34e22edca21beeacd519e058b5eb5f3075d1e513 -- \
+            linktools-ai/src/linktools/ai/runtime/state/_retention.py
+          git rm tests/ai/test_session_retention.py
+          cat > /tmp/session-router.patch <<'PATCH'
+          diff --git a/linktools-ai/src/linktools/ai/runtime/_session.py b/linktools-ai/src/linktools/ai/runtime/_session.py
+          --- a/linktools-ai/src/linktools/ai/runtime/_session.py
+          +++ b/linktools-ai/src/linktools/ai/runtime/_session.py
+          @@ -192,6 +192,14 @@ class _SessionTranscriptStore(Protocol):
+          +    def iter_conversation_messages(
+          +        self,
+          +        *,
+          +        history_id: str | None,
+          +        step_run_id: str,
+          +        tenant_id: str,
+          +    ) -> AsyncIterator[object]: ...
+          +
+               def iter_conversation_message_range(
+                   self,
+                   *,
+          @@ -677,18 +685,11 @@ class DefaultSessionService:
+                       return
+                   history_id = record.continuation.history_id or record.history_id
+          -        if history_id is not None:
+          -            async for message in self._transcript_store.iter_session_messages(
+          -                history_id,
+          -                tenant_id=record.tenant_id,
+          -            ):
+          -                yield message
+          -            return
+          -        async for message in self._transcript_store.iter_messages(
+          -            run_id=record.continuation.step_run_id,
+          +        async for message in self._transcript_store.iter_conversation_messages(
+          +            history_id=history_id,
+          +            step_run_id=record.continuation.step_run_id,
+          +            tenant_id=record.tenant_id,
+                   ):
+                       yield message
+          
+               def iter_session_messages(
+          diff --git a/linktools-ai/src/linktools/ai/runtime/state/_steps.py b/linktools-ai/src/linktools/ai/runtime/state/_steps.py
+          --- a/linktools-ai/src/linktools/ai/runtime/state/_steps.py
+          +++ b/linktools-ai/src/linktools/ai/runtime/state/_steps.py
+          @@ -2188,6 +2188,42 @@ class RuntimeStepStore(StepStore):
+                   ):
+                       yield message
+          
+          +    def iter_conversation_messages(
+          +        self,
+          +        *,
+          +        history_id: str | None,
+          +        step_run_id: str,
+          +        tenant_id: str,
+          +    ) -> AsyncIterator[object]:
+          +        return self._iter_conversation_messages(
+          +            history_id=history_id,
+          +            step_run_id=step_run_id,
+          +            tenant_id=tenant_id,
+          +        )
+          +
+          +    async def _iter_conversation_messages(
+          +        self,
+          +        *,
+          +        history_id: str | None,
+          +        step_run_id: str,
+          +        tenant_id: str,
+          +    ) -> AsyncIterator[object]:
+          +        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+          +        if isinstance(archive, StateStepArchive):
+          +            if history_id is None:
+          +                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+          +            async for message in archive.iter_session_messages(
+          +                history_id,
+          +                tenant_id=tenant_id,
+          +            ):
+          +                yield message
+          +            return
+          +        if isinstance(archive, InMemoryStepArchive):
+          +            async for message in archive.iter_messages(run_id=step_run_id):
+          +                yield message
+          +            return
+          +        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+          +
+               async def conversation_message_count(
+                   self,
+                   *,
+          diff --git a/tests/ai/test_session_timeline.py b/tests/ai/test_session_timeline.py
+          --- a/tests/ai/test_session_timeline.py
+          +++ b/tests/ai/test_session_timeline.py
+          @@ -366,6 +366,16 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruct
+                   assert "stale answer" not in rendered
+                   assert older.next_cursor is None
+                   assert executions.get_many_calls == 2
+          +
+          +        restored = [
+          +            message
+          +            async for message in service.iter_session_messages(
+          +                "session", principal=principal
+          +            )
+          +        ]
+          +        restored_text = repr(restored)
+          +        assert "visible answer" in restored_text
+          +        assert "stale answer" not in restored_text
+               finally:
+                   await state.close()
+          
+          PATCH
+          sed -i 's/^          //' /tmp/session-router.patch
+          git apply --check /tmp/session-router.patch
+          git apply /tmp/session-router.patch
+          git diff --check
       - name: Install tooling
         run: |
           python -m pip install --quiet --upgrade pip
@@ -178,14 +143,15 @@ jobs:
         run: |
           python -m compileall -q \
             linktools-ai/src/linktools/ai/runtime/_session.py \
-            linktools-ai/src/linktools/ai/runtime/_local.py \
-            linktools-ai/src/linktools/ai/runtime/state/_steps.py
+            linktools-ai/src/linktools/ai/runtime/state/_steps.py \
+            linktools-ai/src/linktools/ai/runtime/state/_retention.py
           python -m pytest -q \
             tests/ai/test_session_timeline.py \
             tests/ai/test_session_timeline_fork.py \
             tests/ai/test_session_timeline_recovery.py \
             tests/ai/test_session_timeline_runtime.py \
             tests/ai/test_session_timeline_storage.py
+          python manage.py check linktools-ai
           git diff --check
       - name: Commit cleanup
         run: |
@@ -193,10 +159,10 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add \
             linktools-ai/src/linktools/ai/runtime/_session.py \
-            linktools-ai/src/linktools/ai/runtime/_local.py \
             linktools-ai/src/linktools/ai/runtime/state/_steps.py \
+            linktools-ai/src/linktools/ai/runtime/state/_retention.py \
             tests/ai/test_session_timeline.py
           git rm .github/workflows/session-timeline-router-contract-fix.yml
           git diff --cached --check
-          git commit -m "refactor(ai): centralize conversation transcript routing"
+          git commit -m "refactor(ai): simplify session conversation routing"
           git push origin HEAD:feat/ai-session-timeline
