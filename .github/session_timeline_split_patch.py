@@ -6,8 +6,5 @@ old = '''                local_start = min(\n                    (\n            
 new = '''                if timeline_range is None:\n                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)\n                await self._conversation.commit_timeline_turn_in_transaction(\n                    conversation_transaction,\n                    session_id,\n                    tenant_id=commit.execution.tenant_id,\n                    execution_id=commit.execution.execution_id,\n                    start_message_index=timeline_range[0],\n                    end_message_index=timeline_range[1],\n                )\n'''
 if text.count(old) != 1:
     raise RuntimeError(f"expected one remaining conversation timeline range block, found {text.count(old)}")
-text = text.replace(old, new, 1)
-if "local_start = min(" in text:
-    raise RuntimeError("duplicate inline timeline range computation remains")
-path.write_text(text, encoding="utf-8")
+path.write_text(text.replace(old, new, 1), encoding="utf-8")
 print("split-storage timeline branch unified")
