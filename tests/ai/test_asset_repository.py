@@ -179,12 +179,15 @@ class _RaceStore(AssetStore):
         super().__init__(StorageOverlay(backend, writer=backend))
         self._raced = False
 
-    async def get(self, key: AssetKey) -> "bytes | None":
-        value = await super().get(key)
+    async def get_many(
+        self,
+        keys: "Sequence[AssetKey]",
+    ) -> "tuple[bytes | None, ...]":
+        values = await super().get_many(keys)
         if not self._raced:
             self._raced = True
             await self.put(AssetKey("skill", "late"), SkillSpecCodec().encode(SkillSpec("late", "late")))
-        return value
+        return values
 
 
 @pytest.mark.asyncio
@@ -197,6 +200,58 @@ async def test_freeze_ignores_assets_added_after_the_captured_snapshot() -> None
     frozen = await CapabilityGroup.from_store("workspace", store).freeze()
 
     assert [item.id for item in frozen] == ["first"]
+
+
+class _BatchReadStore(AssetStore):
+    def __init__(self, backend: InMemoryAssetBackend) -> None:
+        super().__init__(StorageOverlay(backend, writer=backend))
+        self.batch_reads: list[tuple[AssetKey, ...]] = []
+        self.individual_reads = 0
+
+    async def get_many(
+        self,
+        keys: "Sequence[AssetKey]",
+    ) -> "tuple[bytes | None, ...]":
+        self.batch_reads.append(tuple(keys))
+        return await super().get_many(keys)
+
+    async def get(self, key: AssetKey) -> "bytes | None":
+        self.individual_reads += 1
+        return await super().get(key)
+
+    async def stat(self, key: AssetKey):
+        self.individual_reads += 1
+        return await super().stat(key)
+
+
+@pytest.mark.asyncio
+async def test_builtin_loader_batches_declaration_body_reads() -> None:
+    backend = InMemoryAssetBackend()
+    store = _BatchReadStore(backend)
+    await store.initialize()
+    await store.put(
+        AssetKey("agent", "agent"),
+        AgentSpecCodec().encode(AgentSpec("agent", model="model")),
+    )
+    await store.put(
+        AssetKey("mcp", "server"),
+        MCPServerSpecCodec().encode(MCPServerSpec("server", "python", ("-m", "server"))),
+    )
+    await store.put(
+        AssetKey("skill", "skill"),
+        SkillSpecCodec().encode(SkillSpec("skill", "instructions")),
+    )
+
+    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
+
+    assert [item.id for item in frozen] == ["agent", "server", "skill"]
+    assert len(store.batch_reads) == 1
+    assert set(store.batch_reads[0]) == {
+        AssetKey("agent", "agent"),
+        AssetKey("mcp", "server"),
+        AssetKey("skill", "skill"),
+    }
+    assert store.individual_reads == 0
 
 
 def test_capability_group_does_not_expose_logical_asset_crud() -> None:
