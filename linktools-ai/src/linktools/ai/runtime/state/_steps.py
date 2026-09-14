@@ -534,6 +534,7 @@ class InMemoryStepArchive(StagingStepStore):
     def __init__(self, runtime_domain: RuntimeDomain) -> None:
         super().__init__()
         self._runtime_domain = runtime_domain
+        self._session_history_owners: dict[str, str] = {}
 
     @property
     def runtime_domain(self) -> RuntimeDomain:
@@ -562,6 +563,12 @@ class InMemoryStepArchive(StagingStepStore):
             for snapshot in snapshots:
                 if snapshot not in snapshot_values:
                     snapshot_values.append(snapshot)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION and any(
+                snapshot.state == "complete" for snapshot in snapshots
+            ):
+                history_id = run.metadata.get("history_id")
+                if history_id:
+                    self._session_history_owners[history_id] = run.run_id
 
     async def materialize_snapshot(
         self,
@@ -576,6 +583,17 @@ class InMemoryStepArchive(StagingStepStore):
             snapshots=(snapshot,),
             execution_id=execution_id,
         )
+
+    def release_run_local(self, run_id: str) -> None:
+        run = self._runs.get(run_id)
+        history_id = (
+            None
+            if run is None or self._runtime_domain is not RuntimeDomain.CONVERSATION
+            else run.metadata.get("history_id")
+        )
+        super().release_run_local(run_id)
+        if history_id is not None and self._session_history_owners.get(history_id) == run_id:
+            self._session_history_owners.pop(history_id, None)
 
     async def resolve_transcript_message_refs(
         self,
@@ -615,19 +633,8 @@ class InMemoryStepArchive(StagingStepStore):
     def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        candidates: list[ContinuableSnapshot] = []
-        for run in self._runs.values():
-            if run.metadata.get("history_id") != history_id:
-                continue
-            snapshot = self.latest_snapshot_local(run.run_id)
-            if snapshot is not None:
-                candidates.append(snapshot)
-        if not candidates:
-            return None
-        return max(
-            candidates,
-            key=lambda value: (len(value.messages), value.timestamp, value.run_id),
-        )
+        run_id = self._session_history_owners.get(history_id)
+        return None if run_id is None else self.latest_snapshot_local(run_id)
 
     async def session_message_count(
         self,
