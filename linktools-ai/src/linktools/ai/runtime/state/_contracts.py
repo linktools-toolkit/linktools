@@ -1347,7 +1347,6 @@ class SessionRepository(RuntimeRepository, Protocol):
         history_quality: str | None = None,
     ) -> SessionRecord: ...
 
-
 class ConversationHistoryRepository(RuntimeRepository, Protocol):
     async def create(
         self, record: ConversationHistoryRecord
@@ -1430,6 +1429,12 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def get(
         self, execution_id: str, *, tenant_id: str
     ) -> ExecutionRecord | None: ...
+    async def get_many(
+        self,
+        execution_ids: Sequence[str],
+        *,
+        tenant_id: str,
+    ) -> Mapping[str, ExecutionRecord]: ...
     async def get_in_transaction(
         self,
         transaction: StateTransaction,

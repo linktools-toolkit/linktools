@@ -18,7 +18,6 @@ from linktools.core import ConfigField, environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Execution, ExecutionResult, Runtime, RuntimeState
 from linktools.ai.workspace import Workspace
@@ -126,15 +125,6 @@ async def _open_runtime_state(
         raise ValueError(f"unsupported Runtime storage backend: {storage}")
 
     path = workspace.storage_root / "runtime.db"
-    await asyncio.to_thread(path.parent.mkdir, parents=True, exist_ok=True)
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    bootstrap_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    try:
-        await provision_runtime_database(bootstrap_engine)
-    finally:
-        _logger.debug("ai run SQL bootstrap engine disposing: path=%s", path)
-        await bootstrap_engine.dispose()
     _logger.info("ai run storage selected: backend=sqlite path=%s", path)
     yield RuntimeState.sqlite(path)
 

@@ -227,9 +227,11 @@ async def materialize_runtime_state(
 
         for key, domains in sql_groups.items():
             route = sql_routes[key]
+            bootstrap_local_schema = False
             if key[0] == "sqlite":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                bootstrap_local_schema = not route.path.exists()
                 await asyncio.to_thread(
                     route.path.parent.mkdir, parents=True, exist_ok=True
                 )
@@ -250,11 +252,15 @@ async def materialize_runtime_state(
                 from ._schema import build_runtime_sql_metadata
 
                 build_runtime_sql_metadata(frozenset(domains), metadata=metadata)
-                if object_store is None and any(
+                if key[0] == "sql" and object_store is None and any(
                     runtime_domain_uses_object_store(domain)
                     for domain in domains
                 ):
                     build_object_sql_metadata(metadata=metadata)
+                if bootstrap_local_schema:
+                    await context.initialize()
+                    async with context.engine.begin() as connection:
+                        await connection.run_sync(metadata.create_all)
                 group = SqlStateStorageGroup(
                     context,
                     metadata,
@@ -277,6 +283,8 @@ async def materialize_runtime_state(
                     await store.close()
                 if group is not None:
                     await group.close()
+                elif key[0] == "sqlite":
+                    await context.close()
                 raise
             cleanups.extend(store.close for store in group_stores)
             if group is not None:
@@ -459,6 +467,7 @@ def _build_object_router(
     values: dict[RuntimeDomain, ObjectStore] = {}
     close_guard_stores: list[ObjectStore] = []
     sql_objects: dict[int, SqlObjectStore] = {}
+    sqlite_objects: dict[Path, FilesystemObjectStore] = {}
     for domain in RuntimeDomain:
         if not runtime_domain_uses_object_store(domain):
             continue
@@ -477,15 +486,22 @@ def _build_object_router(
             store = FilesystemObjectStore(route.path / "objects")
             values[domain] = store
             close_guard_stores.append(store)
-        elif route.kind in {"sqlite", "sql"} and domain in contexts:
+        elif route.kind == "sqlite" and route.path is not None:
+            store = sqlite_objects.get(route.path)
+            if store is None:
+                store = FilesystemObjectStore(_sqlite_object_root(route.path))
+                sqlite_objects[route.path] = store
+            values[domain] = store
+            close_guard_stores.append(store)
+        elif route.kind == "sql" and domain in contexts:
             context = contexts[domain]
             context_key = id(context)
-            object_store = sql_objects.get(context_key)
-            if object_store is None:
-                object_store = SqlObjectStore.from_context(context)
-                sql_objects[context_key] = object_store
-            values[domain] = object_store
-            close_guard_stores.append(object_store)
+            store = sql_objects.get(context_key)
+            if store is None:
+                store = SqlObjectStore.from_context(context)
+                sql_objects[context_key] = store
+            values[domain] = store
+            close_guard_stores.append(store)
         else:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
     return _RuntimeObjectRouter(
@@ -554,6 +570,10 @@ def _unique(values: tuple[object, ...]) -> tuple[object, ...]:
             result.append(value)
             seen.add(id(value))
     return tuple(result)
+
+
+def _sqlite_object_root(path: Path) -> Path:
+    return path.with_name(f"{path.name}.objects")
 
 
 def _tenant_scope_digest(tenant_id: str) -> str:

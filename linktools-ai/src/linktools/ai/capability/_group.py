@@ -277,6 +277,34 @@ class CapabilityLoadContext:
         self._cache[key] = data
         return data
 
+    async def _preload(self, keys: Sequence[AssetKey]) -> None:
+        requested = tuple(dict.fromkeys(keys))
+        if any(key not in self._by_key for key in requested):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        pending = tuple(
+            self._by_key[key]
+            for key in requested
+            if key not in self._cache
+        )
+        if not pending:
+            return
+        values = await self._store.get_many(tuple(entry.key for entry in pending))
+        current = {info.key: info for info in await self._store.metadata_snapshot()}
+        for entry, value in zip(pending, values, strict=True):
+            info = current.get(entry.key)
+            if (
+                value is None
+                or info is None
+                or info.etag != entry.etag
+                or info.size != entry.size
+                or info.metadata != entry.metadata
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            data = bytes(value)
+            if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.etag:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            self._cache[entry.key] = data
+
 
 class CapabilityLoader(Protocol[AppT]):
     @property
@@ -551,6 +579,19 @@ class _BuiltinDeclarationLoader:
         }
         if directory_root_set.intersection(flat_skill_ids):
             raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+        declaration_keys = tuple(
+            entry.key
+            for entry in entries
+            if (
+                entry.key.kind in {"agent", "mcp"}
+                or entry.key.kind == "skill"
+                and (
+                    entry.key.id.endswith("/SKILL.md")
+                    or not _inside_skill_root(entry.key.id, directory_roots)
+                )
+            )
+        )
+        await context._preload(declaration_keys)
 
         result: list[CapabilityContribution[object]] = []
         skill_codec = SkillSpecCodec()

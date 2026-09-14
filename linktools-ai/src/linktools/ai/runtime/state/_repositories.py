@@ -1908,6 +1908,46 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             domain=RuntimeDomain.EXECUTION,
         )
 
+    async def get_many(
+        self,
+        execution_ids: Sequence[str],
+        *,
+        tenant_id: str,
+    ) -> Mapping[str, ExecutionRecord]:
+        if tenant_id != self._tenant_id:
+            return {}
+        if isinstance(execution_ids, (str, bytes)):
+            raise TypeError("execution_ids must be a sequence of strings")
+        ordered = tuple(dict.fromkeys(execution_ids))
+        if any(not isinstance(execution_id, str) or not execution_id for execution_id in ordered):
+            raise ValueError("execution_ids must contain non-empty strings")
+        if not ordered:
+            return {}
+        keys = {
+            execution_id: self._key("execution", execution_id)
+            for execution_id in ordered
+        }
+
+        async def read(
+            transaction: StateTransaction,
+        ) -> Mapping[str, ExecutionRecord]:
+            records = await transaction.get_records(tuple(keys.values()))
+            values: dict[str, ExecutionRecord] = {}
+            for execution_id, key in keys.items():
+                record = records.get(key)
+                if record is None:
+                    continue
+                value = await self._decode(record, ExecutionRecord)
+                if (
+                    value.execution_id != execution_id
+                    or value.tenant_id != self._tenant_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[execution_id] = value
+            return values
+
+        return await self._store.read(read)
+
     async def create_with_history_head(
         self, execution: ExecutionRecord
     ) -> ExecutionRecord:
