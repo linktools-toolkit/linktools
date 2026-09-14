@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned planning command and durable plan projection."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -77,17 +77,17 @@ class RuntimePlanStore:
     def owner_id(self) -> str:
         return self._owner_id
 
-    async def get_items(self) -> list[PlanItem]:
+    async def _read_plan(self) -> tuple[list[PlanItem], int]:
         record = await self._store.read(
             lambda transaction: transaction.get_record(self._key)
         )
-        return _decode_payload(record)[0]
+        return _decode_payload(record)
+
+    async def get_items(self) -> list[PlanItem]:
+        return (await self._read_plan())[0]
 
     async def get_plan(self) -> dict[str, JsonValue]:
-        record = await self._store.read(
-            lambda transaction: transaction.get_record(self._key)
-        )
-        items, revision = _decode_payload(record)
+        items, revision = await self._read_plan()
         return {
             "items": [_item_payload(item) for item in items],
             "revision": revision,
@@ -98,48 +98,58 @@ class RuntimePlanStore:
         items: list[PlanItem],
     ) -> dict[str, JsonValue]:
         values = _validated_items(items)
+        _previous, current, revision = await self.edit_items(
+            lambda _current: values
+        )
+        return {
+            "items": [_item_payload(item) for item in current],
+            "revision": revision,
+        }
 
-        async def mutate(transaction: StateTransaction) -> dict[str, JsonValue]:
+    async def edit_items(
+        self,
+        edit: Callable[[list[PlanItem]], list[PlanItem]],
+    ) -> tuple[list[PlanItem], list[PlanItem], int]:
+        if not callable(edit):
+            raise TypeError("plan edit must be callable")
+        observed: tuple[list[PlanItem], list[PlanItem], int] | None = None
+
+        async def mutate(
+            transaction: StateTransaction,
+        ) -> tuple[list[PlanItem], list[PlanItem], int]:
+            nonlocal observed
             current = await transaction.get_record(self._key)
             current_items, current_revision = _decode_payload(current)
-            if current_items == values:
-                return {
-                    "items": [_item_payload(item) for item in values],
-                    "revision": current_revision,
-                }
-            revision = current_revision + 1
-            next_record = self._record(values, current)
-            if current is None:
-                await transaction.insert_record(next_record)
-            elif not await transaction.replace_record(
-                next_record,
-                expected_storage_version=current.storage_version,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            result = {
-                "items": [_item_payload(item) for item in values],
-                "revision": revision,
-            }
-            _logger.debug(
-                "runtime plan replaced: owner_kind=%s owner_id=%s revision=%s items=%s",
-                self._owner_kind,
-                self._owner_id,
-                revision,
-                len(values),
-            )
-            return result
+            values = _validated_items(edit(list(current_items)))
+            revision = current_revision
+            if current_items != values:
+                revision += 1
+                next_record = self._record(values, current)
+                if current is None:
+                    await transaction.insert_record(next_record)
+                elif not await transaction.replace_record(
+                    next_record,
+                    expected_storage_version=current.storage_version,
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                _logger.debug(
+                    "runtime plan replaced: owner_kind=%s owner_id=%s revision=%s items=%s",
+                    self._owner_kind,
+                    self._owner_id,
+                    revision,
+                    len(values),
+                )
+            observed = (current_items, values, revision)
+            return observed
 
         try:
             return await self._store.mutate(mutate)
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
+            if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or observed is None:
                 raise
-            current = await self.get_items()
-            if current == values:
-                return {
-                    "items": [_item_payload(item) for item in values],
-                    "revision": (await self.get_plan())["revision"],
-                }
+            current, revision = await self._read_plan()
+            if current == observed[1]:
+                return observed[0], current, revision
             raise
 
     def _record(
