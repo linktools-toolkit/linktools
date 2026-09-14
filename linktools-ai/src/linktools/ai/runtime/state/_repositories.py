@@ -984,13 +984,42 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             [session_id],
         )
 
-    def _timeline_stream(self, session_id: str, kind: str) -> bytes:
+    def _timeline_stream(self, session_id: str) -> bytes:
         return stream_digest(
             self._namespace,
             self._tenant_id,
             self._domain.value,
-            kind,
+            "session_turn",
             [session_id],
+        )
+
+    def _timeline_commit_key(self, session_id: str, sequence: int) -> bytes:
+        return self._key("session_turn_commit", [session_id, sequence])
+
+    def _stored_timeline_commit(
+        self, value: SessionTurnCommitRef
+    ) -> StoredRecord:
+        identity = [value.session_id, value.sequence]
+        return StoredRecord(
+            self._timeline_commit_key(value.session_id, value.sequence),
+            self._partition("session_turn_commit"),
+            self._scope("session_turn_commit", "session", value.session_id),
+            None,
+            "session_turn_commit",
+            sortable_identity(identity),
+            None,
+            0,
+            None,
+            0,
+            None,
+            {
+                "version": 1,
+                "session_id": value.session_id,
+                "sequence": value.sequence,
+                "execution_id": value.execution_id,
+                "start_message_index": value.start_message_index,
+                "end_message_index": value.end_message_index,
+            },
         )
 
     @staticmethod
@@ -1014,36 +1043,45 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         return SessionTurnRef(session_id, fact.sequence, execution_id)
 
     def _decode_timeline_commit(
-        self, session_id: str, fact: StoredFact
+        self, session_id: str, sequence: int, record: StoredRecord
     ) -> SessionTurnCommitRef:
         if (
-            fact.kind != "session_turn_commit"
-            or fact.owner_key_digest != self._key("session", session_id)
-            or set(fact.data)
+            record.key_digest != self._timeline_commit_key(session_id, sequence)
+            or record.partition_digest != self._partition("session_turn_commit")
+            or record.scope_digest
+            != self._scope("session_turn_commit", "session", session_id)
+            or record.parent_digest is not None
+            or record.kind != "session_turn_commit"
+            or record.sort_key != sortable_identity([session_id, sequence])
+            or record.state is not None
+            or set(record.data)
             != {
                 "version",
+                "session_id",
+                "sequence",
                 "execution_id",
                 "start_message_index",
                 "end_message_index",
             }
-            or fact.data.get("version") != 1
-            or not isinstance(fact.data.get("execution_id"), str)
+            or record.data.get("version") != 1
+            or record.data.get("session_id") != session_id
+            or record.data.get("sequence") != sequence
+            or not isinstance(record.data.get("execution_id"), str)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        execution_id = str(fact.data["execution_id"])
-        start = fact.data.get("start_message_index")
-        end = fact.data.get("end_message_index")
+        execution_id = str(record.data["execution_id"])
+        start = record.data.get("start_message_index")
+        end = record.data.get("end_message_index")
         if (
             isinstance(start, bool)
             or not isinstance(start, int)
             or isinstance(end, bool)
             or not isinstance(end, int)
-            or fact.subject_digest != self._timeline_subject(execution_id)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             return SessionTurnCommitRef(
-                session_id, fact.sequence, execution_id, start, end
+                session_id, sequence, execution_id, start, end
             )
         except ValueError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -1452,7 +1490,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         facts = await self._store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(
-                    self._timeline_stream(session_id, "session_turn"),
+                    self._timeline_stream(session_id),
                     after_sequence=start_sequence - 1,
                     limit=end_sequence - start_sequence,
                 )
@@ -1482,19 +1520,18 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             raise ValueError("session timeline range is invalid")
         if start_sequence == end_sequence:
             return ()
-        facts = await self._store.read(
-            lambda transaction: transaction.list_facts(
-                FactQuery(
-                    self._timeline_stream(session_id, "session_turn_commit"),
-                    after_sequence=start_sequence - 1,
-                    limit=end_sequence - start_sequence,
-                )
-            )
+        sequences = tuple(range(start_sequence, end_sequence))
+        keys = tuple(
+            self._timeline_commit_key(session_id, sequence)
+            for sequence in sequences
+        )
+        records = await self._store.read(
+            lambda transaction: transaction.get_records(keys)
         )
         return tuple(
-            self._decode_timeline_commit(session_id, fact)
-            for fact in facts
-            if fact.sequence < end_sequence
+            self._decode_timeline_commit(session_id, sequence, records[key])
+            for sequence, key in zip(sequences, keys)
+            if key in records
         )
 
     async def commit_timeline_turn_in_transaction(
@@ -1511,7 +1548,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         subject = self._timeline_subject(execution_id)
         turns = await transaction.list_facts(
             FactQuery(
-                self._timeline_stream(session_id, "session_turn"),
+                self._timeline_stream(session_id),
                 subject_digest=subject,
                 latest=True,
             )
@@ -1521,16 +1558,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         turn = self._decode_timeline_turn(session_id, turns[0])
         if turn.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        commit_stream = self._timeline_stream(session_id, "session_turn_commit")
-        existing = await transaction.list_facts(
-            FactQuery(
-                commit_stream,
-                after_sequence=turn.sequence - 1,
-                limit=1,
+        commit_key = self._timeline_commit_key(session_id, turn.sequence)
+        existing = await transaction.get_record(commit_key)
+        if existing is not None:
+            committed = self._decode_timeline_commit(
+                session_id, turn.sequence, existing
             )
-        )
-        if existing and existing[0].sequence == turn.sequence:
-            committed = self._decode_timeline_commit(session_id, existing[0])
             if committed.execution_id != execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if start_message_index is not None and (
@@ -1552,22 +1585,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             start_message_index,
             end_message_index,
         )
-        await transaction.insert_fact(
-            StoredFact(
-                commit_stream,
-                turn.sequence,
-                self._key("session", session_id),
-                "session_turn_commit",
-                subject,
-                None,
-                {
-                    "version": 1,
-                    "execution_id": execution_id,
-                    "start_message_index": start_message_index,
-                    "end_message_index": end_message_index,
-                },
-            )
-        )
+        await transaction.insert_record(self._stored_timeline_commit(committed))
         return committed
 
     async def list(
@@ -1853,7 +1871,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 )
                 await transaction.insert_fact(
                     StoredFact(
-                        self._timeline_stream(session_id, "session_turn"),
+                        self._timeline_stream(session_id),
                         sequence,
                         self._key("session", session_id),
                         "session_turn",
