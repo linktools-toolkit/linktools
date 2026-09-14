@@ -25,7 +25,6 @@ from linktools.ai.runtime.state._contracts import (
     SessionRecord,
 )
 from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
-from linktools.ai.runtime.state._steps import StateStepArchive
 from linktools.ai.storage import StoredPayload
 
 
@@ -62,7 +61,6 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
         )
 
         archive = state.steps.read_store(RuntimeDomain.CONVERSATION)
-        assert isinstance(archive, StateStepArchive)
         now = datetime.now(timezone.utc)
         run = RunRecord(
             run_id="run",

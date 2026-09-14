@@ -3171,7 +3171,10 @@ class LocalExecutionBackend:
             )
             if target_snapshot is None or target_snapshot.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if not isinstance(conversation_archive, StateStepArchive):
+        session_message_count = getattr(
+            conversation_archive, "session_message_count", None
+        )
+        if session_message_count is None:
             if session.continuation == intent.next_cursor:
                 return
             if session.status is SessionStatus.CLOSED:
@@ -3191,7 +3194,7 @@ class LocalExecutionBackend:
         history_id = session.history_id or intent.next_cursor.history_id
         if history_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        end_message_index = await conversation_archive.session_message_count(
+        end_message_index = await session_message_count(
             history_id,
             tenant_id=checkpoint.tenant_id,
         )

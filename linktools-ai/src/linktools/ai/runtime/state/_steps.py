@@ -612,6 +612,54 @@ class InMemoryStepArchive(StagingStepStore):
             for message in snapshot.messages[start:end]:
                 yield message
 
+    def _session_snapshot(self, history_id: str) -> ContinuableSnapshot | None:
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        candidates: list[ContinuableSnapshot] = []
+        for run in self._runs.values():
+            if run.metadata.get("history_id") != history_id:
+                continue
+            snapshot = self.latest_snapshot_local(run.run_id)
+            if snapshot is not None:
+                candidates.append(snapshot)
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda value: (len(value.messages), value.timestamp, value.run_id),
+        )
+
+    async def session_message_count(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+    ) -> int:
+        del tenant_id
+        snapshot = self._session_snapshot(history_id)
+        if snapshot is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        return len(snapshot.messages)
+
+    async def iter_session_message_range(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        start: int,
+        end: int,
+    ) -> AsyncIterator[object]:
+        del tenant_id
+        if start < 0 or end < start:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        snapshot = self._session_snapshot(history_id)
+        if snapshot is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if end > len(snapshot.messages):
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        for message in snapshot.messages[start:end]:
+            yield message
+
     async def load_model_context(self, *, run_id: str) -> tuple[object, ...]:
         snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
         return () if snapshot is None else tuple(snapshot.messages)

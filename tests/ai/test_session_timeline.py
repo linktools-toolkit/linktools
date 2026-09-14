@@ -147,7 +147,9 @@ class _ExecutionService:
         raise AssertionError("timeline must not wait for an execution")
 
 
-async def _materialize_conversation(state: RuntimeState) -> tuple[str, int]:
+async def _materialize_conversation(
+    state: RuntimeState, history_id: str
+) -> tuple[str, int]:
     run_id = "timeline-conversation-run"
     conversation_id = step_conversation_id(
         namespace="session-timeline",
@@ -161,7 +163,7 @@ async def _materialize_conversation(state: RuntimeState) -> tuple[str, int]:
             conversation_id=conversation_id,
             parent_run_id=None,
             agent_name="agent",
-            metadata={"agent_name": "agent"},
+            metadata={"agent_name": "agent", "history_id": history_id},
             started_at=now,
         )
     )
@@ -225,7 +227,10 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
             execution_id="success",
             expected=None,
         )
-        run_id, message_count = await _materialize_conversation(state)
+        assert created.history_id is not None
+        run_id, message_count = await _materialize_conversation(
+            state, created.history_id
+        )
 
         async def commit_success(transaction):
             await state.conversation.sessions.commit_timeline_turn_in_transaction(
