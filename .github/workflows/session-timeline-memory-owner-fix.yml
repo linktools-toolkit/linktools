@@ -24,9 +24,10 @@ jobs:
           python-version: '3.10'
       - name: Apply focused fix
         run: |
+          python .github/session_timeline_memory_owner_fix.py
           python - <<'PY'
           from pathlib import Path
-          path = Path('.github/session_timeline_memory_owner_fix.py')
+          path = Path('tests/ai/test_session_timeline_storage.py')
           text = path.read_text(encoding='utf-8')
           old = '''        assert len(messages) == 1
           assert messages[0] == latest_snapshot_message = ModelResponse(
@@ -34,17 +35,25 @@ jobs:
           )
           assert latest_snapshot_message.parts[0].content == "new"
           '''
+          # YAML strips the indentation shared by this run block, so normalize
+          # the generated test block rather than the temporary patch source.
+          if old not in text:
+              old = '''        assert len(messages) == 1
+        assert messages[0] == latest_snapshot_message = ModelResponse(
+            parts=[TextPart(content="new")]
+        )
+        assert latest_snapshot_message.parts[0].content == "new"
+'''
           new = '''        assert len(messages) == 1
-          assert isinstance(messages[0], ModelResponse)
-          assert len(messages[0].parts) == 1
-          assert isinstance(messages[0].parts[0], TextPart)
-          assert messages[0].parts[0].content == "new"
-          '''
+        assert isinstance(messages[0], ModelResponse)
+        assert len(messages[0].parts) == 1
+        assert isinstance(messages[0].parts[0], TextPart)
+        assert messages[0].parts[0].content == "new"
+'''
           if text.count(old) != 1:
-              raise SystemExit('temporary patch assertion block did not match exactly once')
+              raise SystemExit('generated assertion block did not match exactly once')
           path.write_text(text.replace(old, new), encoding='utf-8')
           PY
-          python .github/session_timeline_memory_owner_fix.py
       - name: Install test environment
         run: |
           python -m pip install --quiet --upgrade pip
