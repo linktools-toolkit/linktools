@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from binascii import Error as Base64Error
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -88,6 +88,15 @@ class _SessionExecutionService(ExecutionService, Protocol):
     ) -> ExecutionHandle: ...
 
 
+class _SessionExecutionRepository(ExecutionRepository, Protocol):
+    async def get_many(
+        self,
+        execution_ids: Sequence[str],
+        *,
+        tenant_id: str,
+    ) -> Mapping[str, ExecutionRecord]: ...
+
+
 class _SessionTranscriptStore(Protocol):
     async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]: ...
 
@@ -139,7 +148,7 @@ class DefaultSessionService:
     def __init__(
         self,
         conversation: ConversationState,
-        executions: ExecutionRepository,
+        executions: _SessionExecutionRepository,
         authorization: AuthorizationPolicy,
         execution: _SessionExecutionService,
         cursor_signer: CursorSigner,
@@ -286,9 +295,36 @@ class DefaultSessionService:
             snapshot=snapshot,
         )
         values = page.items
+        active_ids = tuple(
+            dict.fromkeys(
+                record.active_execution_id
+                for record in values
+                if record.active_execution_id is not None
+            )
+        )
+        active_by_id = (
+            {}
+            if not active_ids
+            else await self._executions.get_many(
+                active_ids,
+                tenant_id=request.principal.tenant_id,
+            )
+        )
         views = tuple(
             await asyncio.gather(
-                *(self._view(record, request.principal) for record in values)
+                *(
+                    self._view(
+                        record,
+                        request.principal,
+                        active=self._active_execution_ids(
+                            record,
+                            None
+                            if record.active_execution_id is None
+                            else active_by_id.get(record.active_execution_id),
+                        ),
+                    )
+                    for record in values
+                )
             )
         )
         next_cursor = _make_cursor(
@@ -961,14 +997,27 @@ class DefaultSessionService:
             record.history_quality,
         )
 
-    async def _active_admitted_execution(
-        self,
+    @staticmethod
+    def _active_execution_ids(
         record: SessionRecord,
+        execution: "ExecutionRecord | None",
+    ) -> tuple[str, ...]:
+        active = DefaultSessionService._validate_active_admitted_execution(
+            record,
+            execution,
+        )
+        return () if active is None else (active.execution_id,)
+
+    @staticmethod
+    def _validate_active_admitted_execution(
+        record: SessionRecord,
+        execution: "ExecutionRecord | None",
     ) -> "ExecutionRecord | None":
         execution_id = record.active_execution_id
         if execution_id is None:
+            if execution is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return None
-        execution = await self._executions.get(execution_id, tenant_id=record.tenant_id)
         if (
             execution is None
             or execution.execution_id != execution_id
@@ -984,6 +1033,16 @@ class DefaultSessionService:
         }:
             return None
         return execution
+
+    async def _active_admitted_execution(
+        self,
+        record: SessionRecord,
+    ) -> "ExecutionRecord | None":
+        execution_id = record.active_execution_id
+        if execution_id is None:
+            return None
+        execution = await self._executions.get(execution_id, tenant_id=record.tenant_id)
+        return self._validate_active_admitted_execution(record, execution)
 
     async def _reconcile_terminal_admission(
         self, record: SessionRecord
