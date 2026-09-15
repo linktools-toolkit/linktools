@@ -181,6 +181,35 @@ async def test_asset_store_close_owns_backend_lifecycle(
     assert error.value.code is ErrorCode.STORAGE_CLOSED
 
 
+async def test_asset_store_close_retries_failed_backend_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = InMemoryAssetBackend()
+    calls = 0
+    original = backend.close
+
+    async def close() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("retry close")
+        await original()
+
+    monkeypatch.setattr(backend, "close", close)
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+
+    with pytest.raises(RuntimeError, match="retry close"):
+        await store.close()
+    assert not store.ready
+
+    await store.close()
+    assert calls == 2
+    with pytest.raises(AIError) as error:
+        await store.initialize()
+    assert error.value.code is ErrorCode.STORAGE_CLOSED
+
+
 class _BlockingCache:
     def __init__(self) -> None:
         self.entered = asyncio.Event()

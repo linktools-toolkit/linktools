@@ -175,6 +175,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self._preloaded: dict[KeyT, str] = {}
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
+        self._close_started = False
         self._closed = False
         self._lifecycle_backends: tuple[InitializableStorage, ...] = ()
 
@@ -207,7 +208,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
     async def initialize(self) -> None:
         async with self._initialize_lock:
-            if self._closed:
+            if self._closed or self._close_started:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
             if self._initialized:
                 return
@@ -243,10 +244,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         async with self._initialize_lock:
             if self._closed:
                 return
-            self._closed = True
+            self._close_started = True
             self._initialized = False
             backends = self._lifecycle_backends
-            self._lifecycle_backends = ()
 
         first_error: BaseException | None = None
         cancelled = False
@@ -276,6 +276,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     first_error = error
         if first_error is not None:
             raise first_error
+        async with self._initialize_lock:
+            self._lifecycle_backends = ()
+            self._closed = True
         if cancelled:
             raise asyncio.CancelledError
         _logger.debug("storage overlay closed")
