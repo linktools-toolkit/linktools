@@ -12,7 +12,6 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Runtime dependencies must remain acyclic; annotation-only back-references belong under `TYPE_CHECKING`.
 - Keep lower-level infrastructure independent from higher-level composition and SDK semantics. Do not introduce duplicate abstractions that compete for the same ownership.
 - Keep vendor-specific behavior out of vendor-neutral core abstractions.
-- AI-owned Python identifiers must not begin with `linktools` after removing leading underscores and comparing case-insensitively. Package/module/import paths and string protocol or namespace values are not Python identifiers and are exempt.
 - Architecture and release gates encode long-lived invariants only. Do not freeze current package names, module depth, class names, or layout as policy.
 - Build/release tooling must not become a second owner of Runtime semantic truth.
 
