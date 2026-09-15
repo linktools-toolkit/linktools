@@ -1410,7 +1410,7 @@ class DefaultExecutionService:
                         terminal_event_type=ExecutionEventType.EXECUTION_FAILED,
                         terminal_event_payload=_failed_event_payload(
                             error.code.value,
-                            error.safe_error_details,
+                            error.safe_details,
                             diagnostics,
                         ),
                         idempotency=IdempotencyTerminalUpdate(
