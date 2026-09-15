@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 
 from linktools.core import environ
 
-from ..core import JsonValue, Page
+from ..core import JsonValue, Page, validate_page_limit
 from ..errors import AIError, ErrorCode
 from ..storage import (
     StorageBatchResult,
@@ -207,7 +207,7 @@ class AssetStore:
     ) -> "Page[AssetInfo]":
         """Page active file metadata by kind and key prefix."""
         self._ensure_ready()
-        _validate_limit(limit)
+        limit = validate_page_limit(limit)
         values = [
             info
             for info in await self._storage.list_info()
@@ -247,7 +247,7 @@ class AssetStore:
     ) -> "Page[StorageOwnedInfo[AssetInfo]]":
         """Page active file metadata together with its effective storage owner."""
         self._ensure_ready()
-        _validate_limit(limit)
+        limit = validate_page_limit(limit)
         values = [
             owned
             for owned in await self._storage.list_info_with_owners()
@@ -286,11 +286,6 @@ class AssetStore:
     def _ensure_ready(self) -> None:
         if not self._ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "asset store is not initialized")
-
-
-def _validate_limit(limit: int) -> None:
-    if limit < 1 or limit > 200:
-        raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
 
 
 def _make_cursor(
