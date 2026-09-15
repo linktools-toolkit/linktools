@@ -2,12 +2,9 @@
 # -*- coding: utf-8 -*-
 """Authorized read-only execution query and history service."""
 
-import time
-
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
-    CursorPayload,
     CursorSigner,
     Page,
     Principal,
@@ -17,6 +14,8 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
+from ._cursor import decode_cursor as decode_runtime_cursor
+from ._cursor import encode_cursor as encode_runtime_cursor
 from .service_api import (
     ExecutionHistoryItem,
     ExecutionHistoryReader,
@@ -27,6 +26,8 @@ from .service_api import (
     project_execution_view,
 )
 from .state._contracts import ExecutionRecord, ExecutionRepository
+
+_CURSOR_RESOURCE_KIND = "EXECUTION"
 
 
 class DefaultExecutionHistoryService:
@@ -218,16 +219,12 @@ def _encode_execution_cursor(
     repository_cursor: str,
     signer: CursorSigner,
 ) -> str:
-    return signer.encode(
-        CursorPayload(
-            1,
-            tenant_id,
-            "EXECUTION",
-            filter_digest,
-            repository_cursor,
-            0,
-            int(time.time()) + 3600,
-        )
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind=_CURSOR_RESOURCE_KIND,
+        filter_digest=filter_digest,
+        position=repository_cursor,
     )
 
 
@@ -240,20 +237,16 @@ def _decode_execution_cursor(
 ) -> str | None:
     if cursor is None:
         return None
-    try:
-        payload = signer.decode(cursor)
-    except AIError as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
-    if (
-        payload.cursor_version != 1
-        or payload.tenant_id != tenant_id
-        or payload.resource_kind != "EXECUTION"
-        or payload.filter_digest != filter_digest
-        or payload.snapshot_or_store_revision != 0
-        or not payload.sort_key
-    ):
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind=_CURSOR_RESOURCE_KIND,
+        filter_digest=filter_digest,
+    )
+    if payload.revision != 0:
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return payload.sort_key
+    return payload.position
 
 
 __all__ = ["DefaultExecutionHistoryService"]
