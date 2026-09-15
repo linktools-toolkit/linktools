@@ -82,10 +82,11 @@ class AssetStore:
         _logger.debug("asset store initialized")
 
     async def close(self) -> None:
-        """Mark this store unavailable after its owner closes configured backends."""
+        """Close this store and every backend initialized by its overlay."""
         if not self._ready:
             return
         self._ready = False
+        await self._storage.close()
         _logger.debug("asset store closed")
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":

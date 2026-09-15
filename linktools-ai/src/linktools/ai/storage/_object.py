@@ -12,13 +12,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    BinaryIO,
-    Protocol,
-    runtime_checkable,
-)
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, TypeVar, runtime_checkable
 
 from linktools.core import environ
 
@@ -46,6 +40,7 @@ if TYPE_CHECKING:
 
 _logger = environ.get_logger("ai.storage.object")
 _CHUNK_SIZE = 1024 * 1024
+_TaskT = TypeVar("_TaskT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +206,12 @@ class _ScopedObjectStore:
         return self._parent.store_id
 
     async def put(
-        self, key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        expected_size: int,
+        expected_digest: str,
     ) -> ObjectStat:
         physical_key = self._physical_key(key)
         value = await self._parent.put(
@@ -266,7 +266,6 @@ class FilesystemObjectStore:
         self._store_id = store_id
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._offline_owner: asyncio.Task[Any] | None = None
-        self._offline_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def store_id(self) -> str:
@@ -282,7 +281,12 @@ class FilesystemObjectStore:
         return root / f"{digest}.bin", root / f"{digest}.json"
 
     async def put(
-        self, key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        expected_size: int,
+        expected_digest: str,
     ) -> ObjectStat:
         _validate_put(key, expected_size, expected_digest)
         owner = asyncio.current_task()
@@ -297,17 +301,8 @@ class FilesystemObjectStore:
             ),
             name=f"filesystem-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
         )
-        _track_object_task(self._background_tasks, task, "filesystem object put")
-        if offline_owned:
-            self._offline_tasks.add(task)
-            task.add_done_callback(self._offline_tasks.discard)
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done():
-                task.result()
-                raise
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+        _track_object_task(self._background_tasks, task)
+        return await _finish_owned_task(task)
 
     async def _put_owned(
         self,
@@ -387,19 +382,7 @@ class FilesystemObjectStore:
             yield
         finally:
             self._offline_owner = None
-            pending = tuple(task for task in self._offline_tasks if not task.done())
-            if pending:
-                cleanup = asyncio.create_task(
-                    _release_offline_lock(lock, pending),
-                    name="filesystem-object-offline-release",
-                )
-                _track_object_task(
-                    self._background_tasks,
-                    cleanup,
-                    "filesystem object offline lock release",
-                )
-            else:
-                await lock.__aexit__(None, None, None)
+            await lock.__aexit__(None, None, None)
 
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
         values = await asyncio.to_thread(
@@ -425,17 +408,8 @@ class FilesystemObjectStore:
             ),
             name=f"filesystem-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
         )
-        _track_object_task(self._background_tasks, task, "filesystem object delete")
-        if offline_owned:
-            self._offline_tasks.add(task)
-            task.add_done_callback(self._offline_tasks.discard)
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done():
-                task.result()
-                raise
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+        _track_object_task(self._background_tasks, task)
+        return await _finish_owned_task(task)
 
     async def _delete_owned(
         self,
@@ -480,40 +454,23 @@ class FilesystemObjectStore:
         digest = hashlib.sha256()
         size = 0
         open_task = asyncio.create_task(asyncio.to_thread(destination.open, "rb"))
-        try:
-            handle: BinaryIO | None = await asyncio.shield(open_task)
-        except asyncio.CancelledError:
-            cleanup = asyncio.create_task(
-                _close_after_open(open_task),
-                name="filesystem-object-open-cleanup",
-            )
-            _track_object_task(
-                self._background_tasks,
-                cleanup,
-                "filesystem object open cleanup",
-            )
-            raise
+        _track_object_task(self._background_tasks, open_task)
+        handle, cancelled = await _settle_task(open_task)
+        if cancelled:
+            await self._close_file(handle)
+            raise asyncio.CancelledError
+
+        primary_error: BaseException | None = None
+        close_cancelled = False
         try:
             while True:
-                if handle is None:
-                    raise RuntimeError("filesystem object handle ownership was transferred")
                 read_task = asyncio.create_task(
                     asyncio.to_thread(handle.read, _CHUNK_SIZE)
                 )
-                try:
-                    chunk = await asyncio.shield(read_task)
-                except asyncio.CancelledError:
-                    cleanup = asyncio.create_task(
-                        _close_after_read(read_task, handle),
-                        name="filesystem-object-read-cleanup",
-                    )
-                    _track_object_task(
-                        self._background_tasks,
-                        cleanup,
-                        "filesystem object read cleanup",
-                    )
-                    handle = None
-                    raise
+                _track_object_task(self._background_tasks, read_task)
+                chunk, read_cancelled = await _settle_task(read_task)
+                if read_cancelled:
+                    raise asyncio.CancelledError
                 if not chunk:
                     break
                 digest.update(chunk)
@@ -521,18 +478,24 @@ class FilesystemObjectStore:
                 yield chunk
             if expected.size != size or expected.digest != digest.hexdigest():
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        finally:
-            if handle is not None:
-                close_task = asyncio.create_task(asyncio.to_thread(handle.close))
-                try:
-                    await asyncio.shield(close_task)
-                except asyncio.CancelledError:
-                    _track_object_task(
-                        self._background_tasks,
-                        close_task,
-                        "filesystem object close cleanup",
-                    )
-                    raise
+        except BaseException as error:  # noqa: BLE001
+            primary_error = error
+        try:
+            close_cancelled = await self._close_file(handle)
+        except BaseException as close_error:  # noqa: BLE001
+            if primary_error is not None:
+                raise primary_error from close_error
+            raise
+        if primary_error is not None:
+            raise primary_error
+        if close_cancelled:
+            raise asyncio.CancelledError
+
+    async def _close_file(self, handle: BinaryIO) -> bool:
+        close_task = asyncio.create_task(asyncio.to_thread(handle.close))
+        _track_object_task(self._background_tasks, close_task)
+        _value, cancelled = await _settle_task(close_task)
+        return cancelled
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)
@@ -560,7 +523,12 @@ class SqlObjectStore:
         self._background_tasks: set[asyncio.Task[Any]] = set()
 
     @classmethod
-    def from_context(cls, context: "SqlStorageContext", *, store_id: str = "builtin") -> "SqlObjectStore":
+    def from_context(
+        cls,
+        context: "SqlStorageContext",
+        *,
+        store_id: str = "builtin",
+    ) -> "SqlObjectStore":
         return cls(context.engine, store_id=store_id, context=context)
 
     @property
@@ -572,7 +540,12 @@ class SqlObjectStore:
         return tuple(task for task in self._background_tasks if not task.done())
 
     async def put(
-        self, key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        expected_size: int,
+        expected_digest: str,
     ) -> ObjectStat:
         _validate_put(key, expected_size, expected_digest)
         task = asyncio.create_task(
@@ -584,14 +557,8 @@ class SqlObjectStore:
             ),
             name=f"sql-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
         )
-        _track_object_task(self._background_tasks, task, "SQL object put")
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done():
-                task.result()
-                raise
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+        _track_object_task(self._background_tasks, task)
+        return await _finish_owned_task(task)
 
     async def _put_owned(
         self,
@@ -627,6 +594,7 @@ class SqlObjectStore:
         table = self._metadata.tables["ai_objects"]
         chunks = self._metadata.tables["ai_object_chunks"]
         key_digest = _key_digest(self.store_id, key)
+
         async def execute(session) -> None:
             await session.execute(
                 insert(table).values(
@@ -653,6 +621,7 @@ class SqlObjectStore:
                     row["key_digest"] = key_digest.hex()
                 await session.execute(insert(chunks), rows)
                 index += len(rows)
+
         await self._context.run_mutation(execute, domain="storage.object")
 
     async def stat(self, key: str) -> ObjectStat | None:
@@ -665,7 +634,9 @@ class SqlObjectStore:
             row = (
                 (
                     await session.execute(
-                        select(table).where(table.c.key_digest == _key_digest(self.store_id, key).hex())
+                        select(table).where(
+                            table.c.key_digest == _key_digest(self.store_id, key).hex()
+                        )
                     )
                 )
                 .mappings()
@@ -702,11 +673,22 @@ class SqlObjectStore:
                 .all()
             )
             rows = (
-                (await session.execute(select(chunks.c.key_digest, chunks.c.chunk_index, chunks.c.content)))
+                (
+                    await session.execute(
+                        select(
+                            chunks.c.key_digest,
+                            chunks.c.chunk_index,
+                            chunks.c.content,
+                        )
+                    )
+                )
                 .mappings()
                 .all()
             )
-            all_object_keys = {str(value) for value in await session.scalars(select(objects.c.key_digest))}
+            all_object_keys = {
+                str(value)
+                for value in await session.scalars(select(objects.c.key_digest))
+            }
         finally:
             await session.close()
         header_keys = {str(row["key_digest"]) for row in headers}
@@ -722,10 +704,21 @@ class SqlObjectStore:
             grouped.setdefault(key, []).append(row)
         for header in headers:
             key = str(header["key_digest"])
-            if _key_digest(str(header["store_id"]), str(header["object_key"])).hex() != key:
+            if (
+                _key_digest(
+                    str(header["store_id"]),
+                    str(header["object_key"]),
+                ).hex()
+                != key
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            values = sorted(grouped.get(key, ()), key=lambda row: int(row["chunk_index"]))
-            if [int(row["chunk_index"]) for row in values] != list(range(len(values))):
+            values = sorted(
+                grouped.get(key, ()),
+                key=lambda row: int(row["chunk_index"]),
+            )
+            if [int(row["chunk_index"]) for row in values] != list(
+                range(len(values))
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             digest = hashlib.sha256()
             size = 0
@@ -733,7 +726,9 @@ class SqlObjectStore:
                 content = bytes(row["content"])
                 digest.update(content)
                 size += len(content)
-            if size != int(header["size"]) or digest.hexdigest() != str(header["content_digest"]):
+            if size != int(header["size"]) or digest.hexdigest() != str(
+                header["content_digest"]
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
@@ -743,7 +738,11 @@ class SqlObjectStore:
         session = self._context.sessions()
         try:
             rows = (
-                (await session.execute(select(table).where(table.c.store_id == self.store_id)))
+                (
+                    await session.execute(
+                        select(table).where(table.c.store_id == self.store_id)
+                    )
+                )
                 .mappings()
                 .all()
             )
@@ -761,6 +760,14 @@ class SqlObjectStore:
 
     async def delete_object(self, key: str, *, expected_digest: str) -> bool:
         _validate_key(key)
+        task = asyncio.create_task(
+            self._delete_owned(key, expected_digest=expected_digest),
+            name=f"sql-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
+        )
+        _track_object_task(self._background_tasks, task)
+        return await _finish_owned_task(task)
+
+    async def _delete_owned(self, key: str, *, expected_digest: str) -> bool:
         from sqlalchemy import delete, select
 
         key_digest = _key_digest(self.store_id, key).hex()
@@ -781,13 +788,14 @@ class SqlObjectStore:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await session.execute(
                 delete(self._metadata.tables["ai_object_chunks"]).where(
-                    self._metadata.tables["ai_object_chunks"].c.key_digest == key_digest
+                    self._metadata.tables["ai_object_chunks"].c.key_digest
+                    == key_digest
                 )
             )
             result = await session.execute(
                 delete(table).where(
-                    self._metadata.tables["ai_objects"].c.key_digest == key_digest,
-                    self._metadata.tables["ai_objects"].c.store_id == self.store_id,
+                    table.c.key_digest == key_digest,
+                    table.c.store_id == self.store_id,
                 )
             )
             return result.rowcount == 1
@@ -805,7 +813,9 @@ class SqlObjectStore:
             header = (
                 (
                     await session.execute(
-                        select(table).where(table.c.key_digest == _key_digest(self.store_id, key).hex())
+                        select(table).where(
+                            table.c.key_digest == _key_digest(self.store_id, key).hex()
+                        )
                     )
                 )
                 .mappings()
@@ -816,7 +826,9 @@ class SqlObjectStore:
             if header["store_id"] != self.store_id or header["object_key"] != key:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result = await session.stream(
-                select(chunks).where(chunks.c.key_digest == header["key_digest"]).order_by(chunks.c.chunk_index)
+                select(chunks)
+                .where(chunks.c.key_digest == header["key_digest"])
+                .order_by(chunks.c.chunk_index)
             )
             digest = hashlib.sha256()
             size = 0
@@ -829,7 +841,9 @@ class SqlObjectStore:
                 digest.update(value)
                 size += len(value)
                 yield value
-            if size != int(header["size"]) or digest.hexdigest() != str(header["content_digest"]):
+            if size != int(header["size"]) or digest.hexdigest() != str(
+                header["content_digest"]
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         finally:
             await session.close()
@@ -854,7 +868,10 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
             "key_digest",
             digest,
             nullable=False,
-            comment="Canonical SHA-256 identity of the ObjectStore store identifier and object key.",
+            comment=(
+                "Canonical SHA-256 identity of the ObjectStore store identifier "
+                "and object key."
+            ),
         ),
         Column(
             "store_id",
@@ -863,12 +880,28 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
             comment="Logical ObjectStore identifier that namespaces object keys.",
         ),
         Column(
-            "object_key", Text, nullable=False, comment="Original opaque object key exposed by the ObjectStore API."
+            "object_key",
+            Text,
+            nullable=False,
+            comment="Original opaque object key exposed by the ObjectStore API.",
         ),
-        Column("content_digest", digest, nullable=False, comment="SHA-256 digest of the immutable object bytes."),
-        Column("size", BigInteger, nullable=False, comment="Exact immutable object size in bytes."),
+        Column(
+            "content_digest",
+            digest,
+            nullable=False,
+            comment="SHA-256 digest of the immutable object bytes.",
+        ),
+        Column(
+            "size",
+            BigInteger,
+            nullable=False,
+            comment="Exact immutable object size in bytes.",
+        ),
         *sql_audit_columns(),
-        comment="Immutable ObjectStore headers containing canonical object identity, content digest, and size.",
+        comment=(
+            "Immutable ObjectStore headers containing canonical object identity, "
+            "content digest, and size."
+        ),
         **sql_table_options(),
     )
     sql_unique(objects, "key_digest")
@@ -881,7 +914,10 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
             "key_digest",
             digest,
             nullable=False,
-            comment="Canonical SHA-256 identity of the immutable ObjectStore object owning this chunk.",
+            comment=(
+                "Canonical SHA-256 identity of the immutable ObjectStore object "
+                "owning this chunk."
+            ),
         ),
         Column(
             "chunk_index",
@@ -896,7 +932,9 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
             comment="Binary content bytes for this immutable object chunk.",
         ),
         *sql_audit_columns(),
-        comment="Ordered binary chunks that compose immutable ObjectStore content.",
+        comment=(
+            "Ordered binary chunks that compose immutable ObjectStore content."
+        ),
         **sql_table_options(),
     )
     sql_unique(chunks, "key_digest", "chunk_index")
@@ -904,7 +942,13 @@ def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
     return metadata
 
 
-async def read_object(store: ObjectStore, key: str, *, expected_digest: str, expected_size: int) -> bytes:
+async def read_object(
+    store: ObjectStore,
+    key: str,
+    *,
+    expected_digest: str,
+    expected_size: int,
+) -> bytes:
     digest = hashlib.sha256()
     size = 0
     data = bytearray()
@@ -917,7 +961,31 @@ async def read_object(store: ObjectStore, key: str, *, expected_digest: str, exp
     return bytes(data)
 
 
-async def _spool_memory(chunks: AsyncIterator[bytes], expected_size: int) -> tuple[bytes, str]:
+async def _settle_task(task: "asyncio.Task[_TaskT]") -> tuple[_TaskT, bool]:
+    """Observe one owned task to completion before reporting caller cancellation."""
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            if task.done():
+                if task.cancelled():
+                    raise
+                return task.result(), True
+            cancelled = True
+
+
+async def _finish_owned_task(task: "asyncio.Task[_TaskT]") -> _TaskT:
+    value, cancelled = await _settle_task(task)
+    if cancelled:
+        raise asyncio.CancelledError
+    return value
+
+
+async def _spool_memory(
+    chunks: AsyncIterator[bytes],
+    expected_size: int,
+) -> tuple[bytes, str]:
     data = bytearray()
     digest = hashlib.sha256()
     async for chunk in chunks:
@@ -930,7 +998,11 @@ async def _spool_memory(chunks: AsyncIterator[bytes], expected_size: int) -> tup
     return bytes(data), digest.hexdigest()
 
 
-async def _spool_file(chunks: AsyncIterator[bytes], path: Path, expected_size: int) -> tuple[int, str]:
+async def _spool_file(
+    chunks: AsyncIterator[bytes],
+    path: Path,
+    expected_size: int,
+) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
     buffer = bytearray()
@@ -969,7 +1041,11 @@ def _sync_file(path: Path) -> None:
         os.fsync(handle.fileno())
 
 
-def _stat_filesystem_object(metadata: Path, destination: Path, key: str) -> ObjectStat | None:
+def _stat_filesystem_object(
+    metadata: Path,
+    destination: Path,
+    key: str,
+) -> ObjectStat | None:
     if not metadata.is_file() and not destination.is_file():
         return None
     return _read_filesystem_metadata(metadata, destination, key)
@@ -1080,55 +1156,26 @@ def _read_payload_batch(
 def _track_object_task(
     tasks: set[asyncio.Task[Any]],
     task: asyncio.Task[Any],
-    label: str,
 ) -> None:
     tasks.add(task)
-
-    def consume(done: asyncio.Task[Any]) -> None:
-        try:
-            done.result()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:  # noqa: BLE001
-            _logger.exception("background %s failed", label)
-        finally:
-            tasks.discard(done)
-
-    task.add_done_callback(consume)
-
-
-async def _release_offline_lock(
-    lock: FilesystemMutationLock,
-    tasks: tuple[asyncio.Task[Any], ...],
-) -> None:
-    await asyncio.gather(*tasks, return_exceptions=True)
-    await lock.__aexit__(None, None, None)
-
-
-async def _close_after_open(task: asyncio.Task[BinaryIO]) -> None:
-    handle = await task
-    await asyncio.to_thread(handle.close)
-
-
-async def _close_after_read(
-    task: asyncio.Task[bytes],
-    handle: BinaryIO,
-) -> None:
-    try:
-        await task
-    finally:
-        await asyncio.to_thread(handle.close)
+    task.add_done_callback(tasks.discard)
 
 
 def _key_digest(store_id: str, key: str) -> bytes:
-    return hashlib.sha256(store_id.encode("utf-8") + b"\0" + key.encode("utf-8")).digest()
+    return hashlib.sha256(
+        store_id.encode("utf-8") + b"\0" + key.encode("utf-8")
+    ).digest()
 
 
 def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _read_filesystem_metadata(metadata: Path, destination: Path, key: str) -> ObjectStat:
+def _read_filesystem_metadata(
+    metadata: Path,
+    destination: Path,
+    key: str,
+) -> ObjectStat:
     if not metadata.is_file() or not destination.is_file():
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
@@ -1163,7 +1210,9 @@ def _validate_store_id(value: str) -> None:
         or not value
         or len(value) > 128
         or any(
-            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" for character in value
+            character
+            not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+            for character in value
         )
     ):
         raise ValueError("object store id is invalid")

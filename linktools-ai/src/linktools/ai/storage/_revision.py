@@ -53,7 +53,11 @@ def apply_metadata_load(
     current: 'MetadataState[KeyT, InfoT] | None',
     load: 'MetadataLoad[KeyT, InfoT]',
 ) -> 'MetadataState[KeyT, InfoT]':
-    entries = {} if load.mode is MetadataLoadMode.REPLACE or current is None else dict(current.entries)
+    entries = (
+        {}
+        if load.mode is MetadataLoadMode.REPLACE or current is None
+        else dict(current.entries)
+    )
     for change in load.changes:
         if change.info is None:
             entries.pop(change.key, None)
@@ -121,6 +125,33 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
                     if self._refresh_task is task:
                         self._refresh_task = None
 
+    async def settle(self) -> None:
+        """Wait for a detached single-flight refresh before its backend closes."""
+        async with self._lock:
+            task = self._refresh_task
+        if task is None:
+            return
+        cancelled = False
+        try:
+            while True:
+                try:
+                    await asyncio.shield(task)
+                    break
+                except asyncio.CancelledError:
+                    if task.done():
+                        if task.cancelled():
+                            raise
+                        task.result()
+                        cancelled = True
+                        break
+                    cancelled = True
+        finally:
+            async with self._lock:
+                if self._refresh_task is task and task.done():
+                    self._refresh_task = None
+        if cancelled:
+            raise asyncio.CancelledError
+
     async def _load(self) -> 'MetadataState[KeyT, InfoT]':
         generation = self._generation
         if self.policy is LayerRefreshPolicy.ALWAYS:
@@ -133,7 +164,11 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
         state = apply_metadata_load(self._state, load)
         self._state = state
         self._generation += 1
-        _logger.debug("metadata refreshed revision=%s entries=%s", state.revision, len(state.entries))
+        _logger.debug(
+            "metadata refreshed revision=%s entries=%s",
+            state.revision,
+            len(state.entries),
+        )
         return state
 
     async def head_revision(self) -> 'StorageRevision | None':
@@ -149,7 +184,12 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
         self._state = None
         self._generation += 1
 
-    def apply_write(self, key: KeyT, info: InfoT, revision: StorageRevision) -> None:
+    def apply_write(
+        self,
+        key: KeyT,
+        info: InfoT,
+        revision: StorageRevision,
+    ) -> None:
         if self._state is None:
             return
         entries = dict(self._state.entries)
