@@ -2,11 +2,18 @@
 # -*- coding: utf-8 -*-
 """Frozen pure projections for persisted transcript view coordinates."""
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from typing import cast
 
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import (
+    AudioUrl,
+    BinaryContent,
+    CachePoint,
+    DocumentUrl,
+    FileUrl,
+    ImageUrl,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -17,14 +24,16 @@ from pydantic_ai.messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
+    UploadedFile,
     UserPromptPart,
+    VideoUrl,
 )
 
 from ...core import JsonValue, normalize_json_value
 from ...errors import AIError, ErrorCode
 from ..service_api import SessionHistoryItem
 
-SESSION_HISTORY_VIEW_V1 = 1
+SESSION_HISTORY_VIEW_V1 = 2
 EXECUTION_TRANSCRIPT_VIEW_V1 = 1
 
 
@@ -90,6 +99,8 @@ def _projected_parts(
     if len(serialized) != len(raw_parts):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     values: list[tuple[str, JsonValue, str | None, str | None]] = []
+    if isinstance(message, ModelRequest) and message.instructions is not None:
+        values.append(("instructions", message.instructions, None, None))
     for part, payload in zip(raw_parts, serialized, strict=True):
         if isinstance(part, SystemPromptPart):
             values.append(("system", _payload_content(payload), None, None))
@@ -169,19 +180,64 @@ def _payload_content(payload: Mapping[str, JsonValue]) -> JsonValue:
 def _user_content(part: UserPromptPart, payload: Mapping[str, JsonValue]) -> JsonValue:
     if isinstance(part.content, str):
         return part.content
-    text_values: list[str] = []
-    text_only = True
+    values: list[JsonValue] = []
     for item in part.content:
         if isinstance(item, str):
-            text_values.append(item)
+            values.append(item)
         elif isinstance(item, TextContent):
-            text_values.append(item.content)
+            values.append(item.content)
+        elif isinstance(item, BinaryContent):
+            values.append(_binary_content(item))
+        elif isinstance(item, ImageUrl):
+            values.append(_url_content(item))
+        elif isinstance(item, (AudioUrl, DocumentUrl, FileUrl, VideoUrl)):
+            values.append(_url_content(item))
+        elif isinstance(item, UploadedFile):
+            values.append(
+                {
+                    "kind": "uploaded-file",
+                    "file_id": item.file_id,
+                    "provider_name": item.provider_name,
+                    "media_type": item.media_type,
+                    "vendor_metadata": normalize_json_value(
+                        item.vendor_metadata or {}
+                    ),
+                }
+            )
+        elif isinstance(item, CachePoint):
+            values.append({"kind": "cache-point", "ttl": item.ttl})
         else:
-            text_only = False
-            break
-    if text_only:
-        return text_values
-    return _payload_content(payload)
+            values.append({"kind": _part_kind(item, payload)})
+    return values
+
+
+def _binary_content(item: BinaryContent) -> dict[str, JsonValue]:
+    value: dict[str, JsonValue] = {
+        "kind": "binary",
+        "media_type": item.media_type,
+        "size": len(item.data),
+        "digest": hashlib.sha256(item.data).hexdigest(),
+    }
+    if item.identifier is not None:
+        value["identifier"] = item.identifier
+    if item.vendor_metadata is not None:
+        value["vendor_metadata"] = normalize_json_value(item.vendor_metadata)
+    return value
+
+
+def _url_content(item: object) -> dict[str, JsonValue]:
+    value: dict[str, JsonValue] = {
+        "kind": str(getattr(item, "kind", "url")),
+        "url": str(getattr(item, "url")),
+    }
+    for name in ("media_type", "identifier"):
+        candidate = getattr(item, name, None)
+        if candidate is not None:
+            value[name] = str(candidate)
+    metadata = getattr(item, "vendor_metadata", None)
+    if metadata is not None:
+        value["vendor_metadata"] = normalize_json_value(metadata)
+    return value
 
 
 def _part_kind(part: object, payload: Mapping[str, JsonValue]) -> str:

@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import datetime, timezone
+from typing import Protocol
 
 from linktools.core import environ
 from openai import (
@@ -29,22 +31,47 @@ from pydantic_ai.exceptions import (
     UnexpectedModelBehavior,
     UserError,
 )
-from pydantic_ai.messages import ModelResponse
-from pydantic_ai.models import Model, ModelRequestContext
+from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.run import AgentRunResult
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.usage import UsageLimitExceeded
 
 from ..capability import AgentContext
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ._journal import ModelRequestFact, ModelRequestJournal
 from ._metrics import (
     _bind_metric_execution_context,
     _metric_correlation,
 )
-from ._journal import ModelRequestFact, ModelRequestJournal
 
 _logger = environ.get_logger("ai.runtime.model_metrics")
+
+
+class ModelInteractionRecorder(Protocol):
+    def begin_model_interaction(
+        self,
+        fact: ModelRequestFact,
+        model: Model,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        streaming: bool,
+    ) -> None: ...
+
+    def finish_model_interaction(
+        self,
+        fact: ModelRequestFact,
+        *,
+        model: Model,
+        response: ModelResponse | None,
+        status: str,
+        error_code: str | None,
+        duration_ns: int,
+        usage: object | None,
+    ) -> None: ...
 
 
 class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]):
@@ -61,6 +88,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         step_run_id: str,
         agent_id: str,
         journal: ModelRequestJournal | None = None,
+        interaction_recorder: ModelInteractionRecorder | None = None,
     ) -> None:
         self.id = "linktools.ai.model-observation"
         self._recorder = recorder
@@ -76,6 +104,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             execution_id=execution_id,
             step_run_id=step_run_id,
         )
+        self._interaction_recorder = interaction_recorder
 
     def get_ordering(self) -> CapabilityOrdering:
         return CapabilityOrdering(position="innermost")
@@ -124,10 +153,12 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             )
         assert fact is not None
         request_sequence = fact.request_sequence
+        self._stage_request(fact, request_context)
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:
             fact = self._journal.finish(request_sequence, status="CANCELLED")
+            self._finish_request(fact, selected_model, None, "CANCELLED", None, None)
             self._record_model(
                 run_context,
                 fact,
@@ -140,6 +171,14 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             raise
         except RunCancelled as error:
             fact = self._journal.finish(request_sequence, status="CANCELLED")
+            self._finish_request(
+                fact,
+                selected_model,
+                None,
+                "CANCELLED",
+                _model_error_code(error),
+                None,
+            )
             self._record_model(
                 run_context,
                 fact,
@@ -152,6 +191,14 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             raise
         except Exception as error:
             fact = self._journal.finish(request_sequence, status="FAILED")
+            self._finish_request(
+                fact,
+                selected_model,
+                None,
+                "FAILED",
+                _model_error_code(error),
+                None,
+            )
             self._record_model(
                 run_context,
                 fact,
@@ -163,6 +210,14 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             )
             raise
         fact = self._journal.finish(request_sequence, status="SUCCEEDED")
+        self._finish_request(
+            fact,
+            selected_model,
+            response,
+            "SUCCEEDED",
+            None,
+            response.usage,
+        )
         self._record_model(
             run_context,
             fact,
@@ -218,8 +273,20 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         model: Model,
         response: ModelResponse | None,
         error: BaseException | None,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        streaming: bool = False,
     ) -> None:
         if phase == "started":
+            self._stage_request(
+                fact,
+                messages=messages,
+                model_settings=model_settings,
+                parameters=parameters,
+                streaming=streaming,
+                model=model,
+            )
             return
         if phase not in {"completed", "failed", "cancelled"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -235,6 +302,14 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 error_code=None,
                 measurements=_provider_usage_measurements(response),
             )
+            self._finish_request(
+                fact,
+                model,
+                response,
+                "SUCCEEDED",
+                None,
+                response.usage,
+            )
             return
         exception = error if isinstance(error, Exception) else None
         self._record_model(
@@ -246,6 +321,79 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             error_code=None if exception is None else _model_error_code(exception),
             measurements=(),
         )
+        self._finish_request(
+            fact,
+            model,
+            None,
+            "CANCELLED" if phase == "cancelled" else "FAILED",
+            None if exception is None else _model_error_code(exception),
+            None,
+        )
+
+    def _stage_request(
+        self,
+        fact: ModelRequestFact,
+        request_context: ModelRequestContext | None = None,
+        *,
+        messages: Sequence[ModelMessage] | None = None,
+        model_settings: ModelSettings | None = None,
+        parameters: ModelRequestParameters | None = None,
+        streaming: bool | None = None,
+        model: Model | None = None,
+    ) -> None:
+        recorder = self._interaction_recorder
+        if recorder is None:
+            return
+        try:
+            if request_context is not None:
+                messages = request_context.messages
+                model_settings = request_context.model_settings
+                parameters = request_context.model_request_parameters
+                streaming = bool(getattr(request_context, "streaming", False))
+                model = request_context.model
+            if messages is None or parameters is None or model is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            recorder.begin_model_interaction(
+                fact,
+                model,
+                messages,
+                model_settings,
+                parameters,
+                bool(streaming),
+            )
+        except Exception:
+            _logger.exception(
+                "model interaction staging rejected: sequence=%s",
+                fact.request_sequence,
+            )
+
+    def _finish_request(
+        self,
+        fact: ModelRequestFact,
+        model: Model,
+        response: ModelResponse | None,
+        status: str,
+        error_code: str | None,
+        usage: object | None,
+    ) -> None:
+        recorder = self._interaction_recorder
+        if recorder is None:
+            return
+        try:
+            recorder.finish_model_interaction(
+                fact,
+                model=model,
+                response=response,
+                status=status,
+                error_code=error_code,
+                duration_ns=fact.duration_ns or 0,
+                usage=usage,
+            )
+        except Exception:
+            _logger.exception(
+                "model interaction staging rejected: sequence=%s",
+                fact.request_sequence,
+            )
 
     def _record_model(
         self,

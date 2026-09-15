@@ -26,6 +26,7 @@ from .service_api import (
     ExecutionTraceItem,
     ExecutionView,
     ListExecutionRequest,
+    ModelInteractionItem,
     TranscriptItem,
 )
 from .state import RuntimeDomain, RuntimeState
@@ -114,6 +115,21 @@ class RuntimeHistory:
         limit: int = 100,
     ) -> Page[TranscriptItem]:
         return await self._service.transcript(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def model_interactions(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> Page[ModelInteractionItem]:
+        return await self._service.model_interactions(
             execution_id,
             principal=principal,
             cursor=cursor,

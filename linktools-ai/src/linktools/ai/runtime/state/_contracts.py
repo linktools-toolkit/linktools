@@ -38,12 +38,12 @@ from ...core import (
     ResourceRef,
     SessionStatus,
     StopReason,
-    ToolOperationStatus,
     ThinkingValue,
+    ToolOperationStatus,
     UsageMetrics,
     canonical_sha256,
-    normalize_execution_mode,
     normalize_correlation,
+    normalize_execution_mode,
     normalize_thinking,
     validate_agent_id,
     validate_lease_owner,
@@ -431,6 +431,45 @@ class ContextProjection:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelInteractionRecord:
+    """Derived observation of one logical model request."""
+
+    run_id: str
+    step_index: int
+    request_sequence: int
+    purpose: str
+    output_retry_index: int | None
+    model: Mapping[str, str]
+    request_context: ContextProjection
+    request_envelope: RuntimePayloadRef
+    response_context: ContextProjection | None
+    status: str
+    error_code: str | None
+    duration_ns: int
+    usage: UsageMetrics | None
+
+    def __post_init__(self) -> None:
+        if (
+            not self.run_id
+            or self.step_index < 0
+            or self.request_sequence < 1
+            or self.purpose not in {"agent", "compaction"}
+            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.duration_ns < 0
+            or not isinstance(self.request_context, ContextProjection)
+            or not isinstance(self.request_envelope, RuntimePayloadRef)
+        ):
+            raise ValueError("model interaction record is invalid")
+        if self.status == "SUCCEEDED" and self.response_context is None:
+            raise ValueError("successful model interaction needs a response context")
+        if self.status != "SUCCEEDED" and self.response_context is not None:
+            raise ValueError("failed model interaction cannot have a response context")
+        if self.status == "FAILED" and not self.error_code:
+            raise ValueError("failed model interaction needs an error code")
+        object.__setattr__(self, "model", dict(self.model))
+
+
+@dataclass(frozen=True, slots=True)
 class StoredStepSnapshot:
     run_id: str
     step_index: int
@@ -629,6 +668,7 @@ class ExecutionRunSealHead:
     snapshot_count: int
     transcript_message_count: int
     projection_digest: str
+    interaction_count: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -637,6 +677,7 @@ class ExecutionRunSealHead:
                 self.event_count,
                 self.snapshot_count,
                 self.transcript_message_count,
+                self.interaction_count,
             )
         ):
             raise ValueError("execution run seal counts cannot be negative")
@@ -672,6 +713,7 @@ class ExecutionHistorySealRecord:
                         "event_count": head.event_count,
                         "snapshot_count": head.snapshot_count,
                         "transcript_message_count": head.transcript_message_count,
+                        "interaction_count": head.interaction_count,
                         "projection_digest": head.projection_digest,
                     }
                     for head in self.run_heads
@@ -2172,6 +2214,7 @@ __all__ = [
     "ExecutionRecord",
     "ExecutionRepository",
     "ExecutionRunSealHead",
+    "ModelInteractionRecord",
     "ExecutionStartClaim",
     "ExecutionStartReservation",
     "ExecutionStartReservationResult",

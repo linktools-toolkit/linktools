@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime-owned step, event, and snapshot contracts."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal, Protocol
@@ -101,6 +101,24 @@ class StepStore(Protocol):
     async def latest_snapshot(
         self, *, run_id: str, include_interrupted: bool = False
     ) -> ContinuableSnapshot | None: ...
+
+    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]: ...
+
+    def staged_payload(self, run_id: str, digest: str) -> bytes: ...
+
+    def stage_model_interaction(self, interaction: object) -> None: ...
+
+    async def list_model_interactions(self, *, run_id: str) -> list[object]: ...
+
+    async def resolve_model_interaction(
+        self,
+        interaction: object,
+    ) -> object: ...
+
+    async def resolve_model_interactions(
+        self,
+        interactions: Sequence[object],
+    ) -> list[object]: ...
 
     async def release_run(
         self, run_id: str, *, execution_id: str | None = None

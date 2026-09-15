@@ -20,12 +20,13 @@ from pydantic_ai.capabilities import (
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
-from pydantic_ai.tools import DeferredToolRequests, RunContext as PydanticRunContext
+from pydantic_ai.tools import DeferredToolRequests
+from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai_harness.step_persistence import StepPersistence
 
 from ..errors import AIError, ErrorCode
 from ._compaction import (
-    ExternalModelRequestObserver,
+    ExternalModelRequestCapture,
     RuntimeCompaction,
     RuntimeCompactionPolicy,
 )
@@ -326,12 +327,16 @@ async def compose_platform_capabilities(
     deferred_pause_sink: Callable[[int], None] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
     model_observation_enabled: bool = False,
-    model_request_observer: "ExternalModelRequestObserver | None" = None,
+    model_request_observer: "ExternalModelRequestCapture | None" = None,
+    harness_store: HarnessStepStoreAdapter | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
     persistence = _RuntimeStepPersistence(
         id="linktools.ai.step-persistence",
-        store=HarnessStepStoreAdapter(step_store, execution_id=execution_id),
+        store=harness_store or HarnessStepStoreAdapter(
+            step_store,
+            execution_id=execution_id,
+        ),
         agent_name=agent_name,
         run_id=step_run_id,
         parent_run_id=parent_step_run_id,
@@ -379,7 +384,7 @@ async def compose_platform_capabilities(
             context_target_tokens,
             policy=compaction_policy,
             journal=model_journal,
-            observer=model_request_observer,
+            request_observer=model_request_observer,
             projection_sink=persistence.remember_context_projection,
         )
     )

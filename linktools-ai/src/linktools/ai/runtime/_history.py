@@ -39,13 +39,19 @@ from ._journal import (
     REQUEST_PURPOSE_METADATA_KEY,
     REQUEST_SEQUENCE_METADATA_KEY,
 )
+from ._model_interaction import project_public_messages
 from .service_api import (
     ExecutionHistoryItem,
     ExecutionTraceItem,
+    ModelInteractionItem,
     SessionHistoryItem,
     TranscriptItem,
 )
-from .state._contracts import ExecutionRecord, ExecutionRepository
+from .state._contracts import (
+    ExecutionRecord,
+    ExecutionRepository,
+    ModelInteractionRecord,
+)
 from .state._step_contracts import RunRecord, StepEvent, StepStore
 from .state._views import (
     SESSION_HISTORY_VIEW_V1,
@@ -84,6 +90,15 @@ class _TraceOccurrence:
     segment_sequence: int
     event_sequence: int
     merge_key: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _InteractionOccurrence:
+    key: tuple[object, ...]
+    source_execution_id: str
+    segment_sequence: int
+    depth: int
+    interaction: ModelInteractionRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +306,157 @@ class StepExecutionHistoryReader:
             len(selected),
         )
         return Page(selected, next_cursor)
+
+    async def model_interactions(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> Page[ModelInteractionItem]:
+        limit = validate_page_limit(limit)
+        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        entries = await self._history_tree(record, tenant_id)
+        values: list[_InteractionOccurrence] = []
+        for source, depth in entries:
+            for segment_sequence in await self._segment_sequences(source, tenant_id):
+                run_id = step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=source.execution_id,
+                    segment_sequence=segment_sequence,
+                )
+                interactions = await self._store.list_model_interactions(
+                    run_id=run_id
+                )
+                typed_interactions = []
+                for interaction in interactions:
+                    if not isinstance(interaction, ModelInteractionRecord):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    typed_interactions.append(interaction)
+                values.extend(
+                    _InteractionOccurrence(
+                        (
+                            source.created_at.astimezone(timezone.utc),
+                            depth,
+                            source.execution_id,
+                            segment_sequence,
+                            interaction.request_sequence,
+                        ),
+                        source.execution_id,
+                        segment_sequence,
+                        depth,
+                        interaction,
+                    )
+                    for interaction in typed_interactions
+                )
+        values.sort(key=lambda value: value.key)
+        start = _model_interaction_cursor_index(
+            cursor,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            signer=self._cursor_signer,
+            values=values,
+        )
+        page = values[start : start + limit + 1]
+        selected_occurrences = page[:limit]
+        resolved_items: dict[tuple[str, int], ModelInteractionItem] = {}
+        for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
+            resolved = await self._store.resolve_model_interactions(
+                tuple(value.interaction for value in occurrence_group)
+            )
+            if len(resolved) != len(occurrence_group):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for occurrence, resolved_context in zip(
+                occurrence_group,
+                resolved,
+                strict=True,
+            ):
+                resolved_items[
+                    (occurrence.interaction.run_id, occurrence.interaction.request_sequence)
+                ] = self._project_model_interaction(
+                    occurrence.interaction,
+                    occurrence.source_execution_id,
+                    occurrence.segment_sequence,
+                    occurrence.depth,
+                    resolved_context,
+                )
+        selected = tuple(
+            resolved_items[
+                (value.interaction.run_id, value.interaction.request_sequence)
+            ]
+            for value in selected_occurrences
+        )
+        next_cursor = None
+        if len(page) > limit:
+            next_cursor = _model_interaction_cursor(
+                tenant_id,
+                execution_id,
+                start + limit,
+                self._cursor_signer,
+            )
+        _logger.debug(
+            "model interactions projected page: execution=%s items=%s",
+            execution_id,
+            len(selected),
+        )
+        return Page(selected, next_cursor)
+
+    def _project_model_interaction(
+        self,
+        interaction: ModelInteractionRecord,
+        execution_id: str,
+        segment_sequence: int,
+        depth: int,
+        resolved: object,
+    ) -> ModelInteractionItem:
+        if not isinstance(resolved, tuple) or len(resolved) != 3:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        request_messages, response_messages, envelope_raw = resolved
+        if not isinstance(request_messages, tuple) or not isinstance(
+            envelope_raw, bytes
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            envelope = json.loads(envelope_raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if not isinstance(envelope, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        request: dict[str, JsonValue] = {
+            "messages": project_public_messages(request_messages),
+            **dict(envelope),
+        }
+        instructions = [
+            message.instructions
+            for message in request_messages
+            if isinstance(message, ModelRequest) and message.instructions is not None
+        ]
+        if instructions:
+            request["instructions"] = instructions
+        response: JsonValue | None = None
+        if response_messages is not None:
+            projected = project_public_messages(response_messages)
+            response = projected[0] if len(projected) == 1 else projected
+        return ModelInteractionItem(
+            execution_id,
+            segment_sequence,
+            depth,
+            interaction.request_sequence,
+            interaction.purpose,
+            interaction.step_index,
+            interaction.output_retry_index,
+            interaction.model,
+            request,
+            response,
+            interaction.status,
+            interaction.error_code,
+            interaction.duration_ns,
+            interaction.usage,
+        )
 
     async def _history_page(
         self,
@@ -896,6 +1062,60 @@ def _execution_filter_digest(execution_id: str, projection_version: int) -> str:
             "execution_id": execution_id,
             "projection_version": projection_version,
         }
+    )
+
+
+def _model_interaction_filter_digest(execution_id: str) -> str:
+    return _execution_filter_digest(execution_id, 1)
+
+
+def _interaction_occurrence_groups(
+    values: Sequence[_InteractionOccurrence],
+) -> tuple[tuple[_InteractionOccurrence, ...], ...]:
+    groups: dict[str, list[_InteractionOccurrence]] = {}
+    for value in values:
+        groups.setdefault(value.interaction.run_id, []).append(value)
+    return tuple(tuple(group) for group in groups.values())
+
+
+def _model_interaction_cursor_index(
+    cursor: str | None,
+    *,
+    tenant_id: str,
+    execution_id: str,
+    signer: CursorSigner,
+    values: Sequence[object],
+) -> int:
+    if cursor is None:
+        return 0
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="model_interactions",
+        filter_digest=_model_interaction_filter_digest(execution_id),
+    )
+    try:
+        position = int(payload.position)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if payload.revision != 0 or position < 0 or position >= len(values):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return position
+
+
+def _model_interaction_cursor(
+    tenant_id: str,
+    execution_id: str,
+    position: int,
+    signer: CursorSigner,
+) -> str:
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="model_interactions",
+        filter_digest=_model_interaction_filter_digest(execution_id),
+        position=str(position),
     )
 
 

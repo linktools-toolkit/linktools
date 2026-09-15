@@ -21,8 +21,14 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from linktools.core import environ
 from openai import (
     APIConnectionError as OpenAIAPIConnectionError,
+)
+from openai import (
     APIError as OpenAIAPIError,
+)
+from openai import (
     APIStatusError as OpenAIAPIStatusError,
+)
+from openai import (
     APITimeoutError as OpenAIAPITimeoutError,
 )
 from pydantic import ValidationError
@@ -65,8 +71,10 @@ from pydantic_ai.models import Model, ModelRequestContext, ModelResponse
 from pydantic_ai.tools import (
     DeferredToolRequests,
     DeferredToolResults,
-    RunContext as PydanticRunContext,
     ToolDefinition,
+)
+from pydantic_ai.tools import (
+    RunContext as PydanticRunContext,
 )
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
@@ -79,8 +87,8 @@ from ..capability import (
     SkillSourceRegistry,
     SubagentCapability,
     SubagentDelegate,
-    tool_compaction_keep_result_from_metadata,
     tool_class_from_metadata,
+    tool_compaction_keep_result_from_metadata,
     tool_context_dedupe_from_metadata,
     tool_plan_safe_from_metadata,
     validate_tool_semantic_metadata,
@@ -108,6 +116,7 @@ if TYPE_CHECKING:
 
 from ._capabilities import compose_platform_capabilities
 from ._compaction import RuntimeCompactionPolicy
+from ._harness import HarnessStepStoreAdapter
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import materialize_mcp_servers
@@ -721,6 +730,11 @@ async def _materialize_agent(
             agent_id=definition.spec.id,
         )
     )
+    harness_store = HarnessStepStoreAdapter(
+        scope.step_store,
+        execution_id=scope.context.execution_id,
+        step_run_id=scope.step_run_id,
+    )
     if tool_metrics is not None:
         capabilities.append(RuntimeToolMetricsCapability(tool_metrics))
 
@@ -801,6 +815,7 @@ async def _materialize_agent(
         step_run_id=scope.step_run_id,
         agent_id=definition.spec.id,
         journal=model_journal,
+        interaction_recorder=harness_store,
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
@@ -822,6 +837,7 @@ async def _materialize_agent(
         model_journal=model_journal,
         model_observation_enabled=metrics is not None,
         model_request_observer=model_observation.record_external_model_request,
+        harness_store=harness_store,
     )
     capabilities.extend(
         cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform)

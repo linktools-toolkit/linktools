@@ -3,6 +3,7 @@
 """PydanticAI StepStore adapter backed by Runtime StateStore facts."""
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
@@ -15,15 +16,17 @@ from uuid import uuid4
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage
 
-from ._step_contracts import (
-    ContinuableSnapshot,
-    RunRecord,
-    StepEvent,
-    StepStore,
-)
-
+from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectStore
+from ...storage import ObjectStore, StoredPayload
+from .._message import decode_model_messages
+from .._model_interaction import (
+    StagedContextSpan,
+    StagedModelInteraction,
+    context_projection_to_durable,
+    extend_prefix_digest,
+    message_prefix_digest,
+)
 from ._codec import (
     _decode_enveloped_domain,
     _decode_step_envelope,
@@ -37,8 +40,11 @@ from ._contracts import (
     ExecutionRepository,
     ExecutionRunSealHead,
     HistoryQuality,
+    InlineContextBlock,
     LoadedContextMessage,
     LoadedModelContext,
+    ModelInteractionRecord,
+    RuntimePayloadRef,
     StoredStepSnapshot,
     TranscriptChunk,
     TranscriptMessageRef,
@@ -59,6 +65,12 @@ from ._history import (
     suffix_prefix_overlap,
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+    StepEvent,
+    StepStore,
+)
 from ._store import (
     FactQuery,
     RecordQuery,
@@ -91,6 +103,7 @@ class _StepArchiveBatch(Protocol):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
+        interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None: ...
 
@@ -108,6 +121,7 @@ class _ProjectionOffset:
     events: int = 0
     snapshots: int = 0
     transcript_messages: int = 0
+    interactions: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +135,9 @@ class ExecutionProjectionBatch:
     target_snapshot_offset: int
     base_message_index: int
     target_message_index: int
+    interactions: tuple[StagedModelInteraction, ...] = ()
+    base_interaction_offset: int = 0
+    target_interaction_offset: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +178,9 @@ class PreparedExecutionProjection:
     target_snapshot_offset: int
     target_transcript_message_count: int
     durable_projection_digest: str = "empty"
+    interactions: tuple["ModelInteractionRecord", ...] = ()
+    base_interaction_offset: int = 0
+    target_interaction_offset: int = 0
 
     @property
     def projection_digest(self) -> str:
@@ -222,6 +242,9 @@ class CapturedExecutionProjection:
     base_snapshot_offset: int
     target_event_offset: int
     target_snapshot_offset: int
+    interactions: tuple[StagedModelInteraction, ...] = ()
+    base_interaction_offset: int = 0
+    target_interaction_offset: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +364,8 @@ class StagingStepStore(StepStore):
         self._runs: dict[str, RunRecord] = {}
         self._events: dict[str, list[StepEvent]] = {}
         self._snapshots: dict[str, list[ContinuableSnapshot]] = {}
+        self._interactions: dict[str, list[StagedModelInteraction]] = {}
+        self._payloads: dict[str, dict[str, bytes]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -418,6 +443,40 @@ class StagingStepStore(StepStore):
             run_id,
             include_interrupted=include_interrupted,
         )
+
+    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]:
+        self._ensure_open()
+        digest = hashlib.sha256(payload).hexdigest()
+        self._payloads.setdefault(run_id, {}).setdefault(digest, bytes(payload))
+        return digest, len(payload)
+
+    def staged_payload(self, run_id: str, digest: str) -> bytes:
+        self._ensure_open()
+        try:
+            return self._payloads[run_id][digest]
+        except KeyError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    def stage_model_interaction(self, interaction: object) -> None:
+        self._ensure_open()
+        if not isinstance(interaction, StagedModelInteraction):
+            raise TypeError("staged model interaction is invalid")
+        self._interactions.setdefault(interaction.run_id, []).append(interaction)
+
+    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+        self._ensure_open()
+        return list(self._interactions.get(run_id, ()))
+
+    async def resolve_model_interaction(self, interaction: object) -> object:
+        del interaction
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
+    async def resolve_model_interactions(
+        self,
+        interactions: Sequence[object],
+    ) -> list[object]:
+        del interactions
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     async def load_loaded_model_context(
         self,
@@ -501,6 +560,8 @@ class StagingStepStore(StepStore):
         self._runs.pop(run_id, None)
         self._events.pop(run_id, None)
         self._snapshots.pop(run_id, None)
+        self._interactions.pop(run_id, None)
+        self._payloads.pop(run_id, None)
 
     def capture_projection_local(
         self,
@@ -513,6 +574,7 @@ class StagingStepStore(StepStore):
             return None
         events = self._events.get(run_id, ())
         snapshots = self._snapshots.get(run_id, ())
+        interactions = self._interactions.get(run_id, ())
         return ExecutionProjectionBatch(
             run,
             tuple(events[offset.events:]),
@@ -523,6 +585,9 @@ class StagingStepStore(StepStore):
             len(snapshots),
             offset.transcript_messages,
             offset.transcript_messages,
+            tuple(interactions[offset.interactions:]),
+            offset.interactions,
+            len(interactions),
         )
 
     def _ensure_open(self) -> None:
@@ -545,6 +610,7 @@ class InMemoryStepArchive(StagingStepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
+        interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
         del execution_id
@@ -562,6 +628,10 @@ class InMemoryStepArchive(StagingStepStore):
             for snapshot in snapshots:
                 if snapshot not in snapshot_values:
                     snapshot_values.append(snapshot)
+            interaction_values = self._interactions.setdefault(run.run_id, [])
+            for interaction in interactions:
+                if interaction not in interaction_values:
+                    interaction_values.append(interaction)
 
     async def materialize_snapshot(
         self,
@@ -574,6 +644,7 @@ class InMemoryStepArchive(StagingStepStore):
             run,
             events=(),
             snapshots=(snapshot,),
+            interactions=(),
             execution_id=execution_id,
         )
 
@@ -615,6 +686,55 @@ class InMemoryStepArchive(StagingStepStore):
     async def load_model_context(self, *, run_id: str) -> tuple[object, ...]:
         snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
         return () if snapshot is None else tuple(snapshot.messages)
+
+    async def resolve_model_interaction(
+        self,
+        interaction: object,
+    ) -> tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...] | None, bytes]:
+        if not isinstance(interaction, ModelInteractionRecord):
+            raise TypeError("model interaction is invalid")
+        snapshot = await self.latest_snapshot(
+            run_id=interaction.run_id,
+            include_interrupted=True,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        def resolve(projection: ContextProjection) -> tuple[ModelMessage, ...]:
+            values: list[ModelMessage] = []
+            for item in projection.items:
+                if isinstance(item, TranscriptSpanRef):
+                    if item.start < 0 or item.end > len(snapshot.messages):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    values.extend(snapshot.messages[item.start : item.end])
+                    continue
+                payload = item.content.payload
+                if payload.kind != "inline":
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                raw = payload.decode()
+                if not isinstance(raw, bytes):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values.extend(decode_model_messages(raw))
+            return tuple(values)
+
+        envelope = interaction.request_envelope.payload.decode()
+        if not isinstance(envelope, bytes):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        response = (
+            None
+            if interaction.response_context is None
+            else resolve(interaction.response_context)
+        )
+        return resolve(interaction.request_context), response, envelope
+
+    async def resolve_model_interactions(
+        self,
+        interactions: Sequence[object],
+    ) -> list[object]:
+        return [
+            await self.resolve_model_interaction(interaction)
+            for interaction in interactions
+        ]
 
 
 class StateStepArchive(StepStore):
@@ -680,6 +800,16 @@ class StateStepArchive(StepStore):
             head.projection_digest,
         )
 
+    async def execution_history_head_record(
+        self,
+        run_id: str,
+    ) -> ExecutionRunSealHead:
+        values = await self.execution_history_heads((run_id,))
+        head = values.get(run_id)
+        if head is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return head
+
     async def execution_history_heads(
         self,
         run_ids: Sequence[str],
@@ -696,6 +826,7 @@ class StateStepArchive(StepStore):
             for key in (
                 self._sequence(run_id, "event"),
                 self._sequence(run_id, "snapshot"),
+                self._sequence(run_id, "interaction"),
             )
         )
         run_keys = tuple(self._run_key(run_id) for run_id in unique_run_ids)
@@ -720,8 +851,17 @@ class StateStepArchive(StepStore):
             projection_record = records.get(self._history.projection_key(run_id))
             event_count = sequences.get(self._sequence(run_id, "event"), 0)
             snapshot_count = sequences.get(self._sequence(run_id, "snapshot"), 0)
+            interaction_count = sequences.get(
+                self._sequence(run_id, "interaction"), 0
+            )
             if head_record is None:
-                if run_record is not None or projection_record is not None or event_count or snapshot_count:
+                if (
+                    run_record is not None
+                    or projection_record is not None
+                    or event_count
+                    or snapshot_count
+                    or interaction_count
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 result[run_id] = ExecutionRunSealHead(run_id, 0, 0, 0, "empty")
                 continue
@@ -741,8 +881,220 @@ class StateStepArchive(StepStore):
                 snapshot_count,
                 head.message_count,
                 projection_digest,
+                interaction_count,
             )
         return result
+
+    async def resolve_model_interaction(
+        self,
+        interaction: object,
+    ) -> tuple[tuple[ModelMessage, ...], tuple[ModelMessage, ...] | None, bytes]:
+        if not isinstance(interaction, ModelInteractionRecord):
+            raise TypeError("model interaction is invalid")
+        request = await self._history.load_projected_context(
+            interaction.run_id,
+            interaction.request_context,
+        )
+        response = None
+        if interaction.response_context is not None:
+            response = (
+                await self._history.load_projected_context(
+                    interaction.run_id,
+                    interaction.response_context,
+                )
+            ).model_messages()
+        envelope = await self._history.read_payload(
+            interaction.request_envelope.payload
+        )
+        return request.model_messages(), response, envelope
+
+    async def resolve_model_interactions(
+        self,
+        interactions: Sequence[object],
+    ) -> list[object]:
+        require_no_run_history_lock(
+            "StateStepArchive.resolve_model_interactions"
+        )
+        values = tuple(interactions)
+        if not values:
+            return []
+        if any(not isinstance(value, ModelInteractionRecord) for value in values):
+            raise TypeError("model interaction is invalid")
+        records = tuple(value for value in values if isinstance(value, ModelInteractionRecord))
+        projections = tuple(
+            projection
+            for record in records
+            for projection in (
+                record.request_context,
+                *(
+                    ()
+                    if record.response_context is None
+                    else (record.response_context,)
+                ),
+            )
+        )
+        contexts = await self._history.load_projected_contexts(
+            records[0].run_id,
+            projections,
+        )
+        envelopes: dict[str, bytes] = {}
+        result: list[object] = []
+        context_index = 0
+        for record in records:
+            request = contexts[context_index].model_messages()
+            context_index += 1
+            response = None
+            if record.response_context is not None:
+                response = contexts[context_index].model_messages()
+                context_index += 1
+            digest = record.request_envelope.payload.digest
+            if digest not in envelopes:
+                envelopes[digest] = await self._history.read_payload(
+                    record.request_envelope.payload
+                )
+            result.append((request, response, envelopes[digest]))
+        return result
+
+    async def prepare_interactions(
+        self,
+        run: RunRecord,
+        interactions: Sequence[StagedModelInteraction],
+        payload: Callable[[str], bytes],
+        source_messages: Sequence[ModelMessage] | None = None,
+    ) -> tuple[ModelInteractionRecord, ...]:
+        values = tuple(interactions)
+        if not values:
+            return ()
+        request_sequences: set[int] = set()
+        for interaction in values:
+            if (
+                interaction.run_id != run.run_id
+                or interaction.request_sequence in request_sequences
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            request_sequences.add(interaction.request_sequence)
+        max_source_count = max(
+            (
+                projection.source_message_count
+                for interaction in values
+                for projection in (
+                    interaction.request_context,
+                    *(
+                        ()
+                        if interaction.response_context is None
+                        else (interaction.response_context,)
+                    ),
+                )
+                if projection.source_prefix_digest != "0" * 64
+            ),
+            default=0,
+        )
+        prefix_messages = (
+            tuple(source_messages)
+            if source_messages is not None
+            and len(source_messages) >= max_source_count
+            else await self._history.load_messages(run.run_id)
+        )
+        prefix_checkpoints = {0: message_prefix_digest(())}
+        prefix_digest = prefix_checkpoints[0]
+        for index, message in enumerate(prefix_messages[:max_source_count], 1):
+            prefix_digest = extend_prefix_digest(prefix_digest, message)
+            prefix_checkpoints[index] = prefix_digest
+        _logger.debug(
+            "model interaction prefix checkpoints: run=%s counts=%s kinds=%s",
+            run.run_id,
+            tuple(prefix_checkpoints),
+            tuple(type(message).__name__ for message in prefix_messages),
+        )
+        for interaction in values:
+            for projection in (
+                interaction.request_context,
+                *(
+                    ()
+                    if interaction.response_context is None
+                    else (interaction.response_context,)
+                ),
+            ):
+                if projection.source_prefix_digest == "0" * 64:
+                    continue
+                if projection.source_message_count > len(prefix_messages):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if any(
+                    isinstance(item, StagedContextSpan)
+                    and item.end > len(prefix_messages)
+                    for item in projection.items
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if prefix_checkpoints[projection.source_message_count] != (
+                    projection.source_prefix_digest
+                ):
+                    raise AIError(
+                        ErrorCode.STORAGE_INTEGRITY_ERROR,
+                        "model interaction source prefix digest mismatch",
+                    )
+        result: list[ModelInteractionRecord] = []
+        for staged in values:
+            request_context = context_projection_to_durable(
+                staged.request_context,
+                owner_id=run.run_id,
+                source_domain=self._runtime_domain,
+                payload=payload,
+            )
+            request_context = await self._history.prepare_projection(
+                run.run_id,
+                request_context,
+            )
+            request_envelope = await self._prepare_inline_payload(
+                run.run_id,
+                RuntimePayloadRef(
+                    StoredPayload.inline_bytes(payload(staged.request_envelope_digest)),
+                    self._runtime_domain,
+                ),
+            )
+            response_context = None
+            if staged.response_context is not None:
+                response_context = context_projection_to_durable(
+                    staged.response_context,
+                    owner_id=run.run_id,
+                    source_domain=self._runtime_domain,
+                    payload=payload,
+                )
+                response_context = await self._history.prepare_projection(
+                    run.run_id,
+                    response_context,
+                )
+            result.append(
+                ModelInteractionRecord(
+                    staged.run_id,
+                    staged.step_index,
+                    staged.request_sequence,
+                    staged.purpose,
+                    staged.output_retry_index,
+                    staged.model,
+                    request_context,
+                    request_envelope,
+                    response_context,
+                    staged.status,
+                    staged.error_code,
+                    staged.duration_ns,
+                    staged.usage,
+                )
+            )
+        return tuple(result)
+
+    async def _prepare_inline_payload(
+        self,
+        run_id: str,
+        content: RuntimePayloadRef,
+    ) -> RuntimePayloadRef:
+        projection = await self._history.prepare_projection(
+            run_id,
+            ContextProjection((InlineContextBlock(content),)),
+        )
+        item = projection.items[0]
+        if not isinstance(item, InlineContextBlock):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return item.content
 
     async def verify_execution_projection_head(
         self,
@@ -754,12 +1106,13 @@ class StateStepArchive(StepStore):
         if await self.get_run(run_id=projection.run.run_id) != projection.run:
             return False
         head = await self.execution_history_head(projection.run.run_id)
+        record = await self.execution_history_head_record(projection.run.run_id)
         return head == (
             projection.target_event_offset,
             projection.target_snapshot_offset,
             projection.target_transcript_message_count,
             projection.projection_digest,
-        )
+        ) and record.interaction_count == projection.target_interaction_offset
 
     def bind_history_lock(self, history_lock: _RunHistoryLock) -> None:
         self._history_lock = history_lock
@@ -1270,6 +1623,7 @@ class StateStepArchive(StepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[ContinuableSnapshot],
+        interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
         self._ensure_open()
@@ -1284,6 +1638,7 @@ class StateStepArchive(StepStore):
                 run,
                 events=events,
                 snapshots=prepared.snapshots,
+                interactions=interactions,
                 execution_id=execution_id,
             )
         )
@@ -1294,6 +1649,7 @@ class StateStepArchive(StepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[PreparedStepSnapshot],
+        interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
     ) -> None:
         """Commit a prepared projection without preparing its payload twice."""
@@ -1310,6 +1666,7 @@ class StateStepArchive(StepStore):
                 run,
                 events=events,
                 snapshots=values,
+                interactions=interactions,
                 execution_id=execution_id,
             )
         )
@@ -1321,6 +1678,7 @@ class StateStepArchive(StepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[PreparedStepSnapshot],
+        interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
@@ -1335,6 +1693,9 @@ class StateStepArchive(StepStore):
         ) + tuple(
             ("snapshot", snapshot.stored, snapshot.stored.state)
             for snapshot in snapshots
+        ) + tuple(
+            ("interaction", interaction, interaction.status)
+            for interaction in interactions
         )
         supplied_history_head_guard = history_head_guard is not None
         history_head_guard = await self._execution_history_guard_in_transaction(
@@ -1355,19 +1716,27 @@ class StateStepArchive(StepStore):
             return
         owner = self._run_key(run.run_id)
         owner_record = await self._ensure_run_in_transaction(transaction, run)
-        grouped: dict[str, list[object]] = {"event": [], "snapshot": []}
-        kinds: dict[str, list[str]] = {"event": [], "snapshot": []}
+        grouped: dict[str, list[object]] = {
+            "event": [],
+            "snapshot": [],
+            "interaction": [],
+        }
+        kinds: dict[str, list[str]] = {
+            "event": [],
+            "snapshot": [],
+            "interaction": [],
+        }
         for family, value, kind in facts:
             grouped[family].append(value)
             kinds[family].append(kind)
         stored_facts: list[StoredFact] = []
         reservation_requests = {
             self._sequence(run.run_id, family): len(grouped[family])
-            for family in ("event", "snapshot")
+            for family in ("event", "snapshot", "interaction")
             if grouped[family]
         }
         high_waters = await transaction.reserve_sequences(reservation_requests)
-        for family in ("event", "snapshot"):
+        for family in ("event", "snapshot", "interaction"):
             values = grouped[family]
             if not values:
                 continue
@@ -1375,7 +1744,11 @@ class StateStepArchive(StepStore):
             final = high_waters[sequence_key_value]
             sequences = tuple(range(final - len(values) + 1, final + 1))
             stream = self._stream(run.run_id, family)
-            fact_kind = "step_event" if family == "event" else "step_snapshot"
+            fact_kind = {
+                "event": "step_event",
+                "snapshot": "step_snapshot",
+                "interaction": "model_interaction",
+            }[family]
             for sequence, value, kind in zip(sequences, values, kinds[family], strict=True):
                 stored_facts.append(
                     StoredFact(
@@ -1519,6 +1892,7 @@ class StateStepArchive(StepStore):
         *,
         events: Sequence[StepEvent],
         snapshots: Sequence[PreparedStepSnapshot],
+        interactions: Sequence[ModelInteractionRecord] = (),
         execution_id: str | None = None,
         history_head_guard: tuple[ExecutionHistoryHeadRecord, StoredRecord] | None = None,
     ) -> None:
@@ -1530,6 +1904,7 @@ class StateStepArchive(StepStore):
             run,
             events=events,
             snapshots=snapshots,
+            interactions=interactions,
             execution_id=execution_id,
             history_head_guard=history_head_guard,
         )
@@ -1663,6 +2038,17 @@ class StateStepArchive(StepStore):
         require_no_run_history_lock("StateStepArchive.list_events")
         values = await self._facts(run_id, "event")
         return [_decode_step(value.data) for value in values]
+
+    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+        require_no_run_history_lock("StateStepArchive.list_model_interactions")
+        values = await self._facts(run_id, "interaction")
+        result = []
+        for value in values:
+            interaction = _decode_step(value.data)
+            if not isinstance(interaction, ModelInteractionRecord):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result.append(interaction)
+        return result
 
     async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]:
         require_no_run_history_lock("StateStepArchive.iter_messages")
@@ -1883,7 +2269,7 @@ class StateStepArchive(StepStore):
             await transaction.delete_sequences(
                 tuple(
                     self._sequence(run_id, family)
-                    for family in ("event", "snapshot")
+                    for family in ("event", "snapshot", "interaction")
                 )
             )
             await self._advance_execution_history_head_in_transaction(
@@ -2143,6 +2529,34 @@ class RuntimeStepStore(StepStore):
         await self._ensure_business()
         return await self._staging.latest_snapshot(run_id=run_id, include_interrupted=include_interrupted)
 
+    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]:
+        return self._staging.intern_payload(run_id, payload)
+
+    def staged_payload(self, run_id: str, digest: str) -> bytes:
+        return self._staging.staged_payload(run_id, digest)
+
+    def stage_model_interaction(self, interaction: object) -> None:
+        self._staging.stage_model_interaction(interaction)
+        run_id = getattr(interaction, "run_id", None)
+        if not isinstance(run_id, str) or not run_id:
+            raise TypeError("staged model interaction has no run id")
+        self._projection_dirty.add(run_id)
+
+    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+        await self._ensure_business()
+        return await self._staging.list_model_interactions(run_id=run_id)
+
+    async def resolve_model_interaction(self, interaction: object) -> object:
+        await self._ensure_business()
+        return await self._staging.resolve_model_interaction(interaction)
+
+    async def resolve_model_interactions(
+        self,
+        interactions: Sequence[object],
+    ) -> list[object]:
+        await self._ensure_business()
+        return await self._staging.resolve_model_interactions(interactions)
+
     def read_store(self, runtime_domain: RuntimeDomain) -> StepStore:
         if runtime_domain not in self._archives:
             return self._staging
@@ -2322,6 +2736,25 @@ class RuntimeStepStore(StepStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if archive is not None:
             await _materialize_snapshot(archive, run, snapshot)
+            interactions = await self._staging.list_model_interactions(
+                run_id=step_run_id
+            )
+            if interactions and isinstance(archive, StateStepArchive):
+                prepared = await archive.prepare_interactions(
+                    run,
+                    tuple(interactions),
+                    lambda digest: self._staging.staged_payload(
+                        step_run_id,
+                        digest,
+                    ),
+                    source_messages=snapshot.messages,
+                )
+                await archive.sync_projection(
+                    run,
+                    events=(),
+                    snapshots=(),
+                    interactions=prepared,
+                )
 
     async def materialize_conversation(self, *, step_run_id: str) -> None:
         run = await self._staging.get_run(run_id=step_run_id)
@@ -2375,6 +2808,22 @@ class RuntimeStepStore(StepStore):
                     snapshot,
                     execution_id=execution_id,
                 )
+                if isinstance(destination, StateStepArchive):
+                    interactions = await recovery.list_model_interactions(
+                        run_id=step_run_id
+                    )
+                    if interactions:
+                        await destination.sync_projection(
+                            run,
+                            events=(),
+                            snapshots=(),
+                            interactions=tuple(
+                                value
+                                for value in interactions
+                                if isinstance(value, ModelInteractionRecord)
+                            ),
+                            execution_id=execution_id,
+                        )
 
             async def readback() -> CommitObservation[None]:
                 try:
@@ -2383,9 +2832,19 @@ class RuntimeStepStore(StepStore):
                         run_id=run.run_id,
                         include_interrupted=True,
                     )
+                    source_interactions = await recovery.list_model_interactions(
+                        run_id=step_run_id
+                    )
+                    observed_interactions = await destination.list_model_interactions(
+                        run_id=run.run_id
+                    )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed_run == run and observed_snapshot == snapshot:
+                if (
+                    observed_run == run
+                    and observed_snapshot == snapshot
+                    and tuple(observed_interactions) == tuple(source_interactions)
+                ):
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
@@ -2471,6 +2930,9 @@ class RuntimeStepStore(StepStore):
                                     0,
                                     0,
                                     0,
+                                    (),
+                                    0,
+                                    0,
                                 ),
                             )
                         )
@@ -2510,6 +2972,27 @@ class RuntimeStepStore(StepStore):
                             if batch.snapshots
                             else durable_head.projection_digest
                         ),
+                        tuple(
+                            await archive.prepare_interactions(
+                                projection.run,
+                                projection.interactions,
+                                lambda digest,
+                                run_id=projection.run.run_id: self._staging.staged_payload(
+                                    run_id,
+                                    digest,
+                                ),
+                                source_messages=(
+                                    projection.snapshots[-1].messages
+                                    if projection.snapshots
+                                    else None
+                                ),
+                            )
+                        ),
+                        durable_head.interaction_count
+                        ,
+                        durable_head.interaction_count
+                        + projection.target_interaction_offset
+                        - projection.base_interaction_offset,
                     )
                 )
             plan = ExecutionTerminalSealPlan(
@@ -2571,6 +3054,10 @@ class RuntimeStepStore(StepStore):
                 offset.transcript_messages = max(
                     offset.transcript_messages,
                     projection.target_transcript_message_count,
+                )
+                offset.interactions = max(
+                    offset.interactions,
+                    projection.target_interaction_offset,
                 )
                 self._projection_dirty.discard(projection.run.run_id)
             if completion is not None and not completion.done():
@@ -2672,6 +3159,9 @@ class RuntimeStepStore(StepStore):
                         projection.base_snapshot_offset,
                         projection.target_event_offset,
                         projection.target_snapshot_offset,
+                        projection.interactions,
+                        projection.base_interaction_offset,
+                        projection.target_interaction_offset,
                     )
                     _logger.debug(
                         "projection flight captured: run=%s token=%s "
@@ -2730,6 +3220,10 @@ class RuntimeStepStore(StepStore):
             )
             offset.events = max(offset.events, captured.target_event_offset)
             offset.snapshots = max(offset.snapshots, captured.target_snapshot_offset)
+            offset.interactions = max(
+                offset.interactions,
+                captured.target_interaction_offset,
+            )
             if target_transcript_message_count is not None:
                 offset.transcript_messages = max(
                     offset.transcript_messages,
@@ -2766,6 +3260,7 @@ class RuntimeStepStore(StepStore):
                     captured.run,
                     captured.events,
                     captured.snapshots,
+                    captured.interactions,
                     execution_id=execution_id,
                 )
 
@@ -2779,6 +3274,9 @@ class RuntimeStepStore(StepStore):
                         run_id=captured.run.run_id,
                         include_interrupted=True,
                     )
+                    stored_interactions = await archive.list_model_interactions(
+                        run_id=captured.run.run_id
+                    )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
                 if stored_run != captured.run:
@@ -2786,6 +3284,10 @@ class RuntimeStepStore(StepStore):
                 if captured.events and tuple(stored_events[-len(captured.events) :]) != captured.events:
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 if captured.snapshots and stored_snapshot != captured.snapshots[-1]:
+                    return CommitObservation(DurableCommitState.NOT_COMMITTED)
+                if captured.interactions and tuple(
+                    stored_interactions[-len(captured.interactions) :]
+                ) != tuple(captured.interactions):
                     return CommitObservation(DurableCommitState.NOT_COMMITTED)
                 return CommitObservation(DurableCommitState.COMMITTED)
 
@@ -2827,7 +3329,7 @@ class RuntimeStepStore(StepStore):
             )
             await self._fence_durability_flight(flight, unknown)
             raise unknown from result.error
-        if not captured.events and not captured.snapshots:
+        if not captured.events and not captured.snapshots and not captured.interactions:
             await self.finalize_execution_projection(flight, captured)
             return
         started = monotonic()
@@ -2836,9 +3338,25 @@ class RuntimeStepStore(StepStore):
                 captured.run,
                 captured.snapshots,
             )
+            interactions = await archive.prepare_interactions(
+                captured.run,
+                captured.interactions,
+                lambda digest: self._staging.staged_payload(
+                    captured.run.run_id,
+                    digest,
+                ),
+                source_messages=(
+                    captured.snapshots[-1].messages
+                    if captured.snapshots
+                    else None
+                ),
+            )
         except BaseException:
             await self.abandon_execution_projection(flight)
             raise
+        durable_head = await archive.execution_history_head_record(
+            captured.run.run_id
+        )
         expected_head = ExecutionRunSealHead(
             captured.run.run_id,
             captured.target_event_offset,
@@ -2847,6 +3365,7 @@ class RuntimeStepStore(StepStore):
             prepared.snapshots[-1].projection.digest
             if prepared.snapshots
             else "empty",
+            durable_head.interaction_count + len(interactions),
         )
 
         async def operation() -> ExecutionRunSealHead:
@@ -2854,33 +3373,35 @@ class RuntimeStepStore(StepStore):
                 captured.run,
                 events=captured.events,
                 snapshots=prepared.snapshots,
+                interactions=interactions,
                 execution_id=execution_id,
             )
-            event_count, snapshot_count, message_count, projection_digest = (
-                await archive.execution_history_head(captured.run.run_id)
-            )
+            head = await archive.execution_history_head_record(captured.run.run_id)
             if (
-                event_count != expected_head.event_count
-                or snapshot_count != expected_head.snapshot_count
-                or message_count != expected_head.transcript_message_count
+                head.event_count != expected_head.event_count
+                or head.snapshot_count != expected_head.snapshot_count
+                or head.transcript_message_count
+                != expected_head.transcript_message_count
+                or head.interaction_count != expected_head.interaction_count
                 or (
                     prepared.snapshots
-                    and projection_digest != expected_head.projection_digest
+                    and head.projection_digest != expected_head.projection_digest
                 )
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return ExecutionRunSealHead(
                 captured.run.run_id,
-                event_count,
-                snapshot_count,
-                message_count,
-                projection_digest,
+                head.event_count,
+                head.snapshot_count,
+                head.transcript_message_count,
+                head.projection_digest,
+                head.interaction_count,
             )
 
         async def readback() -> CommitObservation[ExecutionRunSealHead]:
             try:
-                event_count, snapshot_count, message_count, projection_digest = (
-                    await archive.execution_history_head(captured.run.run_id)
+                head = await archive.execution_history_head_record(
+                    captured.run.run_id
                 )
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
@@ -2889,13 +3410,15 @@ class RuntimeStepStore(StepStore):
                         error=error,
                     )
                 return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-            if event_count != expected_head.event_count:
+            if head.event_count != expected_head.event_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if snapshot_count != expected_head.snapshot_count:
+            if head.snapshot_count != expected_head.snapshot_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if message_count != expected_head.transcript_message_count:
+            if head.transcript_message_count != expected_head.transcript_message_count:
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if prepared.snapshots and projection_digest != expected_head.projection_digest:
+            if head.interaction_count != expected_head.interaction_count:
+                return CommitObservation(DurableCommitState.NOT_COMMITTED)
+            if prepared.snapshots and head.projection_digest != expected_head.projection_digest:
                 return CommitObservation(
                     DurableCommitState.PARTIAL_INTEGRITY_ERROR,
                     error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
@@ -2904,10 +3427,11 @@ class RuntimeStepStore(StepStore):
                 DurableCommitState.COMMITTED,
                 value=ExecutionRunSealHead(
                     captured.run.run_id,
-                    event_count,
-                    snapshot_count,
-                    message_count,
-                    projection_digest,
+                    head.event_count,
+                    head.snapshot_count,
+                    head.transcript_message_count,
+                    head.projection_digest,
+                    head.interaction_count,
                 ),
             )
 
@@ -3255,6 +3779,7 @@ async def _sync_projection(
     run: RunRecord,
     events: tuple[StepEvent, ...],
     snapshots: tuple[ContinuableSnapshot, ...],
+    interactions: tuple[ModelInteractionRecord, ...] = (),
     *,
     execution_id: str | None = None,
 ) -> None:
@@ -3263,6 +3788,7 @@ async def _sync_projection(
             run,
             events=events,
             snapshots=snapshots,
+            interactions=interactions,
             execution_id=execution_id,
         )
         return
@@ -3319,6 +3845,15 @@ def _encode_step(value: object) -> dict[str, object]:
 
 
 def _step_subject(value: object) -> bytes | None:
+    if isinstance(value, ModelInteractionRecord):
+        return hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "run_id": value.run_id,
+                    "request_sequence": value.request_sequence,
+                }
+            )
+        ).digest()
     return None
 
 
