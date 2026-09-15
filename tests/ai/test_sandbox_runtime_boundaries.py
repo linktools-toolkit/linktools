@@ -22,8 +22,9 @@ from linktools.ai.workspace._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_UNKNOWN,
     MAX_SAFE_DETAILS_BYTES,
-    validate_safe_details,
+    read_frame,
 )
+from linktools.ai.workspace.sandbox_worker import _send_error
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -52,6 +53,17 @@ class _FakeSession:
         del timeout_seconds
         self.calls.append(command)
         return "ok"
+
+
+class _BufferWriter:
+    def __init__(self) -> None:
+        self.payload = bytearray()
+
+    def write(self, value: bytes) -> None:
+        self.payload.extend(value)
+
+    async def drain(self) -> None:
+        pass
 
 
 @pytest.mark.asyncio
@@ -132,16 +144,28 @@ async def test_bubblewrap_error_frame_preserves_effect_certainty(
     assert error.safe_details == {"reason": "invalid"}
 
 
-def test_sandbox_safe_detail_limit_applies_to_details_not_frame_envelope() -> None:
+@pytest.mark.asyncio
+async def test_sandbox_worker_bounds_safe_details_independently_from_frame() -> None:
     payload_overhead = len(b'{"reason":""}')
-    validate_safe_details(
-        {"reason": "x" * (MAX_SAFE_DETAILS_BYTES - payload_overhead)}
+    details = {"reason": "x" * (MAX_SAFE_DETAILS_BYTES - payload_overhead)}
+    writer = _BufferWriter()
+
+    await _send_error(
+        cast(asyncio.StreamWriter, writer),
+        "request",
+        ErrorCode.REQUEST_FIELD_INVALID,
+        asyncio.Lock(),
+        details,
+        effect=ERROR_EFFECT_NOT_APPLIED,
     )
 
-    with pytest.raises(ValueError, match="safe details are too large"):
-        validate_safe_details(
-            {"reason": "x" * (MAX_SAFE_DETAILS_BYTES - payload_overhead + 1)}
-        )
+    assert len(writer.payload) > MAX_SAFE_DETAILS_BYTES
+    reader = asyncio.StreamReader()
+    reader.feed_data(bytes(writer.payload))
+    reader.feed_eof()
+    frame = await read_frame(reader)
+    assert frame is not None
+    assert frame["error"]["safe_details"] == details
 
 
 def test_runtime_compaction_uses_harness_deduplication() -> None:
