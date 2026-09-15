@@ -75,9 +75,9 @@ from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
     AgentContext,
     CapabilityContribution,
-    LinkToolsSkills,
-    LinkToolsSubagents,
+    SkillCapability,
     SkillSourceRegistry,
+    SubagentCapability,
     SubagentDelegate,
     tool_compaction_keep_result_from_metadata,
     tool_class_from_metadata,
@@ -674,7 +674,7 @@ async def _materialize_agent(
         )
         capabilities.append(capability)
     if definition.skill_definitions:
-        skill_capability = LinkToolsSkills(
+        skill_capability = SkillCapability(
             definition.skill_definitions,
             skill_sources,
             resource_paths=scope.skill_resource_paths,
@@ -687,7 +687,7 @@ async def _materialize_agent(
     if scope.subagent_available and scope.binding.snapshot.subagents:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        subagent_capability = LinkToolsSubagents(
+        subagent_capability = SubagentCapability(
             scope.binding.snapshot.subagents,
             scope.subagent_delegate,
             scope.subagent_descriptions,
