@@ -3,7 +3,6 @@
 """Artifact query and download API."""
 
 import base64
-import binascii
 import hashlib
 import hmac
 import json
@@ -16,7 +15,6 @@ from linktools.core import environ
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
-    CursorPayload,
     CursorSigner,
     OperationKind,
     OperationLedgerInput,
@@ -28,12 +26,16 @@ from ..core import (
     ResourceRef,
     canonical_json_bytes,
     canonical_sha256,
+    validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
+from ._cursor import decode_cursor as decode_runtime_cursor
+from ._cursor import encode_cursor as encode_runtime_cursor
 from .service_api import ArtifactDownload, ArtifactView
 from .state._contracts import ArtifactState
 
 _logger = environ.get_logger("ai.runtime.artifact")
+_CURSOR_RESOURCE_KIND = "ARTIFACT"
 
 
 class DefaultArtifactService:
@@ -55,9 +57,24 @@ class DefaultArtifactService:
             ResourceRef(ResourceKind.ARTIFACT, execution_id, principal.tenant_id),
         )
         raw_cursor = _decode_cursor(cursor, principal.tenant_id, execution_id, self._cursor_signer)
-        page = await self._state.records.list_by_execution(execution_id, tenant_id=principal.tenant_id, cursor=raw_cursor, limit=limit)
+        page = await self._state.records.list_by_execution(
+            execution_id,
+            tenant_id=principal.tenant_id,
+            cursor=raw_cursor,
+            limit=validate_page_limit(limit),
+        )
         values = tuple(ArtifactView(item.artifact_id, item.execution_id, item.size) for item in page.items)
-        next_cursor = None if page.next_cursor is None else self._cursor_signer.encode(CursorPayload(1, principal.tenant_id, "ARTIFACT", _artifact_filter(execution_id), page.next_cursor, 0, int(time.time()) + 3600))
+        next_cursor = (
+            None
+            if page.next_cursor is None
+            else encode_runtime_cursor(
+                self._cursor_signer,
+                tenant_id=principal.tenant_id,
+                resource_kind=_CURSOR_RESOURCE_KIND,
+                filter_digest=_artifact_filter(execution_id),
+                position=page.next_cursor,
+            )
+        )
         return Page(values, next_cursor)
 
     async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload:
@@ -120,12 +137,13 @@ def _artifact_filter(execution_id: str) -> str:
 def _decode_cursor(cursor: str | None, tenant_id: str, execution_id: str, signer: CursorSigner) -> str | None:
     if cursor is None:
         return None
-    try:
-        payload = signer.decode(cursor)
-        if payload.cursor_version != 1 or payload.tenant_id != tenant_id or payload.resource_kind != "ARTIFACT" or payload.filter_digest != _artifact_filter(execution_id) or payload.snapshot_or_store_revision != 0 or not payload.sort_key.strip():
-            raise ValueError("artifact cursor identity mismatch")
-        return payload.sort_key
-    except (binascii.Error, KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
-    except AIError as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind=_CURSOR_RESOURCE_KIND,
+        filter_digest=_artifact_filter(execution_id),
+    )
+    if payload.revision != 0:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return payload.position
