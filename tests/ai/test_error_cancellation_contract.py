@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Cancellation and capability error-boundary regressions."""
+"""Cancellation and capability error-boundary behavior."""
 
 import asyncio
 from types import SimpleNamespace
@@ -11,12 +11,11 @@ from linktools.ai.asset._sql import SqlAssetBackend
 from linktools.ai.capability import SubagentDelegate
 from linktools.ai.core import ExecutionStatus, Principal, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._mcp import materialize_mcp_servers
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
-from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import MCPServerSpec
 from linktools.ai.task import (
@@ -67,29 +66,25 @@ async def test_asset_sql_apply_preserves_cancellation(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execution_handoff_cleanup_restores_state_before_cancellation() -> None:
-    service = object.__new__(DefaultExecutionService)
-    service._handoff_condition = asyncio.Condition()
+async def test_handoff_gate_recovers_after_cancelled_cleanup() -> None:
+    gate = HandoffGate[tuple[str, str], None]()
+    key = ("tenant", "execution")
 
-    async def cancelled(execution_id: str, *, tenant_id: str) -> None:
-        del execution_id, tenant_id
-        raise asyncio.CancelledError
+    state, owner = await gate.request_release(key)
+    assert owner is True
+    await gate.finish_release(key, state, succeeded=False)
 
-    service._release_terminal = cancelled
-    state = SimpleNamespace(release_in_progress=True, release_requested=False)
-
-    with pytest.raises(asyncio.CancelledError):
-        await service._run_handoff_cleanup("execution", "tenant", state)
-
-    assert state.release_in_progress is False
-    assert state.release_requested is True
+    await asyncio.wait_for(gate.acquire_hold(key, "task:graph:node"), 1)
+    state, owner = await gate.release_hold(key, "task:graph:node")
+    assert state is not None
+    assert owner is True
+    await gate.finish_release(key, state, succeeded=True)
 
 
 @pytest.mark.asyncio
 async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> None:
     service = object.__new__(DefaultExecutionService)
-    service._handoff_condition = asyncio.Condition()
-    service._handoff_states = {}
+    service._handoff = HandoffGate()
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
 
@@ -120,39 +115,6 @@ async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> 
     await release_started.wait()
     release_finished.set()
     await asyncio.gather(cleanup, release_hold)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("service_type", "consumer_name", "resource_id"),
-    (
-        (DefaultEvaluationService, "_evaluation_consumer", "evaluation"),
-        (DefaultSessionService, "_session_consumer", "session"),
-    ),
-)
-async def test_transient_handoff_cleanup_preserves_cancellation(
-    service_type,
-    consumer_name: str,
-    resource_id: str,
-) -> None:
-    service = object.__new__(service_type)
-    service._handoff_condition = asyncio.Condition()
-    service._handoff_states = {}
-
-    async def cancelled(*args, **kwargs) -> None:
-        del args, kwargs
-        raise asyncio.CancelledError
-
-    service._release_terminal = cancelled
-    key = ("tenant", resource_id)
-
-    with pytest.raises(asyncio.CancelledError):
-        async with getattr(service, consumer_name)(resource_id, "tenant"):
-            service._handoff_states[key].release_requested = True
-
-    state = service._handoff_states[key]
-    assert state.release_in_progress is False
-    assert state.release_requested is True
 
 
 @pytest.mark.asyncio
