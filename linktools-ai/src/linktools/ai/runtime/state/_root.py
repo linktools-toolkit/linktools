@@ -311,9 +311,6 @@ class RuntimeState:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._objects.object_store(domain)
 
-    def _object_store(self, domain: RuntimeDomain) -> ObjectStore:
-        return self.object_store(domain)
-
     def working_object_store(
         self,
         domain: RuntimeDomain,
@@ -324,28 +321,6 @@ class RuntimeState:
         if self._objects is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._objects.working_object_store(
-            domain,
-            owner_scope=owner_scope,
-        )
-
-    def _working_object_store(
-        self,
-        domain: RuntimeDomain,
-        *,
-        owner_scope: str,
-    ) -> ObjectStore:
-        return self.working_object_store(domain, owner_scope=owner_scope)
-
-    async def _release_object_scope(
-        self,
-        domain: RuntimeDomain,
-        *,
-        owner_scope: str,
-    ) -> None:
-        self._require_ready()
-        if self._objects is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        await self._objects.release_object_scope(
             domain,
             owner_scope=owner_scope,
         )
