@@ -5,7 +5,7 @@
 import asyncio
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -26,6 +26,7 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
+from ._handoff import HandoffGate, HandoffState
 from ._snapshot import RunSnapshot
 from .service_api import (
     CompareEvaluationRequest,
@@ -39,11 +40,9 @@ from .service_api import (
     StartEvaluationRequest,
 )
 from .state._contracts import (
+    EvaluationRecord,
     EvaluationState,
     ExecutionRepository,
-)
-from .state._contracts import (
-    EvaluationRecord,
     IdempotencyRecord,
 )
 
@@ -76,13 +75,6 @@ async def _no_execution_hold(
 
 async def _no_execution_handoff(execution_id: str, *, tenant_id: str) -> None:
     del execution_id, tenant_id
-
-
-@dataclass
-class _EvaluationHandoffState:
-    active_consumers: int = 0
-    release_requested: bool = False
-    release_in_progress: bool = False
 
 
 def validate_compare_request(request: CompareEvaluationRequest) -> None:
@@ -140,8 +132,7 @@ class DefaultEvaluationService:
         self._request_execution_handoff = (
             request_execution_handoff or _no_execution_handoff
         )
-        self._handoff_states: dict[tuple[str, str], _EvaluationHandoffState] = {}
-        self._handoff_condition = asyncio.Condition()
+        self._handoff = HandoffGate[tuple[str, str], object]()
 
     async def start(
         self, binding_digest: str, request: StartEvaluationRequest
@@ -575,71 +566,52 @@ class DefaultEvaluationService:
     @asynccontextmanager
     async def _evaluation_consumer(self, evaluation_id: str, tenant_id: str):
         key = (tenant_id, evaluation_id)
-        async with self._handoff_condition:
-            while True:
-                state = self._handoff_states.get(key)
-                if state is None:
-                    state = _EvaluationHandoffState()
-                    self._handoff_states[key] = state
-                if not state.release_in_progress:
-                    state.active_consumers += 1
-                    break
-                await self._handoff_condition.wait()
-        cleanup_owner = False
+        state = await self._handoff.enter(key)
         try:
             yield state
         finally:
-            async with self._handoff_condition:
-                state.active_consumers -= 1
-                if state.active_consumers < 0:
-                    raise RuntimeError("evaluation consumer count became negative")
-                if state.active_consumers == 0:
-                    if state.release_requested and not state.release_in_progress:
-                        state.release_in_progress = True
-                        cleanup_owner = True
-                    elif (
-                        not state.release_requested
-                        and self._handoff_states.get(key) is state
-                    ):
-                        self._handoff_states.pop(key, None)
-                self._handoff_condition.notify_all()
-            if cleanup_owner:
-                cleanup_succeeded = False
-                cleanup_error: BaseException | None = None
-                try:
-                    await self._release_terminal(evaluation_id, tenant_id=tenant_id)
-                    cleanup_succeeded = True
-                except BaseException as error:
-                    cleanup_error = error
-                    if isinstance(error, Exception):
-                        _logger.error(
-                            "evaluation transient handoff cleanup failed: evaluation=%s",
-                            evaluation_id,
-                            exc_info=environ.debug,
-                        )
-                async with self._handoff_condition:
-                    if self._handoff_states.get(key) is state:
-                        if cleanup_succeeded and state.active_consumers == 0:
-                            self._handoff_states.pop(key, None)
-                        else:
-                            state.release_in_progress = False
-                            state.release_requested = True
-                    self._handoff_condition.notify_all()
-                if cleanup_error is not None and not isinstance(
-                    cleanup_error, Exception
-                ):
-                    raise cleanup_error
+            owner = await self._handoff.leave(key, state)
+            if owner:
+                await self._run_evaluation_release(evaluation_id, tenant_id, state)
 
     async def _request_evaluation_release(
         self, evaluation_id: str, tenant_id: str
     ) -> None:
         key = (tenant_id, evaluation_id)
-        async with self._handoff_condition:
-            state = self._handoff_states.get(key)
-            if state is None:
-                raise RuntimeError("evaluation release requested without consumer")
-            state.release_requested = True
-            self._handoff_condition.notify_all()
+        state, owner = await self._handoff.request_release(
+            key,
+            require_existing=True,
+        )
+        if owner:
+            await self._run_evaluation_release(evaluation_id, tenant_id, state)
+
+    async def _run_evaluation_release(
+        self,
+        evaluation_id: str,
+        tenant_id: str,
+        state: HandoffState[object],
+    ) -> None:
+        succeeded = False
+        cleanup_error: BaseException | None = None
+        try:
+            await self._release_terminal(evaluation_id, tenant_id=tenant_id)
+            succeeded = True
+        except BaseException as error:
+            cleanup_error = error
+            if isinstance(error, Exception):
+                _logger.error(
+                    "evaluation transient handoff cleanup failed: evaluation=%s",
+                    evaluation_id,
+                    exc_info=environ.debug,
+                )
+        finally:
+            await self._handoff.finish_release(
+                (tenant_id, evaluation_id),
+                state,
+                succeeded=succeeded,
+            )
+        if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+            raise cleanup_error
 
     async def _execution_record(self, record: EvaluationRecord):
         return await self._executions.get(
