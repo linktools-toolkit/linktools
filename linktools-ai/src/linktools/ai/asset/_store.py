@@ -81,7 +81,11 @@ class AssetStore:
             raise AIError(ErrorCode.STORAGE_CLOSED)
         if self._ready:
             return
-        await self._storage.initialize()
+        try:
+            await self._storage.initialize()
+        except BaseException:
+            self._closing = True
+            raise
         self._ready = True
         _logger.debug("asset store initialized")
 

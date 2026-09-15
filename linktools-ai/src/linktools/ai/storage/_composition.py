@@ -224,17 +224,24 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                         opened.append(backend)
                         await backend.initialize()
             except BaseException:
-                self._closed = True
+                failed: list[InitializableStorage] = []
                 for backend in reversed(opened):
                     try:
                         await backend.close()
                     except BaseException as cleanup_error:  # noqa: BLE001
+                        failed.append(backend)
                         _logger.error(
                             "storage backend cleanup failed after initialize error: "
                             "backend=%s exception_type=%s",
                             type(backend).__name__,
                             type(cleanup_error).__name__,
                         )
+                self._initialized = False
+                if failed:
+                    self._close_started = True
+                    self._lifecycle_backends = tuple(reversed(failed))
+                else:
+                    self._closed = True
                 raise
             self._lifecycle_backends = tuple(opened)
             self._initialized = True

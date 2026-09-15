@@ -210,6 +210,39 @@ async def test_asset_store_close_retries_failed_backend_close(
     assert error.value.code is ErrorCode.STORAGE_CLOSED
 
 
+async def test_asset_store_failed_initialize_retains_failed_cleanup_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = InMemoryAssetBackend()
+    close_calls = 0
+    original_close = backend.close
+
+    async def initialize() -> None:
+        raise RuntimeError("initialize failed")
+
+    async def close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        if close_calls == 1:
+            raise RuntimeError("cleanup failed")
+        await original_close()
+
+    monkeypatch.setattr(backend, "initialize", initialize)
+    monkeypatch.setattr(backend, "close", close)
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+
+    with pytest.raises(RuntimeError, match="initialize failed"):
+        await store.initialize()
+    assert not store.ready
+    assert close_calls == 1
+
+    await store.close()
+    assert close_calls == 2
+    with pytest.raises(AIError) as error:
+        await store.initialize()
+    assert error.value.code is ErrorCode.STORAGE_CLOSED
+
+
 class _BlockingCache:
     def __init__(self) -> None:
         self.entered = asyncio.Event()
