@@ -444,7 +444,7 @@ async def test_default_workspace_declaration_scan_does_not_read_skill_resource_c
         return original(path)
 
     monkeypatch.setattr(directory_module, "read_bytes", capture)
-    store, backend = _default_workspace_store(workspace)
+    store = _default_workspace_store(workspace)
     await store.initialize()
     try:
         group = CapabilityGroup.from_store(
@@ -461,7 +461,6 @@ async def test_default_workspace_declaration_scan_does_not_read_skill_resource_c
         assert package / "SKILL.md" in reads
     finally:
         await store.close()
-        await backend.close()
 
 
 class _CountingAssetStore(AssetStore):
@@ -496,7 +495,6 @@ async def test_builtin_loader_reads_skill_declaration_but_not_package_resources(
 
     assert [(item.kind, item.id) for item in frozen] == [("skill", "review")]
     assert store.read_keys == [AssetKey("skill", "review/SKILL.md")]
-
 
 @pytest.mark.asyncio
 async def test_builtin_loader_rejects_overlapping_skill_package_roots() -> None:
@@ -747,7 +745,7 @@ async def test_execution_service_replays_subagent_from_persisted_child_binding()
         executions=SimpleNamespace(get=AsyncMock(return_value=execution)),
     )
     service._binding = lambda digest, snapshot: SimpleNamespace(  # type: ignore[method-assign]
-        definition=SimpleNamespace(spec=SimpleNamespace(id="child"))
+        definition=SimpleNamespace(spec=SimpleNamespace(id="child")),
     )
     start_subagent = AsyncMock(return_value=ExecutionHandle("child-execution"))
     service.start_subagent = start_subagent  # type: ignore[method-assign]
