@@ -9,6 +9,7 @@ from enum import Enum, IntEnum
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.capability import SubagentCapability
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
@@ -26,10 +27,9 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.capability import LinkToolsSubagents
-from linktools.ai.runtime.state._contracts import ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeStatePlan
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
+from linktools.ai.runtime.state._contracts import ToolOperationRecord
 from linktools.ai.runtime.state._contracts import (
     ExecutionRecord,
     PendingDeferredCall,
@@ -250,16 +250,18 @@ def test_subagent_tool_schema_accepts_json_payload() -> None:
         _ref: SubagentRef,
         _task: str,
         *,
+        files: tuple[str, ...],
         invocation_id: str,
     ) -> dict[str, JsonValue]:
         assert invocation_id
+        assert files == ()
         return {
             "execution_id": "child",
             "status": "SUCCEEDED",
             "output": {"value": True},
         }
 
-    capability = LinkToolsSubagents((SubagentRef("agent", "child"),), delegate)
+    capability = SubagentCapability((SubagentRef("agent", "child"),), delegate)
     assert capability.get_toolset() is not None
 
 
