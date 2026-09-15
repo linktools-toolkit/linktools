@@ -80,6 +80,11 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
         self._refresh_task: asyncio.Task[MetadataState[KeyT, InfoT]] | None = None
         self._generation = 0
 
+    @property
+    def pending_refresh_task(self) -> "asyncio.Task[MetadataState[KeyT, InfoT]] | None":
+        task = self._refresh_task
+        return task if task is not None and not task.done() else None
+
     async def initialize(self) -> None:
         if isinstance(self.backend, InitializableStorage):
             await self.backend.initialize()
@@ -111,7 +116,14 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
             if self.policy is LayerRefreshPolicy.STATIC and self._state is not None:
                 return self._state
             if self._refresh_task is None:
-                self._refresh_task = asyncio.create_task(self._load())
+                task = asyncio.create_task(self._load())
+                self._refresh_task = task
+
+                def discard(done: "asyncio.Task[MetadataState[KeyT, InfoT]]") -> None:
+                    if self._refresh_task is done:
+                        self._refresh_task = None
+
+                task.add_done_callback(discard)
             task = self._refresh_task
         try:
             return await asyncio.shield(task)

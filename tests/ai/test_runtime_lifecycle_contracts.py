@@ -399,7 +399,6 @@ async def test_compose_cleanup_continues_after_independent_resource_failure(
     failing = _CloseCounter(fails=True)
     state = _CloseCounter()
     workspace_store = _CloseCounter()
-    workspace_backend = _CloseCounter()
 
     await factory._cleanup_compose_resources(
         selected_state=state,
@@ -410,16 +409,12 @@ async def test_compose_cleanup_continues_after_independent_resource_failure(
         workspace_access=(
             failing if resource_name == "workspace_access" else None
         ),
-        owned_workspace_assets=(
-            workspace_store,
-            workspace_backend,
-        ),
+        owned_workspace_assets=workspace_store,
     )
 
     assert failing.calls == 1
     assert state.calls == 1
     assert workspace_store.calls == 1
-    assert workspace_backend.calls == 1
     assert phases == [f"runtime.compose.{resource_name}"]
 
 

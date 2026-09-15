@@ -8,7 +8,6 @@ import os
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from functools import partial
 from typing import TypeVar, cast
 
 from linktools.core import environ
@@ -64,8 +63,8 @@ from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeState
-from .state._contracts import RecoveryCheckpointState
 from .state import RuntimeStatePlan, RuntimeStateRoute
+from .state._contracts import RecoveryCheckpointState
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -113,7 +112,7 @@ async def compose_runtime_components(
     if len(workspace_groups) > 1:
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
-    owned_workspace_assets: tuple[AssetStore, DirectoryAssetBackend] | None = None
+    owned_workspace_assets: AssetStore | None = None
     selected_state: RuntimeState | None = None
     workspace_access: WorkspaceAccess | None = None
     input_materializer: ExecutionInputMaterializer | None = None
@@ -126,11 +125,10 @@ async def compose_runtime_components(
             )
         else:
             owned_workspace_assets = _default_workspace_store(workspace)
-            owned_store, _owned_backend = owned_workspace_assets
-            await owned_store.initialize()
+            await owned_workspace_assets.initialize()
             workspace_group: CapabilityGroup[object] = CapabilityGroup.from_store(
                 "workspace",
-                owned_store,
+                owned_workspace_assets,
                 skill_source=LocalSkillResourceSource(
                     "workspace",
                     workspace.storage_root / "skills",
@@ -233,7 +231,7 @@ async def compose_runtime_components(
         owned_workspace_close = (
             None
             if owned_workspace_assets is None
-            else partial(_close_owned_workspace_assets, *owned_workspace_assets)
+            else owned_workspace_assets.close
         )
         ownership_transferred = True
         return await _build_local_components(
@@ -296,9 +294,7 @@ class _WorkspaceDeclarationPathAdapter:
         return None
 
 
-def _default_workspace_store(
-    workspace: Workspace,
-) -> tuple[AssetStore, DirectoryAssetBackend]:
+def _default_workspace_store(workspace: Workspace) -> AssetStore:
     adapter: AssetPathAdapter = _WorkspaceDeclarationPathAdapter()
     source = DirectoryAssetBackend(
         str(workspace.storage_root),
@@ -307,15 +303,7 @@ def _default_workspace_store(
         follow_external_symlinks=True,
         ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
     )
-    return AssetStore(StorageOverlay(source)), source
-
-
-async def _close_owned_workspace_assets(
-    store: AssetStore,
-    backend: DirectoryAssetBackend,
-) -> None:
-    await store.close()
-    await backend.close()
+    return AssetStore(StorageOverlay(source))
 
 
 def _runtime_close_actions(
@@ -375,7 +363,7 @@ async def _cleanup_compose_resources(
     initialized: bool,
     input_materializer: ExecutionInputMaterializer | None,
     workspace_access: WorkspaceAccess | None,
-    owned_workspace_assets: tuple[AssetStore, DirectoryAssetBackend] | None,
+    owned_workspace_assets: AssetStore | None,
 ) -> None:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
     if input_materializer is not None:
@@ -385,12 +373,7 @@ async def _cleanup_compose_resources(
     if initialized and selected_state is not None:
         actions.append(("runtime.compose.state", selected_state.close))
     if owned_workspace_assets is not None:
-        actions.append(
-            (
-                "runtime.compose.workspace",
-                partial(_close_owned_workspace_assets, *owned_workspace_assets),
-            )
-        )
+        actions.append(("runtime.compose.workspace", owned_workspace_assets.close))
     await _run_cleanup_actions(actions, stop_on_error=False)
 
 

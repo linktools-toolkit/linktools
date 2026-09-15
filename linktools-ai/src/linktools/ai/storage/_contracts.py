@@ -286,6 +286,8 @@ class VersionedStorage(Protocol[KeyT, ValueT]):
 class InitializableStorage(Protocol):
     async def initialize(self) -> None: ...
 
+    async def close(self) -> None: ...
+
 
 @runtime_checkable
 class ReadableStorageBackend(

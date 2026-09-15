@@ -177,7 +177,7 @@ async def test_workspace_declaration_symlinks_freeze_valid_external_declarations
     _symlink(external_skill, storage_root / "skills" / "review", directory=True)
     _symlink(storage_root / "skills", storage_root / "skills" / "loop", directory=True)
 
-    store, backend = _default_workspace_store(workspace)
+    store = _default_workspace_store(workspace)
     await store.initialize()
     try:
         group: CapabilityGroup[object] = CapabilityGroup.from_store(
@@ -198,4 +198,3 @@ async def test_workspace_declaration_symlinks_freeze_valid_external_declarations
         assert await store.get(AssetKey("mcp", "server")) == mcp.read_bytes()
     finally:
         await store.close()
-        await backend.close()

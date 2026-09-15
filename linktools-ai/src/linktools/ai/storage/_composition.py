@@ -59,6 +59,22 @@ def _is_reset(info: InfoT) -> bool:
     return isinstance(info, StorageEntryStatusInfo) and info.status is StorageEntryStatus.RESET
 
 
+async def _settle_task(task: "asyncio.Task[object]") -> bool:
+    """Wait for owned work to finish before propagating caller cancellation."""
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            return cancelled
+        except asyncio.CancelledError:
+            if task.done():
+                if task.cancelled():
+                    raise
+                task.result()
+                return True
+            cancelled = True
+
+
 class StorageValueValidator(Protocol[KeyT, ValueT, InfoT]):
     def validate_value(self, key: KeyT, value: ValueT, info: InfoT) -> None: ...
 
@@ -159,6 +175,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self._preloaded: dict[KeyT, str] = {}
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
+        self._close_started = False
+        self._closed = False
+        self._lifecycle_backends: tuple[InitializableStorage, ...] = ()
 
     @property
     def writer_is_primary(self) -> bool:
@@ -189,18 +208,87 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
     async def initialize(self) -> None:
         async with self._initialize_lock:
+            if self._closed or self._close_started:
+                raise AIError(ErrorCode.STORAGE_CLOSED)
             if self._initialized:
                 return
             seen: set[int] = set()
-            for backend in (view.backend for view in self._views):
-                identity = id(backend)
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                if isinstance(backend, InitializableStorage):
-                    await backend.initialize()
+            opened: list[InitializableStorage] = []
+            try:
+                for backend in (view.backend for view in self._views):
+                    identity = id(backend)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    if isinstance(backend, InitializableStorage):
+                        opened.append(backend)
+                        await backend.initialize()
+            except BaseException:
+                failed: list[InitializableStorage] = []
+                for backend in reversed(opened):
+                    try:
+                        await backend.close()
+                    except BaseException as cleanup_error:  # noqa: BLE001
+                        failed.append(backend)
+                        _logger.error(
+                            "storage backend cleanup failed after initialize error: "
+                            "backend=%s exception_type=%s",
+                            type(backend).__name__,
+                            type(cleanup_error).__name__,
+                        )
+                self._initialized = False
+                if failed:
+                    self._close_started = True
+                    self._lifecycle_backends = tuple(reversed(failed))
+                else:
+                    self._closed = True
+                raise
+            self._lifecycle_backends = tuple(opened)
             self._initialized = True
         _logger.debug("storage overlay initialized: layers=%s", len(self._views))
+
+    async def close(self) -> None:
+        async with self._initialize_lock:
+            if self._closed:
+                return
+            self._close_started = True
+            self._initialized = False
+            backends = self._lifecycle_backends
+
+        first_error: BaseException | None = None
+        cancelled = False
+        async with self._cache_task_lock:
+            tasks = tuple(self._cache_tasks.values())
+        tasks += tuple(
+            task
+            for view in self._views
+            if (task := view.pending_refresh_task) is not None
+        )
+        for task in tasks:
+            try:
+                cancelled = await _settle_task(cast("asyncio.Task[object]", task)) or cancelled
+            except asyncio.CancelledError:
+                cancelled = True
+            except BaseException as error:  # noqa: BLE001
+                if first_error is None:
+                    first_error = error
+        for backend in reversed(backends):
+            task = asyncio.create_task(backend.close())
+            try:
+                cancelled = await _settle_task(cast("asyncio.Task[object]", task)) or cancelled
+            except asyncio.CancelledError:
+                cancelled = True
+            except BaseException as error:  # noqa: BLE001
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+        async with self._initialize_lock:
+            self._lifecycle_backends = ()
+            self._closed = True
+        if cancelled:
+            raise asyncio.CancelledError
+        _logger.debug("storage overlay closed")
 
     async def refresh(self) -> StorageRevision:
         return (await self._snapshot()).effective.revision
@@ -424,11 +512,13 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             if task is None:
                 task = asyncio.create_task(self._load_cache_value(key, info, cache_key))
                 self._cache_tasks[cache_key] = task
-        try:
-            return await asyncio.shield(task)
-        finally:
-            if task.done() and self._cache_tasks.get(cache_key) is task:
-                self._cache_tasks.pop(cache_key, None)
+
+                def discard(done: "asyncio.Task[ValueT | None]") -> None:
+                    if self._cache_tasks.get(cache_key) is done:
+                        self._cache_tasks.pop(cache_key, None)
+
+                task.add_done_callback(discard)
+        return await asyncio.shield(task)
 
     async def _load_cache_value(
         self,

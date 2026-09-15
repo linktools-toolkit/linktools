@@ -17,6 +17,7 @@ from typing import (
     Any,
     BinaryIO,
     Protocol,
+    TypeVar,
     runtime_checkable,
 )
 
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
 _logger = environ.get_logger("ai.storage.object")
 _CHUNK_SIZE = 1024 * 1024
+_TaskT = TypeVar("_TaskT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,7 +268,6 @@ class FilesystemObjectStore:
         self._store_id = store_id
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._offline_owner: asyncio.Task[Any] | None = None
-        self._offline_tasks: set[asyncio.Task[Any]] = set()
 
     @property
     def store_id(self) -> str:
@@ -298,16 +299,7 @@ class FilesystemObjectStore:
             name=f"filesystem-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
         )
         _track_object_task(self._background_tasks, task, "filesystem object put")
-        if offline_owned:
-            self._offline_tasks.add(task)
-            task.add_done_callback(self._offline_tasks.discard)
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done():
-                task.result()
-                raise
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+        return await _finish_owned_task(task)
 
     async def _put_owned(
         self,
@@ -387,19 +379,7 @@ class FilesystemObjectStore:
             yield
         finally:
             self._offline_owner = None
-            pending = tuple(task for task in self._offline_tasks if not task.done())
-            if pending:
-                cleanup = asyncio.create_task(
-                    _release_offline_lock(lock, pending),
-                    name="filesystem-object-offline-release",
-                )
-                _track_object_task(
-                    self._background_tasks,
-                    cleanup,
-                    "filesystem object offline lock release",
-                )
-            else:
-                await lock.__aexit__(None, None, None)
+            await lock.__aexit__(None, None, None)
 
     async def _list_objects(self) -> AsyncIterator[ObjectStat]:
         values = await asyncio.to_thread(
@@ -426,16 +406,7 @@ class FilesystemObjectStore:
             name=f"filesystem-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
         )
         _track_object_task(self._background_tasks, task, "filesystem object delete")
-        if offline_owned:
-            self._offline_tasks.add(task)
-            task.add_done_callback(self._offline_tasks.discard)
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done():
-                task.result()
-                raise
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+        return await _finish_owned_task(task)
 
     async def _delete_owned(
         self,
@@ -480,40 +451,30 @@ class FilesystemObjectStore:
         digest = hashlib.sha256()
         size = 0
         open_task = asyncio.create_task(asyncio.to_thread(destination.open, "rb"))
-        try:
-            handle: BinaryIO | None = await asyncio.shield(open_task)
-        except asyncio.CancelledError:
-            cleanup = asyncio.create_task(
-                _close_after_open(open_task),
-                name="filesystem-object-open-cleanup",
-            )
+        _track_object_task(self._background_tasks, open_task, "filesystem object open")
+        handle, cancelled = await _settle_task(open_task)
+        if cancelled:
+            close_task = asyncio.create_task(asyncio.to_thread(handle.close))
             _track_object_task(
                 self._background_tasks,
-                cleanup,
-                "filesystem object open cleanup",
+                close_task,
+                "filesystem object close cleanup",
             )
-            raise
+            await _finish_owned_task(close_task)
+            raise asyncio.CancelledError
         try:
             while True:
-                if handle is None:
-                    raise RuntimeError("filesystem object handle ownership was transferred")
                 read_task = asyncio.create_task(
                     asyncio.to_thread(handle.read, _CHUNK_SIZE)
                 )
-                try:
-                    chunk = await asyncio.shield(read_task)
-                except asyncio.CancelledError:
-                    cleanup = asyncio.create_task(
-                        _close_after_read(read_task, handle),
-                        name="filesystem-object-read-cleanup",
-                    )
-                    _track_object_task(
-                        self._background_tasks,
-                        cleanup,
-                        "filesystem object read cleanup",
-                    )
-                    handle = None
-                    raise
+                _track_object_task(
+                    self._background_tasks,
+                    read_task,
+                    "filesystem object read",
+                )
+                chunk, cancelled = await _settle_task(read_task)
+                if cancelled:
+                    raise asyncio.CancelledError
                 if not chunk:
                     break
                 digest.update(chunk)
@@ -522,17 +483,13 @@ class FilesystemObjectStore:
             if expected.size != size or expected.digest != digest.hexdigest():
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         finally:
-            if handle is not None:
-                close_task = asyncio.create_task(asyncio.to_thread(handle.close))
-                try:
-                    await asyncio.shield(close_task)
-                except asyncio.CancelledError:
-                    _track_object_task(
-                        self._background_tasks,
-                        close_task,
-                        "filesystem object close cleanup",
-                    )
-                    raise
+            close_task = asyncio.create_task(asyncio.to_thread(handle.close))
+            _track_object_task(
+                self._background_tasks,
+                close_task,
+                "filesystem object close cleanup",
+            )
+            await _finish_owned_task(close_task)
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)
@@ -585,13 +542,7 @@ class SqlObjectStore:
             name=f"sql-object-put-{_key_digest(self.store_id, key).hex()[:12]}",
         )
         _track_object_task(self._background_tasks, task, "SQL object put")
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if task.done():
-                task.result()
-                raise
-            raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+        return await _finish_owned_task(task)
 
     async def _put_owned(
         self,
@@ -761,6 +712,14 @@ class SqlObjectStore:
 
     async def delete_object(self, key: str, *, expected_digest: str) -> bool:
         _validate_key(key)
+        task = asyncio.create_task(
+            self._delete_owned(key, expected_digest=expected_digest),
+            name=f"sql-object-delete-{_key_digest(self.store_id, key).hex()[:12]}",
+        )
+        _track_object_task(self._background_tasks, task, "SQL object delete")
+        return await _finish_owned_task(task)
+
+    async def _delete_owned(self, key: str, *, expected_digest: str) -> bool:
         from sqlalchemy import delete, select
 
         key_digest = _key_digest(self.store_id, key).hex()
@@ -915,6 +874,26 @@ async def read_object(store: ObjectStore, key: str, *, expected_digest: str, exp
     if size != expected_size or digest.hexdigest() != expected_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return bytes(data)
+
+
+async def _settle_task(task: "asyncio.Task[_TaskT]") -> tuple[_TaskT, bool]:
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            if task.done():
+                if task.cancelled():
+                    raise
+                return task.result(), True
+            cancelled = True
+
+
+async def _finish_owned_task(task: "asyncio.Task[_TaskT]") -> _TaskT:
+    value, cancelled = await _settle_task(task)
+    if cancelled:
+        raise asyncio.CancelledError
+    return value
 
 
 async def _spool_memory(chunks: AsyncIterator[bytes], expected_size: int) -> tuple[bytes, str]:
@@ -1082,42 +1061,9 @@ def _track_object_task(
     task: asyncio.Task[Any],
     label: str,
 ) -> None:
+    del label
     tasks.add(task)
-
-    def consume(done: asyncio.Task[Any]) -> None:
-        try:
-            done.result()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:  # noqa: BLE001
-            _logger.exception("background %s failed", label)
-        finally:
-            tasks.discard(done)
-
-    task.add_done_callback(consume)
-
-
-async def _release_offline_lock(
-    lock: FilesystemMutationLock,
-    tasks: tuple[asyncio.Task[Any], ...],
-) -> None:
-    await asyncio.gather(*tasks, return_exceptions=True)
-    await lock.__aexit__(None, None, None)
-
-
-async def _close_after_open(task: asyncio.Task[BinaryIO]) -> None:
-    handle = await task
-    await asyncio.to_thread(handle.close)
-
-
-async def _close_after_read(
-    task: asyncio.Task[bytes],
-    handle: BinaryIO,
-) -> None:
-    try:
-        await task
-    finally:
-        await asyncio.to_thread(handle.close)
+    task.add_done_callback(tasks.discard)
 
 
 def _key_digest(store_id: str, key: str) -> bytes:

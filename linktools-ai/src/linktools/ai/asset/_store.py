@@ -57,6 +57,8 @@ class AssetStore:
         """Create a raw Asset file store from one storage overlay."""
         self._storage = storage
         self._ready = False
+        self._closing = False
+        self._closed = False
 
     @property
     def ready(self) -> bool:
@@ -75,17 +77,29 @@ class AssetStore:
 
     async def initialize(self) -> None:
         """Initialize configured storage backends before serving requests."""
+        if self._closed or self._closing:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
         if self._ready:
             return
-        await self._storage.initialize()
+        try:
+            await self._storage.initialize()
+        except BaseException:
+            self._closing = True
+            raise
         self._ready = True
         _logger.debug("asset store initialized")
 
     async def close(self) -> None:
-        """Mark this store unavailable after its owner closes configured backends."""
-        if not self._ready:
+        """Close this store and every backend initialized by its overlay."""
+        if self._closed:
             return
+        if not self._ready and not self._closing:
+            return
+        self._closing = True
         self._ready = False
+        await self._storage.close()
+        self._closing = False
+        self._closed = True
         _logger.debug("asset store closed")
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
@@ -94,7 +108,7 @@ class AssetStore:
         return await self._storage.stat(key)
 
     async def get(self, key: AssetKey) -> "bytes | None":
-        """Return current effective file bytes, or None when no file is visible."""
+        """Return current file bytes, or None when no file is visible."""
         self._ensure_ready()
         return await self._storage.get(key)
 

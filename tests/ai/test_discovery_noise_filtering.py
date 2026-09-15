@@ -49,7 +49,7 @@ async def test_workspace_declaration_discovery_ignores_noise_without_restricting
     (root / "skills" / "review" / "SKILL.md").write_text("skill", encoding="utf-8")
     (root / "skills" / "Thumbs.DB").write_bytes(b"noise")
 
-    store, backend = _default_workspace_store(workspace)
+    store = _default_workspace_store(workspace)
     await store.initialize()
     try:
         page = await store.list_info(limit=200)
@@ -63,7 +63,6 @@ async def test_workspace_declaration_discovery_ignores_noise_without_restricting
         }
     finally:
         await store.close()
-        await backend.close()
 
 
 @pytest.mark.asyncio
