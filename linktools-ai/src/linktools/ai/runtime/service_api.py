@@ -28,6 +28,7 @@ from ..core import (
     normalize_thinking,
     validate_idempotency_key,
     validate_memory_scope,
+    validate_page_limit,
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
@@ -415,12 +416,7 @@ class ListExecutionRequest:
     limit: int = 100
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.limit, bool)
-            or not isinstance(self.limit, int)
-            or not 1 <= self.limit <= 200
-        ):
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        validate_page_limit(self.limit)
 
 
 @dataclass(frozen=True, slots=True)

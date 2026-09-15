@@ -25,7 +25,7 @@ WORKER_EXIT_OK = 0
 WORKER_EXIT_SESSION_FAILED = 1
 WORKER_EXIT_CLEANUP_FAILED = 2
 MAX_ACTIVE_REQUESTS = 256
-MAX_SAFE_ERROR_BYTES = 8 * 1024
+MAX_SAFE_DETAILS_BYTES = 8 * 1024
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 _REQUEST_FIELDS = {
     "read_file": (
@@ -125,6 +125,20 @@ def validate_request_size(method: str, params: Mapping[str, Any]) -> None:
     validate_request_params(method, params)
 
 
+def validate_safe_details(details: Mapping[str, Any]) -> None:
+    """Validate the bounded diagnostic payload carried by an error frame."""
+    if not isinstance(details, Mapping) or any(
+        not isinstance(key, str) for key in details
+    ):
+        raise ValueError("safe details are invalid")
+    try:
+        payload = canonical_json_bytes(details)
+    except (TypeError, UnicodeError, ValueError) as error:
+        raise ValueError("safe details are invalid") from error
+    if len(payload) > MAX_SAFE_DETAILS_BYTES:
+        raise ValueError("safe details are too large")
+
+
 async def read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
     """Read and validate one length-prefixed JSON object."""
     try:
@@ -174,7 +188,7 @@ __all__ = [
     "GUARDIAN_EXIT_SESSION_FAILED",
     "MAX_ACTIVE_REQUESTS",
     "MAX_FRAME_BYTES",
-    "MAX_SAFE_ERROR_BYTES",
+    "MAX_SAFE_DETAILS_BYTES",
     "PROTOCOL_VERSION",
     "SandboxProtocolError",
     "WORKER_EXIT_CLEANUP_FAILED",
@@ -185,4 +199,5 @@ __all__ = [
     "read_frame",
     "validate_request_params",
     "validate_request_size",
+    "validate_safe_details",
 ]

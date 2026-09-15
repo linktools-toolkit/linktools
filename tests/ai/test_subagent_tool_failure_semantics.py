@@ -72,6 +72,40 @@ async def test_terminal_child_becomes_typed_tool_failure(
     }
 
 
+async def test_existing_child_replay_does_not_require_current_definition() -> None:
+    result = ExecutionResult(
+        "child-execution",
+        ExecutionStatus.SUCCEEDED,
+        {"ok": True},
+        "f" * 64,
+        UsageMetrics(),
+    )
+    execution = SimpleNamespace(
+        replay_subagent=AsyncMock(return_value=ExecutionHandle(result.execution_id)),
+        wait=AsyncMock(return_value=result),
+    )
+    dispatcher = SubagentDispatcher(
+        None,  # type: ignore[arg-type]
+        None,  # type: ignore[arg-type]
+        execution,  # type: ignore[arg-type]
+    )
+
+    value = await dispatcher.dispatch(
+        parent_execution_id="parent",
+        root_execution_id="root",
+        memory_scope="memory",
+        principal=Principal("principal", "tenant", "service"),
+        ref=SubagentRef("agent", "child"),
+        mode="run",
+        user_prompt="do work",
+        invocation_id="persisted-call",
+    )
+
+    assert value["execution_id"] == "child-execution"
+    assert value["status"] == ExecutionStatus.SUCCEEDED.value
+    execution.replay_subagent.assert_awaited_once()
+
+
 def _context() -> RunContext[None]:
     return RunContext(
         deps=None,

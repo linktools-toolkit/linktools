@@ -23,7 +23,6 @@ from ._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_UNKNOWN,
     MAX_ACTIVE_REQUESTS,
-    MAX_SAFE_ERROR_BYTES,
     PROTOCOL_VERSION,
     WORKER_EXIT_CLEANUP_FAILED,
     WORKER_EXIT_OK,
@@ -33,6 +32,7 @@ from ._sandbox_protocol import (
     protocol_error,
     read_frame,
     validate_request_params,
+    validate_safe_details,
 )
 
 _PR_SET_DUMPABLE = 4
@@ -378,8 +378,7 @@ async def _dispatch(
     if method == "find_files":
         return await session.find_files(params["pattern"], path=params.get("path", "."))
     if method == "create_directory":
-        return await session.create_directory(params["path"]
-        )
+        return await session.create_directory(params["path"])
     if method == "file_info":
         return await session.file_info(params["path"])
     if method == "run_command":
@@ -407,6 +406,7 @@ async def _send_error(
 ) -> None:
     safe_details = dict(details or {})
     try:
+        validate_safe_details(safe_details)
         frame = encode_frame(
             {
                 "request_id": request_id,
@@ -417,8 +417,6 @@ async def _send_error(
                 },
             }
         )
-        if len(frame) > MAX_SAFE_ERROR_BYTES:
-            raise ValueError("error details are too large")
     except (AIError, SandboxProtocolError, TypeError, ValueError):
         frame = encode_frame(
             {

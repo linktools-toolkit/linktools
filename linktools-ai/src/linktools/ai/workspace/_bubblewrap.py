@@ -31,12 +31,12 @@ from ._sandbox_protocol import (
     GUARDIAN_EXIT_OK,
     GUARDIAN_EXIT_SESSION_FAILED,
     MAX_ACTIVE_REQUESTS,
-    MAX_SAFE_ERROR_BYTES,
     PROTOCOL_VERSION,
     SandboxProtocolError,
     encode_frame,
     read_frame,
     validate_request_params,
+    validate_safe_details,
 )
 
 _logger = environ.get_logger("ai.workspace.bubblewrap")
@@ -478,18 +478,7 @@ class _BubblewrapSandboxSession:
             code = ErrorCode(code_value)
             if effect not in ERROR_EFFECT_VALUES:
                 raise ValueError("error effect is invalid")
-            if not isinstance(details, Mapping):
-                raise ValueError("safe details are invalid")
-            if any(not isinstance(key, str) for key in details):
-                raise ValueError("safe detail key is invalid")
-            if len(
-                json.dumps(
-                    details,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ) > MAX_SAFE_ERROR_BYTES:
-                raise ValueError("safe details are too large")
+            validate_safe_details(details)
         except (TypeError, ValueError) as protocol_error:
             raise SandboxProtocolError("response error code is invalid") from protocol_error
         async with self._pending_lock:
