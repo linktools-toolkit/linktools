@@ -102,13 +102,13 @@ class StepStore(Protocol):
         self, *, run_id: str, include_interrupted: bool = False
     ) -> ContinuableSnapshot | None: ...
 
-    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]: ...
-
-    def staged_payload(self, run_id: str, digest: str) -> bytes: ...
-
-    def stage_model_interaction(self, interaction: object) -> None: ...
-
-    async def list_model_interactions(self, *, run_id: str) -> list[object]: ...
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]: ...
 
     async def resolve_model_interaction(
         self,

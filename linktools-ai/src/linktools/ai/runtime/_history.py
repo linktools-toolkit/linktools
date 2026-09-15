@@ -63,6 +63,7 @@ _logger = environ.get_logger("ai.runtime.history")
 _EXECUTION_HISTORY_PROJECTION_VERSION = 1
 _EXECUTION_TRACE_PROJECTION_VERSION = 1
 _EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1
+_MODEL_INTERACTION_PROJECTION_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,48 +321,73 @@ class StepExecutionHistoryReader:
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._history_tree(record, tenant_id)
-        values: list[_InteractionOccurrence] = []
-        for source, depth in entries:
-            for segment_sequence in await self._segment_sequences(source, tenant_id):
-                run_id = step_run_id(
-                    namespace=self._namespace,
-                    tenant_id=tenant_id,
-                    execution_id=source.execution_id,
-                    segment_sequence=segment_sequence,
-                )
-                interactions = await self._store.list_model_interactions(
-                    run_id=run_id
-                )
-                typed_interactions = []
-                for interaction in interactions:
-                    if not isinstance(interaction, ModelInteractionRecord):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    typed_interactions.append(interaction)
-                values.extend(
-                    _InteractionOccurrence(
-                        (
-                            source.created_at.astimezone(timezone.utc),
-                            depth,
-                            source.execution_id,
-                            segment_sequence,
-                            interaction.request_sequence,
-                        ),
-                        source.execution_id,
-                        segment_sequence,
+        sources: list[_HistorySource] = []
+        for item, depth in entries:
+            for segment_sequence in await self._segment_sequences(item, tenant_id):
+                sources.append(
+                    _HistorySource(
+                        item,
                         depth,
-                        interaction,
+                        segment_sequence,
+                        (
+                            item.created_at.astimezone(timezone.utc),
+                            depth,
+                            item.execution_id,
+                            segment_sequence,
+                        ),
                     )
-                    for interaction in typed_interactions
                 )
-        values.sort(key=lambda value: value.key)
-        start = _model_interaction_cursor_index(
+        cursor_coordinate = _decode_model_interaction_cursor(
             cursor,
             tenant_id=tenant_id,
             execution_id=execution_id,
             signer=self._cursor_signer,
-            values=values,
         )
-        page = values[start : start + limit + 1]
+        source_by_identity = {
+            (source.record.execution_id, source.segment_sequence): source
+            for source in sources
+        }
+        cursor_source = None
+        if cursor_coordinate is not None:
+            cursor_source = source_by_identity.get(cursor_coordinate[:2])
+            if cursor_source is None:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+        cursor_prefix = None if cursor_source is None else cursor_source.merge_prefix
+
+        values: list[_InteractionOccurrence] = []
+        for source in sources:
+            if cursor_prefix is not None and source.merge_prefix < cursor_prefix:
+                continue
+            after_request_sequence = (
+                cursor_coordinate[2]
+                if cursor_coordinate is not None and source is cursor_source
+                else None
+            )
+            run_id = step_run_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=source.record.execution_id,
+                segment_sequence=source.segment_sequence,
+            )
+            interactions = await self._store.list_model_interactions(
+                run_id=run_id,
+                after_request_sequence=after_request_sequence,
+                limit=limit + 1,
+            )
+            for interaction in interactions:
+                if not isinstance(interaction, ModelInteractionRecord):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values.append(
+                    _InteractionOccurrence(
+                        (*source.merge_prefix, interaction.request_sequence),
+                        source.record.execution_id,
+                        source.segment_sequence,
+                        source.depth,
+                        interaction,
+                    )
+                )
+        values.sort(key=lambda value: value.key)
+        page = values[: limit + 1]
         selected_occurrences = page[:limit]
         resolved_items: dict[tuple[str, int], ModelInteractionItem] = {}
         for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
@@ -391,11 +417,11 @@ class StepExecutionHistoryReader:
             for value in selected_occurrences
         )
         next_cursor = None
-        if len(page) > limit:
+        if len(page) > limit and selected_occurrences:
             next_cursor = _model_interaction_cursor(
                 tenant_id,
                 execution_id,
-                start + limit,
+                selected_occurrences[-1],
                 self._cursor_signer,
             )
         _logger.debug(
@@ -1066,7 +1092,7 @@ def _execution_filter_digest(execution_id: str, projection_version: int) -> str:
 
 
 def _model_interaction_filter_digest(execution_id: str) -> str:
-    return _execution_filter_digest(execution_id, 1)
+    return _execution_filter_digest(execution_id, _MODEL_INTERACTION_PROJECTION_VERSION)
 
 
 def _interaction_occurrence_groups(
@@ -1078,16 +1104,15 @@ def _interaction_occurrence_groups(
     return tuple(tuple(group) for group in groups.values())
 
 
-def _model_interaction_cursor_index(
+def _decode_model_interaction_cursor(
     cursor: str | None,
     *,
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
-    values: Sequence[object],
-) -> int:
+) -> tuple[str, int, int] | None:
     if cursor is None:
-        return 0
+        return None
     payload = decode_runtime_cursor(
         cursor,
         signer,
@@ -1095,19 +1120,26 @@ def _model_interaction_cursor_index(
         resource_kind="model_interactions",
         filter_digest=_model_interaction_filter_digest(execution_id),
     )
-    try:
-        position = int(payload.position)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
-    if payload.revision != 0 or position < 0 or position >= len(values):
+    coordinate = _decode_position(payload.position, 3)
+    if (
+        payload.revision != 0
+        or not isinstance(coordinate[0], str)
+        or not coordinate[0]
+        or isinstance(coordinate[1], bool)
+        or not isinstance(coordinate[1], int)
+        or coordinate[1] < 1
+        or isinstance(coordinate[2], bool)
+        or not isinstance(coordinate[2], int)
+        or coordinate[2] < 1
+    ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return position
+    return coordinate[0], coordinate[1], coordinate[2]
 
 
 def _model_interaction_cursor(
     tenant_id: str,
     execution_id: str,
-    position: int,
+    occurrence: _InteractionOccurrence,
     signer: CursorSigner,
 ) -> str:
     return encode_runtime_cursor(
@@ -1115,7 +1147,15 @@ def _model_interaction_cursor(
         tenant_id=tenant_id,
         resource_kind="model_interactions",
         filter_digest=_model_interaction_filter_digest(execution_id),
-        position=str(position),
+        position=json.dumps(
+            [
+                occurrence.source_execution_id,
+                occurrence.segment_sequence,
+                occurrence.interaction.request_sequence,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
 
 

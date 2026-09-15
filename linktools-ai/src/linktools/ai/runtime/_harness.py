@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import cast
+from typing import Protocol, cast
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage, ModelResponse
@@ -37,13 +37,14 @@ from ..capability import ToolCallRejected
 from ..core import UsageMetrics
 from ..errors import AIError, ErrorCode
 from ._journal import ModelRequestFact
-from ._message import encode_model_messages, project_transient_binary_content
+from ._message import project_transient_binary_content
 from ._model_interaction import (
     StagedContextInline,
     StagedContextProjection,
     StagedContextSpan,
     StagedModelInteraction,
     build_context_projection,
+    build_inline_context_projection,
     extend_prefix_digest,
     message_prefix_digest,
     model_identity,
@@ -58,6 +59,12 @@ from .state._step_contracts import (
 )
 
 _logger = environ.get_logger("ai.runtime.harness")
+
+
+class _InteractionStagingStore(Protocol):
+    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]: ...
+
+    def stage_model_interaction(self, interaction: object) -> None: ...
 
 
 class HarnessPlanStoreAdapter:
@@ -220,6 +227,7 @@ class HarnessStepStoreAdapter:
         step_run_id: str | None = None,
     ) -> None:
         self._store = store
+        self._interaction_store = cast(_InteractionStagingStore, store)
         self._execution_id = execution_id
         self._step_run_id = step_run_id
         self._effects: dict[tuple[str, str], ToolEffectRecord] = {}
@@ -230,10 +238,7 @@ class HarnessStepStoreAdapter:
         self._prefix_source: tuple[ModelMessage, ...] | None = None
         self._prefix_digest: str | None = None
         self._interaction_projections: dict[int, StagedContextProjection] = {}
-        self._interaction_inline_items: dict[
-            int,
-            tuple[StagedContextInline, ...],
-        ] = {}
+        self._interaction_requests: dict[int, tuple[ModelMessage, ...]] = {}
         self._interaction_payloads: dict[int, str] = {}
         self._interaction_runs: dict[int, str] = {}
         self._interaction_models: dict[int, dict[str, str]] = {}
@@ -465,51 +470,50 @@ class HarnessStepStoreAdapter:
         model_settings: ModelSettings | None,
         parameters: ModelRequestParameters,
         streaming: bool,
+        model_id: str | None = None,
     ) -> None:
         run_id = self._step_run_id or self._run_id_from_messages(messages)
         if run_id is None:
             run_id = self._execution_id
         if not isinstance(run_id, str) or not run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        source = self._projection_source or tuple(messages)
         projected = tuple(messages)
-        inline_items: tuple[StagedContextInline, ...] = ()
-        if self._projection_source is None:
-            inline_items = tuple(
-                StagedContextInline(
-                    *self._store.intern_payload(
-                        run_id,
-                        encode_model_messages((message,)),
-                    )
-                )
-                for message in projected
+        if fact.purpose == "compaction":
+            projection = build_inline_context_projection(
+                projected,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
             )
-        projection = build_context_projection(
-            source,
-            projected,
-            lambda payload: self._store.intern_payload(run_id, payload),
-            source_prefix_digest=self._source_prefix_digest(source),
-        )
+        else:
+            source = self._projection_source or projected
+            projection = build_context_projection(
+                source,
+                projected,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
+                source_prefix_digest=self._source_prefix_digest(source),
+            )
         _logger.debug(
             "model interaction context staged: run=%s sequence=%s "
-            "source_count=%s source_digest=%s message_kinds=%s",
+            "purpose=%s source_count=%s source_digest=%s",
             run_id,
             fact.request_sequence,
+            fact.purpose,
             projection.source_message_count,
             projection.source_prefix_digest,
-            tuple(type(message).__name__ for message in source),
         )
         _envelope, envelope_bytes = request_envelope(
             model_settings=model_settings,
             parameters=parameters,
             streaming=streaming,
         )
-        digest, _size = self._store.intern_payload(run_id, envelope_bytes)
+        digest, _size = self._interaction_store.intern_payload(run_id, envelope_bytes)
         self._interaction_projections[fact.request_sequence] = projection
-        self._interaction_inline_items[fact.request_sequence] = inline_items
+        self._interaction_requests[fact.request_sequence] = projected
         self._interaction_payloads[fact.request_sequence] = digest
         self._interaction_runs[fact.request_sequence] = run_id
-        self._interaction_models[fact.request_sequence] = model_identity(model)
+        self._interaction_models[fact.request_sequence] = model_identity(
+            model,
+            route_id=model_id,
+        )
 
     def finish_model_interaction(
         self,
@@ -522,34 +526,24 @@ class HarnessStepStoreAdapter:
         duration_ns: int,
         usage: object | None,
     ) -> None:
+        del model
         request_sequence = fact.request_sequence
         projection = self._interaction_projections.pop(request_sequence)
-        inline_items = self._interaction_inline_items.pop(request_sequence)
+        request_messages = self._interaction_requests.pop(request_sequence)
         run_id = self._interaction_runs.pop(request_sequence)
         envelope_digest = self._interaction_payloads.pop(request_sequence)
         model_value = self._interaction_models.pop(request_sequence)
-        if status != "SUCCEEDED" and inline_items:
-            projection = StagedContextProjection(
-                0,
-                message_prefix_digest(()),
-                inline_items,
+        if status != "SUCCEEDED":
+            projection = build_inline_context_projection(
+                request_messages,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
             )
         response_projection = None
         if response is not None:
-            _logger.debug(
-                "model interaction response staged: sequence=%s response_digest=%s",
-                request_sequence,
-                hashlib.sha256(self._encode_response(response)).hexdigest(),
-            )
             if fact.purpose == "compaction":
-                digest, size = self._store.intern_payload(
-                    run_id,
-                    self._encode_response(response),
-                )
-                response_projection = StagedContextProjection(
-                    0,
-                    "0" * 64,
-                    (StagedContextInline(digest, size),),
+                response_projection = build_inline_context_projection(
+                    (response,),
+                    lambda payload: self._interaction_store.intern_payload(run_id, payload),
                 )
             else:
                 response_projection = StagedContextProjection(
@@ -562,7 +556,7 @@ class HarnessStepStoreAdapter:
                         ),
                     ),
                 )
-        self._store.stage_model_interaction(
+        self._interaction_store.stage_model_interaction(
             StagedModelInteraction(
                 run_id,
                 fact.step_index,
@@ -608,10 +602,6 @@ class HarnessStepStoreAdapter:
         self._prefix_source = values
         self._prefix_digest = digest
         return digest
-
-    @staticmethod
-    def _encode_response(response: ModelResponse) -> bytes:
-        return encode_model_messages((response,))
 
     def snapshot_context_messages(
         self,

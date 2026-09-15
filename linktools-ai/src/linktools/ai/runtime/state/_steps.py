@@ -461,11 +461,36 @@ class StagingStepStore(StepStore):
         self._ensure_open()
         if not isinstance(interaction, StagedModelInteraction):
             raise TypeError("staged model interaction is invalid")
-        self._interactions.setdefault(interaction.run_id, []).append(interaction)
+        values = self._interactions.setdefault(interaction.run_id, [])
+        for current in values:
+            if current.request_sequence != interaction.request_sequence:
+                continue
+            if current == interaction:
+                return
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if values and interaction.request_sequence <= values[-1].request_sequence:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        values.append(interaction)
 
-    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]:
         self._ensure_open()
-        return list(self._interactions.get(run_id, ()))
+        if after_request_sequence is not None and after_request_sequence < 0:
+            raise ValueError("interaction sequence must be non-negative")
+        if limit is not None and limit < 1:
+            raise ValueError("interaction limit must be positive")
+        values = [
+            value
+            for value in self._interactions.get(run_id, ())
+            if after_request_sequence is None
+            or value.request_sequence > after_request_sequence
+        ]
+        return list(values if limit is None else values[:limit])
 
     async def resolve_model_interaction(self, interaction: object) -> object:
         del interaction
@@ -630,8 +655,18 @@ class InMemoryStepArchive(StagingStepStore):
                     snapshot_values.append(snapshot)
             interaction_values = self._interactions.setdefault(run.run_id, [])
             for interaction in interactions:
-                if interaction not in interaction_values:
-                    interaction_values.append(interaction)
+                existing = next(
+                    (
+                        value
+                        for value in interaction_values
+                        if value.request_sequence == interaction.request_sequence
+                    ),
+                    None,
+                )
+                if existing is None:
+                    interaction_values.append(interaction)  # type: ignore[arg-type]
+                elif existing != interaction:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def materialize_snapshot(
         self,
@@ -834,6 +869,7 @@ class StateStepArchive(StepStore):
             self._history.projection_key(run_id) for run_id in unique_run_ids
         )
         head_keys = tuple(self._history.head_key(run_id) for run_id in unique_run_ids)
+
         async def read(
             transaction: StateTransaction,
         ) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, int]]:
@@ -921,6 +957,8 @@ class StateStepArchive(StepStore):
         if any(not isinstance(value, ModelInteractionRecord) for value in values):
             raise TypeError("model interaction is invalid")
         records = tuple(value for value in values if isinstance(value, ModelInteractionRecord))
+        if any(record.run_id != records[0].run_id for record in records):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         projections = tuple(
             projection
             for record in records
@@ -1000,12 +1038,6 @@ class StateStepArchive(StepStore):
         for index, message in enumerate(prefix_messages[:max_source_count], 1):
             prefix_digest = extend_prefix_digest(prefix_digest, message)
             prefix_checkpoints[index] = prefix_digest
-        _logger.debug(
-            "model interaction prefix checkpoints: run=%s counts=%s kinds=%s",
-            run.run_id,
-            tuple(prefix_checkpoints),
-            tuple(type(message).__name__ for message in prefix_messages),
-        )
         for interaction in values:
             for projection in (
                 interaction.request_context,
@@ -1032,37 +1064,53 @@ class StateStepArchive(StepStore):
                         ErrorCode.STORAGE_INTEGRITY_ERROR,
                         "model interaction source prefix digest mismatch",
                     )
-        result: list[ModelInteractionRecord] = []
-        for staged in values:
-            request_context = context_projection_to_durable(
-                staged.request_context,
+
+        prepared_payloads: dict[str, RuntimePayloadRef] = {}
+
+        async def prepare_payload(digest: str) -> RuntimePayloadRef:
+            prepared = prepared_payloads.get(digest)
+            if prepared is not None:
+                return prepared
+            prepared = await self._prepare_inline_payload(
+                run.run_id,
+                RuntimePayloadRef(
+                    StoredPayload.inline_bytes(payload(digest)),
+                    self._runtime_domain,
+                ),
+            )
+            prepared_payloads[digest] = prepared
+            return prepared
+
+        async def prepare_context(
+            staged_projection,
+        ) -> ContextProjection:
+            projection = context_projection_to_durable(
+                staged_projection,
                 owner_id=run.run_id,
                 source_domain=self._runtime_domain,
                 payload=payload,
             )
-            request_context = await self._history.prepare_projection(
-                run.run_id,
-                request_context,
-            )
-            request_envelope = await self._prepare_inline_payload(
-                run.run_id,
-                RuntimePayloadRef(
-                    StoredPayload.inline_bytes(payload(staged.request_envelope_digest)),
-                    self._runtime_domain,
-                ),
-            )
-            response_context = None
-            if staged.response_context is not None:
-                response_context = context_projection_to_durable(
-                    staged.response_context,
-                    owner_id=run.run_id,
-                    source_domain=self._runtime_domain,
-                    payload=payload,
+            items = []
+            for item in projection.items:
+                if isinstance(item, TranscriptSpanRef):
+                    items.append(item)
+                    continue
+                items.append(
+                    InlineContextBlock(
+                        await prepare_payload(item.content.payload.digest)
+                    )
                 )
-                response_context = await self._history.prepare_projection(
-                    run.run_id,
-                    response_context,
-                )
+            return ContextProjection(tuple(items))
+
+        result: list[ModelInteractionRecord] = []
+        for staged in values:
+            request_context = await prepare_context(staged.request_context)
+            request_envelope = await prepare_payload(staged.request_envelope_digest)
+            response_context = (
+                None
+                if staged.response_context is None
+                else await prepare_context(staged.response_context)
+            )
             result.append(
                 ModelInteractionRecord(
                     staged.run_id,
@@ -1729,6 +1777,32 @@ class StateStepArchive(StepStore):
         for family, value, kind in facts:
             grouped[family].append(value)
             kinds[family].append(kind)
+
+        if grouped["interaction"]:
+            stream = self._stream(run.run_id, "interaction")
+            fresh_values: list[object] = []
+            fresh_kinds: list[str] = []
+            for value, kind in zip(
+                grouped["interaction"], kinds["interaction"], strict=True
+            ):
+                if not isinstance(value, ModelInteractionRecord):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                subject = _step_subject(value)
+                if subject is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                existing = await transaction.list_facts(
+                    FactQuery(stream, subject_digest=subject, latest=True)
+                )
+                if existing:
+                    fact = existing[0]
+                    if fact.state == kind and _decode_step(fact.data) == value:
+                        continue
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                fresh_values.append(value)
+                fresh_kinds.append(kind)
+            grouped["interaction"] = fresh_values
+            kinds["interaction"] = fresh_kinds
+
         stored_facts: list[StoredFact] = []
         reservation_requests = {
             self._sequence(run.run_id, family): len(grouped[family])
@@ -1750,13 +1824,19 @@ class StateStepArchive(StepStore):
                 "interaction": "model_interaction",
             }[family]
             for sequence, value, kind in zip(sequences, values, kinds[family], strict=True):
+                if (
+                    family == "interaction"
+                    and isinstance(value, ModelInteractionRecord)
+                    and sequence != value.request_sequence
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 stored_facts.append(
                     StoredFact(
                         stream,
                         sequence,
                         owner,
                         fact_kind,
-                        None,
+                        _step_subject(value),
                         kind,
                         _encode_step(value),
                     )
@@ -2039,13 +2119,34 @@ class StateStepArchive(StepStore):
         values = await self._facts(run_id, "event")
         return [_decode_step(value.data) for value in values]
 
-    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]:
         require_no_run_history_lock("StateStepArchive.list_model_interactions")
-        values = await self._facts(run_id, "interaction")
+        if after_request_sequence is not None and after_request_sequence < 0:
+            raise ValueError("interaction sequence must be non-negative")
+        if limit is not None and limit < 1:
+            raise ValueError("interaction limit must be positive")
+        values = await self._store.read(
+            lambda transaction: transaction.list_facts(
+                FactQuery(
+                    self._stream(run_id, "interaction"),
+                    after_sequence=after_request_sequence,
+                    limit=limit,
+                )
+            )
+        )
         result = []
         for value in values:
             interaction = _decode_step(value.data)
-            if not isinstance(interaction, ModelInteractionRecord):
+            if (
+                not isinstance(interaction, ModelInteractionRecord)
+                or value.sequence != interaction.request_sequence
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append(interaction)
         return result
@@ -2542,9 +2643,19 @@ class RuntimeStepStore(StepStore):
             raise TypeError("staged model interaction has no run id")
         self._projection_dirty.add(run_id)
 
-    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]:
         await self._ensure_business()
-        return await self._staging.list_model_interactions(run_id=run_id)
+        return await self._staging.list_model_interactions(
+            run_id=run_id,
+            after_request_sequence=after_request_sequence,
+            limit=limit,
+        )
 
     async def resolve_model_interaction(self, interaction: object) -> object:
         await self._ensure_business()
@@ -2988,8 +3099,7 @@ class RuntimeStepStore(StepStore):
                                 ),
                             )
                         ),
-                        durable_head.interaction_count
-                        ,
+                        durable_head.interaction_count,
                         durable_head.interaction_count
                         + projection.target_interaction_offset
                         - projection.base_interaction_offset,
@@ -3127,7 +3237,6 @@ class RuntimeStepStore(StepStore):
         self,
         step_run_id: str,
     ) -> "tuple[CapturedExecutionProjection, _RunProjectionFlight] | None":
-        """CAPTURE: snapshot staged state under the run lock with no durable I/O."""
         await self._ensure_business()
         while True:
             completion: asyncio.Future[None] | None = None
@@ -3163,19 +3272,10 @@ class RuntimeStepStore(StepStore):
                         projection.base_interaction_offset,
                         projection.target_interaction_offset,
                     )
-                    _logger.debug(
-                        "projection flight captured: run=%s token=%s "
-                        "events=%s snapshots=%s",
-                        step_run_id,
-                        flight.token,
-                        len(captured.events),
-                        len(captured.snapshots),
-                    )
                     return captured, flight
             await asyncio.shield(completion)
 
     async def wait_projection_flight(self, step_run_id: str) -> None:
-        """Wait for an active flight without holding the run lock."""
         await self._ensure_business()
         while True:
             async with self._history_lock.hold(step_run_id):
@@ -3189,18 +3289,12 @@ class RuntimeStepStore(StepStore):
         self,
         flight: _RunProjectionFlight,
     ) -> None:
-        """Remove a flight after a definitely-not-committed outcome."""
         async with self._history_lock.hold(flight.run_id):
             if self._durability_flights.get(flight.run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             del self._durability_flights[flight.run_id]
         if not flight.completion.done():
             flight.completion.set_result(None)
-        _logger.info(
-            "projection flight abandoned: run=%s token=%s",
-            flight.run_id,
-            flight.token,
-        )
 
     async def finalize_execution_projection(
         self,
@@ -3209,7 +3303,6 @@ class RuntimeStepStore(StepStore):
         *,
         target_transcript_message_count: int | None = None,
     ) -> None:
-        """FINALIZE: advance offsets and clear dirty state after durable success."""
         async with self._history_lock.hold(flight.run_id):
             if self._durability_flights.get(flight.run_id) is not flight:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -3232,13 +3325,6 @@ class RuntimeStepStore(StepStore):
             self._projection_dirty.discard(flight.run_id)
         if not flight.completion.done():
             flight.completion.set_result(None)
-        _logger.debug(
-            "projection flight finalized: run=%s token=%s events=%s snapshots=%s",
-            flight.run_id,
-            flight.token,
-            captured.target_event_offset,
-            captured.target_snapshot_offset,
-        )
 
     async def commit_captured_execution_projection(
         self,
@@ -3247,7 +3333,6 @@ class RuntimeStepStore(StepStore):
         *,
         execution_id: str,
     ) -> None:
-        """PREPARE + DURABLE COMMIT without the run lock, then FINALIZE."""
         archive = self._archives.get(RuntimeDomain.EXECUTION)
         if not isinstance(archive, StateStepArchive):
             if not isinstance(archive, _StepArchiveBatch):
@@ -3318,11 +3403,6 @@ class RuntimeStepStore(StepStore):
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "projection commit left partial durable state",
                 ) from result.error
-            _logger.error(
-                "projection commit unresolved; flight retained: run=%s token=%s",
-                flight.run_id,
-                flight.token,
-            )
             unknown = AIError(
                 ErrorCode.STORAGE_COMMIT_UNKNOWN,
                 "projection commit outcome is unresolved",
@@ -3364,7 +3444,7 @@ class RuntimeStepStore(StepStore):
             prepared.target_transcript_message_count,
             prepared.snapshots[-1].projection.digest
             if prepared.snapshots
-            else "empty",
+            else durable_head.projection_digest,
             durable_head.interaction_count + len(interactions),
         )
 
@@ -3383,20 +3463,10 @@ class RuntimeStepStore(StepStore):
                 or head.transcript_message_count
                 != expected_head.transcript_message_count
                 or head.interaction_count != expected_head.interaction_count
-                or (
-                    prepared.snapshots
-                    and head.projection_digest != expected_head.projection_digest
-                )
+                or head.projection_digest != expected_head.projection_digest
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return ExecutionRunSealHead(
-                captured.run.run_id,
-                head.event_count,
-                head.snapshot_count,
-                head.transcript_message_count,
-                head.projection_digest,
-                head.interaction_count,
-            )
+            return head
 
         async def readback() -> CommitObservation[ExecutionRunSealHead]:
             try:
@@ -3404,36 +3474,11 @@ class RuntimeStepStore(StepStore):
                     captured.run.run_id
                 )
             except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=error,
-                    )
                 return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-            if head.event_count != expected_head.event_count:
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if head.snapshot_count != expected_head.snapshot_count:
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if head.transcript_message_count != expected_head.transcript_message_count:
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if head.interaction_count != expected_head.interaction_count:
-                return CommitObservation(DurableCommitState.NOT_COMMITTED)
-            if prepared.snapshots and head.projection_digest != expected_head.projection_digest:
-                return CommitObservation(
-                    DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                    error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-                )
             return CommitObservation(
                 DurableCommitState.COMMITTED,
-                value=ExecutionRunSealHead(
-                    captured.run.run_id,
-                    head.event_count,
-                    head.snapshot_count,
-                    head.transcript_message_count,
-                    head.projection_digest,
-                    head.interaction_count,
-                ),
-            )
+                value=head,
+            ) if head == expected_head else CommitObservation(DurableCommitState.NOT_COMMITTED)
 
         result = await run_durable_commit(
             operation,
@@ -3463,11 +3508,6 @@ class RuntimeStepStore(StepStore):
             await self._fence_durability_flight(flight, integrity)
             raise integrity from result.error
         else:
-            _logger.error(
-                "projection commit unresolved; flight retained: run=%s token=%s",
-                flight.run_id,
-                flight.token,
-            )
             unknown = AIError(
                 ErrorCode.STORAGE_COMMIT_UNKNOWN,
                 "projection commit outcome is unresolved",
@@ -3476,12 +3516,13 @@ class RuntimeStepStore(StepStore):
             raise unknown from result.error
         _logger.debug(
             "step projection flushed: domain=%s backend=%s run=%s "
-            "events=%s snapshots=%s duration_ms=%.3f",
+            "events=%s snapshots=%s interactions=%s duration_ms=%.3f",
             RuntimeDomain.EXECUTION.value,
             type(archive).__name__,
             flight.run_id,
             len(captured.events),
             len(captured.snapshots),
+            len(captured.interactions),
             (monotonic() - started) * 1000,
         )
 
@@ -3504,7 +3545,6 @@ class RuntimeStepStore(StepStore):
     async def flush_dirty_execution_projections(self, *, execution_id: str) -> None:
         for run_id in tuple(self._projection_dirty):
             await self.flush_execution_projection(run_id, execution_id=execution_id)
-
 
     async def verify_terminal_attempts(
         self, *, candidate_step_run_ids: tuple[str, ...], required_step_run_id: str | None
@@ -3560,12 +3600,6 @@ class RuntimeStepStore(StepStore):
                     run_id,
                     execution_id=seal_owner,
                     token=seal_token,
-                )
-                _logger.warning(
-                    "terminal seal discarded on staging release: run=%s "
-                    "execution=%s",
-                    run_id,
-                    seal_owner,
                 )
 
     async def release_archive(
@@ -3637,12 +3671,6 @@ class RuntimeStepStore(StepStore):
             asyncio.get_running_loop().create_future(),
         )
         self._durability_flights[run_id] = flight
-        _logger.debug(
-            "durability flight captured: run=%s token=%s kind=%s",
-            run_id,
-            flight.token,
-            kind.value,
-        )
         return flight
 
     async def _finalize_durability_flight(
@@ -3655,12 +3683,6 @@ class RuntimeStepStore(StepStore):
             del self._durability_flights[flight.run_id]
         if not flight.completion.done():
             flight.completion.set_result(None)
-        _logger.debug(
-            "durability flight finalized: run=%s token=%s kind=%s",
-            flight.run_id,
-            flight.token,
-            flight.kind.value,
-        )
 
     async def _abandon_durability_flight(
         self,
@@ -3672,12 +3694,6 @@ class RuntimeStepStore(StepStore):
             del self._durability_flights[flight.run_id]
         if not flight.completion.done():
             flight.completion.set_result(None)
-        _logger.info(
-            "durability flight abandoned: run=%s token=%s kind=%s",
-            flight.run_id,
-            flight.token,
-            flight.kind.value,
-        )
 
     async def _fence_durability_flight(
         self,
@@ -3696,13 +3712,6 @@ class RuntimeStepStore(StepStore):
                 future.exception()
 
             completion.add_done_callback(consume)
-        _logger.error(
-            "durability flight fenced: run=%s token=%s kind=%s code=%s",
-            flight.run_id,
-            flight.token,
-            flight.kind.value,
-            error.code.value,
-        )
 
     async def _settle_durability_flight(
         self,
@@ -3732,12 +3741,6 @@ class RuntimeStepStore(StepStore):
             )
             await self._fence_durability_flight(flight, integrity)
             raise integrity from result.error
-        _logger.error(
-            "durability flight unresolved: run=%s token=%s kind=%s",
-            flight.run_id,
-            flight.token,
-            flight.kind.value,
-        )
         unknown = AIError(
             ErrorCode.STORAGE_COMMIT_UNKNOWN,
             "durability flight commit outcome is unresolved",

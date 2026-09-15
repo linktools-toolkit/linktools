@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -31,6 +32,7 @@ from .state._plan import RuntimeDomain
 
 _PREFIX_SEED = hashlib.sha256(b"linktools.model-context-prefix.v1").digest()
 _ENVELOPE_VERSION = 1
+_INLINE_SOURCE_DIGEST = "0" * 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +204,21 @@ def build_context_projection(
     )
 
 
+def build_inline_context_projection(
+    messages: Sequence[ModelMessage],
+    intern_payload: PayloadIntern,
+) -> StagedContextProjection:
+    """Capture a context that has no canonical transcript owner."""
+    return StagedContextProjection(
+        0,
+        _INLINE_SOURCE_DIGEST,
+        tuple(
+            StagedContextInline(*intern_payload(encode_model_messages((message,))))
+            for message in messages
+        ),
+    )
+
+
 def context_projection_to_durable(
     projection: StagedContextProjection,
     *,
@@ -261,9 +278,9 @@ def project_public_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]
     return values
 
 
-def model_identity(model: object) -> dict[str, str]:
+def model_identity(model: object, *, route_id: str | None = None) -> dict[str, str]:
     return {
-        "route_id": str(getattr(model, "model_id", "")),
+        "route_id": str(route_id or getattr(model, "model_id", "")),
         "system": str(getattr(model, "system", "")),
         "model_name": str(getattr(model, "model_name", "")),
     }
@@ -279,13 +296,8 @@ def _message_signature(message: ModelMessage) -> bytes:
     return hashlib.sha256(encode_model_messages((message,))).digest()
 
 
-def _json_snapshot(value: object, *, exclude: set[str] | None = None) -> JsonValue:
-    try:
-        dumped = TypeAdapter(object).dump_python(value, mode="json")
-    except (TypeError, ValueError):
-        dumped = {}
-    if exclude and isinstance(dumped, dict):
-        dumped = {key: item for key, item in dumped.items() if key not in exclude}
+def _json_snapshot(value: object) -> JsonValue:
+    dumped = TypeAdapter(object).dump_python(value, mode="json")
     return cast(JsonValue, dumped)
 
 
@@ -295,6 +307,7 @@ def _parameters_snapshot(parameters: ModelRequestParameters) -> JsonValue:
         "function_tools",
         "tool_visibility",
         "revealed_tool_names",
+        "deferred_capability_ids",
         "output_mode",
         "output_object",
         "output_tools",
@@ -309,7 +322,7 @@ def _parameters_snapshot(parameters: ModelRequestParameters) -> JsonValue:
     for tool in parameters.native_tools:
         snapshot = _json_snapshot(tool)
         if not isinstance(snapshot, Mapping):
-            snapshot = {}
+            raise TypeError("native tool observation is not a mapping")
         native_tools.append(
             {
                 "kind": str(getattr(tool, "kind", "native")),
@@ -333,7 +346,7 @@ def _sanitize_binary(value: JsonValue) -> None:
         if isinstance(data, str):
             try:
                 raw = base64.b64decode(data, validate=True)
-            except ValueError:
+            except (ValueError, binascii.Error):
                 raw = data.encode("utf-8")
             value["size"] = len(raw)
             value["digest"] = hashlib.sha256(raw).hexdigest()
@@ -349,6 +362,7 @@ __all__ = [
     "StagedContextSpan",
     "StagedModelInteraction",
     "build_context_projection",
+    "build_inline_context_projection",
     "extend_prefix_digest",
     "message_prefix_digest",
     "model_identity",
