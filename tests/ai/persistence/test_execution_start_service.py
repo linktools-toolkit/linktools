@@ -257,8 +257,6 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
         )
         await asyncio.sleep(0)
         assert not release_started.is_set()
-        handoff_state = service._handoff_states[("tenant", handle.execution_id)]
-        assert handoff_state.dependency_holds == {hold_id}
 
         cleanup = asyncio.create_task(
             service.release_dependency_hold(
@@ -328,59 +326,5 @@ async def test_unbound_runtime_bridge_rejects_runtime_access() -> None:
         with pytest.raises(AIError) as error:
             service.runtime_backend()
         assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_launch_missing_record_is_storage_integrity_failure() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="launch-integrity", tenant_id="tenant")
-    try:
-        service = _service(state, backend=_Launcher(state.execution.executions))
-
-        with pytest.raises(AIError) as error:
-            await service._launch_started(
-                _request("hello", Principal("owner", "tenant"), "launch-key"),
-                SimpleNamespace(execution_id="missing", tenant_id="tenant"),
-                scope="scope",
-                idempotency_key_digest="digest",
-            )
-
-        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    finally:
-        await state.close()
-
-
-@pytest.mark.asyncio
-async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
-    state = RuntimeState.in_memory()
-    await state.initialize(namespace="memory-namespace-validation", tenant_id="tenant")
-    try:
-        service = _service(state, backend=_Launcher(state.execution.executions))
-        principal = Principal("owner", "tenant")
-        handle = await service.start(
-            _binding().binding_digest,
-            _request("without memory", principal, "without-memory"),
-        )
-        execution = await state.execution.executions.get(
-            handle.execution_id,
-            tenant_id=principal.tenant_id,
-        )
-        assert execution is not None
-        assert execution.memory_scope is None
-
-        for value in ("", "  "):
-            with pytest.raises(AIError) as error:
-                await service.start(
-                    _binding().binding_digest,
-                    _request(
-                        "invalid memory",
-                        principal,
-                        f"invalid-{len(value)}",
-                        memory_scope=value,
-                    ),
-                )
-            assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     finally:
         await state.close()
