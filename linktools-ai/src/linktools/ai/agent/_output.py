@@ -342,13 +342,6 @@ def _canonical_schema_node(
     return value
 
 
-def _validate_fingerprint(value: str) -> None:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-
-
 __all__ = [
     "AssistantTextOutput",
     "OutputBinding",
