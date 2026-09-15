@@ -10,7 +10,7 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime.state import RuntimeState
 
-from .test_runtime_composition_regressions import (
+from .test_runtime_composition_invariants import (
     _RuntimeUsageModels,
     _runtime_usage_workspace,
 )
@@ -49,6 +49,7 @@ async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
             [item.item_kind for item in turn.items] for turn in page.items
         ] == [["assistant"], ["assistant"]]
         assert page.next_cursor is None
+
 
 @pytest.mark.asyncio
 async def test_in_memory_fork_survives_parent_close(tmp_path: Path) -> None:
