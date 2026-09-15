@@ -31,7 +31,7 @@ class SubagentDelegate(Protocol):
     ) -> "dict[str, JsonValue]": ...
 
 
-class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
+class SubagentCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         refs: "Sequence[SubagentRef]",
@@ -87,14 +87,6 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
-                validate_user_prompt(task)
-            except AIError as error:
-                if error.code is ErrorCode.PROMPT_TOO_LARGE:
-                    raise ToolCallRejected(
-                        "The delegated task is invalid or too large. Shorten it and retry."
-                    ) from error
-                raise
-            try:
                 return await self.delegate_task(
                     subagent_id,
                     task,
@@ -102,6 +94,10 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
                     invocation_id=ctx.tool_call_id,
                 )
             except AIError as error:
+                if error.code is ErrorCode.PROMPT_TOO_LARGE:
+                    raise ToolCallRejected(
+                        "The delegated task is invalid or too large. Shorten it and retry."
+                    ) from error
                 if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
                     raise ToolCallFailed(
                         "subagent execution failed; adapt and continue"
@@ -191,4 +187,4 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
         return result
 
 
-__all__ = ["LinkToolsSubagents", "SUBAGENT_CAPABILITY_ID", "SubagentDelegate"]
+__all__ = ["SUBAGENT_CAPABILITY_ID", "SubagentCapability", "SubagentDelegate"]
