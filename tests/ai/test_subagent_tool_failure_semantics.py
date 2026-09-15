@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from linktools.ai.capability import LinkToolsSubagents, ToolCallFailed, ToolCallRejected
+from linktools.ai.capability import SubagentCapability, ToolCallFailed, ToolCallRejected
 from linktools.ai.core import ExecutionStatus, Principal, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -104,7 +104,7 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
         assert files == ()
         raise AIError(ErrorCode.TOOL_EXECUTION_FAILED, safe_details=details)
 
-    capability = LinkToolsSubagents(
+    capability = SubagentCapability(
         (SubagentRef("agent", "child"),),
         delegate,
     )
@@ -138,7 +138,7 @@ async def test_subagent_tool_retries_its_own_oversized_task() -> None:
         called = True
         return {}
 
-    capability = LinkToolsSubagents(
+    capability = SubagentCapability(
         (SubagentRef("agent", "child"),),
         delegate,
     )
@@ -171,7 +171,7 @@ async def test_subagent_downstream_prompt_error_is_not_reclassified() -> None:
         del ref, task, files, invocation_id
         raise AIError(ErrorCode.PROMPT_TOO_LARGE)
 
-    capability = LinkToolsSubagents(
+    capability = SubagentCapability(
         (SubagentRef("agent", "child"),),
         delegate,
     )
