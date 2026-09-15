@@ -279,7 +279,7 @@ async def test_step_preflight_rejects_flights_tasks_and_terminal_seals() -> None
 async def test_runtime_object_preflight_rejects_pending_filesystem_work(
     tmp_path,
 ) -> None:
-    store = FilesystemObjectStore(tmp_path)
+    store = FilesystemObjectStore(tmp_path / "objects")
     router = _RuntimeObjectRouter(
         {RuntimeDomain.EXECUTION: store},
         close_guard_stores=(store,),
@@ -299,7 +299,7 @@ async def test_runtime_object_preflight_rejects_pending_filesystem_work(
 async def test_runtime_object_preflight_ignores_external_filesystem_work(
     tmp_path,
 ) -> None:
-    store = FilesystemObjectStore(tmp_path)
+    store = FilesystemObjectStore(tmp_path / "objects")
     router = _RuntimeObjectRouter(
         {RuntimeDomain.EXECUTION: store},
         close_guard_stores=(),

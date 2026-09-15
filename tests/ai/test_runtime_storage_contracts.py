@@ -23,7 +23,7 @@ from linktools.ai.runtime.state._store import (
     StoredRecord,
 )
 from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import PayloadPolicy
+from linktools.ai.storage import FilesystemObjectStore, PayloadPolicy
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -67,7 +67,10 @@ async def test_sql_state_group_maps_programming_failure_to_internal(
     path = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(engine)
-    state = RuntimeState.sqlite(path)
+    state = RuntimeState.sqlite(
+        path,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await state.initialize(namespace="sql-error-contract", tenant_id="tenant")
     store = state.execution.executions.state_store
 
@@ -194,7 +197,10 @@ async def test_sqlite_parallel_tool_lifecycle_persists_each_terminal_effect(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeState.sqlite(path)
+    state = RuntimeState.sqlite(
+        path,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await state.initialize(namespace="parallel-tools", tenant_id="tenant")
     try:
         run_id = "run"

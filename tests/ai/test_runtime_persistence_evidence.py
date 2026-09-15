@@ -32,7 +32,7 @@ from linktools.ai.runtime.state._contracts import (
     ResultRecord,
 )
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.storage import ObjectRef, StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai.run import _emit_result
 from pydantic import BaseModel
@@ -207,7 +207,10 @@ async def test_terminal_stream_allows_immediate_runtime_close(
         engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
         await provision_runtime_database(engine)
         await engine.dispose()
-        state = RuntimeState.sqlite(database)
+        state = RuntimeState.sqlite(
+            database,
+            object_store=FilesystemObjectStore(tmp_path / "objects"),
+        )
 
     try:
         async with Runtime.open(
@@ -260,7 +263,10 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
 
     monkeypatch.setattr(AgentExecutor, "execute", blocking_execute)
     workspace = Workspace.load(workspace_root, workspace_id="workspace")
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     try:
         async with Runtime.open(
             workspace,
@@ -285,7 +291,10 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     finally:
         await state.close()
 
-    reopened = RuntimeState.sqlite(database)
+    reopened = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     try:
         async with Runtime.open(
             workspace,
@@ -313,7 +322,10 @@ async def test_session_runtime_persists_and_reads_terminal_result(
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
 
     try:
         async with Runtime.open(

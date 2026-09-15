@@ -35,7 +35,7 @@ from linktools.ai.runtime.state._contracts import (
     ResultRecord,
 )
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
+from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy
 from linktools.ai.workspace import Workspace
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.test import TestModel
@@ -184,7 +184,13 @@ async def _durable_state(
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
     await engine.dispose()
-    return RuntimeState.sqlite(database), database
+    return (
+        RuntimeState.sqlite(
+            database,
+            object_store=FilesystemObjectStore(tmp_path / "objects"),
+        ),
+        database,
+    )
 
 
 @pytest.mark.asyncio
@@ -210,7 +216,10 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
     reopened = (
         RuntimeState.filesystem(durable_path)
         if backend == "filesystem"
-        else RuntimeState.sqlite(durable_path)
+        else RuntimeState.sqlite(
+            durable_path,
+            object_store=FilesystemObjectStore(tmp_path / "objects"),
+        )
     )
     try:
         async with Runtime.open(

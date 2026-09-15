@@ -12,8 +12,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from linktools.ai.storage import FilesystemObjectStore
 from linktools.cli import BaseCommand, CommandError
-from linktools.cli.argparse import BooleanOptionalAction, ConfigAction
+from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
@@ -117,16 +118,19 @@ async def _open_runtime_state(
     storage: str,
 ) -> AsyncIterator[RuntimeState]:
     if storage == "filesystem":
-        path = workspace.storage_root / "runtime"
-        _logger.info("ai run storage selected: backend=filesystem path=%s", path)
-        yield RuntimeState.filesystem(path)
+        root_path = workspace.storage_root / "runtime"
+        objects_path = root_path / "objects"
+        _logger.info("ai run storage selected: backend=filesystem path=%s", root_path)
+        yield RuntimeState.filesystem(root_path, object_store=FilesystemObjectStore(objects_path))
         return
-    if storage != "sqlite":
-        raise ValueError(f"unsupported Runtime storage backend: {storage}")
-
-    path = workspace.storage_root / "runtime.db"
-    _logger.info("ai run storage selected: backend=sqlite path=%s", path)
-    yield RuntimeState.sqlite(path)
+    if storage == "sqlite":
+        root_path = workspace.storage_root / "runtime"
+        runtime_path = root_path / "runtime.db"
+        objects_path = root_path / "objects"
+        _logger.info("ai run storage selected: backend=sqlite path=%s", runtime_path)
+        yield RuntimeState.sqlite(runtime_path, object_store=FilesystemObjectStore(objects_path))
+        return
+    raise ValueError(f"unsupported Runtime storage backend: {storage}")
 
 
 async def _emit_result(

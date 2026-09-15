@@ -16,7 +16,7 @@ from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._contracts import ToolOperationAdmission
 from linktools.ai.runtime.state._repositories import ToolRepositoryImpl
-from linktools.ai.storage import StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, StoredPayload
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -82,7 +82,10 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
     await provision_runtime_database(engine)
     await engine.dispose()
 
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await state.initialize(namespace="tool-cas", tenant_id="tenant")
     try:
         repository = state.recovery.tools

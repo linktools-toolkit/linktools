@@ -311,10 +311,13 @@ this Runtime query surface.
 `Runtime.open()` accepts an explicit `RuntimeState` when the application owns storage selection:
 
 ```python
+from pathlib import Path
+
 from linktools.ai import Runtime
 from linktools.ai.runtime import RuntimeState
 
-state = RuntimeState.sqlite("/var/lib/linktools/runtime.db")
+runtime_root = Path("/var/lib/linktools/runtime")
+state = RuntimeState.sqlite(runtime_root / "runtime.db")
 
 async with Runtime.open(
     workspace,
@@ -326,7 +329,7 @@ async with Runtime.open(
 
 Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments.
 
-SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local path-backed SQLite state initializes its own Runtime schema; an existing SQLite database is only validated and is never implicitly migrated or repaired. External SQL backends still require explicit schema provisioning/migration. Local SQLite keeps object payloads in a filesystem sidecar next to the database instead of storing large Runtime objects in SQL BLOB rows.
+SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local path-backed SQLite state initializes its own Runtime and `ai_objects` schema; an existing SQLite database is only validated and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration.
 
 Durable local execution and recovery are provided by Runtime state and recovery
 checkpoints and do not require an external workflow server. Harness provides the

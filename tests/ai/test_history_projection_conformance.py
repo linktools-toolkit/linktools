@@ -43,6 +43,7 @@ from linktools.ai.runtime.state._history import (
 )
 from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
 from linktools.ai.spec import AgentSpec
+from linktools.ai.storage import FilesystemObjectStore
 from ._runtime_test_helpers import execution_owner_fields
 from pydantic_ai.messages import (
     ModelRequest,
@@ -335,7 +336,10 @@ async def test_conversation_head_replacement_preserves_physical_identity(
     provisioning_engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     await provision_database(provisioning_engine)
     await provisioning_engine.dispose()
-    state = RuntimeState.sqlite(path)
+    state = RuntimeState.sqlite(
+        path,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await state.initialize(namespace="conversation-head", tenant_id="tenant")
     try:
         await state.conversation.histories.create(

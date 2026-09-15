@@ -306,7 +306,10 @@ async def test_shared_runtime_state_group_is_validated_once(
     state = (
         RuntimeState.filesystem(tmp_path / "runtime")
         if backend == "filesystem"
-        else RuntimeState.sqlite(tmp_path / "runtime.sqlite")
+        else RuntimeState.sqlite(
+            tmp_path / "runtime.sqlite",
+            object_store=FilesystemObjectStore(tmp_path / "objects"),
+        )
     )
     await state.initialize(namespace=f"validate-{backend}", tenant_id="tenant")
     calls: list[RuntimeDomain] = []

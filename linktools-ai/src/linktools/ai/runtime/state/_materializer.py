@@ -252,7 +252,7 @@ async def materialize_runtime_state(
                 from ._schema import build_runtime_sql_metadata
 
                 build_runtime_sql_metadata(frozenset(domains), metadata=metadata)
-                if key[0] == "sql" and object_store is None and any(
+                if key[0] in {"sqlite", "sql"} and object_store is None and any(
                     runtime_domain_uses_object_store(domain)
                     for domain in domains
                 ):
@@ -467,7 +467,6 @@ def _build_object_router(
     values: dict[RuntimeDomain, ObjectStore] = {}
     close_guard_stores: list[ObjectStore] = []
     sql_objects: dict[int, SqlObjectStore] = {}
-    sqlite_objects: dict[Path, FilesystemObjectStore] = {}
     for domain in RuntimeDomain:
         if not runtime_domain_uses_object_store(domain):
             continue
@@ -486,14 +485,7 @@ def _build_object_router(
             store = FilesystemObjectStore(route.path / "objects")
             values[domain] = store
             close_guard_stores.append(store)
-        elif route.kind == "sqlite" and route.path is not None:
-            store = sqlite_objects.get(route.path)
-            if store is None:
-                store = FilesystemObjectStore(_sqlite_object_root(route.path))
-                sqlite_objects[route.path] = store
-            values[domain] = store
-            close_guard_stores.append(store)
-        elif route.kind == "sql" and domain in contexts:
+        elif route.kind in {"sqlite", "sql"} and domain in contexts:
             context = contexts[domain]
             context_key = id(context)
             store = sql_objects.get(context_key)
@@ -570,10 +562,6 @@ def _unique(values: tuple[object, ...]) -> tuple[object, ...]:
             result.append(value)
             seen.add(id(value))
     return tuple(result)
-
-
-def _sqlite_object_root(path: Path) -> Path:
-    return path.with_name(f"{path.name}.objects")
 
 
 def _tenant_scope_digest(tenant_id: str) -> str:

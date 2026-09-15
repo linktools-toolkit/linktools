@@ -19,6 +19,7 @@ from linktools.ai.task import (
     TaskGraphRequest,
     TaskNodeContext,
 )
+from linktools.ai.storage import FilesystemObjectStore
 from linktools.ai.workspace import Workspace
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -51,7 +52,10 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         "submit:reopen-expired",
         TaskGraphLimits(max_concurrency=1),
     )
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await state.initialize(
         namespace=workspace.workspace_id,
         tenant_id="default",
@@ -73,7 +77,10 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
 
     await asyncio.sleep(1.05)
 
-    reopened = RuntimeState.sqlite(database)
+    reopened = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     async with Runtime.open(
         workspace,
         models=ModelRegistry.openai(model="gpt-test"),

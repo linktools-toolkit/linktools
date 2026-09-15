@@ -22,6 +22,7 @@ from linktools.ai.task import (
     TaskExpanderRef,
     TaskNode,
 )
+from linktools.ai.storage import FilesystemObjectStore
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
@@ -669,7 +670,10 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
         await engine.dispose()
 
     graph = TaskGraph("sqlite-task-events", (TaskNode("node"),))
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await state.initialize(namespace="task-event-sqlite", tenant_id="tenant")
     try:
         repository = state.task.tasks
@@ -697,7 +701,10 @@ async def test_sqlite_task_event_history_survives_reopen(tmp_path: Path) -> None
     finally:
         await state.close()
 
-    reopened = RuntimeState.sqlite(database)
+    reopened = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await reopened.initialize(namespace="task-event-sqlite", tenant_id="tenant")
     try:
         after = await reopened.task.tasks.list_events(

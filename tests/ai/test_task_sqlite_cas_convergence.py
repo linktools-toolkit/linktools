@@ -24,7 +24,7 @@ from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.storage import ObjectRef, StoredPayload
+from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskGraphService,
@@ -132,7 +132,10 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
     database = tmp_path / "state.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
@@ -214,7 +217,10 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
     database = tmp_path / "failure.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
@@ -275,7 +281,10 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
     monkeypatch.setattr(RuntimeTaskNodeRunner, "cancel", _noop_cancel)
     database = tmp_path / "cancel.sqlite"
     await _provision_sqlite(database)
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
@@ -314,7 +323,10 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
         TaskGraphLimits(max_concurrency=1),
     )
     admission = TaskGraphAdmission.from_request(request)
-    state = RuntimeState.sqlite(database)
+    state = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await state.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
         await state.task.admissions.admit(admission, request.graph)
@@ -339,7 +351,10 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
     finally:
         await state.close()
 
-    reopened = RuntimeState.sqlite(database)
+    reopened = RuntimeState.sqlite(
+        database,
+        object_store=FilesystemObjectStore(tmp_path / "objects"),
+    )
     await reopened.initialize(namespace="task-cas-recovery", tenant_id="tenant")
     try:
         view = await reopened.task.tasks.scheduler_snapshot(

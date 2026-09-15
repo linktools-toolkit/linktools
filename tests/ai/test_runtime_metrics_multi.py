@@ -13,6 +13,7 @@ from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.storage import FilesystemObjectStore
 from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -80,7 +81,10 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     )
     await provision_runtime_database(sqlite_provision_engine)
     await sqlite_provision_engine.dispose()
-    sqlite_state = RuntimeState.sqlite(sqlite_state_path)
+    sqlite_state = RuntimeState.sqlite(
+        sqlite_state_path,
+        object_store=FilesystemObjectStore(tmp_path / "sqlite-objects"),
+    )
 
     sql_state_path = tmp_path / "sql-state.db"
     sql_engine = create_async_engine(f"sqlite+aiosqlite:///{sql_state_path}")

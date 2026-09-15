@@ -258,6 +258,8 @@ class _ScopedObjectStore:
 
 
 class FilesystemObjectStore:
+    """Store content-addressed objects directly below ``root``."""
+
     def __init__(self, root: str | Path, *, store_id: str = "builtin") -> None:
         _validate_store_id(store_id)
         self._root = Path(root).expanduser().resolve()
@@ -276,7 +278,7 @@ class FilesystemObjectStore:
 
     def _paths(self, key: str) -> tuple[Path, Path]:
         digest = _key_digest(self.store_id, key).hex()
-        root = self._root / "objects" / digest[:2]
+        root = self._root / digest[:2]
         return root / f"{digest}.bin", root / f"{digest}.json"
 
     async def put(
@@ -999,7 +1001,7 @@ def _publish_filesystem_object(
 
 def _validate_filesystem_objects(root: Path, store_id: str) -> None:
     expected_files: set[Path] = set()
-    for metadata in (root / "objects").glob("*/*.json"):
+    for metadata in root.glob("*/*.json"):
         try:
             value = json.loads(metadata.read_text(encoding="utf-8"))
             key = value["key"]
@@ -1020,14 +1022,20 @@ def _validate_filesystem_objects(root: Path, store_id: str) -> None:
         if actual_size != expected_size or actual_digest != expected_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         expected_files.update({metadata, destination})
-    actual_files = {path for path in (root / "objects").rglob("*") if path.is_file()}
+    actual_files = {
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and path != root / "object.lock"
+        and root / ".tmp" not in path.parents
+    }
     if actual_files != expected_files:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _list_filesystem_objects(root: Path, store_id: str) -> tuple[ObjectStat, ...]:
     values: list[ObjectStat] = []
-    for metadata in (root / "objects").glob("*/*.json"):
+    for metadata in root.glob("*/*.json"):
         try:
             value = json.loads(metadata.read_text(encoding="utf-8"))
             key = value["key"]
