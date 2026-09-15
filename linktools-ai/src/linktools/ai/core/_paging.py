@@ -45,7 +45,11 @@ class CursorPayload:
     expires_at: int
 
     def __post_init__(self) -> None:
-        if self.version != 1 or isinstance(self.version, bool):
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version != 1
+        ):
             raise ValueError("unsupported cursor version")
         if not isinstance(self.tenant_id, str) or not self.tenant_id:
             raise ValueError("cursor tenant is invalid")
