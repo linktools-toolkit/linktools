@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Focused regressions for final Runtime composition invariants."""
+"""Runtime composition and ownership invariants."""
 
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +14,6 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
-    JsonValue,
     Principal,
     ResourceKind,
     ResourceRef,
@@ -31,19 +28,12 @@ from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay, StoredPayload
 from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
-from pydantic_ai.models import (
-    CompletedStreamedResponse,
-    ModelRequestParameters,
-    StreamedResponse,
-)
-from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.settings import ModelSettings
-from pydantic_ai.usage import RequestUsage
+
+from ._runtime_test_helpers import RuntimeUsageModels, runtime_usage_workspace
 
 
 class _DenyAuthorization:
@@ -90,94 +80,6 @@ class _UncertainExecution:
     async def inspect(self, execution_id: str, *, principal: Principal) -> object:
         del execution_id, principal
         return SimpleNamespace(status=ExecutionStatus.STARTED)
-
-
-async def _runtime_usage_model(
-    messages: list[ModelMessage],
-    info: AgentInfo,
-) -> ModelResponse:
-    del messages, info
-    return ModelResponse(
-        parts=[TextPart("done")],
-        usage=RequestUsage(
-            input_tokens=101,
-            output_tokens=202,
-            cache_read_tokens=303,
-            cache_write_tokens=404,
-        ),
-    )
-
-
-class _UsageFunctionModel(FunctionModel):
-    @asynccontextmanager
-    async def request_stream(
-        self,
-        messages: list[ModelMessage],
-        model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-        run_context: object | None = None,
-    ) -> AsyncIterator[StreamedResponse]:
-        del run_context
-        response = await self.request(
-            messages,
-            model_settings,
-            model_request_parameters,
-        )
-        yield CompletedStreamedResponse(
-            response,
-            model_request_parameters=model_request_parameters,
-            replay_events=True,
-        )
-
-
-class _RuntimeUsageModelBinding:
-    route_id = "default"
-    provider = "test"
-    model_identity = "test:usage"
-    vision = False
-    fingerprint = "u" * 64
-    semantic_payload: dict[str, JsonValue] = {
-        "provider": "test",
-        "model": "usage",
-    }
-
-    def materialize(self) -> FunctionModel:
-        return _UsageFunctionModel(_runtime_usage_model)
-
-
-class _RuntimeUsageModels:
-    def snapshot(self) -> "_RuntimeUsageModels":
-        return self
-
-    def resolve(self, route_id: str) -> _RuntimeUsageModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _RuntimeUsageModelBinding()
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _RuntimeUsageModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _RuntimeUsageModelBinding.semantic_payload
-        ):
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _RuntimeUsageModelBinding()
-
-
-def _runtime_usage_workspace(path: Path) -> Workspace:
-    path.mkdir(parents=True)
-    agent_path = path / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
-    )
-    return Workspace.load(path, workspace_id="workspace")
 
 
 def _binding() -> AgentBindingSnapshot:
@@ -414,11 +316,11 @@ async def test_subagent_unknown_cancel_requires_recovery() -> None:
 async def test_runtime_persists_model_usage_through_history_views(
     tmp_path: Path,
 ) -> None:
-    workspace = _runtime_usage_workspace(tmp_path / "workspace")
+    workspace = runtime_usage_workspace(tmp_path / "workspace")
 
     async with Runtime.open(
         workspace,
-        models=_RuntimeUsageModels(),  # type: ignore[arg-type]
+        models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
     ) as runtime:
         result = await runtime.agent("default").run(
