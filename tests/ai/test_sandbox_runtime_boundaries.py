@@ -21,6 +21,8 @@ from linktools.ai.workspace._bubblewrap import (
 from linktools.ai.workspace._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_UNKNOWN,
+    MAX_SAFE_DETAILS_BYTES,
+    validate_safe_details,
 )
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -128,6 +130,18 @@ async def test_bubblewrap_error_frame_preserves_effect_certainty(
     assert isinstance(error, AIError)
     assert error.code is ErrorCode.REQUEST_FIELD_INVALID
     assert error.safe_details == {"reason": "invalid"}
+
+
+def test_sandbox_safe_detail_limit_applies_to_details_not_frame_envelope() -> None:
+    payload_overhead = len(b'{"reason":""}')
+    validate_safe_details(
+        {"reason": "x" * (MAX_SAFE_DETAILS_BYTES - payload_overhead)}
+    )
+
+    with pytest.raises(ValueError, match="safe details are too large"):
+        validate_safe_details(
+            {"reason": "x" * (MAX_SAFE_DETAILS_BYTES - payload_overhead + 1)}
+        )
 
 
 def test_runtime_compaction_uses_harness_deduplication() -> None:
