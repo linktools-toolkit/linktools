@@ -16,7 +16,7 @@ from linktools.ai.asset import (
 from linktools.ai.capability import (
     AssetSkillResourceSource,
     LocalSkillResourceSource,
-    LinkToolsSkills,
+    SkillCapability,
     SkillDefinition,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -122,7 +122,7 @@ async def test_local_skill_resource_discovery_ignores_noise_but_explicit_read_wo
     (package / "__MACOSX" / "metadata").write_bytes(b"noise")
 
     source = LocalSkillResourceSource("local", skills_root)
-    capability = LinkToolsSkills(
+    capability = SkillCapability(
         (
             SkillDefinition(
                 SkillSpec("review", "pinned"),
