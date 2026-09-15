@@ -60,7 +60,7 @@ def _is_reset(info: InfoT) -> bool:
 
 
 async def _settle_task(task: "asyncio.Task[object]") -> bool:
-    """Wait for one owned task to finish before propagating caller cancellation."""
+    """Wait for owned work to finish before propagating caller cancellation."""
     cancelled = False
     while True:
         try:
@@ -141,9 +141,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             raise ValueError("layer ids must be non-empty and unique")
         if any(layer.backend is primary for layer in layer_values):
             raise ValueError("primary backend cannot be repeated as a layer")
-        if writer is not None and writer is not primary and all(
-            writer is not layer.backend for layer in layer_values
-        ):
+        if writer is not None and writer is not primary and all(writer is not layer.backend for layer in layer_values):
             raise ValueError("writer must be one of the read backends")
         self.primary = primary
         self.writer = writer
@@ -194,10 +192,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         """Return whether the configured writer commits batches atomically."""
         return isinstance(self.writer, AtomicBatchStorageWriter) and self.writer.atomic_batch
 
-    def is_writable_backend(
-        self,
-        backend: "ReadableStorageBackend[KeyT, ValueT, InfoT]",
-    ) -> bool:
+    def is_writable_backend(self, backend: "ReadableStorageBackend[KeyT, ValueT, InfoT]") -> bool:
         """Return whether a backend is the overlay's writable backend."""
         return self.writer is backend
 
@@ -224,23 +219,11 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     if identity in seen:
                         continue
                     seen.add(identity)
-                    if not isinstance(backend, InitializableStorage):
-                        continue
-                    try:
+                    if isinstance(backend, InitializableStorage):
+                        opened.append(backend)
                         await backend.initialize()
-                    except BaseException:
-                        try:
-                            await backend.close()
-                        except BaseException as cleanup_error:  # noqa: BLE001
-                            _logger.error(
-                                "storage backend cleanup failed after initialize error: "
-                                "backend=%s exception_type=%s",
-                                type(backend).__name__,
-                                type(cleanup_error).__name__,
-                            )
-                        raise
-                    opened.append(backend)
             except BaseException:
+                self._closed = True
                 for backend in reversed(opened):
                     try:
                         await backend.close()
@@ -267,10 +250,14 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
         first_error: BaseException | None = None
         cancelled = False
-
         async with self._cache_task_lock:
-            cache_tasks = tuple(self._cache_tasks.values())
-        for task in cache_tasks:
+            tasks = tuple(self._cache_tasks.values())
+        tasks += tuple(
+            task
+            for view in self._views
+            if (task := view.pending_refresh_task) is not None
+        )
+        for task in tasks:
             try:
                 cancelled = await _settle_task(cast("asyncio.Task[object]", task)) or cancelled
             except asyncio.CancelledError:
@@ -278,21 +265,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             except BaseException as error:  # noqa: BLE001
                 if first_error is None:
                     first_error = error
-        async with self._cache_task_lock:
-            self._cache_tasks = {
-                key: task for key, task in self._cache_tasks.items() if not task.done()
-            }
-
-        for view in self._views:
-            task = asyncio.create_task(view.settle())
-            try:
-                cancelled = await _settle_task(cast("asyncio.Task[object]", task)) or cancelled
-            except asyncio.CancelledError:
-                cancelled = True
-            except BaseException as error:  # noqa: BLE001
-                if first_error is None:
-                    first_error = error
-
         for backend in reversed(backends):
             task = asyncio.create_task(backend.close())
             try:
@@ -302,7 +274,6 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             except BaseException as error:  # noqa: BLE001
                 if first_error is None:
                     first_error = error
-
         if first_error is not None:
             raise first_error
         if cancelled:
@@ -339,11 +310,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if self.validator is not None:
             self.validator.validate_value(key, value, info)
 
-    def _effective_revision(
-        self,
-        revisions: 'Sequence[str]',
-        primary: StorageRevision,
-    ) -> StorageRevision:
+    def _effective_revision(self, revisions: 'Sequence[str]', primary: StorageRevision) -> StorageRevision:
         if len(revisions) == 1:
             return primary
         return StorageRevision(canonical_sha256(list(revisions)))
@@ -352,10 +319,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         heads = await asyncio.gather(*(view.head_revision() for view in self._views))
         if any(head is None for head in heads):
             return (await self._state()).revision
-        return self._effective_revision(
-            [str(head) for head in heads],
-            cast(StorageRevision, heads[0]),
-        )
+        return self._effective_revision([str(head) for head in heads], cast(StorageRevision, heads[0]))
 
     async def get(self, key: KeyT) -> 'ValueT | None':
         state = await self._state()
@@ -389,10 +353,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 )
         return info
 
-    async def locate(
-        self,
-        key: KeyT,
-    ) -> 'StorageLocation[KeyT, ValueT, InfoT] | None':
+    async def locate(self, key: KeyT) -> 'StorageLocation[KeyT, ValueT, InfoT] | None':
         """Return the effective owner selected by layer precedence for one key."""
         state = await self._state()
         info = state.entries.get(key)
@@ -400,13 +361,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             return None
         owner = state.owners[key]
         backend = self._views[owner].backend
-        return StorageLocation(
-            key,
-            info,
-            backend,
-            self._owner_id(owner),
-            self.is_writable_backend(backend),
-        )
+        return StorageLocation(key, info, backend, self._owner_id(owner), self.is_writable_backend(backend))
 
     def invalidate(self) -> None:
         """Discard materialized metadata and preload markers after an external mutation."""
@@ -437,11 +392,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if info is None or _is_deleted(info):
             return None
         owner = state.owners[key]
-        cache_key = (
-            self.cache_adapter.cache_key(key, info)
-            if self.cache_adapter is not None
-            else None
-        )
+        cache_key = self.cache_adapter.cache_key(key, info) if self.cache_adapter is not None else None
         if self.cache is not None and cache_key is not None:
             cached_value = await self._read_cache_value(key, info, cache_key)
             if cached_value is not None:
@@ -467,11 +418,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             return await self._get_from_state(key, refreshed, retried=True)
         self._validate_value(key, value, info)
         if self.cache is not None and cache_key is not None:
-            await write_cache(
-                self.cache,
-                cache_key,
-                self.cache_adapter.to_cache(value),
-            )
+            await write_cache(self.cache, cache_key, self.cache_adapter.to_cache(value))
         return value
 
     async def _get_many_from_state(
@@ -501,11 +448,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 values[key] = value
 
         await asyncio.gather(*(_cache_read(key) for key in keys))
-        misses = [
-            key
-            for key in misses
-            if key in state.entries and not _is_deleted(state.entries[key])
-        ]
+        misses = [key for key in misses if key in state.entries and not _is_deleted(state.entries[key])]
         loaded = await self._load_origins(misses, state)
         raced: set[int] = set()
         missing_origins: list[KeyT] = []
@@ -557,25 +500,15 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         async with self._cache_task_lock:
             task = self._cache_tasks.get(cache_key)
             if task is None:
-                task = asyncio.create_task(
-                    self._load_cache_value_owned(key, info, cache_key)
-                )
+                task = asyncio.create_task(self._load_cache_value(key, info, cache_key))
                 self._cache_tasks[cache_key] = task
-        return await asyncio.shield(task)
 
-    async def _load_cache_value_owned(
-        self,
-        key: KeyT,
-        info: InfoT,
-        cache_key: str,
-    ) -> 'ValueT | None':
-        try:
-            return await self._load_cache_value(key, info, cache_key)
-        finally:
-            current = asyncio.current_task()
-            async with self._cache_task_lock:
-                if current is not None and self._cache_tasks.get(cache_key) is current:
-                    self._cache_tasks.pop(cache_key, None)
+                def discard(done: "asyncio.Task[ValueT | None]") -> None:
+                    if self._cache_tasks.get(cache_key) is done:
+                        self._cache_tasks.pop(cache_key, None)
+
+                task.add_done_callback(discard)
+        return await asyncio.shield(task)
 
     async def _load_cache_value(
         self,
@@ -632,9 +565,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
             await asyncio.gather(*(_load_one(key) for key in group))
 
-        await asyncio.gather(
-            *(_load_group(owner, group) for owner, group in grouped.items())
-        )
+        await asyncio.gather(*(_load_group(owner, group) for owner, group in grouped.items()))
         return loaded
 
     async def _delete_cache(self, cache_key: str) -> None:
@@ -645,10 +576,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
-            _logger.debug(
-                "failed to delete corrupted storage cache entry: key=%s",
-                cache_key,
-            )
+            _logger.debug("failed to delete corrupted storage cache entry: key=%s", cache_key)
 
     async def list_info(self) -> 'tuple[InfoT, ...]':
         state = await self._state()
@@ -696,9 +624,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
     async def preload(self, keys: 'Sequence[KeyT] | None' = None) -> PreloadResult:
         state = await self._state()
-        selected = (
-            tuple(dict.fromkeys(keys)) if keys is not None else tuple(state.entries)
-        )
+        selected = tuple(dict.fromkeys(keys)) if keys is not None else tuple(state.entries)
         if self.cache is None or self.cache_adapter is None:
             return PreloadResult(state.revision, len(selected), 0, 0, len(selected))
         identities = {
@@ -717,9 +643,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             if key not in marked
         )
         present = await contains_many(self.cache, pending_identities)
-        already_cached = len(marked) + sum(
-            1 for identity in pending_identities if identity in present
-        )
+        already_cached = len(marked) + sum(1 for identity in pending_identities if identity in present)
         for key, identity in identities.items():
             if key in marked or identity in present:
                 self._preloaded[key] = identity
@@ -879,11 +803,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             current = await self.current_revision()
             if current != expected_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        results: list[
-            StoragePutResult[InfoT]
-            | StorageDeleteResult[KeyT]
-            | StorageResetResult[KeyT]
-        ] = []
+        results: list[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT]] = []
         revision = expected_revision
         for index, change in enumerate(changes):
             try:
@@ -908,11 +828,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                         metadata=change.metadata,
                     )
             except Exception as exc:
-                failure_revision = (
-                    revision
-                    if revision is not None
-                    else await self.current_revision()
-                )
+                failure_revision = revision if revision is not None else await self.current_revision()
                 error_code = (
                     exc.code.value
                     if isinstance(exc, AIError)
@@ -937,61 +853,33 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         result: 'StorageBatchResult[InfoT, KeyT]',
     ) -> None:
         if len(result.results) != len(changes):
-            raise AIError(
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
-                "storage batch result count mismatch",
-            )
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch result count mismatch")
         for change, item in zip(changes, result.results):
             if change.operation is StorageOperation.PUT:
                 if not isinstance(item, StoragePutResult):
-                    raise AIError(
-                        ErrorCode.STORAGE_INTEGRITY_ERROR,
-                        "storage batch put result mismatch",
-                    )
-                self._validate_value(
-                    change.key,
-                    cast(ValueT, change.value),
-                    item.info,
-                )
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch put result mismatch")
+                self._validate_value(change.key, cast(ValueT, change.value), item.info)
             elif change.operation is StorageOperation.DELETE and (
                 not isinstance(item, StorageDeleteResult) or item.key != change.key
             ):
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "storage batch delete result mismatch",
-                )
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch delete result mismatch")
             elif change.operation is StorageOperation.RESET and (
                 not isinstance(item, StorageResetResult) or item.key != change.key
             ):
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "storage batch reset result mismatch",
-                )
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch reset result mismatch")
 
-    def _validate_batch(
-        self,
-        changes: 'Sequence[StorageChange[KeyT, ValueT]]',
-    ) -> None:
+    def _validate_batch(self, changes: 'Sequence[StorageChange[KeyT, ValueT]]') -> None:
         seen: set[KeyT] = set()
         for change in changes:
-            if change.operation not in {
-                StorageOperation.PUT,
-                StorageOperation.DELETE,
-                StorageOperation.RESET,
-            }:
+            if change.operation not in {StorageOperation.PUT, StorageOperation.DELETE, StorageOperation.RESET}:
                 raise ValueError(f"unsupported storage operation: {change.operation}")
             if change.key in seen:
                 raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
             seen.add(change.key)
             if change.operation is StorageOperation.PUT and change.value is None:
                 raise ValueError("PUT changes require a value")
-            if (
-                change.operation in {StorageOperation.DELETE, StorageOperation.RESET}
-                and change.value is not None
-            ):
-                raise ValueError(
-                    f"{change.operation.value} changes cannot contain a value"
-                )
+            if change.operation in {StorageOperation.DELETE, StorageOperation.RESET} and change.value is not None:
+                raise ValueError(f"{change.operation.value} changes cannot contain a value")
 
     def _after_put(
         self,
@@ -1022,52 +910,28 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 self.primary_view.invalidate()
                 _logger.warning(
                     "storage revision notification failed",
-                    extra={
-                        "error_code": ErrorCode.STORAGE_REVISION_NOTIFY_FAILED.value
-                    },
+                    extra={"error_code": ErrorCode.STORAGE_REVISION_NOTIFY_FAILED.value},
                     exc_info=True,
                 )
 
-    async def list_versions(
-        self,
-        key: KeyT,
-    ) -> 'tuple[VersionSummary, ...]':
+    async def list_versions(self, key: KeyT) -> 'tuple[VersionSummary, ...]':
         state = await self._state()
         owners = tuple(range(len(self._views)))
-        collected: dict[
-            tuple[int, str, StorageEntryStatus],
-            VersionSummary,
-        ] = {}
+        collected: dict[tuple[int, str, StorageEntryStatus], VersionSummary] = {}
         for owner in owners:
             backend = self._views[owner].backend
             if not isinstance(backend, VersionedStorage):
                 continue
             versions = tuple(await backend.list_versions(key))
             for version in versions:
-                collected[
-                    (
-                        version.entry_revision.value,
-                        version.digest,
-                        version.status,
-                    )
-                ] = version
+                collected[(version.entry_revision.value, version.digest, version.status)] = version
         if collected:
-            return tuple(
-                sorted(
-                    collected.values(),
-                    key=lambda version: version.entry_revision.value,
-                    reverse=True,
-                )
-            )
+            return tuple(sorted(collected.values(), key=lambda version: version.entry_revision.value, reverse=True))
         if key not in state.owners:
             raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
-    async def get_at_revision(
-        self,
-        key: KeyT,
-        entry_revision: StorageEntryRevision,
-    ) -> 'ValueT | None':
+    async def get_at_revision(self, key: KeyT, entry_revision: StorageEntryRevision) -> 'ValueT | None':
         state = await self._state()
         owners = tuple(range(len(self._views)))
         for owner in owners:
@@ -1075,22 +939,11 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             if not isinstance(backend, VersionedStorage):
                 continue
             versions = tuple(await backend.list_versions(key))
-            if any(
-                version.entry_revision == entry_revision
-                for version in versions
-            ):
+            if any(version.entry_revision == entry_revision for version in versions):
                 return await backend.get_at_revision(key, entry_revision)
-        raise AIError(
-            ErrorCode.ASSET_VERSION_OWNER_UNKNOWN
-            if key not in state.owners
-            else ErrorCode.STORAGE_VERSION_UNSUPPORTED
-        )
+        raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
-    async def get_at_version(
-        self,
-        key: KeyT,
-        version: int,
-    ) -> 'ValueT | None':
+    async def get_at_version(self, key: KeyT, version: int) -> 'ValueT | None':
         state = await self._state()
         owners = tuple(range(len(self._views)))
         for owner in owners:
@@ -1100,11 +953,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             versions = tuple(await backend.list_versions(key))
             if any(item.entry_revision.value == version for item in versions):
                 return await backend.get_at_version(key, version)
-        raise AIError(
-            ErrorCode.ASSET_VERSION_OWNER_UNKNOWN
-            if key not in state.owners
-            else ErrorCode.STORAGE_VERSION_UNSUPPORTED
-        )
+        raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 __all__ = [
