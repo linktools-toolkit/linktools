@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pydantic tool return-schema regressions for runtime capabilities."""
+"""Pydantic tool return schemas for runtime capabilities."""
 
 import warnings
 
 from linktools.ai.capability import (
-    LinkToolsSkills,
-    LinkToolsSubagents,
+    SkillCapability,
     SkillDefinition,
     SkillSourceRegistry,
+    SubagentCapability,
 )
 from linktools.ai.core import JsonValue
 from linktools.ai.spec import SkillSpec, SubagentRef
@@ -19,20 +19,22 @@ def test_pydantic_capability_tool_return_schemas_are_constrained() -> None:
         _ref: SubagentRef,
         _task: str,
         *,
+        files: tuple[str, ...],
         invocation_id: str,
     ) -> dict[str, JsonValue]:
         assert invocation_id
+        assert files == ()
         return {
             "execution_id": "child",
             "status": "SUCCEEDED",
             "output": {"value": True},
         }
 
-    skill = LinkToolsSkills(
+    skill = SkillCapability(
         (SkillDefinition(SkillSpec("skill", content="instructions")),),
         SkillSourceRegistry(),
     )
-    subagent = LinkToolsSubagents((SubagentRef("agent", "child"),), delegate)
+    subagent = SubagentCapability((SubagentRef("agent", "child"),), delegate)
 
     with warnings.catch_warnings():
         warnings.filterwarnings(
