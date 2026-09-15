@@ -10,19 +10,16 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime.state import RuntimeState
 
-from .test_runtime_composition_regressions import (
-    _RuntimeUsageModels,
-    _runtime_usage_workspace,
-)
+from ._runtime_test_helpers import RuntimeUsageModels, runtime_usage_workspace
 
 
 @pytest.mark.asyncio
 async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
-    workspace = _runtime_usage_workspace(tmp_path / "workspace")
+    workspace = runtime_usage_workspace(tmp_path / "workspace")
 
     async with Runtime.open(
         workspace,
-        models=_RuntimeUsageModels(),  # type: ignore[arg-type]
+        models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
     ) as runtime:
         session = await runtime.agent("default").create_session("session")
@@ -50,13 +47,14 @@ async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
         ] == [["assistant"], ["assistant"]]
         assert page.next_cursor is None
 
+
 @pytest.mark.asyncio
 async def test_in_memory_fork_survives_parent_close(tmp_path: Path) -> None:
-    workspace = _runtime_usage_workspace(tmp_path / "workspace-fork")
+    workspace = runtime_usage_workspace(tmp_path / "workspace-fork")
 
     async with Runtime.open(
         workspace,
-        models=_RuntimeUsageModels(),  # type: ignore[arg-type]
+        models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
     ) as runtime:
         parent = await runtime.agent("default").create_session("parent")

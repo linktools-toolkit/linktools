@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Host-side Bubblewrap guardian.
 
-The guardian deliberately treats the control stream as opaque bytes.  It owns
+The guardian deliberately treats the control stream as opaque bytes. It owns
 the Runtime pidfd and the Bubblewrap child, while the worker owns the protocol
 and all workspace operations.
 """
@@ -30,7 +30,6 @@ from ._sandbox_protocol import (
     GUARDIAN_EXIT_SESSION_FAILED,
     PROTOCOL_VERSION,
     WORKER_EXIT_CLEANUP_FAILED,
-    WORKER_BUILD,
 )
 
 _MAX_CONFIG_BYTES = 1 * 1024 * 1024
@@ -145,7 +144,9 @@ def _relay(
                 to_worker.clear()
                 worker_input_open = False
             _set_write_interest(selector, child_in_fd, "worker-in", bool(to_worker))
-            _set_write_interest(selector, control_out_fd, "control-out", bool(to_control))
+            _set_write_interest(
+                selector, control_out_fd, "control-out", bool(to_control)
+            )
             events = selector.select(0.25)
             if not events and child.poll() is not None:
                 break
@@ -183,7 +184,9 @@ def _relay(
                     else:
                         to_worker.extend(data)
                         if len(to_worker) > _MAX_BUFFER_BYTES:
-                            raise RuntimeError("guardian input backpressure limit exceeded")
+                            raise RuntimeError(
+                                "guardian input backpressure limit exceeded"
+                            )
                 elif tag == "worker-out" and mask & selectors.EVENT_READ:
                     data = _read_nonblocking(child_out_fd)
                     if data is None:
@@ -197,13 +200,12 @@ def _relay(
                         _unregister(selector, control_out_fd)
                         _close_fd(control_in_fd)
                         _close_fd(control_out_fd)
-                    else:
-                        if control_open and not runtime_dead:
-                            to_control.extend(data)
-                            if len(to_control) > _MAX_BUFFER_BYTES:
-                                raise RuntimeError(
-                                    "guardian output backpressure limit exceeded"
-                                )
+                    elif control_open and not runtime_dead:
+                        to_control.extend(data)
+                        if len(to_control) > _MAX_BUFFER_BYTES:
+                            raise RuntimeError(
+                                "guardian output backpressure limit exceeded"
+                            )
                 elif tag == "bwrap-status" and mask & selectors.EVENT_READ:
                     data = _read_nonblocking(status_fd)
                     if data is None:
@@ -251,11 +253,7 @@ def _relay(
             return GUARDIAN_EXIT_CLEANUP_FAILED
         if worker_returncode is not None and control_open and not runtime_dead:
             worker_failed = True
-        return (
-            GUARDIAN_EXIT_SESSION_FAILED
-            if worker_failed
-            else GUARDIAN_EXIT_OK
-        )
+        return GUARDIAN_EXIT_SESSION_FAILED if worker_failed else GUARDIAN_EXIT_OK
     finally:
         for fd in (
             control_in_fd,
@@ -440,9 +438,7 @@ def _terminate_and_reap_child(child_id: int, waitid: Any) -> None:
             if not _wait_child_until(child_id, waitid, _CLOSE_SECONDS):
                 _send_child_pidfd_signal(pidfd, signal.SIGKILL)
                 if not _wait_child_until(child_id, waitid, _CLOSE_SECONDS):
-                    raise RuntimeError(
-                        f"adopted child {child_id} did not exit"
-                    )
+                    raise RuntimeError(f"adopted child {child_id} did not exit")
         _wait_child_pid(child_id)
     finally:
         _close_fd(pidfd)
@@ -547,7 +543,13 @@ def _send_pidfd_signal(pidfd: int, value: signal.Signals) -> None:
         raise OSError("pidfd signaling is unavailable")
     libc = ctypes.CDLL(None, use_errno=True)
     syscall = libc.syscall
-    syscall.argtypes = [ctypes.c_long, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint]
+    syscall.argtypes = [
+        ctypes.c_long,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+    ]
     syscall.restype = ctypes.c_long
     result = syscall(
         _pidfd_send_signal_number(),
@@ -633,10 +635,9 @@ def _read_config(fd_value: int, runtime_pidfd: int) -> dict[str, Any]:
 def _validate_config(value: Mapping[str, Any]) -> None:
     arguments = value.get("bwrap_args")
     if (
-        set(value) != {"version", "worker_build", "bwrap_args"}
+        set(value) != {"version", "bwrap_args"}
         or isinstance(value.get("version"), bool)
         or value.get("version") != PROTOCOL_VERSION
-        or value.get("worker_build") != WORKER_BUILD
         or not isinstance(arguments, list)
         or not arguments
         or any(not isinstance(argument, str) or not argument for argument in arguments)
@@ -729,7 +730,9 @@ def _write_stderr(value: bytes) -> None:
 
 
 def _write_diagnostic(error: BaseException) -> None:
-    _write_stderr(f"sandbox guardian failed: {type(error).__name__}\n".encode())
+    _write_stderr(
+        f"sandbox guardian failed: {type(error).__name__}\n".encode()
+    )
 
 
 def _close_fd(fd: int) -> None:

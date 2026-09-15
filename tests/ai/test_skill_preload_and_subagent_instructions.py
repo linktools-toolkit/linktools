@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill preload and subagent instruction pin regressions."""
+"""Skill preload and subagent instruction contracts."""
 
 import pytest
 
-from linktools.ai.capability import LinkToolsSkills, SkillDefinition
+from linktools.ai.capability import SkillCapability, SkillDefinition
+from linktools.ai.capability._skill_source import SkillSourceRegistry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, SkillSpec
-from linktools.ai.capability._skill_source import SkillSourceRegistry
 
 
 def _skill(identity: str, content: str) -> SkillDefinition:
@@ -65,7 +65,7 @@ def test_agent_spec_preload_rejects_unknown_version() -> None:
 
 
 def test_preloaded_skills_are_eager_instructions_on_the_skill_capability() -> None:
-    capability = LinkToolsSkills(
+    capability = SkillCapability(
         (_skill("z", "z-content"), _skill("a", "a-content")),
         SkillSourceRegistry(),
         preloaded_skill_ids=("z", "a"),
@@ -84,7 +84,7 @@ def test_preloaded_skill_instructions_reject_unpaired_surrogates() -> None:
         _skill("skill", "bad\ud800content"),
         _skill("bad\ud800id", "content"),
     ):
-        capability = LinkToolsSkills(
+        capability = SkillCapability(
             (definition,),
             SkillSourceRegistry(),
             preloaded_skill_ids=(definition.id,),
@@ -97,7 +97,7 @@ def test_preloaded_skill_instructions_reject_unpaired_surrogates() -> None:
 def test_preloaded_skill_instructions_enforce_total_byte_limit() -> None:
     definition = _skill("skill", "content")
     content_size = len("[skill: skill]\ncontent".encode("utf-8"))
-    capability = LinkToolsSkills(
+    capability = SkillCapability(
         (definition,),
         SkillSourceRegistry(),
         preloaded_skill_ids=("skill",),
@@ -109,4 +109,4 @@ def test_preloaded_skill_instructions_enforce_total_byte_limit() -> None:
 
 
 def test_skill_capability_without_skills_has_no_instructions() -> None:
-    assert LinkToolsSkills((), SkillSourceRegistry()).instructions() is None
+    assert SkillCapability((), SkillSourceRegistry()).instructions() is None

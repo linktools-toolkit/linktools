@@ -91,7 +91,7 @@ class SkillDefinition:
         return cls(specification, source_ref)
 
 
-class LinkToolsSkills(AbstractCapability[AgentContext[object]]):
+class SkillCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         skills: Sequence[SkillDefinition],
@@ -300,4 +300,4 @@ def _usage_hint(view: SkillResourceView) -> str:
     )
 
 
-__all__ = ["LinkToolsSkills", "SkillDefinition"]
+__all__ = ["SkillCapability", "SkillDefinition"]

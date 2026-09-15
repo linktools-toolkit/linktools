@@ -8,7 +8,7 @@ import re
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from functools import wraps
@@ -57,6 +57,7 @@ from ..storage import (
     StoredPayload,
     payload_fits_inline,
 )
+from ._handoff import HandoffGate, HandoffState
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._input import (
     ExecutionInputMaterializer,
@@ -216,14 +217,6 @@ async def _missing_terminal_verifier(
 ) -> None:
     del execution, status, required_step_run_id
     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-
-@dataclass
-class _ExecutionHandoffState:
-    active_consumers: int = 0
-    dependency_holds: set[str] = field(default_factory=set)
-    release_requested: bool = False
-    release_in_progress: bool = False
 
 
 @dataclass
@@ -390,8 +383,7 @@ class DefaultExecutionService:
         self._session_execution_ready = session_execution_ready
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
-        self._handoff_states: dict[tuple[str, str], _ExecutionHandoffState] = {}
-        self._handoff_condition = asyncio.Condition()
+        self._handoff = HandoffGate[tuple[str, str], None]()
         self._detached_cancel_finalizers: set[asyncio.Task[CancelExecutionResult]] = (
             set()
         )
@@ -583,19 +575,7 @@ class DefaultExecutionService:
         tenant_id: str,
         hold_id: str,
     ) -> None:
-        if not isinstance(hold_id, str) or not hold_id.strip():
-            raise ValueError("execution dependency hold id is required")
-        key = (tenant_id, execution_id)
-        async with self._handoff_condition:
-            while True:
-                state = self._handoff_states.get(key)
-                if state is None:
-                    state = _ExecutionHandoffState()
-                    self._handoff_states[key] = state
-                if not state.release_in_progress:
-                    state.dependency_holds.add(hold_id)
-                    return
-                await self._handoff_condition.wait()
+        await self._handoff.acquire_hold((tenant_id, execution_id), hold_id)
 
     async def release_dependency_hold(
         self,
@@ -604,35 +584,16 @@ class DefaultExecutionService:
         tenant_id: str,
         hold_id: str,
     ) -> None:
-        owner = False
-        state: _ExecutionHandoffState | None = None
-        async with self._handoff_condition:
-            state = self._handoff_states.get((tenant_id, execution_id))
-            if state is None:
-                return
-            state.dependency_holds.discard(hold_id)
-            owner = self._claim_cleanup_locked(state)
-            if (
-                not owner
-                and not state.release_requested
-                and not state.dependency_holds
-                and state.active_consumers == 0
-            ):
-                self._handoff_states.pop((tenant_id, execution_id), None)
+        key = tenant_id, execution_id
+        state, owner = await self._handoff.release_hold(key, hold_id)
         if owner and state is not None:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
     async def request_terminal_handoff(
         self, execution_id: str, *, tenant_id: str
     ) -> None:
-        owner = False
-        state: _ExecutionHandoffState
-        async with self._handoff_condition:
-            state = self._handoff_states.setdefault(
-                (tenant_id, execution_id), _ExecutionHandoffState()
-            )
-            state.release_requested = True
-            owner = self._claim_cleanup_locked(state)
+        key = tenant_id, execution_id
+        state, owner = await self._handoff.request_release(key)
         if owner:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
@@ -647,27 +608,17 @@ class DefaultExecutionService:
         }:
             await self.request_terminal_handoff(execution_id, tenant_id=tenant_id)
 
-    def _claim_cleanup_locked(self, state: _ExecutionHandoffState) -> bool:
-        if (
-            state.active_consumers == 0
-            and not state.dependency_holds
-            and state.release_requested
-            and not state.release_in_progress
-        ):
-            state.release_in_progress = True
-            return True
-        return False
-
     async def _run_handoff_cleanup(
-        self, execution_id: str, tenant_id: str, state: _ExecutionHandoffState
+        self,
+        execution_id: str,
+        tenant_id: str,
+        state: HandoffState[None],
     ) -> None:
+        key = tenant_id, execution_id
         try:
             await self._release_terminal(execution_id, tenant_id=tenant_id)
         except BaseException as error:
-            async with self._handoff_condition:
-                state.release_in_progress = False
-                state.release_requested = True
-                self._handoff_condition.notify_all()
+            await self._handoff.finish_release(key, state, succeeded=False)
             if not isinstance(error, Exception):
                 raise
             _logger.error(
@@ -676,36 +627,16 @@ class DefaultExecutionService:
                 exc_info=environ.debug,
             )
             return
-        async with self._handoff_condition:
-            if self._handoff_states.get((tenant_id, execution_id)) is state:
-                self._handoff_states.pop((tenant_id, execution_id), None)
-            self._handoff_condition.notify_all()
+        await self._handoff.finish_release(key, state, succeeded=True)
 
     @asynccontextmanager
     async def _execution_consumer(self, execution_id: str, tenant_id: str):
-        async with self._handoff_condition:
-            state = self._handoff_states.setdefault(
-                (tenant_id, execution_id), _ExecutionHandoffState()
-            )
-            while state.release_in_progress:
-                await self._handoff_condition.wait()
-            state.active_consumers += 1
+        key = tenant_id, execution_id
+        state = await self._handoff.enter(key)
         try:
             yield
         finally:
-            owner = False
-            async with self._handoff_condition:
-                state.active_consumers -= 1
-                if state.active_consumers < 0:
-                    raise RuntimeError("execution consumer count underflow")
-                owner = self._claim_cleanup_locked(state)
-                if (
-                    not owner
-                    and not state.release_requested
-                    and not state.dependency_holds
-                    and state.active_consumers == 0
-                ):
-                    self._handoff_states.pop((tenant_id, execution_id), None)
+            owner = await self._handoff.leave(key, state)
             if owner:
                 await self._run_handoff_cleanup(execution_id, tenant_id, state)
 

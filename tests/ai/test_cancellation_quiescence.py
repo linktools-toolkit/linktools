@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Regression coverage for Runtime-owned cancellation quiescence."""
+"""Runtime-owned cancellation quiescence behavior."""
 
 import asyncio
 from types import SimpleNamespace
@@ -13,6 +13,7 @@ from linktools.ai.runtime._execution import (
     CancelEffectOutcome,
     DefaultExecutionService,
 )
+from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.task import DefaultTaskGraphService
 from linktools.ai.task._local import LocalTaskGraphLauncher
@@ -65,8 +66,7 @@ def _local_backend(current: object) -> LocalExecutionBackend:
 
 def _execution_service() -> DefaultExecutionService:
     service = object.__new__(DefaultExecutionService)
-    service._handoff_states = {}
-    service._handoff_condition = asyncio.Condition()
+    service._handoff = HandoffGate()
     service._detached_cancel_finalizers = set()
     service._detached_cancel_failure = None
     return service

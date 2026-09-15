@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Final declaration, capability, and runtime-leaf contracts."""
+"""Declaration, capability semantic, and runtime-leaf contracts."""
 
 import json
 
@@ -13,7 +13,7 @@ from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import (
     CapabilityGroup,
-    LinkToolsSkills,
+    SkillCapability,
     SkillDefinition,
     SkillSourceRegistry,
     tool_semantic_metadata,
@@ -58,7 +58,6 @@ def test_tool_semantic_metadata_preserves_upstream_values() -> None:
         plan_safe=True,
         tool_class="business",
     )
-
     assert metadata["upstream"] == "retained"
     assert metadata["linktools.ai.effect"] == "replay_safe"
     assert metadata["linktools.ai.plan_safe"] is True
@@ -98,9 +97,7 @@ async def test_business_tool_semantics_are_frozen_in_tool_metadata() -> None:
         effect="replay_safe",
         plan_safe=True,
     )
-
     candidate = (await group.freeze())[0]
-
     assert tool.tool_def.metadata == {
         "linktools.ai.effect": "replay_safe",
         "linktools.ai.plan_safe": True,
@@ -119,7 +116,6 @@ def test_runtime_domain_object_store_trait_has_one_owner() -> None:
         RuntimeDomain.TASK,
         RuntimeDomain.RECOVERY,
     }
-
     assert {
         domain
         for domain in RuntimeDomain
@@ -152,7 +148,6 @@ def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
     assert AgentSpecCodec().decode(json.dumps(agent_payload).encode()) == AgentSpec(
         "agent"
     )
-
     skill_payload = {
         "version": 1,
         "id": "skill",
@@ -160,10 +155,8 @@ def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
         "future_metadata": {"future": True},
     }
     assert SkillSpecCodec().decode(json.dumps(skill_payload).encode()) == SkillSpec(
-        "skill",
-        "skill content",
+        "skill", "skill content"
     )
-
     mcp_payload = {
         "version": 1,
         "id": "mcp",
@@ -171,8 +164,7 @@ def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
         "future_metadata": {"future": True},
     }
     assert MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode()) == MCPServerSpec(
-        "mcp",
-        "echo",
+        "mcp", "echo"
     )
 
 
@@ -185,7 +177,6 @@ def test_agent_spec_codec_ignores_unknown_usage_limit_fields() -> None:
             "future_limit": {"unit": "request"},
         },
     }
-
     decoded = AgentSpecCodec().decode(json.dumps(payload).encode())
     assert decoded.usage_limits == AgentUsageLimits(model_requests=1)
 
@@ -208,8 +199,8 @@ def test_spec_constructors_reject_invalid_values() -> None:
 
 
 @pytest.mark.asyncio
-async def test_linktools_skills_is_the_direct_skill_capability() -> None:
-    capability = LinkToolsSkills(
+async def test_skill_capability_lists_skills_and_rejects_duplicate_ids() -> None:
+    capability = SkillCapability(
         (
             SkillDefinition(SkillSpec("z", "z skill")),
             SkillDefinition(SkillSpec("a", "a skill")),
@@ -218,9 +209,8 @@ async def test_linktools_skills_is_the_direct_skill_capability() -> None:
     )
     assert [item["id"] for item in await capability.list_skills()] == ["a", "z"]
     assert capability.get_toolset().id == "linktools.ai.skills"
-
     with pytest.raises(AIError) as error:
-        LinkToolsSkills(
+        SkillCapability(
             (
                 SkillDefinition(SkillSpec("same", "one")),
                 SkillDefinition(SkillSpec("same", "two")),
@@ -271,16 +261,9 @@ async def test_runtime_tool_boundary_requires_a_descriptor_for_every_leaf() -> N
     )
     context = _context()
     tools = await boundary.get_tools(context)
-    assert (
-        await boundary.call_tool(
-            "_business",
-            {"value": "ok"},
-            context,
-            tools["_business"],
-        )
-        == "ok"
-    )
-
+    assert await boundary.call_tool(
+        "_business", {"value": "ok"}, context, tools["_business"]
+    ) == "ok"
     unknown = RuntimeToolBoundaryToolset(
         (FunctionToolset([_business]),),
         {},
@@ -315,13 +298,6 @@ async def test_runtime_tool_boundary_does_not_rewrite_explicit_descriptor() -> N
     )
     context = _context()
     tools = await boundary.get_tools(context)
-
-    assert (
-        await boundary.call_tool(
-            "_business",
-            {"value": "ok"},
-            context,
-            tools["_business"],
-        )
-        == "ok"
-    )
+    assert await boundary.call_tool(
+        "_business", {"value": "ok"}, context, tools["_business"]
+    ) == "ok"

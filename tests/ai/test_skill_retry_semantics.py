@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill tool regression for model-correctable selection misses."""
+"""Skill tool behavior for model-correctable selection misses."""
 
 import pytest
 from linktools.ai.capability import (
-    LinkToolsSkills,
+    SkillCapability,
     SkillDefinition,
     SkillResourceView,
     SkillSourceRef,
@@ -45,7 +45,7 @@ def _context() -> RunContext[None]:
 
 
 async def test_missing_skill_id_is_model_retry() -> None:
-    capability = LinkToolsSkills(
+    capability = SkillCapability(
         (SkillDefinition(SkillSpec("known", content="instructions")),),
         SkillSourceRegistry(),
     )
@@ -63,7 +63,7 @@ async def test_missing_skill_id_is_model_retry() -> None:
 
 
 async def test_missing_skill_resource_is_tool_failure() -> None:
-    capability = LinkToolsSkills(
+    capability = SkillCapability(
         (SkillDefinition(SkillSpec("known", content="instructions")),),
         SkillSourceRegistry(),
     )
@@ -85,7 +85,7 @@ async def test_outside_root_skill_resource_is_only_tool_failure_at_model_boundar
         SkillSpec("known", content="instructions"),
         SkillSourceRef("source", "known"),
     )
-    capability = LinkToolsSkills(
+    capability = SkillCapability(
         (definition,),
         SkillSourceRegistry((_OutsideRootSource(),)),
     )

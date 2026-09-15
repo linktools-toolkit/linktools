@@ -30,12 +30,13 @@ from ._sandbox_protocol import (
     ERROR_EFFECT_VALUES,
     GUARDIAN_EXIT_OK,
     GUARDIAN_EXIT_SESSION_FAILED,
+    MAX_ACTIVE_REQUESTS,
     PROTOCOL_VERSION,
-    WORKER_BUILD,
     SandboxProtocolError,
     encode_frame,
     read_frame,
     validate_request_params,
+    validate_safe_details,
 )
 
 _logger = environ.get_logger("ai.workspace.bubblewrap")
@@ -43,9 +44,7 @@ _GUARDIAN_MODULE = "linktools.ai.workspace.sandbox_guardian"
 _WORKER_MODULE = "linktools.ai.workspace.sandbox_worker"
 _HANDSHAKE_TIMEOUT_SECONDS = 10.0
 _CLOSE_TIMEOUT_SECONDS = 5.0
-_MAX_PENDING_REQUESTS = 256
 _MAX_RESULT_CHARS = 50_000
-_MAX_SAFE_DETAILS_BYTES = 8 * 1024
 _MOUNTPOINTS = (
     "workspace",
     "skills",
@@ -380,7 +379,7 @@ class _BubblewrapSandboxSession:
                 raise AIError(_session_state_error(self._state))
             async with self._pending_lock:
                 pending_business = sum(item[1] for item in self._pending.values())
-                if business and pending_business >= _MAX_PENDING_REQUESTS:
+                if business and pending_business >= MAX_ACTIVE_REQUESTS:
                     raise AIError(ErrorCode.SANDBOX_BUSY)
                 self._pending[frame_id] = (future, business)
         sent = False
@@ -479,18 +478,7 @@ class _BubblewrapSandboxSession:
             code = ErrorCode(code_value)
             if effect not in ERROR_EFFECT_VALUES:
                 raise ValueError("error effect is invalid")
-            if not isinstance(details, Mapping):
-                raise ValueError("safe details are invalid")
-            if any(not isinstance(key, str) for key in details):
-                raise ValueError("safe detail key is invalid")
-            if len(
-                json.dumps(
-                    details,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ) > _MAX_SAFE_DETAILS_BYTES:
-                raise ValueError("safe details are too large")
+            validate_safe_details(details)
         except (TypeError, ValueError) as protocol_error:
             raise SandboxProtocolError("response error code is invalid") from protocol_error
         async with self._pending_lock:
@@ -787,7 +775,6 @@ def _guardian_config(
     )
     return {
         "version": PROTOCOL_VERSION,
-        "worker_build": WORKER_BUILD,
         "bwrap_args": bwrap_args,
     }
 
@@ -878,8 +865,6 @@ def _build_bwrap_args(
             _WORKER_MODULE,
             "--resources-json",
             json.dumps(worker_resources, ensure_ascii=False, separators=(",", ":")),
-            "--worker-build",
-            WORKER_BUILD,
             "--lock-root",
             "/__linktools_locks",
         )
@@ -1165,12 +1150,10 @@ def _parse_bwrap_version(value: str) -> tuple[int, int, int]:
 def _is_ready_frame(value: Mapping[str, Any] | None) -> bool:
     return bool(
         value is not None
-        and set(value)
-        == {"type", "protocol_version", "worker_build", "status"}
+        and set(value) == {"type", "protocol_version", "status"}
         and value.get("type") == "ready"
         and not isinstance(value.get("protocol_version"), bool)
         and value.get("protocol_version") == PROTOCOL_VERSION
-        and value.get("worker_build") == WORKER_BUILD
         and value.get("status") == "ready"
     )
 

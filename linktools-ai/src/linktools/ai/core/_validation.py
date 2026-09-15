@@ -94,7 +94,7 @@ def validate_observation_payload(value: JsonValue) -> JsonValue:
 
 
 def validate_page_limit(value: int) -> int:
-    if value < 1 or value > 200:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 200:
         raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
     return value
 

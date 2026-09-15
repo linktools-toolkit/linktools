@@ -15,6 +15,17 @@ from ..errors import AIError, ErrorCode
 from ._json import JsonValue, canonical_json_bytes
 
 ItemT = TypeVar("ItemT")
+_CURSOR_FIELDS = frozenset(
+    {
+        "version",
+        "tenant_id",
+        "resource_kind",
+        "filter_digest",
+        "position",
+        "revision",
+        "expires_at",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,48 +36,59 @@ class Page(Generic[ItemT]):
 
 @dataclass(frozen=True, slots=True)
 class CursorPayload:
-    cursor_version: int
+    version: int
     tenant_id: str
     resource_kind: str
     filter_digest: str
-    sort_key: str
-    snapshot_or_store_revision: int
+    position: str
+    revision: int
     expires_at: int
-    include_deleted: bool = False
-    history_id: "str | None" = None
-    next_message_index: "int | None" = None
-    intra_message_item_offset: "int | None" = None
-    projection_version: "int | None" = None
-    source_execution_id: "str | None" = None
-    segment_sequence: "int | None" = None
-    source_event_sequence: "int | None" = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.version, int)
+            or isinstance(self.version, bool)
+            or self.version != 1
+        ):
+            raise ValueError("unsupported cursor version")
+        if not isinstance(self.tenant_id, str) or not self.tenant_id:
+            raise ValueError("cursor tenant is invalid")
+        if not isinstance(self.resource_kind, str) or not self.resource_kind:
+            raise ValueError("cursor resource kind is invalid")
+        if (
+            not isinstance(self.filter_digest, str)
+            or len(self.filter_digest) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.filter_digest
+            )
+        ):
+            raise ValueError("cursor filter digest is invalid")
+        if not isinstance(self.position, str) or not self.position:
+            raise ValueError("cursor position is invalid")
+        if (
+            not isinstance(self.revision, int)
+            or isinstance(self.revision, bool)
+            or self.revision < 0
+        ):
+            raise ValueError("cursor revision is invalid")
+        if (
+            not isinstance(self.expires_at, int)
+            or isinstance(self.expires_at, bool)
+            or self.expires_at <= 0
+        ):
+            raise ValueError("cursor expiry is invalid")
 
     def as_json(self) -> dict[str, JsonValue]:
-        value: dict[str, JsonValue] = {
-            "cursor_version": self.cursor_version,
+        return {
+            "version": self.version,
             "tenant_id": self.tenant_id,
             "resource_kind": self.resource_kind,
             "filter_digest": self.filter_digest,
-            "sort_key": self.sort_key,
-            "snapshot_or_store_revision": self.snapshot_or_store_revision,
+            "position": self.position,
+            "revision": self.revision,
             "expires_at": self.expires_at,
-            "include_deleted": self.include_deleted,
         }
-        if self.history_id is not None:
-            value["history_id"] = self.history_id
-        if self.next_message_index is not None:
-            value["next_message_index"] = self.next_message_index
-        if self.intra_message_item_offset is not None:
-            value["intra_message_item_offset"] = self.intra_message_item_offset
-        if self.projection_version is not None:
-            value["projection_version"] = self.projection_version
-        if self.source_execution_id is not None:
-            value["source_execution_id"] = self.source_execution_id
-        if self.segment_sequence is not None:
-            value["segment_sequence"] = self.segment_sequence
-        if self.source_event_sequence is not None:
-            value["source_event_sequence"] = self.source_event_sequence
-        return value
 
 
 class CursorSigner(Protocol):
@@ -77,58 +99,76 @@ class CursorSigner(Protocol):
 class HmacCursorSigner:
     """Sign canonical cursors with an injected current and previous key."""
 
-    def __init__(self, current_key_id: str, current_key: bytes, previous: "tuple[str, bytes] | None" = None) -> None:
+    def __init__(
+        self,
+        current_key_id: str,
+        current_key: bytes,
+        previous: "tuple[str, bytes] | None" = None,
+    ) -> None:
         if not current_key_id or "." in current_key_id or not current_key:
             raise ValueError("cursor signing key is required")
         self._current_key_id = current_key_id
         self._keys = {current_key_id: current_key}
         if previous is not None:
-            if not previous[0] or "." in previous[0] or not previous[1]:
+            if (
+                not previous[0]
+                or "." in previous[0]
+                or not previous[1]
+                or previous[0] == current_key_id
+            ):
                 raise ValueError("previous cursor signing key is invalid")
             self._keys[previous[0]] = previous[1]
 
     def encode(self, payload: CursorPayload) -> str:
         raw = canonical_json_bytes(payload.as_json())
         key_id = self._current_key_id.encode("utf-8")
-        signature = hmac.new(self._keys[self._current_key_id], raw + b"." + key_id, hashlib.sha256).digest()
+        signature = hmac.new(
+            self._keys[self._current_key_id],
+            raw + b"." + key_id,
+            hashlib.sha256,
+        ).digest()
         return ".".join((_b64(raw), self._current_key_id, _b64(signature)))
 
     def decode(self, token: str) -> CursorPayload:
         try:
+            if not isinstance(token, str):
+                raise TypeError("cursor token must be a string")
             raw_token, key_id, encoded_signature = token.split(".", 2)
             raw = _unb64(raw_token)
             signature = _unb64(encoded_signature)
             key = self._keys[key_id]
-            expected = hmac.new(key, raw + b"." + key_id.encode("utf-8"), hashlib.sha256).digest()
+            expected = hmac.new(
+                key,
+                raw + b"." + key_id.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
             if not hmac.compare_digest(signature, expected):
-                raise ValueError("signature")
+                raise ValueError("cursor signature is invalid")
             value = json.loads(raw.decode("utf-8"))
-            if not isinstance(value, dict) or not isinstance(value.get("include_deleted"), bool):
-                raise ValueError("cursor fields")  # noqa: TRY004
+            if not isinstance(value, dict) or set(value) != _CURSOR_FIELDS:
+                raise ValueError("cursor fields are invalid")
             payload = CursorPayload(
-                int(value["cursor_version"]),
-                str(value["tenant_id"]),
-                str(value["resource_kind"]),
-                str(value["filter_digest"]),
-                str(value["sort_key"]),
-                int(value["snapshot_or_store_revision"]),
-                int(value["expires_at"]),
-                value["include_deleted"],
-                None if value.get("history_id") is None else str(value["history_id"]),
-                _optional_nonnegative_int(value.get("next_message_index")),
-                _optional_nonnegative_int(value.get("intra_message_item_offset")),
-                _optional_nonnegative_int(value.get("projection_version")),
-                None
-                if value.get("source_execution_id") is None
-                else str(value["source_execution_id"]),
-                _optional_nonnegative_int(value.get("segment_sequence")),
-                _optional_nonnegative_int(value.get("source_event_sequence")),
+                value["version"],
+                value["tenant_id"],
+                value["resource_kind"],
+                value["filter_digest"],
+                value["position"],
+                value["revision"],
+                value["expires_at"],
             )
             if payload.expires_at < int(time.time()):
-                raise ValueError("expired")
+                raise ValueError("cursor is expired")
             return payload
-        except (KeyError, TypeError, ValueError, UnicodeError, OverflowError, binascii.Error, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.ASSET_CURSOR_INVALID) from error
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeError,
+            OverflowError,
+            binascii.Error,
+            json.JSONDecodeError,
+        ) as error:
+            raise AIError(ErrorCode.CURSOR_INVALID) from error
 
 
 def _b64(value: bytes) -> str:
@@ -137,15 +177,6 @@ def _b64(value: bytes) -> str:
 
 def _unb64(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-
-
-def _optional_nonnegative_int(value: object) -> "int | None":
-    if value is None:
-        return None
-    result = int(value)
-    if result < 0:
-        raise ValueError("cursor offset cannot be negative")
-    return result
 
 
 __all__ = ["CursorPayload", "CursorSigner", "HmacCursorSigner", "Page"]

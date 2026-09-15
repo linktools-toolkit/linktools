@@ -5,7 +5,7 @@
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 from ..core import (
     ThinkingEffort,
@@ -119,6 +119,9 @@ class AgentUsageLimits:
 class AgentSpec:
     """Durable, runtime-independent declaration of one Agent."""
 
+    DEFAULT_TOOL_RETRIES: ClassVar[int] = 10000
+    DEFAULT_OUTPUT_RETRIES: ClassVar[int] = 3
+
     id: str
     model: str = "default"
     system_prompt: str = ""
@@ -130,8 +133,8 @@ class AgentSpec:
     usage_limits: "AgentUsageLimits | None" = None
     planning: bool = False
     thinking: ThinkingValue = False
-    tool_retries: int = 10000
-    output_retries: int = 3
+    tool_retries: int = DEFAULT_TOOL_RETRIES
+    output_retries: int = DEFAULT_OUTPUT_RETRIES
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()
 

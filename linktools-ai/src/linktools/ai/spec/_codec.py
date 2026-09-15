@@ -80,8 +80,8 @@ class AgentSpecCodec:
         allow_capabilities = raw.get("allow_capabilities", ["*"])
         planning = raw.get("planning", False)
         thinking = raw.get("thinking", False)
-        tool_retries = raw.get("tool_retries", 10000)
-        output_retries = raw.get("output_retries", 3)
+        tool_retries = raw.get("tool_retries", AgentSpec.DEFAULT_TOOL_RETRIES)
+        output_retries = raw.get("output_retries", AgentSpec.DEFAULT_OUTPUT_RETRIES)
         description = raw.get("description")
         preload_skills: object = raw.get("preload_skills", [])
         if not isinstance(preload_skills, list) or any(

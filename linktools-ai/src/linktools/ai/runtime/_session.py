@@ -4,21 +4,19 @@
 
 import asyncio
 import json
-import time
-from binascii import Error as Base64Error
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol, cast
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
+from ..capability import WorkspaceAccess
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
-    CursorPayload,
     CursorSigner,
     ExecutionStatus,
     OperationKind,
@@ -34,9 +32,13 @@ from ..core import (
     canonical_sha256,
     idempotency_key_digest,
     validate_agent_id,
+    validate_page_limit,
 )
 from ..errors import AIError, ErrorCode
-from ..capability import WorkspaceAccess
+from ._cursor import decode_cursor as decode_runtime_cursor
+from ._cursor import encode_cursor as encode_runtime_cursor
+from ._handoff import HandoffGate, HandoffState
+from ._input import stored_user_input_view
 from .service_api import (
     CancelExecutionRequest,
     CloseSessionRequest,
@@ -56,6 +58,7 @@ from .service_api import (
     UpdateSessionRequest,
 )
 from .state._contracts import (
+    ConversationCursor,
     ConversationState,
     ExecutionRecord,
     ExecutionRepository,
@@ -63,13 +66,11 @@ from .state._contracts import (
     SessionTurnCommitRef,
     SessionTurnRef,
 )
-from .state._contracts import (
-    ConversationCursor,
-)
-from ._input import stored_user_input_view
 from .state._views import project_session_history_message
 
 _TIMELINE_PROJECTION_VERSION = 1
+_TIMELINE_CURSOR_KIND = "SESSION_TIMELINE"
+_SESSION_CURSOR_KIND = "SESSION"
 
 
 def _timeline_items(messages: tuple[ModelMessage, ...]) -> tuple[SessionTurnItem, ...]:
@@ -118,20 +119,16 @@ def _timeline_cursor(
     before_sequence: int,
     signer: CursorSigner,
 ) -> str:
-    return signer.encode(
-        CursorPayload(
-            1,
-            tenant_id,
-            "SESSION_TIMELINE",
-            _timeline_filter_digest(session_id),
-            json.dumps(
-                [source_session_id, before_sequence],
-                separators=(",", ":"),
-            ),
-            0,
-            int(time.time()) + 3600,
-            projection_version=_TIMELINE_PROJECTION_VERSION,
-        )
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind=_TIMELINE_CURSOR_KIND,
+        filter_digest=_timeline_filter_digest(session_id),
+        position=json.dumps(
+            [source_session_id, before_sequence],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
 
 
@@ -144,18 +141,19 @@ def _decode_timeline_cursor(
 ) -> "tuple[str, int] | None":
     if cursor is None:
         return None
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind=_TIMELINE_CURSOR_KIND,
+        filter_digest=_timeline_filter_digest(session_id),
+    )
     try:
-        payload = signer.decode(cursor)
-        coordinate = json.loads(payload.sort_key)
-    except (AIError, json.JSONDecodeError, TypeError, ValueError) as error:
+        coordinate = json.loads(payload.position)
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     if (
-        payload.cursor_version != 1
-        or payload.tenant_id != tenant_id
-        or payload.resource_kind != "SESSION_TIMELINE"
-        or payload.filter_digest != _timeline_filter_digest(session_id)
-        or payload.snapshot_or_store_revision != 0
-        or payload.projection_version != _TIMELINE_PROJECTION_VERSION
+        payload.revision != 0
         or not isinstance(coordinate, list)
         or len(coordinate) != 2
         or not isinstance(coordinate[0], str)
@@ -225,14 +223,6 @@ async def _no_release_terminal(
     del session_id, tenant_id, continuation
 
 
-@dataclass
-class _SessionHandoffState:
-    active_consumers: int = 0
-    release_requested: bool = False
-    release_in_progress: bool = False
-    continuation: ConversationCursor | None = None
-
-
 class DefaultSessionService:
     """Enforce session ownership, Agent identity immutability, and revision CAS."""
 
@@ -258,8 +248,7 @@ class DefaultSessionService:
         self._transcript_store = transcript_store
         self._release_terminal = release_terminal or _no_release_terminal
         self._workspace_access = workspace_access
-        self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
-        self._handoff_condition = asyncio.Condition()
+        self._handoff = HandoffGate[tuple[str, str], ConversationCursor]()
 
     async def create(self, agent_id: str, request: CreateSessionRequest) -> SessionView:
         try:
@@ -372,12 +361,7 @@ class DefaultSessionService:
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> Page[SessionTurn]:
-        if (
-            isinstance(limit, bool)
-            or not isinstance(limit, int)
-            or not 1 <= limit <= 200
-        ):
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        limit = validate_page_limit(limit)
         async with self._session_consumer(session_id, principal.tenant_id):
             root = await self._authorized(
                 session_id,
@@ -581,8 +565,7 @@ class DefaultSessionService:
             AuthorizationAction.SESSION_READ,
             ResourceRef(ResourceKind.SESSION, "list", request.principal.tenant_id),
         )
-        if not 1 <= request.limit <= 200:
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        limit = validate_page_limit(request.limit)
         cursor, snapshot = _decode_session_cursor(
             request.cursor,
             request.principal.tenant_id,
@@ -593,7 +576,7 @@ class DefaultSessionService:
             tenant_id=request.principal.tenant_id,
             owner_principal_id=request.principal.principal_id,
             cursor=cursor,
-            limit=request.limit,
+            limit=limit,
             snapshot=snapshot,
         )
         values = page.items
@@ -1160,74 +1143,57 @@ class DefaultSessionService:
     @asynccontextmanager
     async def _session_consumer(self, session_id: str, tenant_id: str):
         key = (tenant_id, session_id)
-        async with self._handoff_condition:
-            while True:
-                state = self._handoff_states.get(key)
-                if state is None:
-                    state = _SessionHandoffState()
-                    self._handoff_states[key] = state
-                if not state.release_in_progress:
-                    state.active_consumers += 1
-                    break
-                await self._handoff_condition.wait()
-        cleanup_owner = False
+        state = await self._handoff.enter(key)
         try:
             yield state
         finally:
-            async with self._handoff_condition:
-                state.active_consumers -= 1
-                if state.active_consumers < 0:
-                    raise RuntimeError("session consumer count became negative")
-                if state.active_consumers == 0:
-                    if state.release_requested and not state.release_in_progress:
-                        state.release_in_progress = True
-                        cleanup_owner = True
-                    elif (
-                        not state.release_requested
-                        and self._handoff_states.get(key) is state
-                    ):
-                        self._handoff_states.pop(key, None)
-                self._handoff_condition.notify_all()
-            if cleanup_owner:
-                cleanup_succeeded = False
-                cleanup_error: BaseException | None = None
-                try:
-                    await self._release_terminal(
-                        session_id, tenant_id=tenant_id, continuation=state.continuation
-                    )
-                    cleanup_succeeded = True
-                except BaseException as error:
-                    cleanup_error = error
-                    if isinstance(error, Exception):
-                        _logger.error(
-                            "session transient handoff cleanup failed: session=%s",
-                            session_id,
-                            exc_info=environ.debug,
-                        )
-                async with self._handoff_condition:
-                    if self._handoff_states.get(key) is state:
-                        if cleanup_succeeded and state.active_consumers == 0:
-                            self._handoff_states.pop(key, None)
-                        else:
-                            state.release_in_progress = False
-                            state.release_requested = True
-                    self._handoff_condition.notify_all()
-                if cleanup_error is not None and not isinstance(
-                    cleanup_error, Exception
-                ):
-                    raise cleanup_error
+            owner = await self._handoff.leave(key, state)
+            if owner:
+                await self._run_session_release(session_id, tenant_id, state)
 
     async def _request_session_release(
         self, session_id: str, tenant_id: str, continuation: ConversationCursor | None
     ) -> None:
         key = (tenant_id, session_id)
-        async with self._handoff_condition:
-            state = self._handoff_states.get(key)
-            if state is None:
-                raise RuntimeError("session release requested without consumer")
-            state.release_requested = True
-            state.continuation = continuation
-            self._handoff_condition.notify_all()
+        state, owner = await self._handoff.request_release(
+            key,
+            value=continuation,
+            require_existing=True,
+        )
+        if owner:
+            await self._run_session_release(session_id, tenant_id, state)
+
+    async def _run_session_release(
+        self,
+        session_id: str,
+        tenant_id: str,
+        state: HandoffState[ConversationCursor],
+    ) -> None:
+        succeeded = False
+        cleanup_error: BaseException | None = None
+        try:
+            await self._release_terminal(
+                session_id,
+                tenant_id=tenant_id,
+                continuation=state.release_value,
+            )
+            succeeded = True
+        except BaseException as error:
+            cleanup_error = error
+            if isinstance(error, Exception):
+                _logger.error(
+                    "session transient handoff cleanup failed: session=%s",
+                    session_id,
+                    exc_info=environ.debug,
+                )
+        finally:
+            await self._handoff.finish_release(
+                (tenant_id, session_id),
+                state,
+                succeeded=succeeded,
+            )
+        if cleanup_error is not None and not isinstance(cleanup_error, Exception):
+            raise cleanup_error
 
     async def _wait_for_no_active(self, session_id: str, tenant_id: str) -> None:
         record = await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
@@ -1609,6 +1575,10 @@ class DefaultSessionService:
 __all__ = ["DefaultSessionService"]
 
 
+def _session_filter_digest(owner_principal_id: str) -> str:
+    return canonical_sha256({"owner_principal_id": owner_principal_id})
+
+
 def _make_cursor(
     snapshot: int,
     tenant_id: str,
@@ -1618,16 +1588,13 @@ def _make_cursor(
 ) -> "str | None":
     if sort_key is None:
         return None
-    return signer.encode(
-        CursorPayload(
-            1,
-            tenant_id,
-            "SESSION",
-            canonical_sha256({"owner_principal_id": owner_principal_id}),
-            sort_key,
-            snapshot,
-            int(time.time()) + 3600,
-        )
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind=_SESSION_CURSOR_KIND,
+        filter_digest=_session_filter_digest(owner_principal_id),
+        position=sort_key,
+        revision=snapshot,
     )
 
 
@@ -1636,26 +1603,11 @@ def _decode_session_cursor(
 ) -> "tuple[str | None, int | None]":
     if cursor is None:
         return None, None
-    try:
-        payload = signer.decode(cursor)
-        if (
-            payload.cursor_version != 1
-            or payload.tenant_id != tenant_id
-            or payload.resource_kind != "SESSION"
-            or payload.filter_digest
-            != canonical_sha256({"owner_principal_id": owner_principal_id})
-        ):
-            raise ValueError("session cursor identity mismatch")
-        if not payload.sort_key.strip():
-            raise ValueError("session cursor sort key is empty")
-        return payload.sort_key, payload.snapshot_or_store_revision
-    except (
-        Base64Error,
-        KeyError,
-        TypeError,
-        ValueError,
-        json.JSONDecodeError,
-    ) as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
-    except AIError as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind=_SESSION_CURSOR_KIND,
+        filter_digest=_session_filter_digest(owner_principal_id),
+    )
+    return payload.position, payload.revision

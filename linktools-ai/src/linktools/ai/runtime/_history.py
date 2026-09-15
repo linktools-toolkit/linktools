@@ -3,8 +3,8 @@
 """Project Runtime step facts into Runtime trace and transcript views."""
 
 import heapq
+import json
 import re
-import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,7 +14,6 @@ from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from ..core import (
-    CursorPayload,
     CursorSigner,
     ExecutionStatus,
     JsonValue,
@@ -22,9 +21,12 @@ from ..core import (
     canonical_sha256,
     step_conversation_id,
     step_run_id,
+    validate_page_limit,
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
+from ._cursor import decode_cursor as decode_runtime_cursor
+from ._cursor import encode_cursor as encode_runtime_cursor
 from ._journal import (
     DURATION_NS_METADATA_KEY,
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
@@ -52,6 +54,9 @@ from .state._views import (
 )
 
 _logger = environ.get_logger("ai.runtime.history")
+_EXECUTION_HISTORY_PROJECTION_VERSION = 1
+_EXECUTION_TRACE_PROJECTION_VERSION = 1
+_EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,8 +195,7 @@ class StepExecutionHistoryReader:
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        if not 1 <= limit <= 200:
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        limit = validate_page_limit(limit)
         entries = await self._history_tree(record, tenant_id)
         occurrences: list[_TraceOccurrence] = []
         for item, depth in entries:
@@ -244,8 +248,7 @@ class StepExecutionHistoryReader:
     async def history(
         self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
     ) -> "Page[ExecutionHistoryItem]":
-        if not 1 <= limit <= 200:
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        limit = validate_page_limit(limit)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -456,8 +459,7 @@ class StepExecutionHistoryReader:
     async def transcript(
         self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int
     ) -> Page[TranscriptItem]:
-        if not 1 <= limit <= 200:
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        limit = validate_page_limit(limit)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -650,8 +652,7 @@ class StepSessionHistoryReader:
         cursor: "str | None",
         limit: int,
     ) -> "Page[SessionHistoryItem]":
-        if not 1 <= limit <= 200:
-            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        limit = validate_page_limit(limit)
         if continuation_step_run_id is None:
             if cursor is not None:
                 raise AIError(ErrorCode.CURSOR_INVALID)
@@ -889,6 +890,25 @@ def _event_timestamp(event: StepEvent) -> datetime:
     return event.timestamp.astimezone(timezone.utc)
 
 
+def _execution_filter_digest(execution_id: str, projection_version: int) -> str:
+    return canonical_sha256(
+        {
+            "execution_id": execution_id,
+            "projection_version": projection_version,
+        }
+    )
+
+
+def _decode_position(position: str, size: int) -> list[object]:
+    try:
+        value = json.loads(position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if not isinstance(value, list) or len(value) != size:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return value
+
+
 def _decode_history_cursor(
     cursor: str | None,
     *,
@@ -898,50 +918,32 @@ def _decode_history_cursor(
 ) -> tuple[str, int, int, int] | None:
     if cursor is None:
         return None
-    return _decode_source_cursor(
+    payload = decode_runtime_cursor(
         cursor,
+        signer,
         tenant_id=tenant_id,
         resource_kind="execution_history",
-        filter_digest=canonical_sha256({"execution_id": execution_id}),
-        sort_key="canonical-source",
-        projection_version=1,
-        signer=signer,
+        filter_digest=_execution_filter_digest(
+            execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION
+        ),
     )
-
-
-def _decode_source_cursor(
-    cursor: str,
-    *,
-    tenant_id: str,
-    resource_kind: str,
-    filter_digest: str,
-    sort_key: str,
-    projection_version: int,
-    signer: CursorSigner,
-) -> tuple[str, int, int, int]:
-    try:
-        payload = signer.decode(cursor)
-    except AIError as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    coordinate = _decode_position(payload.position, 4)
     if (
-        payload.cursor_version != 1
-        or payload.tenant_id != tenant_id
-        or payload.resource_kind != resource_kind
-        or payload.filter_digest != filter_digest
-        or payload.sort_key != sort_key
-        or payload.source_execution_id is None
-        or payload.segment_sequence is None
-        or payload.next_message_index is None
-        or payload.intra_message_item_offset is None
-        or payload.projection_version != projection_version
+        payload.revision != 0
+        or not isinstance(coordinate[0], str)
+        or not coordinate[0]
+        or isinstance(coordinate[1], bool)
+        or not isinstance(coordinate[1], int)
+        or coordinate[1] < 1
+        or isinstance(coordinate[2], bool)
+        or not isinstance(coordinate[2], int)
+        or coordinate[2] < 0
+        or isinstance(coordinate[3], bool)
+        or not isinstance(coordinate[3], int)
+        or coordinate[3] < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return (
-        payload.source_execution_id,
-        payload.segment_sequence,
-        payload.next_message_index,
-        payload.intra_message_item_offset,
-    )
+    return coordinate[0], coordinate[1], coordinate[2], coordinate[3]
 
 
 def _history_cursor(
@@ -950,21 +952,23 @@ def _history_cursor(
     occurrence: _HistoryOccurrence,
     signer: CursorSigner,
 ) -> str:
-    return signer.encode(
-        CursorPayload(
-            1,
-            tenant_id,
-            "execution_history",
-            canonical_sha256({"execution_id": execution_id}),
-            "canonical-source",
-            0,
-            int(time.time()) + 3600,
-            source_execution_id=occurrence.source_execution_id,
-            segment_sequence=occurrence.segment_sequence,
-            next_message_index=occurrence.message_index,
-            intra_message_item_offset=occurrence.item_offset,
-            projection_version=1,
-        )
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="execution_history",
+        filter_digest=_execution_filter_digest(
+            execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION
+        ),
+        position=json.dumps(
+            [
+                occurrence.source_execution_id,
+                occurrence.segment_sequence,
+                occurrence.message_index,
+                occurrence.item_offset,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
 
 
@@ -978,33 +982,35 @@ def _trace_cursor_index(
 ) -> int:
     if cursor is None:
         return 0
-    try:
-        payload = signer.decode(cursor)
-    except AIError as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="execution_trace",
+        filter_digest=_execution_filter_digest(
+            execution_id, _EXECUTION_TRACE_PROJECTION_VERSION
+        ),
+    )
+    coordinate = _decode_position(payload.position, 3)
     if (
-        payload.cursor_version != 1
-        or payload.tenant_id != tenant_id
-        or payload.resource_kind != "execution_trace"
-        or payload.filter_digest != canonical_sha256({"execution_id": execution_id})
-        or payload.sort_key != "durable-event"
-        or payload.source_execution_id is None
-        or payload.segment_sequence is None
-        or payload.source_event_sequence is None
-        or payload.projection_version != 1
+        payload.revision != 0
+        or not isinstance(coordinate[0], str)
+        or not coordinate[0]
+        or isinstance(coordinate[1], bool)
+        or not isinstance(coordinate[1], int)
+        or coordinate[1] < 1
+        or isinstance(coordinate[2], bool)
+        or not isinstance(coordinate[2], int)
+        or coordinate[2] < 1
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    coordinate = (
-        payload.source_execution_id,
-        payload.segment_sequence,
-        payload.source_event_sequence,
-    )
+    expected = (coordinate[0], coordinate[1], coordinate[2])
     for index, occurrence in enumerate(occurrences):
         if (
             occurrence.source_execution_id,
             occurrence.segment_sequence,
             occurrence.event_sequence,
-        ) == coordinate:
+        ) == expected:
             return index
     raise AIError(ErrorCode.CURSOR_INVALID)
 
@@ -1015,20 +1021,22 @@ def _trace_cursor(
     occurrence: _TraceOccurrence,
     signer: CursorSigner,
 ) -> str:
-    return signer.encode(
-        CursorPayload(
-            1,
-            tenant_id,
-            "execution_trace",
-            canonical_sha256({"execution_id": execution_id}),
-            "durable-event",
-            0,
-            int(time.time()) + 3600,
-            source_execution_id=occurrence.source_execution_id,
-            segment_sequence=occurrence.segment_sequence,
-            source_event_sequence=occurrence.event_sequence,
-            projection_version=1,
-        )
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="execution_trace",
+        filter_digest=_execution_filter_digest(
+            execution_id, _EXECUTION_TRACE_PROJECTION_VERSION
+        ),
+        position=json.dumps(
+            [
+                occurrence.source_execution_id,
+                occurrence.segment_sequence,
+                occurrence.event_sequence,
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
 
 
@@ -1042,22 +1050,28 @@ def _decode_transcript_cursor(
 ) -> tuple[int, int]:
     if cursor is None:
         return 0, 0
-    try:
-        payload = signer.decode(cursor)
-    except AIError as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="execution_transcript",
+        filter_digest=_execution_filter_digest(
+            execution_id, _EXECUTION_TRANSCRIPT_PROJECTION_VERSION
+        ),
+    )
+    coordinate = _decode_position(payload.position, 3)
     if (
-        payload.cursor_version != 1
-        or payload.tenant_id != tenant_id
-        or payload.resource_kind != "execution_transcript"
-        or payload.filter_digest != canonical_sha256({"execution_id": execution_id})
-        or payload.sort_key != run_id
-        or payload.next_message_index is None
-        or payload.intra_message_item_offset is None
-        or payload.projection_version != 1
+        payload.revision != 0
+        or coordinate[0] != run_id
+        or isinstance(coordinate[1], bool)
+        or not isinstance(coordinate[1], int)
+        or coordinate[1] < 0
+        or isinstance(coordinate[2], bool)
+        or not isinstance(coordinate[2], int)
+        or coordinate[2] < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return payload.next_message_index, payload.intra_message_item_offset
+    return coordinate[1], coordinate[2]
 
 
 def _transcript_cursor(
@@ -1068,19 +1082,27 @@ def _transcript_cursor(
     item_offset: int,
     signer: CursorSigner,
 ) -> str:
-    return signer.encode(
-        CursorPayload(
-            1,
-            tenant_id,
-            "execution_transcript",
-            canonical_sha256({"execution_id": execution_id}),
-            run_id,
-            0,
-            int(time.time()) + 3600,
-            next_message_index=message_index,
-            intra_message_item_offset=item_offset,
-            projection_version=1,
-        )
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="execution_transcript",
+        filter_digest=_execution_filter_digest(
+            execution_id, _EXECUTION_TRANSCRIPT_PROJECTION_VERSION
+        ),
+        position=json.dumps(
+            [run_id, message_index, item_offset],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )
+
+
+def _session_history_filter_digest(session_id: str) -> str:
+    return canonical_sha256(
+        {
+            "session_id": session_id,
+            "projection_version": SESSION_HISTORY_VIEW_V1,
+        }
     )
 
 
@@ -1090,28 +1112,27 @@ def _decode_session_history_cursor(
     session_id: str,
     signer: CursorSigner,
 ) -> tuple[str, int, int]:
-    try:
-        payload = signer.decode(cursor)
-    except AIError as error:
-        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="session_history",
+        filter_digest=_session_history_filter_digest(session_id),
+    )
+    coordinate = _decode_position(payload.position, 3)
     if (
-        payload.cursor_version != 1
-        or payload.tenant_id != tenant_id
-        or payload.resource_kind != "session_history"
-        or payload.filter_digest != canonical_sha256({"session_id": session_id})
-        or payload.history_id is None
-        or payload.next_message_index is None
-        or payload.intra_message_item_offset is None
-        or payload.projection_version != SESSION_HISTORY_VIEW_V1
+        payload.revision != 0
+        or not isinstance(coordinate[0], str)
+        or not coordinate[0]
+        or isinstance(coordinate[1], bool)
+        or not isinstance(coordinate[1], int)
+        or coordinate[1] < 0
+        or isinstance(coordinate[2], bool)
+        or not isinstance(coordinate[2], int)
+        or coordinate[2] < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    if payload.next_message_index < 0 or payload.intra_message_item_offset < 0:
-        raise AIError(ErrorCode.CURSOR_INVALID)
-    return (
-        payload.history_id,
-        payload.next_message_index,
-        payload.intra_message_item_offset,
-    )
+    return coordinate[0], coordinate[1], coordinate[2]
 
 
 def _session_history_cursor(
@@ -1122,20 +1143,16 @@ def _session_history_cursor(
     intra_message_item_offset: int,
     signer: CursorSigner,
 ) -> str:
-    return signer.encode(
-        CursorPayload(
-            1,
-            tenant_id,
-            "session_history",
-            canonical_sha256({"session_id": session_id}),
-            "session_history",
-            0,
-            int(time.time()) + 3600,
-            history_id=history_id,
-            next_message_index=next_message_index,
-            intra_message_item_offset=intra_message_item_offset,
-            projection_version=SESSION_HISTORY_VIEW_V1,
-        )
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="session_history",
+        filter_digest=_session_history_filter_digest(session_id),
+        position=json.dumps(
+            [history_id, next_message_index, intra_message_item_offset],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
     )
 
 

@@ -21,7 +21,10 @@ from linktools.ai.workspace._bubblewrap import (
 from linktools.ai.workspace._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_UNKNOWN,
+    MAX_SAFE_DETAILS_BYTES,
+    read_frame,
 )
+from linktools.ai.workspace.sandbox_worker import _send_error
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -50,6 +53,17 @@ class _FakeSession:
         del timeout_seconds
         self.calls.append(command)
         return "ok"
+
+
+class _BufferWriter:
+    def __init__(self) -> None:
+        self.payload = bytearray()
+
+    def write(self, value: bytes) -> None:
+        self.payload.extend(value)
+
+    async def drain(self) -> None:
+        pass
 
 
 @pytest.mark.asyncio
@@ -128,6 +142,30 @@ async def test_bubblewrap_error_frame_preserves_effect_certainty(
     assert isinstance(error, AIError)
     assert error.code is ErrorCode.REQUEST_FIELD_INVALID
     assert error.safe_details == {"reason": "invalid"}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_worker_bounds_safe_details_independently_from_frame() -> None:
+    payload_overhead = len(b'{"reason":""}')
+    details = {"reason": "x" * (MAX_SAFE_DETAILS_BYTES - payload_overhead)}
+    writer = _BufferWriter()
+
+    await _send_error(
+        cast(asyncio.StreamWriter, writer),
+        "request",
+        ErrorCode.REQUEST_FIELD_INVALID,
+        asyncio.Lock(),
+        details,
+        effect=ERROR_EFFECT_NOT_APPLIED,
+    )
+
+    assert len(writer.payload) > MAX_SAFE_DETAILS_BYTES
+    reader = asyncio.StreamReader()
+    reader.feed_data(bytes(writer.payload))
+    reader.feed_eof()
+    frame = await read_frame(reader)
+    assert frame is not None
+    assert frame["error"]["safe_details"] == details
 
 
 def test_runtime_compaction_uses_harness_deduplication() -> None:

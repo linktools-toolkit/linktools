@@ -20,6 +20,10 @@ from ._tool_semantic import tool_semantic_metadata
 SUBAGENT_CAPABILITY_ID = "linktools.ai.subagents"
 
 
+class _DelegatedTaskPromptError(AIError):
+    pass
+
+
 class SubagentDelegate(Protocol):
     async def __call__(
         self,
@@ -31,7 +35,7 @@ class SubagentDelegate(Protocol):
     ) -> "dict[str, JsonValue]": ...
 
 
-class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
+class SubagentCapability(AbstractCapability[AgentContext[object]]):
     def __init__(
         self,
         refs: "Sequence[SubagentRef]",
@@ -87,20 +91,16 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             try:
-                validate_user_prompt(task)
-            except AIError as error:
-                if error.code is ErrorCode.PROMPT_TOO_LARGE:
-                    raise ToolCallRejected(
-                        "The delegated task is invalid or too large. Shorten it and retry."
-                    ) from error
-                raise
-            try:
                 return await self.delegate_task(
                     subagent_id,
                     task,
                     files=files,
                     invocation_id=ctx.tool_call_id,
                 )
+            except _DelegatedTaskPromptError as error:
+                raise ToolCallRejected(
+                    "The delegated task is invalid or too large. Shorten it and retry."
+                ) from error
             except AIError as error:
                 if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
                     raise ToolCallFailed(
@@ -163,7 +163,12 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not isinstance(task, str) or not task.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        validate_user_prompt(task)
+        try:
+            validate_user_prompt(task)
+        except AIError as error:
+            if error.code is ErrorCode.PROMPT_TOO_LARGE:
+                raise _DelegatedTaskPromptError(ErrorCode.PROMPT_TOO_LARGE) from error
+            raise
         if not isinstance(invocation_id, str) or not invocation_id.strip():
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if not isinstance(files, Sequence) or isinstance(
@@ -191,4 +196,4 @@ class LinkToolsSubagents(AbstractCapability[AgentContext[object]]):
         return result
 
 
-__all__ = ["LinkToolsSubagents", "SUBAGENT_CAPABILITY_ID", "SubagentDelegate"]
+__all__ = ["SUBAGENT_CAPABILITY_ID", "SubagentCapability", "SubagentDelegate"]

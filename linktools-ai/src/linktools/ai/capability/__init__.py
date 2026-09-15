@@ -11,7 +11,7 @@ from ._group import (
     CapabilityLoader,
 )
 from ._mcp import mcp_server_namespace, mcp_server_selector
-from ._skill import LinkToolsSkills, SkillDefinition
+from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
     LocalSkillResourceSource,
@@ -21,7 +21,7 @@ from ._skill_source import (
     SkillSourceRef,
     SkillSourceRegistry,
 )
-from ._subagent import LinkToolsSubagents, SubagentDelegate
+from ._subagent import SubagentCapability, SubagentDelegate
 from ._task import TaskExpander, TaskExpansionContext
 from ._tool_signal import ToolCallFailed, ToolCallRejected
 from ._tool_semantic import (
@@ -54,8 +54,8 @@ __all__ = [
     "CapabilityLoadEntry",
     "CapabilityLoader",
     "AssetSkillResourceSource",
-    "LinkToolsSkills",
-    "LinkToolsSubagents",
+    "SkillCapability",
+    "SubagentCapability",
     "LocalSkillResourceSource",
     "TOOL_CLASS_METADATA_KEY",
     "TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY",
