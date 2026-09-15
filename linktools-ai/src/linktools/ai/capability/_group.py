@@ -480,17 +480,12 @@ class CapabilityGroup(Generic[AppT]):
         usage_limits: "AgentUsageLimits | None" = None,
         planning: bool = False,
         thinking: ThinkingValue = False,
-        tool_retries: "int | None" = None,
-        output_retries: "int | None" = None,
+        tool_retries: int = AgentSpec.DEFAULT_TOOL_RETRIES,
+        output_retries: int = AgentSpec.DEFAULT_OUTPUT_RETRIES,
         description: "str | None" = None,
     ) -> AgentSpec:
         """Register one declarative Agent before Runtime.open()."""
         values = (instructions,) if isinstance(instructions, str) else tuple(instructions)
-        retry_defaults = AgentSpec(name)
-        if tool_retries is None:
-            tool_retries = retry_defaults.tool_retries
-        if output_retries is None:
-            output_retries = retry_defaults.output_retries
         spec = AgentSpec(
             id=name,
             model=model,
