@@ -22,11 +22,12 @@ from ._sandbox import SandboxOperationRejected, SandboxResource
 from ._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_UNKNOWN,
+    MAX_ACTIVE_REQUESTS,
+    MAX_SAFE_ERROR_BYTES,
     PROTOCOL_VERSION,
     WORKER_EXIT_CLEANUP_FAILED,
     WORKER_EXIT_OK,
     WORKER_EXIT_SESSION_FAILED,
-    WORKER_BUILD,
     SandboxProtocolError,
     encode_frame,
     protocol_error,
@@ -36,12 +37,10 @@ from ._sandbox_protocol import (
 
 _PR_SET_DUMPABLE = 4
 _PR_SET_NO_NEW_PRIVS = 38
-_MAX_ACTIVE_REQUESTS = 256
-_SAFE_ERROR_BYTES = 8 * 1024
 
 
 async def main_async(arguments: argparse.Namespace) -> int:
-    _validate_worker(arguments.worker_build)
+    _validate_worker()
     resources = _resources(arguments.resources_json)
     session = _LocalSandboxSession(
         Path("/workspace"),
@@ -67,7 +66,6 @@ async def main_async(arguments: argparse.Namespace) -> int:
             {
                 "type": "ready",
                 "protocol_version": PROTOCOL_VERSION,
-                "worker_build": WORKER_BUILD,
                 "status": "ready",
             },
             write_lock,
@@ -233,7 +231,7 @@ async def _receive_requests(
             )
             continue
         is_control = method == "stop_command"
-        if (not is_control and len(active_business) >= _MAX_ACTIVE_REQUESTS) or (
+        if (not is_control and len(active_business) >= MAX_ACTIVE_REQUESTS) or (
             is_control and active_control
         ):
             await _send_error(
@@ -380,7 +378,8 @@ async def _dispatch(
     if method == "find_files":
         return await session.find_files(params["pattern"], path=params.get("path", "."))
     if method == "create_directory":
-        return await session.create_directory(params["path"])
+        return await session.create_directory(params["path"]
+        )
     if method == "file_info":
         return await session.file_info(params["path"])
     if method == "run_command":
@@ -418,7 +417,7 @@ async def _send_error(
                 },
             }
         )
-        if len(frame) > _SAFE_ERROR_BYTES:
+        if len(frame) > MAX_SAFE_ERROR_BYTES:
             raise ValueError("error details are too large")
     except (AIError, SandboxProtocolError, TypeError, ValueError):
         frame = encode_frame(
@@ -486,9 +485,7 @@ def _resources(value: str) -> tuple[SandboxResource, ...]:
     return tuple(resources)
 
 
-def _validate_worker(build: object) -> None:
-    if build != WORKER_BUILD:
-        raise RuntimeError("worker build is unsupported")
+def _validate_worker() -> None:
     if os.getpid() != 1:
         raise RuntimeError("worker must be the namespace init process")
     _set_dumpable(False)
@@ -568,7 +565,6 @@ def _install_signal_handlers(stop_event: asyncio.Event) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--resources-json", required=True)
-    parser.add_argument("--worker-build", required=True)
     parser.add_argument("--lock-root", required=True)
     arguments = parser.parse_args(argv)
     try:
