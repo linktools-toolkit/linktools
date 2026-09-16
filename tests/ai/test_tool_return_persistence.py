@@ -108,6 +108,29 @@ def test_nested_tool_json_and_binary_content_keep_distinct_types() -> None:
     assert restored["attachment"].media_type == binary.media_type
 
 
+def test_tool_return_hint_paths_do_not_depend_on_mapping_insertion_order() -> None:
+    first = {
+        "z": {
+            "kind": "binary",
+            "media_type": "application/octet-stream",
+            "data": "eg==",
+        },
+        "a": {
+            "kind": "binary",
+            "media_type": "application/octet-stream",
+            "data": "YQ==",
+        },
+    }
+    second = {"a": first["a"], "z": first["z"]}
+
+    expected = {
+        "version": 1,
+        "mapping_paths": [["a"], ["z"]],
+    }
+    assert _encoded_part(first)[_HINT] == expected
+    assert _encoded_part(second)[_HINT] == expected
+
+
 @pytest.mark.parametrize(
     "content",
     (
