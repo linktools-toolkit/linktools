@@ -58,7 +58,7 @@ class KeyedAsyncLock:
             if acquired:
                 lock.release()
             async with self._guard:
-                self._drop_reference(key, lock)
+                self._drop_reference(key)
             raise
 
     async def release(self, key: str) -> None:
@@ -80,32 +80,15 @@ class KeyedAsyncLock:
                 raise RuntimeError(f"keyed lock owner mismatch: {key}")
             self._owners.pop(key, None)
             lock.release()
-            self._drop_reference(key, lock)
+            self._drop_reference(key)
 
-    async def _release_if_owned(
-        self,
-        key: str,
-        owner: "asyncio.Task[object]",
-    ) -> bool:
-        async with self._guard:
-            lock = self._locks.get(key)
-            if lock is None or not lock.locked():
-                return False
-            if self._owners.get(key) is not owner:
-                return False
-            self._owners.pop(key, None)
-            lock.release()
-            self._drop_reference(key, lock)
-            return True
-
-    def _drop_reference(self, key: str, lock: asyncio.Lock) -> None:
-        references = self._references.get(key, 0)
-        if references <= 1:
-            self._references.pop(key, None)
-            if not lock.locked() and self._locks.get(key) is lock:
-                self._locks.pop(key, None)
-            return
-        self._references[key] = references - 1
+    def _drop_reference(self, key: str) -> None:
+        references = self._references[key] - 1
+        if references:
+            self._references[key] = references
+        else:
+            del self._references[key]
+            del self._locks[key]
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,12 +175,15 @@ class FilesystemLeaseCoordinator:
                     asyncio.to_thread(self._try_acquire, key, deadline)
                 )
                 try:
-                    lease = await asyncio.shield(attempt_task)
-                except asyncio.CancelledError:
+                    lease = await asyncio.wait_for(
+                        asyncio.shield(attempt_task),
+                        timeout=remaining,
+                    )
+                except (asyncio.CancelledError, asyncio.TimeoutError) as error:
                     attempt_cleanup_detached = True
                     _detach_lock_task(
                         asyncio.create_task(
-                            self._finish_cancelled_attempt(
+                            self._finish_abandoned_attempt(
                                 attempt_task,
                                 key,
                                 owner,
@@ -205,6 +191,8 @@ class FilesystemLeaseCoordinator:
                         ),
                         "filesystem lease acquire cleanup",
                     )
+                    if isinstance(error, asyncio.TimeoutError):
+                        raise TimeoutError(f"timed out acquiring lease: {key}") from error
                     raise
                 if lease is not None:
                     self._active[key] = lease
@@ -224,7 +212,7 @@ class FilesystemLeaseCoordinator:
                 await self._locks._release_owned(key, owner)
             raise
 
-    async def _finish_cancelled_attempt(
+    async def _finish_abandoned_attempt(
         self,
         attempt_task: "asyncio.Task[Lease | None]",
         key: str,
@@ -305,6 +293,8 @@ class FilesystemLeaseCoordinator:
         await self._locks._release_owned(lease.key, owner)
 
     def _try_acquire(self, key: str, deadline: float) -> "Lease | None":
+        if time.monotonic() >= deadline:
+            return None
         self.root.mkdir(parents=True, exist_ok=True)
         name = _lease_name(key)
         lease_path = self.root / f"{name}.lease"
@@ -314,6 +304,8 @@ class FilesystemLeaseCoordinator:
                 key,
                 timeout=max(0.0, deadline - time.monotonic()),
             ):
+                if time.monotonic() >= deadline:
+                    return None
                 now = time.time()
                 try:
                     current = _read_record(lease_path)
@@ -327,12 +319,14 @@ class FilesystemLeaseCoordinator:
                     self.root / f"{name}.fence",
                     timeout=max(0.0, deadline - time.monotonic()),
                 )
+                if time.monotonic() >= deadline:
+                    return None
                 token = uuid4().hex
                 record = {
                     "key": key,
                     "fence": fence,
                     "token": token,
-                    "expires_at": now + self.lease_seconds,
+                    "expires_at": time.time() + self.lease_seconds,
                 }
                 descriptor: int | None = None
                 try:
@@ -549,7 +543,9 @@ class FilesystemMutationLock:
                 _detach_lock_task(
                     asyncio.create_task(self._release_process_lock()),
                     "filesystem mutation process lock cleanup",
-                )
+                ),
+                "filesystem mutation process lock cleanup",
+            )
             raise
         except BaseException:
             if self._acquired:
