@@ -4,15 +4,13 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import cast
 
 from pydantic import TypeAdapter
-from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.messages import BinaryContent, ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
@@ -161,7 +159,7 @@ def build_context_projection(
     signatures: dict[bytes, list[int]] = {}
     for index, message in enumerate(source_values):
         signatures.setdefault(_message_signature(message), []).append(index)
-    used: set[int] = set()
+    next_candidate: dict[bytes, int] = {}
     items: list[StagedContextItem] = []
     span_start: int | None = None
     span_end = 0
@@ -173,15 +171,21 @@ def build_context_projection(
             span_start = None
 
     for message in projected:
-        candidates = signatures.get(_message_signature(message), ())
-        source_index = next((i for i in candidates if i not in used), None)
+        signature = _message_signature(message)
+        candidates = signatures.get(signature, ())
+        candidate_index = next_candidate.get(signature, 0)
+        source_index = (
+            candidates[candidate_index]
+            if candidate_index < len(candidates)
+            else None
+        )
         if source_index is None:
             flush_span()
             items.append(
                 StagedContextInline(*intern_payload(encode_model_messages((message,))))
             )
             continue
-        used.add(source_index)
+        next_candidate[signature] = candidate_index + 1
         if span_start is not None and source_index == span_end:
             span_end += 1
         else:
@@ -256,7 +260,7 @@ def project_public_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]
     values: list[JsonValue] = []
     for message in messages:
         value = _json_snapshot(message)
-        _sanitize_binary(value)
+        _sanitize_binary(message, value)
         values.append(value)
     return values
 
@@ -271,7 +275,7 @@ def model_identity(model: object, *, route_id: str | None = None) -> dict[str, s
 
 def model_response_projection(response: ModelResponse) -> JsonValue:
     value = _json_snapshot(response)
-    _sanitize_binary(value)
+    _sanitize_binary(response, value)
     return value
 
 
@@ -319,25 +323,27 @@ def _parameters_snapshot(parameters: ModelRequestParameters) -> JsonValue:
     return value
 
 
-def _sanitize_binary(value: JsonValue) -> None:
-    if isinstance(value, list):
-        for item in value:
-            _sanitize_binary(item)
+def _sanitize_binary(source: object, value: JsonValue) -> None:
+    if isinstance(source, BinaryContent):
+        if not isinstance(value, dict):
+            raise TypeError("binary content observation is not a mapping")
+        value.pop("data", None)
+        value["size"] = len(source.data)
+        value["digest"] = hashlib.sha256(source.data).hexdigest()
         return
-    if not isinstance(value, dict):
+    if isinstance(source, Mapping) and isinstance(value, dict):
+        for key, item in source.items():
+            if isinstance(key, str) and key in value:
+                _sanitize_binary(item, value[key])
         return
-    if value.get("kind") == "binary":
-        data = value.pop("data", None)
-        if isinstance(data, str):
-            try:
-                raw = base64.b64decode(data, validate=True)
-            except (ValueError, binascii.Error):
-                raw = data.encode("utf-8")
-            value["size"] = len(raw)
-            value["digest"] = hashlib.sha256(raw).hexdigest()
+    if isinstance(source, (list, tuple)) and isinstance(value, list):
+        for item, projected in zip(source, value, strict=False):
+            _sanitize_binary(item, projected)
         return
-    for item in value.values():
-        _sanitize_binary(item)
+    if is_dataclass(source) and isinstance(value, dict):
+        for field in fields(source):
+            if field.name in value:
+                _sanitize_binary(getattr(source, field.name), value[field.name])
 
 
 __all__ = [
