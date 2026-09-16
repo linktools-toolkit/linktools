@@ -543,9 +543,7 @@ class FilesystemMutationLock:
                 _detach_lock_task(
                     asyncio.create_task(self._release_process_lock()),
                     "filesystem mutation process lock cleanup",
-                ),
-                "filesystem mutation process lock cleanup",
-            )
+                )
             raise
         except BaseException:
             if self._acquired:
