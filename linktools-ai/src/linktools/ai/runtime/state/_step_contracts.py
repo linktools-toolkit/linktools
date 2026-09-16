@@ -102,13 +102,7 @@ class StepStore(Protocol):
         self, *, run_id: str, include_interrupted: bool = False
     ) -> ContinuableSnapshot | None: ...
 
-    async def list_model_interactions(
-        self,
-        *,
-        run_id: str,
-        after_request_sequence: int | None = None,
-        limit: int | None = None,
-    ) -> list[object]: ...
+    async def list_model_interactions(self, *, run_id: str) -> list[object]: ...
 
     async def resolve_model_interaction(
         self,
