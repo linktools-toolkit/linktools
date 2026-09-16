@@ -27,6 +27,7 @@ from linktools.ai.runtime._model_interaction import (
 )
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
 from linktools.ai.runtime.state._model_interaction_store import (
+    ModelInteractionInMemoryStepArchive,
     ModelInteractionRuntimeStepStore,
     ModelInteractionStagingStepStore,
 )
@@ -201,3 +202,16 @@ async def test_interaction_capture_respects_durable_high_water() -> None:
         assert captured.target_interaction_offset == 7
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_volatile_archive_does_not_expose_staged_interactions() -> None:
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
+    await archive.initialize()
+    try:
+        archive.stage_model_interaction(_interaction(1))
+        with pytest.raises(AIError) as raised:
+            await archive.list_model_interactions(run_id="run")
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await archive.close()
