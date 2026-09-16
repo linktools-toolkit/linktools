@@ -38,7 +38,8 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     runtime_root = _local_runtime_root(workspace)
     runtime_root.mkdir(parents=True, exist_ok=True)
     path = runtime_root / "metrics.db"
-    await provision_metrics_sqlite(path)
+    if not path.exists():
+        await provision_metrics_sqlite(path)
     return Metrics.sqlite(path, namespace=workspace.workspace_id)
 
 
