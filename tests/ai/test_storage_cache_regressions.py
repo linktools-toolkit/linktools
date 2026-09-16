@@ -8,11 +8,23 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from linktools.ai.storage import FilesystemContentCache
+from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache
 
 
 def _disk_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.iterdir() if path.is_file())
+
+
+@pytest.mark.asyncio
+async def test_empty_in_memory_entries_consume_capacity() -> None:
+    cache = InMemoryContentCache(max_bytes=2)
+
+    await cache.put("a", b"")
+    await cache.put("b", b"")
+    await cache.put("c", b"")
+
+    assert await cache.contains_many(("a", "b", "c")) == frozenset({"b", "c"})
+    assert cache._size == 2
 
 
 @pytest.mark.asyncio
