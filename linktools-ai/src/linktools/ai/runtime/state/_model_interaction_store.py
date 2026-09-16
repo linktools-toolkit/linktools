@@ -166,6 +166,22 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
             execution_id=execution_id,
         )
 
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]:
+        values = await super().list_model_interactions(
+            run_id=run_id,
+            after_request_sequence=after_request_sequence,
+            limit=limit,
+        )
+        if any(not isinstance(value, ModelInteractionRecord) for value in values):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values
+
 
 class ModelInteractionStateStepArchive(StateStepArchive):
     """Durable archive that keys one immutable fact per logical model request."""
