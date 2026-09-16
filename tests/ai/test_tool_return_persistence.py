@@ -11,6 +11,7 @@ from pydantic_ai.messages import BinaryContent, ModelRequest, ToolReturnPart
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
+from linktools.ai.runtime._model_interaction import project_public_messages
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
 
@@ -64,11 +65,13 @@ def test_media_shaped_tool_json_round_trips_as_plain_mapping() -> None:
         "media_type": "application/octet-stream",
         "data": "YWJj",
     }
+    decoded = decode_model_messages(encode_model_messages(_message(value)))
+    part = decoded[0].parts[0]
 
-    restored = _round_trip(value)
-
-    assert restored == value
-    assert isinstance(restored, dict)
+    assert isinstance(part, ToolReturnPart)
+    assert part.content == value
+    assert isinstance(part.content, dict)
+    assert project_public_messages(decoded)[0]["parts"][0]["content"] == value
     assert _encoded_part(value)[_HINT] == {
         "version": 1,
         "mapping_paths": [[]],
