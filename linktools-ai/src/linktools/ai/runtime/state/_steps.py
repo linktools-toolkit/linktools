@@ -348,10 +348,11 @@ class _RunHistoryLock:
             if token is not None:
                 _held_run_history_locks.reset(token)
             if acquired:
+                async with self._guard:
+                    entry.owner = None
+                    entry.depth = 0
                 entry.lock.release()
             async with self._guard:
-                entry.owner = None
-                entry.depth = 0
                 entry.references -= 1
                 if entry.references == 0 and self._entries.get(run_id) is entry:
                     self._entries.pop(run_id, None)
@@ -463,9 +464,26 @@ class StagingStepStore(StepStore):
             raise TypeError("staged model interaction is invalid")
         self._interactions.setdefault(interaction.run_id, []).append(interaction)
 
-    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]:
         self._ensure_open()
-        return list(self._interactions.get(run_id, ()))
+        _validate_interaction_page(after_request_sequence, limit)
+        selected: list[object] = []
+        for interaction in self._interactions.get(run_id, ()):
+            if (
+                after_request_sequence is not None
+                and interaction.request_sequence <= after_request_sequence
+            ):
+                continue
+            selected.append(interaction)
+            if limit is not None and len(selected) >= limit:
+                break
+        return selected
 
     async def resolve_model_interaction(self, interaction: object) -> object:
         del interaction
@@ -2039,15 +2057,29 @@ class StateStepArchive(StepStore):
         values = await self._facts(run_id, "event")
         return [_decode_step(value.data) for value in values]
 
-    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]:
         require_no_run_history_lock("StateStepArchive.list_model_interactions")
+        _validate_interaction_page(after_request_sequence, limit)
         values = await self._facts(run_id, "interaction")
-        result = []
+        result: list[object] = []
         for value in values:
             interaction = _decode_step(value.data)
             if not isinstance(interaction, ModelInteractionRecord):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                after_request_sequence is not None
+                and interaction.request_sequence <= after_request_sequence
+            ):
+                continue
             result.append(interaction)
+            if limit is not None and len(result) >= limit:
+                break
         return result
 
     async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]:
@@ -2542,9 +2574,19 @@ class RuntimeStepStore(StepStore):
             raise TypeError("staged model interaction has no run id")
         self._projection_dirty.add(run_id)
 
-    async def list_model_interactions(self, *, run_id: str) -> list[object]:
+    async def list_model_interactions(
+        self,
+        *,
+        run_id: str,
+        after_request_sequence: int | None = None,
+        limit: int | None = None,
+    ) -> list[object]:
         await self._ensure_business()
-        return await self._staging.list_model_interactions(run_id=run_id)
+        return await self._staging.list_model_interactions(
+            run_id=run_id,
+            after_request_sequence=after_request_sequence,
+            limit=limit,
+        )
 
     async def resolve_model_interaction(self, interaction: object) -> object:
         await self._ensure_business()
@@ -3772,6 +3814,22 @@ class RuntimeStepStore(StepStore):
     async def _ensure_business(self) -> None:
         if not self._initialized:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+def _validate_interaction_page(
+    after_request_sequence: int | None,
+    limit: int | None,
+) -> None:
+    if after_request_sequence is not None and (
+        isinstance(after_request_sequence, bool)
+        or not isinstance(after_request_sequence, int)
+        or after_request_sequence < 0
+    ):
+        raise ValueError("interaction sequence must be non-negative")
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
+    ):
+        raise ValueError("interaction limit must be positive")
 
 
 async def _sync_projection(
