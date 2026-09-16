@@ -251,13 +251,7 @@ class DirectoryAssetBackend:
             return None
         signature, modified = result
         async with self._lock:
-            entry = await asyncio.to_thread(
-                self._cached_entry,
-                key,
-                path,
-                signature,
-                modified,
-            )
+            entry = await self._cached_entry(key, path, signature, modified)
             return self._info(entry, self._revision)
 
     def _scan(self) -> "tuple[_DirectoryEntry, ...]":
@@ -358,7 +352,7 @@ class DirectoryAssetBackend:
             entry.modified_at,
         )
 
-    def _cached_entry(
+    async def _cached_entry(
         self,
         key: AssetKey,
         path: Path,
@@ -368,8 +362,12 @@ class DirectoryAssetBackend:
         cached = self._entries.get(key)
         if cached is not None and cached[0] == signature:
             return cached[1]
-        content = read_bytes(path)
-        entry = _DirectoryEntry(key, _etag(content), len(content), modified_at)
+
+        def read_entry() -> _DirectoryEntry:
+            content = read_bytes(path)
+            return _DirectoryEntry(key, _etag(content), len(content), modified_at)
+
+        entry = await asyncio.to_thread(read_entry)
         self._entries[key] = (signature, entry)
         return entry
 
