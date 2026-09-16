@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from pydantic_ai.messages import ModelMessage
 
@@ -33,6 +34,7 @@ from ._step_contracts import ContinuableSnapshot, RunRecord, StepEvent
 from ._steps import (
     CapturedExecutionProjection,
     ExecutionProjectionBatch,
+    ExecutionTerminalSealPlan,
     InMemoryStepArchive,
     PreparedStepSnapshot,
     RuntimeStepStore,
@@ -45,6 +47,9 @@ from ._steps import (
     _step_subject,
 )
 from ._store import FactQuery, StateTransaction, StoredFact, StoredRecord
+
+if TYPE_CHECKING:
+    from ._steps import _RunProjectionFlight
 
 
 class ModelInteractionStagingStepStore(StagingStepStore):
@@ -472,16 +477,23 @@ class ModelInteractionRuntimeStepStore(RuntimeStepStore):
                 after_request_sequence=after_request_sequence,
                 limit=limit,
             )
-        return await super().list_model_interactions(run_id=run_id)
+        return await super().list_model_interactions(
+            run_id=run_id,
+            after_request_sequence=after_request_sequence,
+            limit=limit,
+        )
 
-    async def capture_execution_projection(self, step_run_id: str):
+    async def capture_execution_projection(
+        self,
+        step_run_id: str,
+    ) -> "tuple[CapturedExecutionProjection, _RunProjectionFlight] | None":
         await self._align_execution_interaction_offset(step_run_id)
         return await super().capture_execution_projection(step_run_id)
 
     async def commit_captured_execution_projection(
         self,
         captured: CapturedExecutionProjection,
-        flight,
+        flight: _RunProjectionFlight,
         *,
         execution_id: str,
     ) -> None:
@@ -511,7 +523,7 @@ class ModelInteractionRuntimeStepStore(RuntimeStepStore):
         execution_id: str,
         run_ids: Sequence[str],
         binding_digest: str,
-    ):
+    ) -> ExecutionTerminalSealPlan:
         for run_id in dict.fromkeys(run_ids):
             await self._align_execution_interaction_offset(run_id)
         return await super().prepare_execution_terminal_seal(
@@ -612,12 +624,13 @@ def _validate_interaction_sources(
         )
         if projection.source_prefix_digest != "0" * 64
     }
-    checkpoints = {0: message_prefix_digest(())}
-    digest = checkpoints[0]
+    digest = message_prefix_digest(())
+    checkpoints = {0: digest} if 0 in prefix_counts else {}
     max_prefix = max(prefix_counts, default=0)
     for index, message in enumerate(source_messages[:max_prefix], 1):
         digest = extend_prefix_digest(digest, message)
-        checkpoints[index] = digest
+        if index in prefix_counts:
+            checkpoints[index] = digest
     for interaction in interactions:
         for projection in (
             interaction.request_context,
@@ -645,15 +658,22 @@ def _stage_interaction(
     if not isinstance(interaction, StagedModelInteraction):
         raise TypeError("staged model interaction is invalid")
     values = values_by_run.setdefault(interaction.run_id, [])
-    for current in values:
-        if current.request_sequence != interaction.request_sequence:
-            continue
-        if current == interaction:
+    if not values:
+        values.append(interaction)
+        return
+    last_sequence = values[-1].request_sequence
+    if interaction.request_sequence == last_sequence + 1:
+        values.append(interaction)
+        return
+    index = interaction.request_sequence - values[0].request_sequence
+    if (
+        0 <= index < len(values)
+        and values[index].request_sequence == interaction.request_sequence
+    ):
+        if values[index] == interaction:
             return
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if values and interaction.request_sequence != values[-1].request_sequence + 1:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    values.append(interaction)
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _capture_projection(
@@ -708,13 +728,19 @@ def _bounded_interactions(
     limit: int | None,
 ) -> list[object]:
     _validate_page(after_request_sequence, limit)
-    selected = [
-        value
-        for value in values
-        if after_request_sequence is None
-        or getattr(value, "request_sequence", 0) > after_request_sequence
-    ]
-    return selected if limit is None else selected[:limit]
+    selected: list[object] = []
+    for value in values:
+        if not isinstance(value, (StagedModelInteraction, ModelInteractionRecord)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            after_request_sequence is not None
+            and value.request_sequence <= after_request_sequence
+        ):
+            continue
+        selected.append(value)
+        if limit is not None and len(selected) >= limit:
+            break
+    return selected
 
 
 def _validate_page(
