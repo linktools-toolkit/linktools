@@ -171,40 +171,37 @@ def _annotate_tool_return_content(
                 continue
             if not isinstance(encoded_part, dict) or "content" not in encoded_part:
                 raise RuntimeError("tool return persistence dump is invalid")
-            needs_hint, media_paths = _tool_return_content_provenance(
+            mapping_paths = _ambiguous_mapping_paths(
                 part.content,
                 encoded_part["content"],
             )
-            if not needs_hint:
-                continue
-            encoded_part[_TOOL_RETURN_CONTENT_HINT] = {
-                "version": _TOOL_RETURN_CONTENT_HINT_VERSION,
-                "multimodal_paths": [list(path) for path in media_paths],
-            }
+            if mapping_paths:
+                encoded_part[_TOOL_RETURN_CONTENT_HINT] = {
+                    "version": _TOOL_RETURN_CONTENT_HINT_VERSION,
+                    "mapping_paths": [list(path) for path in mapping_paths],
+                }
 
 
-def _tool_return_content_provenance(
+def _ambiguous_mapping_paths(
     source: object,
     encoded: JsonValue,
     path: tuple[str | int, ...] = (),
-) -> tuple[bool, tuple[tuple[str | int, ...], ...]]:
+) -> tuple[tuple[str | int, ...], ...]:
     if is_multi_modal_content(source):
-        return False, (path,)
-    needs_hint = False
-    media_paths: list[tuple[str | int, ...]] = []
+        return ()
+    paths: list[tuple[str | int, ...]] = []
     if isinstance(source, Mapping) and isinstance(encoded, dict):
         if _decodes_as_multimodal(encoded):
-            needs_hint = True
+            paths.append(path)
         for key, item in source.items():
-            if not isinstance(key, str) or key not in encoded:
-                continue
-            child_needs_hint, child_paths = _tool_return_content_provenance(
-                item,
-                encoded[key],
-                path + (key,),
-            )
-            needs_hint = needs_hint or child_needs_hint
-            media_paths.extend(child_paths)
+            if isinstance(key, str) and key in encoded:
+                paths.extend(
+                    _ambiguous_mapping_paths(
+                        item,
+                        encoded[key],
+                        path + (key,),
+                    )
+                )
     elif (
         isinstance(source, Sequence)
         and not isinstance(source, (str, bytes, bytearray))
@@ -213,14 +210,14 @@ def _tool_return_content_provenance(
         for index, (item, encoded_item) in enumerate(
             zip(source, encoded, strict=False)
         ):
-            child_needs_hint, child_paths = _tool_return_content_provenance(
-                item,
-                encoded_item,
-                path + (index,),
+            paths.extend(
+                _ambiguous_mapping_paths(
+                    item,
+                    encoded_item,
+                    path + (index,),
+                )
             )
-            needs_hint = needs_hint or child_needs_hint
-            media_paths.extend(child_paths)
-    return needs_hint, tuple(media_paths)
+    return tuple(paths)
 
 
 def _decodes_as_multimodal(value: Mapping[str, JsonValue]) -> bool:
@@ -230,7 +227,7 @@ def _decodes_as_multimodal(value: Mapping[str, JsonValue]) -> bool:
     ):
         return False
     try:
-        decoded = _MULTIMODAL_ADAPTER.validate_json(canonical_json_bytes(dict(value)))
+        decoded = _MULTIMODAL_ADAPTER.validate_python(dict(value))
     except ValueError:
         return False
     return is_multi_modal_content(decoded)
@@ -270,7 +267,7 @@ def _decode_tool_return_content_hint(
         or version != _TOOL_RETURN_CONTENT_HINT_VERSION
     ):
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    raw_paths = marker.get("multimodal_paths")
+    raw_paths = marker.get("mapping_paths")
     if not isinstance(raw_paths, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     paths: list[tuple[str | int, ...]] = []
@@ -330,22 +327,28 @@ def _restore_tool_return_content(
 
 def _restore_tool_return_value(
     value: JsonValue,
-    media_paths: Sequence[tuple[str | int, ...]],
+    mapping_paths: Sequence[tuple[str | int, ...]],
 ) -> object:
-    expected = set(media_paths)
+    forced = set(mapping_paths)
     restored: set[tuple[str | int, ...]] = set()
 
     def visit(candidate: JsonValue, path: tuple[str | int, ...]) -> object:
-        if path in expected:
-            try:
-                media = _MULTIMODAL_ADAPTER.validate_json(
-                    canonical_json_bytes(candidate)
-                )
-            except ValueError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if path in forced:
+            if not isinstance(candidate, dict):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             restored.add(path)
-            return media
+            return {
+                key: visit(item, path + (key,))
+                for key, item in candidate.items()
+            }
         if isinstance(candidate, dict):
+            if _multimodal_candidate(candidate):
+                try:
+                    return _MULTIMODAL_ADAPTER.validate_json(
+                        canonical_json_bytes(candidate)
+                    )
+                except ValueError:
+                    pass
             return {
                 key: visit(item, path + (key,))
                 for key, item in candidate.items()
@@ -358,9 +361,15 @@ def _restore_tool_return_value(
         return candidate
 
     result = visit(value, ())
-    if restored != expected:
+    if restored != forced:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return result
+
+
+def _multimodal_candidate(value: Mapping[str, JsonValue]) -> bool:
+    return isinstance(value.get("kind"), str) and any(
+        field in value for field in ("url", "media_type", "file_id")
+    )
 
 
 __all__ = [
