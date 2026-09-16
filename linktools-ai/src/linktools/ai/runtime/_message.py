@@ -27,6 +27,7 @@ from ..errors import AIError, ErrorCode
 _CONSUMED_BINARY_MARKER = "[binary content already consumed]"
 _TOOL_RETURN_CONTENT_HINT = "_linktools_tool_return_content"
 _TOOL_RETURN_CONTENT_HINT_VERSION = 1
+_TOOL_RETURN_MAPPING_MASK = "__linktools_plain_mapping__"
 _MULTIMODAL_ADAPTER = TypeAdapter(MultiModalContent)
 
 
@@ -146,14 +147,15 @@ def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not isinstance(json_value, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    hints = _extract_tool_return_content_hints(json_value)
+    hints = _mask_tool_return_content(json_value)
     try:
-        messages = ModelMessagesTypeAdapter.validate_json(
-            canonical_json_bytes(json_value)
+        messages = tuple(
+            ModelMessagesTypeAdapter.validate_json(canonical_json_bytes(json_value))
         )
     except ValueError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    return _restore_tool_return_content(tuple(messages), json_value, hints)
+    _restore_tool_return_content(messages, hints)
+    return messages
 
 
 def _annotate_tool_return_content(
@@ -221,22 +223,23 @@ def _ambiguous_mapping_paths(
 
 
 def _decodes_as_multimodal(value: Mapping[str, JsonValue]) -> bool:
-    kind = value.get("kind")
-    if not isinstance(kind, str) or not any(
+    if not isinstance(value.get("kind"), str) or not any(
         field in value for field in ("url", "media_type", "file_id")
     ):
         return False
     try:
-        decoded = _MULTIMODAL_ADAPTER.validate_python(dict(value))
+        decoded = _MULTIMODAL_ADAPTER.validate_json(
+            canonical_json_bytes(dict(value))
+        )
     except ValueError:
         return False
     return is_multi_modal_content(decoded)
 
 
-def _extract_tool_return_content_hints(
+def _mask_tool_return_content(
     value: list[JsonValue],
-) -> dict[tuple[int, int], tuple[tuple[str | int, ...], ...]]:
-    hints: dict[tuple[int, int], tuple[tuple[str | int, ...], ...]] = {}
+) -> dict[tuple[int, int], dict[tuple[str | int, ...], str]]:
+    hints: dict[tuple[int, int], dict[tuple[str | int, ...], str]] = {}
     for message_index, message in enumerate(value):
         if not isinstance(message, dict):
             continue
@@ -247,11 +250,19 @@ def _extract_tool_return_content_hints(
             if not isinstance(part, dict) or _TOOL_RETURN_CONTENT_HINT not in part:
                 continue
             marker = part.pop(_TOOL_RETURN_CONTENT_HINT)
-            if "content" not in part:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            hints[(message_index, part_index)] = _decode_tool_return_content_hint(
-                marker
-            )
+            content = part.get("content")
+            paths = _decode_tool_return_content_hint(marker)
+            originals: dict[tuple[str | int, ...], str] = {}
+            for path in paths:
+                candidate = _path_value(content, path)
+                if not isinstance(candidate, dict):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                kind = candidate.get("kind")
+                if not isinstance(kind, str):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                originals[path] = kind
+                candidate["kind"] = _TOOL_RETURN_MAPPING_MASK
+            hints[(message_index, part_index)] = originals
     return hints
 
 
@@ -293,83 +304,46 @@ def _decode_tool_return_content_hint(
 
 
 def _restore_tool_return_content(
-    messages: tuple[ModelMessage, ...],
-    encoded: list[JsonValue],
-    hints: Mapping[tuple[int, int], tuple[tuple[str | int, ...], ...]],
-) -> tuple[ModelMessage, ...]:
-    if not hints:
-        return messages
-    result = list(messages)
+    messages: Sequence[ModelMessage],
+    hints: Mapping[
+        tuple[int, int],
+        Mapping[tuple[str | int, ...], str],
+    ],
+) -> None:
     for (message_index, part_index), paths in hints.items():
-        if message_index >= len(result):
+        if message_index >= len(messages):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        message = result[message_index]
+        message = messages[message_index]
         if part_index >= len(message.parts):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         part = message.parts[part_index]
         if not isinstance(part, BaseToolReturnPart):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        encoded_message = encoded[message_index]
-        if not isinstance(encoded_message, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        encoded_parts = encoded_message.get("parts")
-        if not isinstance(encoded_parts, list) or part_index >= len(encoded_parts):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        encoded_part = encoded_parts[part_index]
-        if not isinstance(encoded_part, dict) or "content" not in encoded_part:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        content = _restore_tool_return_value(encoded_part["content"], paths)
-        parts = list(message.parts)
-        parts[part_index] = replace(part, content=content)
-        result[message_index] = replace(message, parts=parts)
-    return tuple(result)
-
-
-def _restore_tool_return_value(
-    value: JsonValue,
-    mapping_paths: Sequence[tuple[str | int, ...]],
-) -> object:
-    forced = set(mapping_paths)
-    restored: set[tuple[str | int, ...]] = set()
-
-    def visit(candidate: JsonValue, path: tuple[str | int, ...]) -> object:
-        if path in forced:
+        for path, kind in paths.items():
+            candidate = _path_value(part.content, path)
             if not isinstance(candidate, dict):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            restored.add(path)
-            return {
-                key: visit(item, path + (key,))
-                for key, item in candidate.items()
-            }
-        if isinstance(candidate, dict):
-            if _multimodal_candidate(candidate):
-                try:
-                    return _MULTIMODAL_ADAPTER.validate_json(
-                        canonical_json_bytes(candidate)
-                    )
-                except ValueError:
-                    pass
-            return {
-                key: visit(item, path + (key,))
-                for key, item in candidate.items()
-            }
-        if isinstance(candidate, list):
-            return [
-                visit(item, path + (index,))
-                for index, item in enumerate(candidate)
-            ]
-        return candidate
-
-    result = visit(value, ())
-    if restored != forced:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return result
+            if candidate.get("kind") != _TOOL_RETURN_MAPPING_MASK:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            candidate["kind"] = kind
 
 
-def _multimodal_candidate(value: Mapping[str, JsonValue]) -> bool:
-    return isinstance(value.get("kind"), str) and any(
-        field in value for field in ("url", "media_type", "file_id")
-    )
+def _path_value(value: object, path: Sequence[str | int]) -> object:
+    candidate = value
+    for segment in path:
+        if isinstance(segment, str):
+            if not isinstance(candidate, Mapping) or segment not in candidate:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            candidate = candidate[segment]
+        else:
+            if (
+                not isinstance(candidate, Sequence)
+                or isinstance(candidate, (str, bytes, bytearray))
+                or segment >= len(candidate)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            candidate = candidate[segment]
+    return candidate
 
 
 __all__ = [
