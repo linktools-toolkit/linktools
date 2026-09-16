@@ -162,10 +162,15 @@ class FilesystemContentCache:
         except (FileNotFoundError, OSError):
             await self._forget(path.name)
             return None
-        # Metadata touch under a short lock; the read itself was unlocked.
+        # Reads before the first index build do not participate in accounting.
         async with self._lock:
-            self._clock += 1
-            self._entries[path.name] = (len(value), self._clock)
+            if self._indexed:
+                previous = self._entries.get(path.name)
+                if previous is not None:
+                    self._total -= previous[0]
+                self._clock += 1
+                self._entries[path.name] = (len(value), self._clock)
+                self._total += len(value)
         return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
@@ -215,17 +220,19 @@ class FilesystemContentCache:
     async def _ensure_index(self) -> None:
         if self._indexed:
             return
-        self._indexed = True
         try:
             entries = await asyncio.to_thread(self._scan_index)
         except OSError:
             self._entries.clear()
             self._total = 0
             return
+        self._entries.clear()
+        self._total = 0
         for name, size in entries:
             self._clock += 1
             self._entries[name] = (size, self._clock)
             self._total += size
+        self._indexed = True
 
     def _scan_index(self) -> "tuple[tuple[str, int], ...]":
         if not self.root.exists():
