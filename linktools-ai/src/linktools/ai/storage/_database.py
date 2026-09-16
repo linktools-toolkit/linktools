@@ -190,7 +190,11 @@ async def validate_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
 async def _validate_sql_schema(engine: "AsyncEngine", metadata: "MetaData") -> None:
     if not metadata.tables:
         return
-    await asyncio.gather(*(_validate_table_schema(engine, table) for table in metadata.tables.values()))
+    # Validation is an initialization/fail-fast path. Validate sequentially so
+    # one schema mismatch cannot return while sibling validation coroutines
+    # still hold checked-out connections that race engine disposal.
+    for table in metadata.tables.values():
+        await _validate_table_schema(engine, table)
 
 
 async def _validate_table_schema(engine: "AsyncEngine", table: "Table") -> None:

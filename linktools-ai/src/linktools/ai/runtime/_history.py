@@ -337,6 +337,7 @@ class StepExecutionHistoryReader:
                         ),
                     )
                 )
+        sources.sort(key=lambda source: source.merge_prefix)
         cursor_coordinate = _decode_model_interaction_cursor(
             cursor,
             tenant_id=tenant_id,
@@ -354,10 +355,13 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.CURSOR_INVALID)
         cursor_prefix = None if cursor_source is None else cursor_source.merge_prefix
 
-        values: list[_InteractionOccurrence] = []
+        page: list[_InteractionOccurrence] = []
         for source in sources:
             if cursor_prefix is not None and source.merge_prefix < cursor_prefix:
                 continue
+            remaining = limit + 1 - len(page)
+            if remaining <= 0:
+                break
             after_request_sequence = (
                 cursor_coordinate[2]
                 if cursor_coordinate is not None and source is cursor_source
@@ -372,12 +376,12 @@ class StepExecutionHistoryReader:
             interactions = await self._store.list_model_interactions(
                 run_id=run_id,
                 after_request_sequence=after_request_sequence,
-                limit=limit + 1,
+                limit=remaining,
             )
             for interaction in interactions:
                 if not isinstance(interaction, ModelInteractionRecord):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                values.append(
+                page.append(
                     _InteractionOccurrence(
                         (*source.merge_prefix, interaction.request_sequence),
                         source.record.execution_id,
@@ -386,8 +390,6 @@ class StepExecutionHistoryReader:
                         interaction,
                     )
                 )
-        values.sort(key=lambda value: value.key)
-        page = values[: limit + 1]
         selected_occurrences = page[:limit]
         resolved_items: dict[tuple[str, int], ModelInteractionItem] = {}
         for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
