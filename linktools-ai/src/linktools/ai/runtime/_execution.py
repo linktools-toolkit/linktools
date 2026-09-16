@@ -25,6 +25,7 @@ from ..agent import (
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
+    CorrelationData,
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionMode,
@@ -39,7 +40,6 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
-    CorrelationData,
     StopReason,
     UsageMetrics,
     canonical_json_bytes,
@@ -58,13 +58,13 @@ from ..storage import (
     payload_fits_inline,
 )
 from ._handoff import HandoffGate, HandoffState
-from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._input import (
     ExecutionInputMaterializer,
     decode_user_content_payload,
     input_intent,
     validate_user_input,
 )
+from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -83,25 +83,28 @@ from .service_api import (
     ExecutionView,
     ForkExecutionRequest,
     ListExecutionRequest,
-    project_execution_view as _project_execution_view,
+    ModelInteractionItem,
     RetryExecutionRequest,
     TranscriptItem,
 )
+from .service_api import (
+    project_execution_view as _project_execution_view,
+)
 from .state import RuntimeDomain
 from .state._contracts import (
-    ExecutionRecord,
-    ExecutionState,
     ExecutionCancelRequestCommit,
+    ExecutionRecord,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
+    ExecutionState,
     ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
     ResultRecord,
     SessionRepository,
     StoredUserInput,
-    ExecutionTerminalCommitResult,
 )
 
 if TYPE_CHECKING:
@@ -2577,6 +2580,27 @@ class DefaultExecutionService:
         )
         return await self._history_reader.history(
             record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit
+        )
+
+    @_observed_query
+    async def model_interactions(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ModelInteractionItem]":
+        record = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_READ,
+        )
+        return await self._history_reader.model_interactions(
+            record.execution_id,
+            tenant_id=record.tenant_id,
+            cursor=cursor,
+            limit=limit,
         )
 
     async def _load_authorized(

@@ -55,6 +55,23 @@ class ExternalModelRequestObserver(Protocol):
     ) -> None: ...
 
 
+class ExternalModelRequestCapture(Protocol):
+    async def __call__(
+        self,
+        ctx: PydanticRunContext[Any],
+        fact: ModelRequestFact,
+        phase: str,
+        model: Model,
+        response: ModelResponse | None,
+        error: BaseException | None,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        streaming: bool,
+        source_messages: Sequence[ModelMessage] | None,
+    ) -> None: ...
+
+
 class _ContextProjectionSink(Protocol):
     def __call__(
         self,
@@ -72,12 +89,16 @@ class _ObservedCompactionModel(WrapperModel):
         *,
         ctx: PydanticRunContext[Any],
         journal: ModelRequestJournal,
-        observer: ExternalModelRequestObserver,
+        observer: ExternalModelRequestObserver | None,
+        capture: ExternalModelRequestCapture | None,
+        source_messages: Sequence[ModelMessage],
     ) -> None:
         super().__init__(wrapped)
         self._ctx = ctx
         self._journal = journal
         self._observer = observer
+        self._capture = capture
+        self._source_messages = tuple(source_messages)
 
     async def request(
         self,
@@ -87,14 +108,29 @@ class _ObservedCompactionModel(WrapperModel):
     ) -> ModelResponse:
         fact = self._journal.begin(self._ctx.run_step, purpose="compaction")
         request_sequence = fact.request_sequence
-        await self._observer(
-            self._ctx,
-            fact,
-            "started",
-            self.wrapped,
-            None,
-            None,
-        )
+        if self._observer is not None:
+            await self._observer(
+                self._ctx,
+                fact,
+                "started",
+                self.wrapped,
+                None,
+                None,
+            )
+        if self._capture is not None:
+            await self._capture(
+                self._ctx,
+                fact,
+                "started",
+                self.wrapped,
+                None,
+                None,
+                messages,
+                model_settings,
+                model_request_parameters,
+                False,
+                self._source_messages,
+            )
         try:
             response = await self.wrapped.request(
                 messages,
@@ -104,37 +140,82 @@ class _ObservedCompactionModel(WrapperModel):
         except asyncio.CancelledError as error:
             fact = self._journal.finish(request_sequence, status="CANCELLED")
             self._journal.consume(request_sequence)
-            await self._observer(
-                self._ctx,
-                fact,
-                "cancelled",
-                self.wrapped,
-                None,
-                error,
-            )
+            if self._observer is not None:
+                await self._observer(
+                    self._ctx,
+                    fact,
+                    "cancelled",
+                    self.wrapped,
+                    None,
+                    error,
+                )
+            if self._capture is not None:
+                await self._capture(
+                    self._ctx,
+                    fact,
+                    "cancelled",
+                    self.wrapped,
+                    None,
+                    error,
+                    messages,
+                    model_settings,
+                    model_request_parameters,
+                    False,
+                    self._source_messages,
+                )
             raise
         except BaseException as error:
             fact = self._journal.finish(request_sequence, status="FAILED")
             self._journal.consume(request_sequence)
-            await self._observer(
-                self._ctx,
-                fact,
-                "failed",
-                self.wrapped,
-                None,
-                error,
-            )
+            if self._observer is not None:
+                await self._observer(
+                    self._ctx,
+                    fact,
+                    "failed",
+                    self.wrapped,
+                    None,
+                    error,
+                )
+            if self._capture is not None:
+                await self._capture(
+                    self._ctx,
+                    fact,
+                    "failed",
+                    self.wrapped,
+                    None,
+                    error,
+                    messages,
+                    model_settings,
+                    model_request_parameters,
+                    False,
+                    self._source_messages,
+                )
             raise
         fact = self._journal.finish(request_sequence, status="SUCCEEDED")
         self._journal.consume(request_sequence)
-        await self._observer(
-            self._ctx,
-            fact,
-            "completed",
-            self.wrapped,
-            response,
-            None,
-        )
+        if self._observer is not None:
+            await self._observer(
+                self._ctx,
+                fact,
+                "completed",
+                self.wrapped,
+                response,
+                None,
+            )
+        if self._capture is not None:
+            await self._capture(
+                self._ctx,
+                fact,
+                "completed",
+                self.wrapped,
+                response,
+                None,
+                messages,
+                model_settings,
+                model_request_parameters,
+                False,
+                self._source_messages,
+            )
         return response
 
 
@@ -147,6 +228,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         *,
         journal: ModelRequestJournal | None = None,
         observer: ExternalModelRequestObserver | None = None,
+        request_observer: ExternalModelRequestCapture | None = None,
         projection_sink: _ContextProjectionSink | None = None,
         policy: RuntimeCompactionPolicy | None = None,
     ) -> None:
@@ -160,6 +242,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         self._target_tokens = target_tokens
         self._journal = journal
         self._observer = observer
+        self._request_observer = request_observer
         self._projection_sink = projection_sink
         self._policy = policy
         self._keep_result_tools: frozenset[str] = frozenset()
@@ -194,12 +277,16 @@ class RuntimeCompaction(AbstractCapability[None]):
             )
         else:
             summary_model: Model | None = None
-            if self._journal is not None and self._observer is not None:
+            if self._journal is not None and (
+                self._observer is not None or self._request_observer is not None
+            ):
                 summary_model = _ObservedCompactionModel(
                     projected_context.model,
                     ctx=ctx,
                     journal=self._journal,
                     observer=self._observer,
+                    capture=self._request_observer,
+                    source_messages=source,
                 )
             tiered = TieredCompaction(
                 tiers=(

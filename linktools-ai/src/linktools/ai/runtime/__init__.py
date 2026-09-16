@@ -6,8 +6,8 @@ from ..task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphServic
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
 from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
-from ._runtime_service import Runtime
 from ._runtime_history import RuntimeHistory
+from ._runtime_service import Runtime
 from ._task import TaskGraphRun
 from .recovery import (
     ExecutionRecoveryEffect,
@@ -61,6 +61,7 @@ from .service_api import (
     ListExecutionRequest,
     ListSessionRequest,
     LoadedSession,
+    ModelInteractionItem,
     Page,
     ReplayEvaluationRequest,
     ResumeSessionRequest,
@@ -112,6 +113,7 @@ __all__ = [
     "ExecutionHistoryItem",
     "ExecutionHistoryReader",
     "ExecutionHistoryService",
+    "ModelInteractionItem",
     "ExecutionRecoveryEffect",
     "ExecutionRequest",
     "ExecutionResult",

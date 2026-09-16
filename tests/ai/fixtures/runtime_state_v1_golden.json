@@ -17,6 +17,7 @@
     "execution_history_state",
     "execution_record",
     "execution_run_seal_head",
+    "model_interaction",
     "execution_start_claim",
     "execution_start_unknown_commit",
     "execution_cancel_request_commit",

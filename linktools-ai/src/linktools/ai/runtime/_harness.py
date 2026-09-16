@@ -5,25 +5,50 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import cast
+from typing import Protocol, cast
 
-from pydantic_ai.messages import ModelMessage
+from linktools.core import environ
+from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.models import Model, ModelRequestParameters
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness.planning import (
     PlanItem as HarnessPlanItem,
+)
+from pydantic_ai_harness.planning import (
     TaskStatus,
 )
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot as HarnessContinuableSnapshot,
+)
+from pydantic_ai_harness.step_persistence import (
     RunRecord as HarnessRunRecord,
+)
+from pydantic_ai_harness.step_persistence import (
     StepEvent as HarnessStepEvent,
+)
+from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
 from ..capability import ToolCallRejected
+from ..core import UsageMetrics
 from ..errors import AIError, ErrorCode
+from ._journal import ModelRequestFact
 from ._message import project_transient_binary_content
+from ._model_interaction import (
+    StagedContextProjection,
+    StagedContextSpan,
+    StagedModelInteraction,
+    build_context_projection,
+    build_inline_context_projection,
+    extend_prefix_digest,
+    message_prefix_digest,
+    model_identity,
+    request_envelope,
+)
 from ._plan import PlanItem, RuntimePlanStore
 from .state._step_contracts import (
     ContinuableSnapshot,
@@ -31,6 +56,14 @@ from .state._step_contracts import (
     StepEvent,
     StepStore,
 )
+
+_logger = environ.get_logger("ai.runtime.harness")
+
+
+class _InteractionStagingStore(Protocol):
+    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]: ...
+
+    def stage_model_interaction(self, interaction: object) -> None: ...
 
 
 class HarnessPlanStoreAdapter:
@@ -185,14 +218,29 @@ def _plan_item_id(index: int) -> str:
 class HarnessStepStoreAdapter:
     """Persist Harness StepPersistence facts through the Runtime StepStore contract."""
 
-    def __init__(self, store: StepStore, *, execution_id: str | None) -> None:
+    def __init__(
+        self,
+        store: StepStore,
+        *,
+        execution_id: str | None,
+        step_run_id: str | None = None,
+    ) -> None:
         self._store = store
+        self._interaction_store = cast(_InteractionStagingStore, store)
         self._execution_id = execution_id
+        self._step_run_id = step_run_id
         self._effects: dict[tuple[str, str], ToolEffectRecord] = {}
         self._effects_lock = asyncio.Lock()
         self._interrupted_runs: set[str] = set()
         self._projection_source: tuple[ModelMessage, ...] | None = None
         self._projection_messages: tuple[ModelMessage, ...] | None = None
+        self._prefix_source: tuple[ModelMessage, ...] | None = None
+        self._prefix_digest: str | None = None
+        self._interaction_projections: dict[int, StagedContextProjection] = {}
+        self._interaction_requests: dict[int, tuple[ModelMessage, ...]] = {}
+        self._interaction_payloads: dict[int, str] = {}
+        self._interaction_runs: dict[int, str] = {}
+        self._interaction_models: dict[int, dict[str, str]] = {}
 
     async def register_run(self, record: HarnessRunRecord) -> None:
         value = RunRecord(
@@ -395,8 +443,13 @@ class HarnessStepStoreAdapter:
             return
         message_values = tuple(messages)
         if _message_prefix(message_values, projected):
+            source = self._projection_source
             self._projection_messages = message_values
-            self._projection_source = message_values
+            self._projection_source = (
+                message_values
+                if source is None
+                else (*source, *message_values[len(projected) :])
+            )
             return
         source = self._projection_source
         if source is not None and _message_prefix(message_values, source):
@@ -407,6 +460,156 @@ class HarnessStepStoreAdapter:
             return
         self._projection_source = None
         self._projection_messages = None
+
+    def begin_model_interaction(
+        self,
+        fact: ModelRequestFact,
+        model: Model,
+        messages: Sequence[ModelMessage],
+        model_settings: ModelSettings | None,
+        parameters: ModelRequestParameters,
+        streaming: bool,
+        model_id: str | None = None,
+        source_messages: Sequence[ModelMessage] | None = None,
+    ) -> None:
+        run_id = self._step_run_id or self._run_id_from_messages(messages)
+        if run_id is None:
+            run_id = self._execution_id
+        if not isinstance(run_id, str) or not run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        projected = tuple(messages)
+        if source_messages is not None:
+            source = tuple(source_messages)
+            projection = build_context_projection(
+                source,
+                projected,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
+                source_prefix_digest=self._source_prefix_digest(source),
+            )
+        elif fact.purpose == "compaction":
+            projection = build_inline_context_projection(
+                projected,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
+            )
+        else:
+            source = self._projection_source or projected
+            projection = build_context_projection(
+                source,
+                projected,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
+                source_prefix_digest=self._source_prefix_digest(source),
+            )
+        _logger.debug(
+            "model interaction context staged: run=%s sequence=%s "
+            "purpose=%s source_count=%s source_digest=%s",
+            run_id,
+            fact.request_sequence,
+            fact.purpose,
+            projection.source_message_count,
+            projection.source_prefix_digest,
+        )
+        _envelope, envelope_bytes = request_envelope(
+            model_settings=model_settings,
+            parameters=parameters,
+            streaming=streaming,
+        )
+        digest, _size = self._interaction_store.intern_payload(run_id, envelope_bytes)
+        self._interaction_projections[fact.request_sequence] = projection
+        self._interaction_requests[fact.request_sequence] = projected
+        self._interaction_payloads[fact.request_sequence] = digest
+        self._interaction_runs[fact.request_sequence] = run_id
+        self._interaction_models[fact.request_sequence] = model_identity(
+            model,
+            route_id=model_id,
+        )
+
+    def finish_model_interaction(
+        self,
+        fact: ModelRequestFact,
+        *,
+        model: Model,
+        response: ModelResponse | None,
+        status: str,
+        error_code: str | None,
+        duration_ns: int,
+        usage: object | None,
+    ) -> None:
+        del model
+        request_sequence = fact.request_sequence
+        projection = self._interaction_projections.pop(request_sequence)
+        request_messages = self._interaction_requests.pop(request_sequence)
+        run_id = self._interaction_runs.pop(request_sequence)
+        envelope_digest = self._interaction_payloads.pop(request_sequence)
+        model_value = self._interaction_models.pop(request_sequence)
+        if status != "SUCCEEDED":
+            projection = build_inline_context_projection(
+                request_messages,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
+            )
+        response_projection = None
+        if response is not None:
+            if fact.purpose == "compaction":
+                response_projection = build_inline_context_projection(
+                    (response,),
+                    lambda payload: self._interaction_store.intern_payload(run_id, payload),
+                )
+            else:
+                response_projection = StagedContextProjection(
+                    projection.source_message_count,
+                    projection.source_prefix_digest,
+                    (
+                        StagedContextSpan(
+                            projection.source_message_count,
+                            projection.source_message_count + 1,
+                        ),
+                    ),
+                )
+        self._interaction_store.stage_model_interaction(
+            StagedModelInteraction(
+                run_id,
+                fact.step_index,
+                request_sequence,
+                fact.purpose,
+                fact.output_retry_index,
+                model_value,
+                projection,
+                envelope_digest,
+                response_projection,
+                status,
+                error_code,
+                duration_ns,
+                _usage_metrics(usage),
+            )
+        )
+
+    def _run_id_from_messages(
+        self,
+        messages: Sequence[ModelMessage],
+    ) -> str | None:
+        for message in messages:
+            run_id = getattr(message, "run_id", None)
+            if isinstance(run_id, str) and run_id:
+                return run_id
+        return None
+
+    def _source_prefix_digest(
+        self,
+        source: Sequence[ModelMessage],
+    ) -> str:
+        values = tuple(source)
+        prefix = self._prefix_source
+        digest = self._prefix_digest
+        if prefix is not None and digest is not None and len(values) >= len(prefix):
+            if values[: len(prefix)] == prefix:
+                for message in values[len(prefix) :]:
+                    digest = extend_prefix_digest(digest, message)
+                self._prefix_source = values
+                self._prefix_digest = digest
+                return digest
+        digest = message_prefix_digest(values)
+        self._prefix_source = values
+        self._prefix_digest = digest
+        return digest
 
     def snapshot_context_messages(
         self,
@@ -431,6 +634,18 @@ class HarnessStepStoreAdapter:
             context_values = binary_projected
             has_projection = True
         return list(context_values) if has_projection else None
+
+
+def _usage_metrics(value: object | None) -> UsageMetrics | None:
+    if value is None:
+        return None
+    return UsageMetrics(
+        model_requests=1,
+        input_tokens=int(getattr(value, "input_tokens", 0)),
+        output_tokens=int(getattr(value, "output_tokens", 0)),
+        cache_read_tokens=int(getattr(value, "cache_read_tokens", 0)),
+        cache_write_tokens=int(getattr(value, "cache_write_tokens", 0)),
+    )
 
 
 def _harness_run(record: RunRecord) -> HarnessRunRecord:

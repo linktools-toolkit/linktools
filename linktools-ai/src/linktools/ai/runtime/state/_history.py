@@ -54,6 +54,7 @@ from ._store import (
     sequence_key,
     stream_digest,
 )
+
 _logger = environ.get_logger("ai.runtime.state.history")
 _CHUNK_TARGET = 256 * 1024
 _COMPRESS_MINIMUM = 16 * 1024
@@ -975,6 +976,65 @@ class TranscriptRepository:
             return None
         return _decode_enveloped_domain(value.data, ContextProjection)
 
+    async def load_projected_context(
+        self,
+        owner_id: str,
+        projection: ContextProjection,
+    ) -> LoadedModelContext:
+        return (await self.load_projected_contexts(owner_id, (projection,)))[0]
+
+    async def load_projected_contexts(
+        self,
+        owner_id: str,
+        projections: Sequence[ContextProjection],
+    ) -> tuple[LoadedModelContext, ...]:
+        """Resolve several projections with one grouped transcript read."""
+        del owner_id
+        require_no_run_history_lock("TranscriptRepository.load_projected_contexts")
+        projection_items: list[list[tuple[object, tuple[TranscriptMessageRef, ...]]]] = []
+        refs: list[TranscriptMessageRef] = []
+        payloads: dict[str, StoredPayload] = {}
+        for projection in projections:
+            items: list[tuple[object, tuple[TranscriptMessageRef, ...]]] = []
+            for item in projection.items:
+                if isinstance(item, TranscriptSpanRef):
+                    item_refs = tuple(
+                        TranscriptMessageRef(
+                            item.source_domain,
+                            item.owner_id,
+                            index,
+                        )
+                        for index in range(item.start, item.end)
+                    )
+                    refs.extend(item_refs)
+                    items.append((item, item_refs))
+                else:
+                    payloads[item.content.payload.digest] = item.content.payload
+                    items.append((item, ()))
+            projection_items.append(items)
+        resolved = await self.resolve_transcript_message_refs(tuple(refs))
+        loaded_payloads = {
+            digest: decode_model_messages(await self._read_payload(payload))
+            for digest, payload in payloads.items()
+        }
+        resolved_index = 0
+        results: list[LoadedModelContext] = []
+        for items in projection_items:
+            values: list[LoadedContextMessage] = []
+            for item, item_refs in items:
+                if isinstance(item, TranscriptSpanRef):
+                    values.extend(
+                        resolved[resolved_index : resolved_index + len(item_refs)]
+                    )
+                    resolved_index += len(item_refs)
+                    continue
+                messages = loaded_payloads[item.content.payload.digest]  # type: ignore[union-attr]
+                values.extend(
+                    LoadedContextMessage(message, None) for message in messages
+                )
+            results.append(LoadedModelContext(tuple(values)))
+        return tuple(results)
+
     async def resolve_transcript_message_refs(
         self,
         refs: Sequence[TranscriptMessageRef],
@@ -1058,38 +1118,7 @@ class TranscriptRepository:
         owner_id: str,
         projection: ContextProjection,
     ) -> LoadedModelContext:
-        span_refs: list[tuple[TranscriptSpanRef, tuple[TranscriptMessageRef, ...]]] = []
-        refs: list[TranscriptMessageRef] = []
-        for item in projection.items:
-            if not isinstance(item, TranscriptSpanRef):
-                span_refs.append((item, ()))  # type: ignore[arg-type]
-                continue
-            item_refs = tuple(
-                TranscriptMessageRef(
-                    item.source_domain,
-                    item.owner_id,
-                    index,
-                )
-                for index in range(item.start, item.end)
-            )
-            refs.extend(item_refs)
-            span_refs.append((item, item_refs))
-        resolved = await self.resolve_transcript_message_refs(tuple(refs))
-        resolved_index = 0
-        values: list[LoadedContextMessage] = []
-        for item, item_refs in span_refs:
-            if isinstance(item, TranscriptSpanRef):
-                values.extend(
-                    resolved[resolved_index : resolved_index + len(item_refs)]
-                )
-                resolved_index += len(item_refs)
-                continue
-            raw = await self._read_payload(item.content.payload)  # type: ignore[union-attr]
-            values.extend(
-                LoadedContextMessage(message, None)
-                for message in decode_model_messages(raw)
-            )
-        return LoadedModelContext(tuple(values))
+        return (await self.load_projected_contexts(owner_id, (projection,)))[0]
 
     async def load_message_span(
         self,
@@ -1387,6 +1416,9 @@ class TranscriptRepository:
         if len(data) != payload.size or hashlib.sha256(data).hexdigest() != payload.digest:
             raise ValueError("object transcript payload integrity check failed")
         return bytes(data)
+
+    async def read_payload(self, payload: StoredPayload) -> bytes:
+        return await self._read_payload(payload)
 
     def decode_chunk(self, fact: StoredFact) -> TranscriptChunk:
         try:

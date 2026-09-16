@@ -304,6 +304,38 @@ class ExecutionHistoryItem:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelInteractionItem:
+    execution_id: str
+    segment_sequence: int
+    depth: int
+    request_sequence: int
+    purpose: str
+    step_index: int
+    output_retry_index: int | None
+    model: Mapping[str, JsonValue]
+    request: Mapping[str, JsonValue]
+    response: JsonValue | None
+    status: str
+    error_code: str | None
+    duration_ns: int
+    usage: UsageMetrics | None
+
+    def __post_init__(self) -> None:
+        if (
+            not self.execution_id
+            or self.segment_sequence < 1
+            or self.depth < 0
+            or self.request_sequence < 1
+            or self.step_index < 0
+            or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+            or self.duration_ns < 0
+        ):
+            raise ValueError("model interaction item is invalid")
+        object.__setattr__(self, "model", dict(self.model))
+        object.__setattr__(self, "request", dict(self.request))
+
+
+@dataclass(frozen=True, slots=True)
 class SessionHistoryItem:
     sequence: int
     item_kind: str
@@ -372,6 +404,15 @@ class ExecutionHistoryReader(Protocol):
         cursor: str | None,
         limit: int,
     ) -> Page[TranscriptItem]: ...
+
+    async def model_interactions(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> Page[ModelInteractionItem]: ...
 
 
 class SessionHistoryReader(Protocol):
@@ -825,6 +866,15 @@ class ExecutionHistoryService(Protocol):
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]": ...
 
+    async def model_interactions(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ModelInteractionItem]": ...
+
 
 class ExecutionService(Protocol):
     async def acquire_dependency_hold(
@@ -935,6 +985,15 @@ class ExecutionService(Protocol):
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]": ...
+
+    async def model_interactions(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ModelInteractionItem]": ...
 
 
 class SessionService(Protocol):
@@ -1087,6 +1146,7 @@ __all__ = [
     "ListExecutionRequest",
     "ListSessionRequest",
     "LoadedSession",
+    "ModelInteractionItem",
     "Page",
     "ReplayEvaluationRequest",
     "ResumeSessionRequest",

@@ -29,11 +29,6 @@ from typing import (
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
 
-from ._step_contracts import (
-    RunRecord,
-    StepEvent,
-)
-
 from ...agent import AgentBindingSnapshot
 from ...core import (
     ApprovalDecision,
@@ -62,19 +57,18 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
+    TaskExpanderRef,
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphLimits,
     TaskGraphView,
     TaskLease,
-    TaskExpanderRef,
     TaskNode,
     TaskNodeView,
     TaskResultRecord,
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
-from ._contracts import ToolOperationRecord
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,
@@ -107,6 +101,7 @@ from ._contracts import (
     LoadedContextMessage,
     LoadedModelContext,
     MemoryRecord,
+    ModelInteractionRecord,
     OperationTerminalUpdate,
     PendingDeferredCall,
     PendingToolContinuation,
@@ -123,6 +118,7 @@ from ._contracts import (
     StoredStepSnapshot,
     StoredUserInput,
     ToolOperationAdmission,
+    ToolOperationRecord,
     TranscriptChunk,
     TranscriptHeadRecord,
     TranscriptMessageRef,
@@ -133,6 +129,10 @@ from ._contracts import (
     TranscriptSpanRef,
 )
 from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._step_contracts import (
+    RunRecord,
+    StepEvent,
+)
 from ._store import (
     StoredAlias,
     StoredFact,
@@ -162,6 +162,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("execution_history_state", ExecutionHistoryState),
     ("execution_record", ExecutionRecord),
     ("execution_run_seal_head", ExecutionRunSealHead),
+    ("model_interaction", ModelInteractionRecord),
     ("execution_start_claim", ExecutionStartClaim),
     ("execution_start_unknown_commit", ExecutionStartUnknownCommit),
     ("execution_cancel_request_commit", ExecutionCancelRequestCommit),
@@ -1954,6 +1955,7 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
         "run_record": RunRecord,
         "step_event": StepEvent,
         "stored_step_snapshot": StoredStepSnapshot,
+        "model_interaction": ModelInteractionRecord,
     }
     target = targets.get(kind)
     if target is None:

@@ -37,6 +37,12 @@ from ._contracts import (
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from ._maintenance import RuntimeStorageInspection
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
+from ._model_interaction_store import (
+    ModelInteractionInMemoryStepArchive,
+    ModelInteractionRuntimeStepStore,
+    ModelInteractionStagingStepStore,
+    ModelInteractionStateStepArchive,
+)
 from ._plan import (
     RuntimeDomain,
     RuntimeRetentionMode,
@@ -49,12 +55,7 @@ from ._repositories import OperationLedgerRepository, build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._store import StateStore
-from ._steps import (
-    InMemoryStepArchive,
-    RuntimeStepStore,
-    StagingStepStore,
-    StateStepArchive,
-)
+from ._steps import RuntimeStepStore, StateStepArchive
 from ._task_repository import TaskAdmissionRepositoryImpl, TaskRepositoryImpl
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
@@ -527,7 +528,7 @@ def _build_steps(
                 context_sources = {
                     RuntimeDomain.CONVERSATION: conversation_archive.transcript_repository,
                 }
-            archives[domain] = StateStepArchive(
+            archives[domain] = ModelInteractionStateStepArchive(
                 stores[domain],
                 object_store=objects.object_store(domain),
                 namespace=namespace,
@@ -542,9 +543,9 @@ def _build_steps(
                 ),
             )
         else:
-            archives[domain] = InMemoryStepArchive(domain)
-    return RuntimeStepStore(
-        StagingStepStore(),
+            archives[domain] = ModelInteractionInMemoryStepArchive(domain)
+    return ModelInteractionRuntimeStepStore(
+        ModelInteractionStagingStepStore(),
         conversation_archive=archives[RuntimeDomain.CONVERSATION],
         execution_archive=archives.get(RuntimeDomain.EXECUTION),
         recovery_archive=archives.get(RuntimeDomain.RECOVERY),

@@ -10,15 +10,9 @@ from typing import cast
 
 from linktools.core import environ
 
-from ._step_contracts import (
-    ContinuableSnapshot,
-    RunRecord,
-    StepEvent,
-)
-
 from ...core import (
-    ExecutionEventType,
     ApprovalStatus,
+    ExecutionEventType,
     ExecutionStatus,
     ExternalCallStatus,
     IdempotencyStatus,
@@ -29,7 +23,6 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
-from ._contracts import ToolOperationRecord
 from ._contracts import (
     AgentAttemptClaim,
     ApprovalRecord,
@@ -37,6 +30,7 @@ from ._contracts import (
     ConversationCursor,
     ConversationHistoryRecord,
     ConversationHistoryRepository,
+    EventRepository,
     ExecutionCancelRequestCommit,
     ExecutionEventAppend,
     ExecutionHistorySealRecord,
@@ -47,18 +41,18 @@ from ._contracts import (
     ExecutionStartClaim,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
-    EventRepository,
     ExternalCallRecord,
     ExternalCallRepository,
     HistoryQuality,
     PendingToolContinuation,
     RecoveryCheckpoint,
+    RecoveryCheckpointRepository,
     RecoveryCheckpointState,
     RecoveryHandoffPhase,
-    RecoveryCheckpointRepository,
-    SessionRepository,
     SessionRecord,
+    SessionRepository,
     ToolOperationAdmission,
+    ToolOperationRecord,
     validate_tool_operation_failure,
 )
 from ._durability import (
@@ -69,6 +63,11 @@ from ._durability import (
 )
 from ._repositories import (
     _tool_admission_matches,
+)
+from ._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+    StepEvent,
 )
 from ._steps import (
     PreparedExecutionProjection,
@@ -1629,6 +1628,7 @@ class RuntimeStateCommands:
                                 projection.run,
                                 events=projection.events,
                                 snapshots=projection.snapshots,
+                                interactions=projection.interactions,
                                 execution_id=commit.execution.execution_id,
                                 history_head_guard=(head, head_record),
                             )
@@ -1948,6 +1948,7 @@ class RuntimeStateCommands:
                             projection.run,
                             events=projection.events,
                             snapshots=projection.snapshots,
+                            interactions=projection.interactions,
                             execution_id=commit.execution.execution_id,
                             history_head_guard=(head, head_record),
                         )
@@ -2310,6 +2311,7 @@ class RuntimeStateCommands:
                 projection.run,
                 events=projection.events,
                 snapshots=projection.snapshots,
+                interactions=projection.interactions,
                 execution_id=execution_id,
             )
 
@@ -3201,6 +3203,7 @@ def _execution_history_seal(
             projection.target_snapshot_offset,
             projection.target_transcript_message_count,
             projection.projection_digest,
+            projection.target_interaction_offset,
         )
         for projection in projections
     ]
@@ -3216,6 +3219,7 @@ def _execution_history_seal(
                 "empty"
                 if current_batch is None or not current_batch.snapshots
                 else current_batch.snapshots[-1].projection.digest,
+                0,
             )
         )
     ordered_heads = tuple(sorted(heads, key=lambda head: head.run_id))

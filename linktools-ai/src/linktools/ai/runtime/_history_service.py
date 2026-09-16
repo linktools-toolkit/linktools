@@ -22,6 +22,7 @@ from .service_api import (
     ExecutionTraceItem,
     ExecutionView,
     ListExecutionRequest,
+    ModelInteractionItem,
     TranscriptItem,
     project_execution_view,
 )
@@ -170,6 +171,22 @@ class DefaultExecutionHistoryService:
     ) -> Page[ExecutionHistoryItem]:
         record = await self._authorize(execution_id, principal)
         return await self._reader.history(
+            execution_id,
+            tenant_id=record.tenant_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def model_interactions(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> Page[ModelInteractionItem]:
+        record = await self._authorize(execution_id, principal)
+        return await self._reader.model_interactions(
             execution_id,
             tenant_id=record.tenant_id,
             cursor=cursor,

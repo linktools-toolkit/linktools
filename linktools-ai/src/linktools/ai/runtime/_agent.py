@@ -24,6 +24,7 @@ from .service_api import (
     ExecutionResult,
     ExecutionTraceItem,
     ExecutionTreeEvent,
+    ModelInteractionItem,
     ReplayEvaluationRequest,
     SessionHistoryItem,
     SessionTurn,
@@ -189,6 +190,19 @@ class Execution(Generic[AppT]):
         limit: int = 100,
     ) -> "Page[TranscriptItem]":
         return await self._runtime.execution.transcript(
+            self.execution_id,
+            principal=self._principal,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    async def model_interactions(
+        self,
+        *,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[ModelInteractionItem]":
+        return await self._runtime.execution.model_interactions(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
