@@ -33,6 +33,9 @@ class KeyedAsyncLock:
         self._guard = asyncio.Lock()
 
     async def acquire(self, key: str) -> None:
+        await self._acquire(key, None)
+
+    async def _acquire(self, key: str, timeout: "float | None") -> None:
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("keyed lock requires an asyncio task")
@@ -47,7 +50,10 @@ class KeyedAsyncLock:
             self._references[key] = self._references.get(key, 0) + 1
         acquired = False
         try:
-            await lock.acquire()
+            if timeout is None:
+                await lock.acquire()
+            else:
+                await asyncio.wait_for(lock.acquire(), timeout=timeout)
             acquired = True
             async with self._guard:
                 self._owners[key] = owner
@@ -177,7 +183,7 @@ class FilesystemLeaseCoordinator:
             if remaining <= 0:
                 raise TimeoutError(f"timed out acquiring lease: {key}")
             try:
-                await asyncio.wait_for(self._locks.acquire(key), timeout=remaining)
+                await self._locks._acquire(key, remaining)
             except asyncio.TimeoutError as error:
                 raise TimeoutError(f"timed out acquiring lease: {key}") from error
             lock_acquired = True
