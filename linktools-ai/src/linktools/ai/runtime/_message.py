@@ -248,19 +248,11 @@ def _mask_tool_return_content(
             if not isinstance(part, dict) or _TOOL_RETURN_CONTENT_HINT not in part:
                 continue
             marker = part.pop(_TOOL_RETURN_CONTENT_HINT)
-            content = part.get("content")
             paths = _decode_tool_return_content_hint(marker)
-            originals: dict[tuple[str | int, ...], str] = {}
-            for path in paths:
-                candidate = _path_value(content, path)
-                if not isinstance(candidate, dict):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                kind = candidate.get("kind")
-                if not isinstance(kind, str):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                originals[path] = kind
-                candidate["kind"] = _TOOL_RETURN_MAPPING_MASK
-            hints[(message_index, part_index)] = originals
+            hints[(message_index, part_index)] = _mask_mapping_paths(
+                part.get("content"),
+                paths,
+            )
     return hints
 
 
@@ -277,7 +269,7 @@ def _decode_tool_return_content_hint(
     ):
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     raw_paths = marker.get("mapping_paths")
-    if not isinstance(raw_paths, list):
+    if not isinstance(raw_paths, list) or not raw_paths:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     paths: list[tuple[str | int, ...]] = []
     for raw_path in raw_paths:
@@ -301,6 +293,39 @@ def _decode_tool_return_content_hint(
     return tuple(paths)
 
 
+def _mask_mapping_paths(
+    value: object,
+    paths: Sequence[tuple[str | int, ...]],
+) -> dict[tuple[str | int, ...], str]:
+    targets = set(paths)
+    originals: dict[tuple[str | int, ...], str] = {}
+
+    def visit(candidate: object, path: tuple[str | int, ...]) -> None:
+        if path in targets:
+            if not isinstance(candidate, dict):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            kind = candidate.get("kind")
+            if not isinstance(kind, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            originals[path] = kind
+            candidate["kind"] = _TOOL_RETURN_MAPPING_MASK
+        if isinstance(candidate, Mapping):
+            for key, item in candidate.items():
+                if isinstance(key, str):
+                    visit(item, path + (key,))
+        elif isinstance(candidate, Sequence) and not isinstance(
+            candidate,
+            (str, bytes, bytearray),
+        ):
+            for index, item in enumerate(candidate):
+                visit(item, path + (index,))
+
+    visit(value, ())
+    if originals.keys() != targets:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return originals
+
+
 def _restore_tool_return_content(
     messages: Sequence[ModelMessage],
     hints: Mapping[
@@ -317,31 +342,38 @@ def _restore_tool_return_content(
         part = message.parts[part_index]
         if not isinstance(part, BaseToolReturnPart):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for path, kind in paths.items():
-            candidate = _path_value(part.content, path)
+        _restore_mapping_paths(part.content, paths)
+
+
+def _restore_mapping_paths(
+    value: object,
+    paths: Mapping[tuple[str | int, ...], str],
+) -> None:
+    restored: set[tuple[str | int, ...]] = set()
+
+    def visit(candidate: object, path: tuple[str | int, ...]) -> None:
+        kind = paths.get(path)
+        if kind is not None:
             if not isinstance(candidate, dict):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if candidate.get("kind") != _TOOL_RETURN_MAPPING_MASK:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             candidate["kind"] = kind
+            restored.add(path)
+        if isinstance(candidate, Mapping):
+            for key, item in candidate.items():
+                if isinstance(key, str):
+                    visit(item, path + (key,))
+        elif isinstance(candidate, Sequence) and not isinstance(
+            candidate,
+            (str, bytes, bytearray),
+        ):
+            for index, item in enumerate(candidate):
+                visit(item, path + (index,))
 
-
-def _path_value(value: object, path: Sequence[str | int]) -> object:
-    candidate = value
-    for segment in path:
-        if isinstance(segment, str):
-            if not isinstance(candidate, Mapping) or segment not in candidate:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            candidate = candidate[segment]
-        else:
-            if (
-                not isinstance(candidate, Sequence)
-                or isinstance(candidate, (str, bytes, bytearray))
-                or segment >= len(candidate)
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            candidate = candidate[segment]
-    return candidate
+    visit(value, ())
+    if restored != set(paths):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 __all__ = [
