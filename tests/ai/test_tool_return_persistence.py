@@ -76,24 +76,33 @@ def test_media_shaped_tool_json_round_trips_as_plain_mapping() -> None:
 
 
 def test_nested_tool_json_and_binary_content_keep_distinct_types() -> None:
-    plain = {
+    nested_plain = {
         "kind": "binary",
         "media_type": "application/octet-stream",
-        "data": "YWJj",
-        "business_count": 2,
+        "data": "ZGVm",
     }
     binary = BinaryContent(
         data=b"real-binary",
         media_type="application/octet-stream",
     )
+    value = {
+        "kind": "binary",
+        "media_type": "application/octet-stream",
+        "data": "YWJj",
+        "business_count": 2,
+        "nested": nested_plain,
+        "attachment": binary,
+    }
 
-    restored = _round_trip({"plain": plain, "binary": binary})
+    restored = _round_trip(value)
 
     assert isinstance(restored, dict)
-    assert restored["plain"] == plain
-    assert isinstance(restored["binary"], BinaryContent)
-    assert restored["binary"].data == binary.data
-    assert restored["binary"].media_type == binary.media_type
+    assert restored["kind"] == "binary"
+    assert restored["business_count"] == 2
+    assert restored["nested"] == nested_plain
+    assert isinstance(restored["attachment"], BinaryContent)
+    assert restored["attachment"].data == binary.data
+    assert restored["attachment"].media_type == binary.media_type
 
 
 @pytest.mark.parametrize(
