@@ -195,11 +195,11 @@ def _ambiguous_mapping_paths(
     if isinstance(source, Mapping) and isinstance(encoded, dict):
         if _decodes_as_multimodal(encoded):
             paths.append(path)
-        for key, item in source.items():
-            if isinstance(key, str) and key in encoded:
+        for key in sorted(encoded):
+            if key in source:
                 paths.extend(
                     _ambiguous_mapping_paths(
-                        item,
+                        source[key],
                         encoded[key],
                         path + (key,),
                     )
