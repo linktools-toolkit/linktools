@@ -4,24 +4,21 @@
 
 import asyncio
 import json
-import os
 import sys
-from collections.abc import AsyncIterator
 from argparse import Namespace
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from linktools.ai.storage import FilesystemObjectStore
 from linktools.cli import BaseCommand, CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
-from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.errors import AIError
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Execution, ExecutionResult, Runtime, RuntimeState
-from linktools.ai.workspace import Workspace
+from linktools.ai.runtime import Execution, ExecutionResult, Runtime
+
+from .._ai_common import _load_workspace, _local_metrics, _local_runtime_state
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -38,12 +35,8 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", help="the prompt")
-        parser.add_argument("--project", type=Path, default=None, help="working directory")
         parser.add_argument(
-            "--storage",
-            choices=("filesystem", "sqlite"),
-            default="sqlite",
-            help="Runtime state storage backend (default: sqlite)",
+            "--project", type=Path, default=None, help="working directory"
         )
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
@@ -66,13 +59,7 @@ class Command(BaseCommand):
         )
 
     def run(self, args: Namespace) -> int:
-        workspace_root = Path.cwd() if args.project is None else args.project
-        try:
-            workspace = Workspace.discover(Path.cwd(), root=workspace_root)
-        except AIError as error:
-            if error.code is not ErrorCode.WORKSPACE_CONFIG_INVALID:
-                raise
-            workspace = Workspace.initialize(workspace_root)
+        workspace = _load_workspace(args.project)
         if not isinstance(args.model, str) or not args.model.strip():
             raise CommandError("--model is required")
         session_id = workspace.workspace_id
@@ -85,52 +72,33 @@ class Command(BaseCommand):
         )
 
         async def execute() -> int:
-            async with _open_runtime_state(workspace, args.storage) as state:
-                async with Runtime.open(
-                    workspace,
-                    state=state,
-                    models=ModelRegistry.openai(
-                        model=args.model,
-                        vision=args.vision,
-                        base_url=args.base_url,
-                        api_key=args.api_key,
-                    ),
-                ) as runtime:
-                    return await _emit_result(
-                        runtime,
-                        args.prompt,
-                        session_id,
-                        memory_scope,
-                        args.json,
-                        args.planning,
-                        args.thinking,
-                    )
+            state = _local_runtime_state(workspace)
+            metrics = await _local_metrics(workspace)
+            async with Runtime.open(
+                workspace,
+                state=state,
+                metrics=metrics,
+                models=ModelRegistry.openai(
+                    model=args.model,
+                    vision=args.vision,
+                    base_url=args.base_url,
+                    api_key=args.api_key,
+                ),
+            ) as runtime:
+                return await _emit_result(
+                    runtime,
+                    args.prompt,
+                    session_id,
+                    memory_scope,
+                    args.json,
+                    args.planning,
+                    args.thinking,
+                )
 
         try:
             return asyncio.run(execute())
         except (TypeError, ValueError, AIError) as error:
             raise CommandError(str(error)) from error
-
-
-@asynccontextmanager
-async def _open_runtime_state(
-    workspace: Workspace,
-    storage: str,
-) -> AsyncIterator[RuntimeState]:
-    if storage == "filesystem":
-        root_path = workspace.storage_root / "runtime"
-        objects_path = root_path / "objects"
-        _logger.info("ai run storage selected: backend=filesystem path=%s", root_path)
-        yield RuntimeState.filesystem(root_path, object_store=FilesystemObjectStore(objects_path))
-        return
-    if storage == "sqlite":
-        root_path = workspace.storage_root / "runtime"
-        runtime_path = root_path / "runtime.db"
-        objects_path = root_path / "objects"
-        _logger.info("ai run storage selected: backend=sqlite path=%s", runtime_path)
-        yield RuntimeState.sqlite(runtime_path, object_store=FilesystemObjectStore(objects_path))
-        return
-    raise ValueError(f"unsupported Runtime storage backend: {storage}")
 
 
 async def _emit_result(
@@ -186,7 +154,11 @@ async def _emit_result(
             event = item.event
             event_type = event.event_type
             if event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
-                text = event.payload.get("text") if isinstance(event.payload, dict) else None
+                text = (
+                    event.payload.get("text")
+                    if isinstance(event.payload, dict)
+                    else None
+                )
                 if isinstance(text, str):
                     sys.stdout.write(text)
                     sys.stdout.flush()
@@ -216,7 +188,8 @@ async def _emit_result(
         raise CommandError(
             "execution failed: "
             f"execution_id={execution_id} status={terminal_status} "
-            f"error_code={terminal_error_code} safe_error_details={terminal_safe_details}"
+            f"error_code={terminal_error_code} "
+            f"safe_error_details={terminal_safe_details}"
         )
     return 0
 
