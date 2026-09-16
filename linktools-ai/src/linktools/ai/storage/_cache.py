@@ -19,6 +19,7 @@ import tempfile
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
+from threading import Lock
 from typing import Protocol, TypeAlias
 
 from ._files import sync_directory
@@ -129,20 +130,20 @@ class InMemoryContentCache:
 
 
 class FilesystemContentCache:
-    """Bounded second-tier cache. Reads happen OUTSIDE the lock (a slow file
-    never blocks other keys); only the LRU metadata update takes the short
-    lock. ``contains_many`` checks all target paths in ONE ``to_thread`` call,
-    reading no content and not scanning the whole root.
+    """Bounded second-tier cache with unlocked content reads.
 
-    The eviction index is built once, on first successful write. Reads before
-    that build are served but do not participate in eviction accounting."""
+    File mutations and eviction accounting share a worker-side lock so caller
+    cancellation cannot separate them. The eviction index is built on the
+    first write attempt whose scan succeeds. Earlier reads remain available
+    without participating in accounting. ``contains_many`` reads no content.
+    """
 
     def __init__(self, root: "str | Path", *, max_bytes: int) -> None:
         if max_bytes < 0:
             raise ValueError("max_bytes must be non-negative")
         self.root = Path(root).resolve()
         self.max_bytes = max_bytes
-        self._lock = asyncio.Lock()
+        self._lock = Lock()
         self._indexed = False
         self._entries: dict[str, tuple[int, int]] = {}
         self._total = 0
@@ -156,29 +157,38 @@ class FilesystemContentCache:
         return self.root / self._name(key)
 
     async def get(self, key: ContentCacheKey) -> "bytes | None":
+        return await asyncio.to_thread(self._get_sync, key)
+
+    def _get_sync(self, key: ContentCacheKey) -> "bytes | None":
         path = self._path(key)
+        with self._lock:
+            observed = self._entries.get(path.name)
         try:
-            value = await asyncio.to_thread(path.read_bytes)
-        except (FileNotFoundError, OSError):
-            await self._forget(path.name)
+            value = path.read_bytes()
+        except FileNotFoundError:
+            with self._lock:
+                if observed is not None and self._entries.get(path.name) is observed:
+                    del self._entries[path.name]
+                    self._total -= observed[0]
             return None
-        async with self._lock:
-            if self._indexed:
-                previous = self._entries.get(path.name)
-                if previous is not None:
-                    self._total -= previous[0]
+        except OSError:
+            return None
+        with self._lock:
+            if observed is not None and self._entries.get(path.name) is observed:
                 self._clock += 1
-                self._entries[path.name] = (len(value), self._clock)
-                self._total += len(value)
+                self._entries[path.name] = (observed[0], self._clock)
         return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
         if len(content) > self.max_bytes:
             return
-        async with self._lock:
-            if not await self._ensure_index():
+        await asyncio.to_thread(self._put, key, content)
+
+    def _put(self, key: ContentCacheKey, content: bytes) -> None:
+        with self._lock:
+            if not self._ensure_index():
                 return
-            await asyncio.to_thread(self._put_sync, key, content)
+            self._put_sync(key, content)
             name = self._name(key)
             previous = self._entries.get(name)
             if previous is not None:
@@ -188,20 +198,23 @@ class FilesystemContentCache:
             self._total += len(content)
             while self._total > self.max_bytes and self._entries:
                 victim = min(self._entries, key=lambda item: self._entries[item][1])
+                (self.root / victim).unlink(missing_ok=True)
                 size, _ = self._entries.pop(victim)
                 self._total -= size
-                await asyncio.to_thread((self.root / victim).unlink, missing_ok=True)
 
     async def delete(self, key: ContentCacheKey) -> None:
+        await asyncio.to_thread(self._delete_sync, key)
+
+    def _delete_sync(self, key: ContentCacheKey) -> None:
         name = self._name(key)
-        async with self._lock:
+        with self._lock:
+            try:
+                (self.root / name).unlink(missing_ok=True)
+            except OSError:
+                return
             previous = self._entries.pop(name, None)
             if previous is not None:
                 self._total -= previous[0]
-            try:
-                await asyncio.to_thread((self.root / name).unlink, missing_ok=True)
-            except OSError:
-                return
 
     async def contains_many(
         self,
@@ -217,14 +230,12 @@ class FilesystemContentCache:
         names = await asyncio.to_thread(_existing)
         return frozenset(paths[name] for name in names)
 
-    async def _ensure_index(self) -> bool:
+    def _ensure_index(self) -> bool:
         if self._indexed:
             return True
         try:
-            entries = await asyncio.to_thread(self._scan_index)
+            entries = self._scan_index()
         except OSError:
-            self._entries.clear()
-            self._total = 0
             return False
         self._entries.clear()
         self._total = 0
@@ -243,12 +254,6 @@ class FilesystemContentCache:
             for item in self.root.iterdir()
             if item.is_file()
         )
-
-    async def _forget(self, name: str) -> None:
-        async with self._lock:
-            previous = self._entries.pop(name, None)
-            if previous is not None:
-                self._total -= previous[0]
 
     def _put_sync(self, key: ContentCacheKey, content: bytes) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
