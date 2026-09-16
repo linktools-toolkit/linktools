@@ -228,9 +228,7 @@ def _decodes_as_multimodal(value: Mapping[str, JsonValue]) -> bool:
     ):
         return False
     try:
-        decoded = _MULTIMODAL_ADAPTER.validate_json(
-            canonical_json_bytes(dict(value))
-        )
+        decoded = _MULTIMODAL_ADAPTER.validate_python(dict(value))
     except ValueError:
         return False
     return is_multi_modal_content(decoded)
