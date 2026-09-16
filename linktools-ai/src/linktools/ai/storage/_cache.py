@@ -26,6 +26,11 @@ from ._files import sync_directory
 ContentCacheKey: TypeAlias = str
 
 
+def _content_charge(content: bytes) -> int:
+    """Charge at least one byte so zero-length entries remain capacity-bounded."""
+    return max(1, len(content))
+
+
 class ContentCache(Protocol):
     async def get(self, key: ContentCacheKey) -> "bytes | None": ...
 
@@ -75,8 +80,13 @@ async def contains_many(
 
 
 class InMemoryContentCache:
-    """Bounded LRU content cache. ``contains_many`` checks all keys under one
-    lock and does NOT touch LRU order (existence is not an access)."""
+    """Bounded LRU content cache.
+
+    ``max_bytes`` is a payload budget with a one-byte minimum charge per entry,
+    so zero-length values cannot grow the key table without bound. ``max_size``
+    remains an optional stricter item-count limit. ``contains_many`` checks all
+    keys under one lock and does not touch LRU order.
+    """
 
     def __init__(self, *, max_bytes: int, max_size: "int | None" = None) -> None:
         if max_bytes < 0:
@@ -97,26 +107,27 @@ class InMemoryContentCache:
             return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
-        if len(content) > self.max_bytes:
+        charge = _content_charge(content)
+        if charge > self.max_bytes:
             return
         async with self._lock:
             previous = self._items.pop(key, None)
             if previous is not None:
-                self._size -= len(previous)
+                self._size -= _content_charge(previous)
             self._items[key] = content
-            self._size += len(content)
+            self._size += charge
             while (
                 self._size > self.max_bytes
                 or (self.max_size is not None and len(self._items) > self.max_size)
             ) and self._items:
                 _, removed = self._items.popitem(last=False)
-                self._size -= len(removed)
+                self._size -= _content_charge(removed)
 
     async def delete(self, key: ContentCacheKey) -> None:
         async with self._lock:
             previous = self._items.pop(key, None)
             if previous is not None:
-                self._size -= len(previous)
+                self._size -= _content_charge(previous)
 
     async def contains_many(
         self,
@@ -144,9 +155,10 @@ class FilesystemContentCache:
         self.max_bytes = max_bytes
         self._lock = asyncio.Lock()
         self._indexed = False
-        self._entries: dict[str, tuple[int, int]] = {}
+        # Tuple values are intentionally replaced on writes. Identity lets an
+        # unlocked read detect that a newer entry replaced the one it observed.
+        self._entries: OrderedDict[str, tuple[int]] = OrderedDict()
         self._total = 0
-        self._clock = 0
 
     @staticmethod
     def _name(key: ContentCacheKey) -> str:
@@ -171,8 +183,7 @@ class FilesystemContentCache:
             return None
         async with self._lock:
             if observed is not None and self._entries.get(path.name) is observed:
-                self._clock += 1
-                self._entries[path.name] = (observed[0], self._clock)
+                self._entries.move_to_end(path.name)
         return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
@@ -185,17 +196,16 @@ class FilesystemContentCache:
             return
         self._put_sync(key, content)
         name = self._name(key)
-        previous = self._entries.get(name)
+        previous = self._entries.pop(name, None)
         if previous is not None:
             self._total -= previous[0]
-        self._clock += 1
-        self._entries[name] = (len(content), self._clock)
+        self._entries[name] = (len(content),)
         self._total += len(content)
         while self._total > self.max_bytes and self._entries:
-            victim = min(self._entries, key=lambda item: self._entries[item][1])
+            victim, entry = next(iter(self._entries.items()))
             (self.root / victim).unlink(missing_ok=True)
-            size, _ = self._entries.pop(victim)
-            self._total -= size
+            self._entries.pop(victim)
+            self._total -= entry[0]
 
     async def delete(self, key: ContentCacheKey) -> None:
         await self._mutate(lambda: self._delete_sync(key))
@@ -249,8 +259,7 @@ class FilesystemContentCache:
         self._entries.clear()
         self._total = 0
         for name, size in entries:
-            self._clock += 1
-            self._entries[name] = (size, self._clock)
+            self._entries[name] = (size,)
             self._total += size
         self._indexed = True
         return True
