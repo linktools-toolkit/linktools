@@ -35,6 +35,7 @@ from linktools.ai.runtime.state._steps import (
     InMemoryStepArchive,
     RuntimeStepStore,
     StagingStepStore,
+    _ProjectionOffset,
 )
 
 
@@ -175,5 +176,28 @@ async def test_interaction_replay_preserves_nonzero_sequence_origin() -> None:
                 store.stage_model_interaction(invalid)
             assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         assert await store.list_model_interactions(run_id="run") == list(values)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_interaction_capture_respects_durable_high_water() -> None:
+    store = ModelInteractionStagingStepStore()
+    await store.initialize()
+    try:
+        await store.register_run(RunRecord("run"))
+        values = tuple(_interaction(sequence) for sequence in (5, 6, 7))
+        for value in values:
+            store.stage_model_interaction(value)
+
+        captured = store.capture_projection_local(
+            "run",
+            _ProjectionOffset(interactions=5),
+        )
+
+        assert captured is not None
+        assert captured.interactions == values[1:]
+        assert captured.base_interaction_offset == 5
+        assert captured.target_interaction_offset == 7
     finally:
         await store.close()
