@@ -82,6 +82,17 @@ class _MaterializedRuntimeState:
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _RuntimeStates:
+    conversation: ConversationState
+    execution: ExecutionState
+    memory: MemoryState
+    artifact: ArtifactState
+    task: TaskState
+    evaluation: EvaluationState
+    recovery: RecoveryState
+
+
 class _RuntimeObjectRouter:
     def __init__(
         self,
@@ -411,50 +422,46 @@ async def materialize_runtime_state(
         raise
 
 
-def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:
+def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> _RuntimeStates:
     try:
-        return type(
-            "RuntimeStates",
-            (),
-            {
-                "conversation": ConversationState(
-                    bundles[RuntimeDomain.CONVERSATION]["sessions"],
-                    bundles[RuntimeDomain.CONVERSATION]["histories"],
-                    bundles[RuntimeDomain.CONVERSATION]["operations"],
-                ),
-                "execution": ExecutionState(
-                    bundles[RuntimeDomain.EXECUTION]["executions"],
-                    bundles[RuntimeDomain.EXECUTION]["events"],
-                    bundles[RuntimeDomain.EXECUTION]["idempotency"],
-                    bundles[RuntimeDomain.EXECUTION]["operations"],
-                ),
-                "memory": MemoryState(
-                    bundles[RuntimeDomain.MEMORY]["records"],
-                    bundles[RuntimeDomain.MEMORY]["operations"],
-                ),
-                "artifact": ArtifactState(
-                    bundles[RuntimeDomain.ARTIFACT]["records"],
-                    bundles[RuntimeDomain.ARTIFACT]["operations"],
-                ),
-                "task": TaskState(
-                    bundles[RuntimeDomain.TASK]["tasks"],
-                    bundles[RuntimeDomain.TASK]["operations"],
-                    bundles[RuntimeDomain.TASK]["admissions"],
-                ),
-                "evaluation": EvaluationState(
-                    bundles[RuntimeDomain.EVALUATION]["records"],
-                    bundles[RuntimeDomain.EVALUATION]["idempotency"],
-                    bundles[RuntimeDomain.EVALUATION]["operations"],
-                ),
-                "recovery": RecoveryState(
-                    bundles[RuntimeDomain.RECOVERY]["approvals"],
-                    bundles[RuntimeDomain.RECOVERY]["external_calls"],
-                    bundles[RuntimeDomain.RECOVERY]["checkpoints"],
-                    bundles[RuntimeDomain.RECOVERY]["operations"],
-                    bundles[RuntimeDomain.RECOVERY]["tools"],
-                ),
-            },
-        )()
+        return _RuntimeStates(
+            conversation=ConversationState(
+                bundles[RuntimeDomain.CONVERSATION]["sessions"],
+                bundles[RuntimeDomain.CONVERSATION]["histories"],
+                bundles[RuntimeDomain.CONVERSATION]["operations"],
+            ),
+            execution=ExecutionState(
+                bundles[RuntimeDomain.EXECUTION]["executions"],
+                bundles[RuntimeDomain.EXECUTION]["events"],
+                bundles[RuntimeDomain.EXECUTION]["idempotency"],
+                bundles[RuntimeDomain.EXECUTION]["operations"],
+            ),
+            memory=MemoryState(
+                bundles[RuntimeDomain.MEMORY]["records"],
+                bundles[RuntimeDomain.MEMORY]["operations"],
+            ),
+            artifact=ArtifactState(
+                bundles[RuntimeDomain.ARTIFACT]["records"],
+                bundles[RuntimeDomain.ARTIFACT]["operations"],
+            ),
+            task=TaskState(
+                bundles[RuntimeDomain.TASK]["tasks"],
+                bundles[RuntimeDomain.TASK]["operations"],
+                bundles[RuntimeDomain.TASK]["admissions"],
+            ),
+            evaluation=EvaluationState(
+                bundles[RuntimeDomain.EVALUATION]["records"],
+                bundles[RuntimeDomain.EVALUATION]["idempotency"],
+                bundles[RuntimeDomain.EVALUATION]["operations"],
+            ),
+            recovery=RecoveryState(
+                bundles[RuntimeDomain.RECOVERY]["approvals"],
+                bundles[RuntimeDomain.RECOVERY]["external_calls"],
+                bundles[RuntimeDomain.RECOVERY]["checkpoints"],
+                bundles[RuntimeDomain.RECOVERY]["operations"],
+                bundles[RuntimeDomain.RECOVERY]["tools"],
+            ),
+        )
     except KeyError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
