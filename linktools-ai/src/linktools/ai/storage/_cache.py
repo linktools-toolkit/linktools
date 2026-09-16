@@ -134,8 +134,8 @@ class FilesystemContentCache:
     lock. ``contains_many`` checks all target paths in ONE ``to_thread`` call,
     reading no content and not scanning the whole root.
 
-    The eviction index is built once, on first write. Reads of an un-indexed
-    root simply miss (a cache, not the source of truth)."""
+    The eviction index is built once, on first successful write. Reads before
+    that build are served but do not participate in eviction accounting."""
 
     def __init__(self, root: "str | Path", *, max_bytes: int) -> None:
         if max_bytes < 0:
@@ -162,7 +162,6 @@ class FilesystemContentCache:
         except (FileNotFoundError, OSError):
             await self._forget(path.name)
             return None
-        # Reads before the first index build do not participate in accounting.
         async with self._lock:
             if self._indexed:
                 previous = self._entries.get(path.name)
@@ -177,7 +176,8 @@ class FilesystemContentCache:
         if len(content) > self.max_bytes:
             return
         async with self._lock:
-            await self._ensure_index()
+            if not await self._ensure_index():
+                return
             await asyncio.to_thread(self._put_sync, key, content)
             name = self._name(key)
             previous = self._entries.get(name)
@@ -217,15 +217,15 @@ class FilesystemContentCache:
         names = await asyncio.to_thread(_existing)
         return frozenset(paths[name] for name in names)
 
-    async def _ensure_index(self) -> None:
+    async def _ensure_index(self) -> bool:
         if self._indexed:
-            return
+            return True
         try:
             entries = await asyncio.to_thread(self._scan_index)
         except OSError:
             self._entries.clear()
             self._total = 0
-            return
+            return False
         self._entries.clear()
         self._total = 0
         for name, size in entries:
@@ -233,6 +233,7 @@ class FilesystemContentCache:
             self._entries[name] = (size, self._clock)
             self._total += size
         self._indexed = True
+        return True
 
     def _scan_index(self) -> "tuple[tuple[str, int], ...]":
         if not self.root.exists():
