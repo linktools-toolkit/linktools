@@ -12,10 +12,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from pydantic import TypeAdapter
-from pydantic_ai.messages import (
-    ModelMessage,
-    ModelResponse,
-)
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
@@ -135,7 +132,6 @@ PayloadIntern = Callable[[bytes], tuple[str, int]]
 
 
 def message_prefix_digest(messages: Sequence[ModelMessage]) -> str:
-    """Return the chained digest for a logical message prefix."""
     value = _PREFIX_SEED
     for message in messages:
         value = hashlib.sha256(
@@ -145,7 +141,6 @@ def message_prefix_digest(messages: Sequence[ModelMessage]) -> str:
 
 
 def extend_prefix_digest(prefix_digest: str, message: ModelMessage) -> str:
-    """Extend a previously computed message prefix digest by one message."""
     try:
         prefix = bytes.fromhex(prefix_digest)
     except ValueError as error:
@@ -162,9 +157,7 @@ def build_context_projection(
     *,
     source_prefix_digest: str | None = None,
 ) -> StagedContextProjection:
-    """Reduce one model context to source spans and unique inline deltas."""
     source_values = tuple(source)
-    projected_values = tuple(projected)
     signatures: dict[bytes, list[int]] = {}
     for index, message in enumerate(source_values):
         signatures.setdefault(_message_signature(message), []).append(index)
@@ -179,13 +172,14 @@ def build_context_projection(
             items.append(StagedContextSpan(span_start, span_end))
             span_start = None
 
-    for message in projected_values:
+    for message in projected:
         candidates = signatures.get(_message_signature(message), ())
         source_index = next((i for i in candidates if i not in used), None)
         if source_index is None:
             flush_span()
-            digest, size = intern_payload(encode_model_messages((message,)))
-            items.append(StagedContextInline(digest, size))
+            items.append(
+                StagedContextInline(*intern_payload(encode_model_messages((message,))))
+            )
             continue
         used.add(source_index)
         if span_start is not None and source_index == span_end:
@@ -208,7 +202,6 @@ def build_inline_context_projection(
     messages: Sequence[ModelMessage],
     intern_payload: PayloadIntern,
 ) -> StagedContextProjection:
-    """Capture a context that has no canonical transcript owner."""
     return StagedContextProjection(
         0,
         _INLINE_SOURCE_DIGEST,
@@ -226,27 +219,21 @@ def context_projection_to_durable(
     source_domain: RuntimeDomain,
     payload: Callable[[str], bytes],
 ) -> ContextProjection:
-    """Convert staging references after the durable owner is known."""
     items = []
     for item in projection.items:
         if isinstance(item, StagedContextSpan):
             items.append(
-                TranscriptSpanRef(
-                    source_domain,
-                    owner_id,
-                    item.start,
-                    item.end,
+                TranscriptSpanRef(source_domain, owner_id, item.start, item.end)
+            )
+        else:
+            items.append(
+                InlineContextBlock(
+                    RuntimePayloadRef(
+                        StoredPayload.inline_bytes(payload(item.payload_digest)),
+                        source_domain,
+                    )
                 )
             )
-            continue
-        items.append(
-            InlineContextBlock(
-                RuntimePayloadRef(
-                    StoredPayload.inline_bytes(payload(item.payload_digest)),
-                    source_domain,
-                )
-            )
-        )
     return ContextProjection(tuple(items))
 
 
@@ -256,20 +243,16 @@ def request_envelope(
     parameters: ModelRequestParameters,
     streaming: bool,
 ) -> tuple[JsonValue, bytes]:
-    """Create the versioned, provider-object-free request envelope."""
-    settings = _json_snapshot({} if model_settings is None else model_settings)
-    parameter_value = _parameters_snapshot(parameters)
     value: dict[str, JsonValue] = {
         "version": _ENVELOPE_VERSION,
         "streaming": streaming,
-        "settings": settings,
-        "parameters": parameter_value,
+        "settings": _json_snapshot({} if model_settings is None else model_settings),
+        "parameters": _parameters_snapshot(parameters),
     }
     return value, canonical_json_bytes(value)
 
 
 def project_public_messages(messages: Sequence[ModelMessage]) -> list[JsonValue]:
-    """Project model messages without exposing binary bodies."""
     values: list[JsonValue] = []
     for message in messages:
         value = _json_snapshot(message)
@@ -297,8 +280,7 @@ def _message_signature(message: ModelMessage) -> bytes:
 
 
 def _json_snapshot(value: object) -> JsonValue:
-    dumped = TypeAdapter(object).dump_python(value, mode="json")
-    return cast(JsonValue, dumped)
+    return cast(JsonValue, TypeAdapter(object).dump_python(value, mode="json"))
 
 
 def _parameters_snapshot(parameters: ModelRequestParameters) -> JsonValue:
@@ -317,7 +299,10 @@ def _parameters_snapshot(parameters: ModelRequestParameters) -> JsonValue:
         "instruction_parts",
         "thinking",
     ):
-        value[name] = _json_snapshot(getattr(parameters, name))
+        raw = getattr(parameters, name)
+        if isinstance(raw, (set, frozenset)):
+            raw = sorted(raw)
+        value[name] = _json_snapshot(raw)
     native_tools: list[JsonValue] = []
     for tool in parameters.native_tools:
         snapshot = _json_snapshot(tool)

@@ -68,6 +68,7 @@ class ExternalModelRequestCapture(Protocol):
         model_settings: ModelSettings | None,
         parameters: ModelRequestParameters,
         streaming: bool,
+        source_messages: Sequence[ModelMessage] | None,
     ) -> None: ...
 
 
@@ -90,12 +91,14 @@ class _ObservedCompactionModel(WrapperModel):
         journal: ModelRequestJournal,
         observer: ExternalModelRequestObserver | None,
         capture: ExternalModelRequestCapture | None,
+        source_messages: Sequence[ModelMessage],
     ) -> None:
         super().__init__(wrapped)
         self._ctx = ctx
         self._journal = journal
         self._observer = observer
         self._capture = capture
+        self._source_messages = tuple(source_messages)
 
     async def request(
         self,
@@ -126,6 +129,7 @@ class _ObservedCompactionModel(WrapperModel):
                 model_settings,
                 model_request_parameters,
                 False,
+                self._source_messages,
             )
         try:
             response = await self.wrapped.request(
@@ -157,6 +161,7 @@ class _ObservedCompactionModel(WrapperModel):
                     model_settings,
                     model_request_parameters,
                     False,
+                    self._source_messages,
                 )
             raise
         except BaseException as error:
@@ -183,6 +188,7 @@ class _ObservedCompactionModel(WrapperModel):
                     model_settings,
                     model_request_parameters,
                     False,
+                    self._source_messages,
                 )
             raise
         fact = self._journal.finish(request_sequence, status="SUCCEEDED")
@@ -208,6 +214,7 @@ class _ObservedCompactionModel(WrapperModel):
                 model_settings,
                 model_request_parameters,
                 False,
+                self._source_messages,
             )
         return response
 
@@ -279,6 +286,7 @@ class RuntimeCompaction(AbstractCapability[None]):
                     journal=self._journal,
                     observer=self._observer,
                     capture=self._request_observer,
+                    source_messages=source,
                 )
             tiered = TieredCompaction(
                 tiers=(

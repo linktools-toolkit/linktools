@@ -60,6 +60,7 @@ class ModelInteractionRecorder(Protocol):
         parameters: ModelRequestParameters,
         streaming: bool,
         model_id: str | None = None,
+        source_messages: Sequence[ModelMessage] | None = None,
     ) -> None: ...
 
     def finish_model_interaction(
@@ -287,6 +288,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         model_settings: ModelSettings | None,
         parameters: ModelRequestParameters,
         streaming: bool = False,
+        source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
         if phase == "started":
             self._stage_request(
@@ -297,6 +299,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 streaming=streaming,
                 model=model,
                 model_id=str(getattr(model, "model_id", "")) or None,
+                source_messages=source_messages,
             )
             return
         if phase not in {"completed", "failed", "cancelled"}:
@@ -353,6 +356,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         streaming: bool | None = None,
         model: Model | None = None,
         model_id: str | None = None,
+        source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
         recorder = self._interaction_recorder
         if recorder is None:
@@ -374,6 +378,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             parameters,
             bool(streaming),
             model_id,
+            source_messages,
         )
 
     def _finish_request(

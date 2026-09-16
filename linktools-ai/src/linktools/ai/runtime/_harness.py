@@ -39,7 +39,6 @@ from ..errors import AIError, ErrorCode
 from ._journal import ModelRequestFact
 from ._message import project_transient_binary_content
 from ._model_interaction import (
-    StagedContextInline,
     StagedContextProjection,
     StagedContextSpan,
     StagedModelInteraction,
@@ -471,6 +470,7 @@ class HarnessStepStoreAdapter:
         parameters: ModelRequestParameters,
         streaming: bool,
         model_id: str | None = None,
+        source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
         run_id = self._step_run_id or self._run_id_from_messages(messages)
         if run_id is None:
@@ -478,7 +478,15 @@ class HarnessStepStoreAdapter:
         if not isinstance(run_id, str) or not run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         projected = tuple(messages)
-        if fact.purpose == "compaction":
+        if source_messages is not None:
+            source = tuple(source_messages)
+            projection = build_context_projection(
+                source,
+                projected,
+                lambda payload: self._interaction_store.intern_payload(run_id, payload),
+                source_prefix_digest=self._source_prefix_digest(source),
+            )
+        elif fact.purpose == "compaction":
             projection = build_inline_context_projection(
                 projected,
                 lambda payload: self._interaction_store.intern_payload(run_id, payload),

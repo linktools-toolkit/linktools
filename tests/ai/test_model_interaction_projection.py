@@ -34,8 +34,10 @@ from linktools.ai.runtime._model_interaction import (
     project_public_messages,
     request_envelope,
 )
+from linktools.ai.runtime.state._model_interaction_store import (
+    ModelInteractionStagingStepStore,
+)
 from linktools.ai.runtime.state._step_contracts import RunRecord
-from linktools.ai.runtime.state._steps import StagingStepStore
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import Workspace
 
@@ -131,15 +133,7 @@ def test_context_projection_retains_spans_and_deduplicates_inline_payloads() -> 
         return digest, len(value)
 
     summary = ModelRequest(parts=[UserPromptPart("summary")])
-    projection = build_context_projection(
-        source,
-        (
-            source[0],
-            summary,
-            summary,
-        ),
-        intern,
-    )
+    projection = build_context_projection(source, (source[0], summary, summary), intern)
 
     assert projection.source_message_count == 2
     assert projection.source_prefix_digest == message_prefix_digest(source)
@@ -151,15 +145,9 @@ def test_context_projection_retains_spans_and_deduplicates_inline_payloads() -> 
 
 def test_public_model_messages_replace_binary_body_with_metadata() -> None:
     message = ModelRequest(
-        parts=[
-            UserPromptPart(
-                [BinaryContent(b"image", media_type="image/png")],
-            )
-        ]
+        parts=[UserPromptPart([BinaryContent(b"image", media_type="image/png")])]
     )
-
     projected = project_public_messages((message,))
-
     assert "data" not in projected[0]["parts"][0]["content"][0]  # type: ignore[index]
     assert projected[0]["parts"][0]["content"][0]["size"] == 5  # type: ignore[index]
 
@@ -168,18 +156,17 @@ def test_request_envelope_keeps_capability_visibility_inputs() -> None:
     envelope, raw = request_envelope(
         model_settings={"temperature": 0.2},
         parameters=ModelRequestParameters(
-            deferred_capability_ids={"skill-a"},
-            revealed_tool_names={"tool-a"},
+            deferred_capability_ids={"skill-b", "skill-a"},
+            revealed_tool_names={"tool-b", "tool-a"},
         ),
         streaming=True,
     )
-
     assert envelope["version"] == 1
     assert envelope["streaming"] is True
     parameters = envelope["parameters"]
     assert isinstance(parameters, Mapping)
-    assert parameters["deferred_capability_ids"] == ["skill-a"]
-    assert parameters["revealed_tool_names"] == ["tool-a"]
+    assert parameters["deferred_capability_ids"] == ["skill-a", "skill-b"]
+    assert parameters["revealed_tool_names"] == ["tool-a", "tool-b"]
     assert b'"version":1' in raw
 
 
@@ -196,14 +183,12 @@ def test_cancelled_model_interaction_has_no_synthetic_error() -> None:
 
 @pytest.mark.asyncio
 async def test_staging_interaction_identity_is_idempotent() -> None:
-    store = StagingStepStore()
+    store = ModelInteractionStagingStepStore()
     await store.initialize()
     await store.register_run(RunRecord("run"))
     interaction = _cancelled_interaction()
-
     store.stage_model_interaction(interaction)
     store.stage_model_interaction(interaction)
-
     assert await store.list_model_interactions(run_id="run") == [interaction]
     with pytest.raises(AIError) as raised:
         store.stage_model_interaction(
@@ -218,28 +203,16 @@ async def test_staging_interaction_identity_is_idempotent() -> None:
 
 @pytest.mark.asyncio
 async def test_success_request_does_not_stage_full_message_payloads() -> None:
-    store = StagingStepStore()
+    store = ModelInteractionStagingStepStore()
     await store.initialize()
     await store.register_run(RunRecord("run"))
-    adapter = HarnessStepStoreAdapter(
-        store,
-        execution_id="execution",
-        step_run_id="run",
-    )
+    adapter = HarnessStepStoreAdapter(store, execution_id="execution", step_run_id="run")
     message = ModelRequest(parts=[UserPromptPart("hello")])
     journal = _journal()
     fact = journal.begin(1)
-
     adapter.begin_model_interaction(
-        fact,
-        TestModel(),
-        (message,),
-        None,
-        ModelRequestParameters(),
-        False,
-        "alias",
+        fact, TestModel(), (message,), None, ModelRequestParameters(), False, "alias"
     )
-
     assert len(store._payloads["run"]) == 1
     finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
     adapter.finish_model_interaction(
@@ -262,28 +235,17 @@ async def test_success_request_does_not_stage_full_message_payloads() -> None:
 
 @pytest.mark.asyncio
 async def test_failed_request_inlines_context_only_after_failure() -> None:
-    store = StagingStepStore()
+    store = ModelInteractionStagingStepStore()
     await store.initialize()
     await store.register_run(RunRecord("run"))
-    adapter = HarnessStepStoreAdapter(
-        store,
-        execution_id="execution",
-        step_run_id="run",
-    )
+    adapter = HarnessStepStoreAdapter(store, execution_id="execution", step_run_id="run")
     message = ModelRequest(parts=[UserPromptPart("hello")])
     journal = _journal()
     fact = journal.begin(1)
-
     adapter.begin_model_interaction(
-        fact,
-        TestModel(),
-        (message,),
-        None,
-        ModelRequestParameters(),
-        False,
+        fact, TestModel(), (message,), None, ModelRequestParameters(), False
     )
     assert len(store._payloads["run"]) == 1
-
     finished = journal.finish(fact.request_sequence, status="FAILED")
     adapter.finish_model_interaction(
         finished,
@@ -302,29 +264,31 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_compaction_request_does_not_reuse_agent_projection_source() -> None:
-    store = StagingStepStore()
+async def test_compaction_request_uses_explicit_source_not_stale_projection() -> None:
+    store = ModelInteractionStagingStepStore()
     await store.initialize()
     await store.register_run(RunRecord("run"))
-    adapter = HarnessStepStoreAdapter(
-        store,
-        execution_id="execution",
-        step_run_id="run",
+    adapter = HarnessStepStoreAdapter(store, execution_id="execution", step_run_id="run")
+    stale_source = (ModelRequest(parts=[UserPromptPart("stale")]),)
+    adapter.remember_context_projection(
+        stale_source,
+        (ModelRequest(parts=[UserPromptPart("stale projected")]),),
     )
-    agent_source = (ModelRequest(parts=[UserPromptPart("agent")]),)
-    agent_projected = (ModelRequest(parts=[UserPromptPart("agent projected")]),)
-    adapter.remember_context_projection(agent_source, agent_projected)
-
-    compaction_request = ModelRequest(parts=[UserPromptPart("summarize")])
+    source = (
+        ModelRequest(parts=[UserPromptPart("keep")]),
+        ModelRequest(parts=[UserPromptPart("replace")]),
+    )
+    synthetic = ModelRequest(parts=[UserPromptPart("summarize")])
     journal = _journal()
     fact = journal.begin(2, purpose="compaction")
     adapter.begin_model_interaction(
         fact,
         TestModel(),
-        (compaction_request,),
+        (source[0], synthetic),
         None,
         ModelRequestParameters(),
         False,
+        source_messages=source,
     )
     finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
     adapter.finish_model_interaction(
@@ -336,21 +300,18 @@ async def test_compaction_request_does_not_reuse_agent_projection_source() -> No
         duration_ns=1,
         usage=None,
     )
-
-    staged = await store.list_model_interactions(run_id="run")
-    interaction = staged[0]
-    assert interaction.purpose == "compaction"  # type: ignore[union-attr]
-    assert interaction.request_context.source_message_count == 0  # type: ignore[union-attr]
-    assert all(
-        isinstance(item, StagedContextInline)
-        for item in interaction.request_context.items  # type: ignore[union-attr]
-    )
+    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    request = interaction.request_context  # type: ignore[union-attr]
+    assert request.source_message_count == 2
+    assert request.source_prefix_digest == message_prefix_digest(source)
+    assert isinstance(request.items[0], StagedContextSpan)
+    assert request.items[0] == StagedContextSpan(0, 1)
+    assert isinstance(request.items[1], StagedContextInline)
 
 
 @pytest.mark.asyncio
 async def test_execution_model_interactions_are_durable_and_public(tmp_path: Path) -> None:
     _write_default_agent(tmp_path)
-
     async with Runtime.open(
         Workspace.load(tmp_path, workspace_id="workspace"),
         models=_TextModels(),  # type: ignore[arg-type]
@@ -359,7 +320,6 @@ async def test_execution_model_interactions_are_durable_and_public(tmp_path: Pat
         execution = await runtime.agent("default").start("hello")
         result = await execution.wait()
         page = await execution.model_interactions()
-
     assert result.status == "SUCCEEDED"
     assert len(page.items) == 1
     assert page.items[0].purpose == "agent"
