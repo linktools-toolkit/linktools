@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from linktools.ai.capability import ToolCallFailed, ToolCallRejected
+from linktools.ai.capability import ToolCallFailed, ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Observation
 from linktools.ai.runtime._tool import ToolOperationDecision
@@ -115,9 +115,7 @@ async def _boundary(
     raw = FunctionToolset([semantic_tool(tool, descriptor)])
     boundary = RuntimeToolBoundaryToolset(
         (raw,),
-        {
-            "tool": descriptor
-        },
+        {"tool": descriptor},
         id="boundary",
         tool_operations=bridge,
         tool_metrics=_metric_context(recorder),
@@ -217,12 +215,12 @@ async def test_skip_tool_execution_emits_success_metric_and_durable_completion()
 @pytest.mark.parametrize(
     ("signal", "expected_code"),
     (
-        (ToolCallRejected("retry"), ErrorCode.TOOL_RETRY_REQUIRED.value),
+        (ToolCallRetry("retry"), ErrorCode.TOOL_RETRY_REQUIRED.value),
         (ToolCallFailed("failed"), ErrorCode.TOOL_EXECUTION_FAILED.value),
     ),
 )
 async def test_tool_signal_metric_uses_stable_failure_code(
-    signal: ToolCallRejected | ToolCallFailed,
+    signal: ToolCallRetry | ToolCallFailed,
     expected_code: str,
 ) -> None:
     recorder = _Recorder()
@@ -246,12 +244,12 @@ async def test_tool_signal_metric_uses_stable_failure_code(
 @pytest.mark.parametrize(
     ("signal", "expected_code"),
     (
-        (ToolCallRejected("retry"), ErrorCode.TOOL_RETRY_REQUIRED.value),
+        (ToolCallRetry("retry"), ErrorCode.TOOL_RETRY_REQUIRED.value),
         (ToolCallFailed("failed"), ErrorCode.TOOL_EXECUTION_FAILED.value),
     ),
 )
 async def test_capability_tool_signal_is_observed_before_control_conversion(
-    signal: ToolCallRejected | ToolCallFailed,
+    signal: ToolCallRetry | ToolCallFailed,
     expected_code: str,
 ) -> None:
     recorder = _Recorder()

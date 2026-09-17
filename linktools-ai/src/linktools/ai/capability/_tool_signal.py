@@ -15,8 +15,8 @@ def _validate_message(message: str) -> str:
     return message
 
 
-class ToolCallRejected(Exception):
-    """Tell the model that it can correct the current tool call."""
+class ToolCallRetry(Exception):
+    """Ask the model to revise and retry the current tool call."""
 
     def __init__(self, message: str) -> None:
         self.message = _validate_message(message)
@@ -24,11 +24,11 @@ class ToolCallRejected(Exception):
 
 
 class ToolCallFailed(Exception):
-    """Tell the model that the accepted tool call deterministically failed."""
+    """Report the current tool call as failed and let the model adapt."""
 
     def __init__(self, message: str) -> None:
         self.message = _validate_message(message)
         super().__init__(self.message)
 
 
-__all__ = ["ToolCallRejected", "ToolCallFailed"]
+__all__ = ["ToolCallRetry", "ToolCallFailed"]

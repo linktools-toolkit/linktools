@@ -27,7 +27,7 @@ from pydantic_ai.tools import (
 )
 
 from ..agent import AgentBinding, AgentCatalog, SubagentRef
-from ..capability import AgentContext, SubagentDelegate, ToolCallRejected
+from ..capability import AgentContext, SubagentDelegate, ToolCallRetry
 from ..workspace import (
     RepositoryInstructionResolver,
     RepositoryInstructions,
@@ -231,11 +231,12 @@ class _RepositoryInstructionBoundary:
             )
         )
         if reconsider:
-            raise ToolCallRejected(_REPOSITORY_INSTRUCTION_RECONSIDER)
+            raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
 
 
 _REPOSITORY_INSTRUCTION_RECONSIDER = (
-    "Repository instructions changed; reconsider the call"
+    "Repository instructions applicable to the target changed. Re-check the current "
+    "instructions before retrying the call."
 )
 
 

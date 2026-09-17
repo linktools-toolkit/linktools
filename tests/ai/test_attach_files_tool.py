@@ -11,7 +11,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import (
-    ToolCallRejected,
+    ToolCallRetry,
     workspace_capabilities,
     workspace_tool_contributions,
 )
@@ -193,7 +193,7 @@ async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_pa
     session = _AttachmentSession({"first.png": b"png"})
     boundary, tool = await _boundary(workspace, session)
 
-    with pytest.raises(ToolCallRejected):
+    with pytest.raises(ToolCallRetry):
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["first.png", "missing.png"]},
@@ -210,7 +210,7 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
     session = _AttachmentSession({"evidence.unknown": b"body"})
     boundary, tool = await _boundary(workspace, session)
 
-    with pytest.raises(ToolCallRejected):
+    with pytest.raises(ToolCallRetry):
         await boundary.call_tool(  # type: ignore[arg-type]
             "attach_files",
             {"paths": ["evidence.unknown"]},
@@ -230,7 +230,7 @@ async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
     boundary, tool = await _boundary(workspace, session, vision=False)
 
     with pytest.raises(
-        ToolCallRejected,
+        ToolCallRetry,
         match="does not support image attachments",
     ):
         await boundary.call_tool(  # type: ignore[arg-type]

@@ -23,7 +23,7 @@ from ._skill_source import (
 )
 from ._subagent import SubagentCapability, SubagentDelegate
 from ._task import TaskExpander, TaskExpansionContext
-from ._tool_signal import ToolCallFailed, ToolCallRejected
+from ._tool_signal import ToolCallFailed, ToolCallRetry
 from ._tool_semantic import (
     TOOL_CLASS_METADATA_KEY,
     TOOL_COMPACTION_KEEP_RESULT_METADATA_KEY,
@@ -73,7 +73,7 @@ __all__ = [
     "TaskExpander",
     "TaskExpansionContext",
     "ToolCallFailed",
-    "ToolCallRejected",
+    "ToolCallRetry",
     "WorkspaceAccess",
     "mcp_server_namespace",
     "mcp_server_selector",

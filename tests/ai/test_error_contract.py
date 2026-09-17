@@ -10,7 +10,7 @@ import httpx
 import pytest
 from linktools.ai.core import ExecutionStatus, ToolOperationStatus, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ToolCallFailed, ToolCallRejected
+from linktools.ai.capability import ToolCallFailed, ToolCallRetry
 from linktools.ai.runtime import ExecutionResult
 from linktools.ai.runtime._agent_executor import _execution_error
 from linktools.ai.runtime._evaluation import _stable_error
@@ -276,7 +276,7 @@ def _unchecked_failed_tool_record(
     ("signal", "code", "kind"),
     (
         (
-            ToolCallRejected("correct the target"),
+            ToolCallRetry("correct the target"),
             ErrorCode.TOOL_RETRY_REQUIRED.value,
             "tool_call_rejected",
         ),
@@ -288,7 +288,7 @@ def _unchecked_failed_tool_record(
     ),
 )
 async def test_tool_error_codec_round_trips_linktools_signal(
-    signal: ToolCallRejected | ToolCallFailed,
+    signal: ToolCallRetry | ToolCallFailed,
     code: str,
     kind: str,
 ) -> None:

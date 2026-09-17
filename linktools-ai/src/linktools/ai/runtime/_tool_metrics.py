@@ -26,7 +26,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.tools import ToolDefinition
 
-from ..capability import AgentContext, ToolCallFailed, ToolCallRejected
+from ..capability import AgentContext, ToolCallFailed, ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ._metric_id import _tool_observation_id
@@ -218,7 +218,7 @@ class RuntimeToolMetricsCapability(
 def _tool_error_code(error: Exception) -> str:
     if isinstance(error, AIError):
         return error.code.value
-    if isinstance(error, ToolCallRejected):
+    if isinstance(error, ToolCallRetry):
         return ErrorCode.TOOL_RETRY_REQUIRED.value
     if isinstance(error, ToolCallFailed):
         return ErrorCode.TOOL_EXECUTION_FAILED.value

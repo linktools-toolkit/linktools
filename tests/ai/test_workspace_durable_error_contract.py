@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from linktools.ai.capability import ToolCallRejected, workspace_capabilities
+from linktools.ai.capability import ToolCallRetry, workspace_capabilities
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
@@ -133,7 +133,7 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
         )
         context = _context()
         args = {"path": "missing/report.txt", "content": "report"}
-        with pytest.raises(ToolCallRejected):
+        with pytest.raises(ToolCallRetry):
             tools = await boundary.get_tools(context)
             await boundary.call_tool("write_file", args, context, tools["write_file"])
 
@@ -199,7 +199,7 @@ async def test_effect_free_missing_target_remains_model_correctable(
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallRejected):
+    with pytest.raises(ToolCallRetry):
         await toolset.call_tool(
             "read_file",
             {"path": "missing.txt"},

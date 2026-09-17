@@ -33,7 +33,7 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
-from ..capability import ToolCallRejected
+from ..capability import ToolCallRetry
 from ..core import UsageMetrics
 from ..errors import AIError, ErrorCode
 from ._journal import ModelRequestFact
@@ -166,13 +166,13 @@ def _harness_plan_items(items: Sequence[PlanItem]) -> list[HarnessPlanItem]:
 
 def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
     if not isinstance(items, list):
-        raise ToolCallRejected(
+        raise ToolCallRetry(
             "Plan items are invalid for this runtime. Correct the plan and retry."
         )
     values: list[PlanItem] = []
     for item in items:
         if not isinstance(item, HarnessPlanItem):
-            raise ToolCallRejected(
+            raise ToolCallRetry(
                 "Plan items are invalid for this runtime. Correct the plan and retry."
             )
         if (
@@ -182,29 +182,28 @@ def _runtime_plan_items(items: list[HarnessPlanItem]) -> list[PlanItem]:
             or item.parent_id is not None
             or item.depends_on
         ):
-            raise ToolCallRejected(
+            raise ToolCallRetry(
                 "Subtasks and dependencies are not enabled. Use a flat plan and retry."
             )
         if not isinstance(item.status, TaskStatus):
-            raise ToolCallRejected(
+            raise ToolCallRetry(
                 "Plan items are invalid for this runtime. Correct the plan and retry."
             )
         if item.status is TaskStatus.blocked:
-            raise ToolCallRejected(
+            raise ToolCallRetry(
                 "Subtasks and dependencies are not enabled. Use a flat plan and retry."
             )
-        if (
-            not isinstance(item.content, str)
-            or not item.content.strip()
-            or item.status
-            not in {
-                TaskStatus.pending,
-                TaskStatus.in_progress,
-                TaskStatus.completed,
-                TaskStatus.cancelled,
-            }
-        ):
-            raise ToolCallRejected(
+        if not isinstance(item.content, str) or not item.content.strip():
+            raise ToolCallRetry(
+                "Each plan item must have non-empty content. Fill every item and retry."
+            )
+        if item.status not in {
+            TaskStatus.pending,
+            TaskStatus.in_progress,
+            TaskStatus.completed,
+            TaskStatus.cancelled,
+        }:
+            raise ToolCallRetry(
                 "Plan items are invalid for this runtime. Correct the plan and retry."
             )
         values.append(PlanItem(item.content, cast(str, item.status.value)))

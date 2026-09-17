@@ -137,7 +137,11 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
 
     assert tool_results == {
         "business": "business failed",
-        "read_file": "workspace permission denied",
+        "read_file": (
+            "Workspace policy does not allow this tool in the current run. "
+            "Repeating the same call will not change the policy; use an allowed "
+            "tool or another approach."
+        ),
         "capability_tool": "capability failed",
     }
     observations_page = await metric_store.scan_observations(

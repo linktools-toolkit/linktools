@@ -11,7 +11,7 @@ from pydantic_ai_harness.planning import (
     PlanItem as HarnessPlanItem,
 )
 
-from linktools.ai.capability import ToolCallRejected
+from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._harness import HarnessPlanStoreAdapter
 from linktools.ai.runtime._harness_planning import HarnessPlanning
@@ -42,7 +42,7 @@ async def test_unsupported_subtask_plan_is_model_correctable() -> None:
     adapter = _adapter(store)
     item = HarnessPlanItem(content="child", parent_id="parent")
 
-    with pytest.raises(ToolCallRejected, match="flat plan"):
+    with pytest.raises(ToolCallRetry, match="flat plan"):
         await adapter.set_items([item])
 
     assert store.calls == 0
@@ -65,7 +65,7 @@ async def test_planning_tool_rejects_duplicate_ids_before_store() -> None:
     tools = await toolset.get_tools(context)
     duplicate = HarnessPlanItem(id="same", content="step")
 
-    with pytest.raises(ToolCallRejected):
+    with pytest.raises(ToolCallRetry, match="ids must be unique"):
         await toolset.call_tool(
             "write_plan",
             {"items": [duplicate, duplicate.model_copy(deep=True)]},

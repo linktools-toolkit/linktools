@@ -27,7 +27,7 @@ from ..workspace import (
 )
 from ._context import AgentContext
 from ._group import CapabilityContribution
-from ._tool_signal import ToolCallRejected
+from ._tool_signal import ToolCallRetry
 from ._tool_semantic import tool_effect_from_metadata, tool_semantic_metadata
 
 _ResultT = TypeVar("_ResultT")
@@ -138,6 +138,70 @@ _UNSUPPORTED_IMAGE_INPUT = (
     "The current model does not support image attachments. "
     "Use a non-image input or another approach."
 )
+_UNRECOGNIZED_ATTACHMENT_TYPE = (
+    "A requested attachment has no recognized media type. Use a workspace file with "
+    "a recognized file extension or inspect it with another tool."
+)
+_INVALID_UTF8_WORKSPACE_CONTENT = (
+    "The requested workspace content is not valid UTF-8 text. Use a binary-capable "
+    "approach or choose a UTF-8 text target."
+)
+_INVALID_WORKSPACE_REQUESTS = {
+    "attach_files": (
+        "The attachment request is invalid. Provide at least one existing workspace "
+        "file with a recognized type and reduce the number or total size of files "
+        "before retrying."
+    ),
+    "read_file": (
+        "The read_file arguments are invalid. Use a non-negative offset and a positive "
+        "limit; if the offset is past the file, retry from an earlier offset."
+    ),
+    "write_file": (
+        "The write_file arguments are invalid. Use a writable workspace path and valid "
+        "UTF-8 text; if expected_hash is supplied, use the current file hash."
+    ),
+    "edit_file": (
+        "The edit_file arguments are invalid. Read the target and retry with non-empty "
+        "old_text that matches exactly once, valid UTF-8 replacement text, and the "
+        "current hash if supplied."
+    ),
+    "list_directory": (
+        "The list_directory target is invalid. Use a valid workspace directory path "
+        "and retry."
+    ),
+    "search_files": (
+        "The search_files arguments are invalid. Use a valid regular expression, a "
+        "valid workspace path, and a relative include_glob when provided."
+    ),
+    "find_files": (
+        "The find_files arguments are invalid. Use a relative glob pattern and a valid "
+        "workspace directory path."
+    ),
+    "create_directory": (
+        "The create_directory target is invalid. Use an allowed writable workspace "
+        "path and retry."
+    ),
+    "file_info": (
+        "The file_info target is invalid. Use a workspace path that resolves to a "
+        "regular file or directory."
+    ),
+    "run_command": (
+        "The run_command arguments are invalid. Use a permitted non-interactive "
+        "command and a valid timeout, then retry."
+    ),
+    "start_command": (
+        "The start_command arguments are invalid. Use a permitted non-interactive "
+        "command and retry."
+    ),
+    "check_command": (
+        "The command id is invalid or no longer active. Use an active command id "
+        "returned by start_command."
+    ),
+    "stop_command": (
+        "The command id is invalid or no longer active. Use an active command id "
+        "returned by start_command."
+    ),
+}
 
 
 class WorkspaceAccess:
@@ -758,12 +822,14 @@ def _workspace_tool_rejected(
     name: str,
     error: AIError,
     default_message: str,
-) -> ToolCallRejected:
-    if (
-        name == "attach_files"
-        and error.safe_details.get("reason") == "image_input_not_supported"
-    ):
+) -> ToolCallRetry:
+    reason = error.safe_details.get("reason")
+    if name == "attach_files" and reason == "image_input_not_supported":
         message = _UNSUPPORTED_IMAGE_INPUT
+    elif name == "attach_files" and reason == "media_type_unknown":
+        message = _UNRECOGNIZED_ATTACHMENT_TYPE
+    elif reason == "invalid_utf8":
+        message = _INVALID_UTF8_WORKSPACE_CONTENT
     elif error.code is ErrorCode.STORAGE_NOT_FOUND:
         message = _MISSING_WORKSPACE_TARGET
     elif error.code is ErrorCode.STORAGE_CONFLICT:
@@ -775,13 +841,13 @@ def _workspace_tool_rejected(
     elif error.code is ErrorCode.TOO_MANY_PENDING_OPERATIONS:
         message = _TOO_MANY_WORKSPACE_COMMANDS
     else:
-        message = default_message
+        message = _INVALID_WORKSPACE_REQUESTS.get(name, default_message)
     _logger.debug(
-        "workspace tool call rejected: operation=%s code=%s",
+        "workspace tool call retry: operation=%s code=%s",
         name,
         error.code.value,
     )
-    return ToolCallRejected(message)
+    return ToolCallRetry(message)
 
 
 __all__ = [
