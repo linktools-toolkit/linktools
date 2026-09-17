@@ -9,6 +9,8 @@ from ._database import (
     provision_metrics_database,
     provision_metrics_sqlite,
     provision_runtime_database,
+    validate_metrics_database,
+    validate_metrics_sqlite,
 )
 
 __all__ = [
@@ -18,4 +20,6 @@ __all__ = [
     "provision_metrics_database",
     "provision_metrics_sqlite",
     "provision_runtime_database",
+    "validate_metrics_database",
+    "validate_metrics_sqlite",
 ]

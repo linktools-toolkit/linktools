@@ -15,7 +15,6 @@ from linktools.ai.runtime._factory import _default_runtime_state
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
 from linktools.ai.workspace import Workspace
-from linktools.commands.ai.run import _open_runtime_state
 
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
@@ -84,30 +83,35 @@ async def test_existing_incompatible_sqlite_is_not_implicitly_migrated(
 
 
 @pytest.mark.asyncio
-async def test_cli_sqlite_state_uses_runtime_filesystem_objects(
+async def test_from_root_uses_runtime_sqlite_and_filesystem_objects(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
-    runtime_root = workspace.storage_root / "runtime"
+    runtime_root = tmp_path / "runtime"
     database = runtime_root / "runtime.db"
     objects_path = runtime_root / "objects"
+    state = RuntimeState.from_root(runtime_root)
 
-    async with _open_runtime_state(workspace, "sqlite") as state:
-        await state.initialize(namespace="sqlite-layout", tenant_id="tenant")
-        try:
-            store = state.object_store(RuntimeDomain.EXECUTION)
-            assert isinstance(store, FilesystemObjectStore)
+    assert all(
+        state.plan.route(domain).kind == "sqlite"
+        and state.plan.route(domain).path == database.resolve()
+        for domain in RuntimeDomain
+    )
 
-            payload = b"runtime-object"
-            digest = hashlib.sha256(payload).hexdigest()
-            await store.put(
-                "payload",
-                _chunks(payload),
-                expected_size=len(payload),
-                expected_digest=digest,
-            )
-        finally:
-            await state.close()
+    await state.initialize(namespace="sqlite-layout", tenant_id="tenant")
+    try:
+        store = state.object_store(RuntimeDomain.EXECUTION)
+        assert isinstance(store, FilesystemObjectStore)
+
+        payload = b"runtime-object"
+        digest = hashlib.sha256(payload).hexdigest()
+        await store.put(
+            "payload",
+            _chunks(payload),
+            expected_size=len(payload),
+            expected_digest=digest,
+        )
+    finally:
+        await state.close()
 
     assert database.is_file()
     with sqlite3.connect(database) as connection:
@@ -115,14 +119,13 @@ async def test_cli_sqlite_state_uses_runtime_filesystem_objects(
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
-            }
+            )
+        }
     assert "ai_objects" not in tables
     assert "ai_object_chunks" not in tables
     assert objects_path.is_dir()
     assert list(objects_path.glob("*/*.bin"))
     assert list(objects_path.glob("*/*.json"))
-    assert not (workspace.storage_root / "runtime.db.objects").exists()
 
 
 def test_default_runtime_state_keeps_filesystem_durable_domains(
@@ -143,6 +146,15 @@ def test_default_runtime_state_keeps_filesystem_durable_domains(
         route.retention is RuntimeRetentionMode.DURABLE
         for route in routes
     )
-    assert state.plan.route(RuntimeDomain.MEMORY).retention is RuntimeRetentionMode.VOLATILE
-    assert state.plan.route(RuntimeDomain.ARTIFACT).retention is RuntimeRetentionMode.VOLATILE
-    assert state.plan.route(RuntimeDomain.EVALUATION).retention is RuntimeRetentionMode.VOLATILE
+    assert (
+        state.plan.route(RuntimeDomain.MEMORY).retention
+        is RuntimeRetentionMode.VOLATILE
+    )
+    assert (
+        state.plan.route(RuntimeDomain.ARTIFACT).retention
+        is RuntimeRetentionMode.VOLATILE
+    )
+    assert (
+        state.plan.route(RuntimeDomain.EVALUATION).retention
+        is RuntimeRetentionMode.VOLATILE
+    )

@@ -4,24 +4,20 @@
 
 import asyncio
 import json
-import os
 import sys
-from collections.abc import AsyncIterator
 from argparse import Namespace
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from linktools.ai.storage import FilesystemObjectStore
 from linktools.cli import BaseCommand, CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Execution, ExecutionResult, Runtime, RuntimeState
-from linktools.ai.workspace import Workspace
+from linktools.ai.runtime import Execution, ExecutionResult, Runtime
+
+from ._common import _load_workspace, _open_local_runtime, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -38,12 +34,8 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", help="the prompt")
-        parser.add_argument("--project", type=Path, default=None, help="working directory")
         parser.add_argument(
-            "--storage",
-            choices=("filesystem", "sqlite"),
-            default="sqlite",
-            help="Runtime state storage backend (default: sqlite)",
+            "--project", type=Path, default=None, help="working directory"
         )
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
@@ -66,71 +58,38 @@ class Command(BaseCommand):
         )
 
     def run(self, args: Namespace) -> int:
-        workspace_root = Path.cwd() if args.project is None else args.project
-        try:
-            workspace = Workspace.discover(Path.cwd(), root=workspace_root)
-        except AIError as error:
-            if error.code is not ErrorCode.WORKSPACE_CONFIG_INVALID:
-                raise
-            workspace = Workspace.initialize(workspace_root)
+        workspace = _load_workspace(args.project)
         if not isinstance(args.model, str) or not args.model.strip():
             raise CommandError("--model is required")
-        session_id = workspace.workspace_id
-        memory_scope = workspace.workspace_id
+        workspace_id = workspace.workspace_id
         _logger.info(
             "ai run session selected: workspace=%s session=%s memory_scope=%s",
-            workspace.workspace_id,
-            session_id,
-            memory_scope,
+            workspace_id,
+            workspace_id,
+            workspace_id,
         )
 
         async def execute() -> int:
-            async with _open_runtime_state(workspace, args.storage) as state:
-                async with Runtime.open(
-                    workspace,
-                    state=state,
-                    models=ModelRegistry.openai(
-                        model=args.model,
-                        vision=args.vision,
-                        base_url=args.base_url,
-                        api_key=args.api_key,
-                    ),
-                ) as runtime:
-                    return await _emit_result(
-                        runtime,
-                        args.prompt,
-                        session_id,
-                        memory_scope,
-                        args.json,
-                        args.planning,
-                        args.thinking,
-                    )
+            async with _open_local_runtime(
+                workspace,
+                models=ModelRegistry.openai(
+                    model=args.model,
+                    vision=args.vision,
+                    base_url=args.base_url,
+                    api_key=args.api_key,
+                ),
+            ) as runtime:
+                return await _emit_result(
+                    runtime,
+                    args.prompt,
+                    workspace_id,
+                    workspace_id,
+                    args.json,
+                    args.planning,
+                    args.thinking,
+                )
 
-        try:
-            return asyncio.run(execute())
-        except (TypeError, ValueError, AIError) as error:
-            raise CommandError(str(error)) from error
-
-
-@asynccontextmanager
-async def _open_runtime_state(
-    workspace: Workspace,
-    storage: str,
-) -> AsyncIterator[RuntimeState]:
-    if storage == "filesystem":
-        root_path = workspace.storage_root / "runtime"
-        objects_path = root_path / "objects"
-        _logger.info("ai run storage selected: backend=filesystem path=%s", root_path)
-        yield RuntimeState.filesystem(root_path, object_store=FilesystemObjectStore(objects_path))
-        return
-    if storage == "sqlite":
-        root_path = workspace.storage_root / "runtime"
-        runtime_path = root_path / "runtime.db"
-        objects_path = root_path / "objects"
-        _logger.info("ai run storage selected: backend=sqlite path=%s", runtime_path)
-        yield RuntimeState.sqlite(runtime_path, object_store=FilesystemObjectStore(objects_path))
-        return
-    raise ValueError(f"unsupported Runtime storage backend: {storage}")
+        return _run_async(execute())
 
 
 async def _emit_result(
@@ -142,83 +101,88 @@ async def _emit_result(
     planning: bool,
     thinking: bool,
 ) -> int:
-    agent = runtime.agent()
-    if as_json:
-        execution = await agent.start(
-            prompt,
-            session_id=session_id,
-            memory_scope=memory_scope,
-            planning=planning,
-            thinking=thinking,
-        )
-        try:
-            result = await execution.wait()
-        except asyncio.CancelledError:
-            await _cancel_interrupted_execution(execution)
-            raise
-        payload = _result_payload(result)
-        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-        if result.status is not ExecutionStatus.SUCCEEDED:
-            raise CommandError(
-                "execution failed: "
-                f"execution_id={result.execution_id} status={result.status.value} "
-                f"error_code={result.error_code} "
-                f"safe_error_details={dict(result.safe_error_details)}"
-            )
-        return 0
-
-    succeeded = False
-    execution = await agent.start(
+    execution = await runtime.agent().start(
         prompt,
         session_id=session_id,
         memory_scope=memory_scope,
         planning=planning,
         thinking=thinking,
     )
-    execution_id = execution.execution_id
-    terminal_status = "UNKNOWN"
-    terminal_error_code: object = None
-    terminal_safe_details: object = {}
     try:
-        async for item in execution.watch():
-            if item.depth != 0:
-                continue
-            event = item.event
-            event_type = event.event_type
-            if event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
-                text = event.payload.get("text") if isinstance(event.payload, dict) else None
-                if isinstance(text, str):
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-            elif event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
-                _write_stderr("[thinking] " + _payload_text(event.payload))
-            elif event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
-                _write_stderr("[tool] " + _payload_text(event.payload))
-            elif event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
-                _write_stderr("[tool] finished " + _payload_text(event.payload))
-            elif event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value:
-                succeeded = True
-                terminal_status = ExecutionStatus.SUCCEEDED.value
-            elif event_type in {
-                ExecutionEventType.EXECUTION_FAILED.value,
-                ExecutionEventType.EXECUTION_CANCELLED.value,
-            }:
-                terminal_status = event_type.removeprefix("EXECUTION_")
-                if isinstance(event.payload, dict):
-                    terminal_error_code = event.payload.get("error_code")
-                    terminal_safe_details = event.payload.get("safe_error_details", {})
+        if as_json:
+            result = await execution.wait()
+            print(json.dumps(_result_payload(result), ensure_ascii=False, sort_keys=True))
+            _raise_for_failure(result)
+            return 0
+        return await _stream_result(execution)
     except asyncio.CancelledError:
         await _cancel_interrupted_execution(execution)
         raise
+
+
+async def _stream_result(execution: "Execution[object]") -> int:
+    status = "UNKNOWN"
+    error_code: object = None
+    safe_details: object = {}
+    succeeded = False
+    async for item in execution.watch():
+        if item.depth != 0:
+            continue
+        event = item.event
+        if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
+            text = event.payload.get("text") if isinstance(event.payload, dict) else None
+            if isinstance(text, str):
+                sys.stdout.write(text)
+                sys.stdout.flush()
+        elif event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
+            _write_stderr("[thinking] " + _payload_text(event.payload))
+        elif event.event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
+            _write_stderr("[tool] " + _payload_text(event.payload))
+        elif event.event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
+            _write_stderr("[tool] finished " + _payload_text(event.payload))
+        elif event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value:
+            succeeded = True
+            status = ExecutionStatus.SUCCEEDED.value
+        elif event.event_type in {
+            ExecutionEventType.EXECUTION_FAILED.value,
+            ExecutionEventType.EXECUTION_CANCELLED.value,
+        }:
+            status = event.event_type.removeprefix("EXECUTION_")
+            if isinstance(event.payload, dict):
+                error_code = event.payload.get("error_code")
+                safe_details = event.payload.get("safe_error_details", {})
     sys.stdout.write("\n")
     sys.stdout.flush()
     if not succeeded:
         raise CommandError(
-            "execution failed: "
-            f"execution_id={execution_id} status={terminal_status} "
-            f"error_code={terminal_error_code} safe_error_details={terminal_safe_details}"
+            _failure_message(execution.execution_id, status, error_code, safe_details)
         )
     return 0
+
+
+def _raise_for_failure(result: ExecutionResult) -> None:
+    if result.status is not ExecutionStatus.SUCCEEDED:
+        raise CommandError(
+            _failure_message(
+                result.execution_id,
+                result.status.value,
+                result.error_code,
+                dict(result.safe_error_details),
+            )
+        )
+
+
+def _failure_message(
+    execution_id: str,
+    status: str,
+    error_code: object,
+    safe_details: object,
+) -> str:
+    return (
+        "execution failed: "
+        f"execution_id={execution_id} status={status} "
+        f"error_code={error_code} safe_error_details={safe_details}"
+    )
 
 
 async def _cancel_interrupted_execution(execution: "Execution[object]") -> None:

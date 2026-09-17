@@ -3,16 +3,15 @@
 
 """`lt ai acp`: start the local ACP stdio Agent."""
 
-import asyncio
 from argparse import Namespace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 
-from linktools.ai.acp import ACPApplication
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import Workspace
+from linktools.ai.acp import ACPAgent, serve_stdio
+
+from ._common import _load_workspace, _open_local_runtime, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -30,23 +29,26 @@ class Command(BaseCommand):
         )
 
     def run(self, args: Namespace) -> int:
-        workspace_root = Path.cwd() if args.project is None else args.project
+        workspace = _load_workspace(args.project)
+        memory_scope = args.memory if args.memory is not None else workspace.workspace_id
+
+        async def execute() -> int:
+            async with _open_local_runtime(workspace) as runtime:
+                await serve_stdio(
+                    ACPAgent(
+                        runtime,
+                        principal=runtime.default_principal,
+                        memory_scope=memory_scope,
+                    )
+                )
+            return 0
+
         try:
-            workspace = Workspace.discover(Path.cwd(), root=workspace_root)
-        except AIError as error:
-            if error.code is not ErrorCode.WORKSPACE_CONFIG_INVALID:
-                raise
-            workspace = Workspace.initialize(workspace_root)
-        try:
-            memory_scope = args.memory if args.memory is not None else workspace.workspace_id
-            asyncio.run(ACPApplication.for_workspace(workspace).serve(memory_scope=memory_scope))
+            return _run_async(execute())
         except ModuleNotFoundError as error:
             raise CommandError(
                 "ai acp requires the agent-client-protocol dependency"
             ) from error
-        except ValueError as error:
-            raise CommandError(str(error)) from error
-        return 0
 
 
 command = Command()

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from ...core import validate_persistence_namespace
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectStore
+from ...storage import FilesystemObjectStore, ObjectStore
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -116,6 +116,14 @@ class RuntimeState:
                 **{domain.value: route for domain in RuntimeDomain}
             ),
             object_store=object_store,
+        )
+
+    @classmethod
+    def from_root(cls, root: "str | Path") -> "RuntimeState":
+        base = _normalize_path(root)
+        return cls.sqlite(
+            base / "runtime.db",
+            object_store=FilesystemObjectStore(base / "objects"),
         )
 
     @classmethod
@@ -308,7 +316,9 @@ class RuntimeState:
     def object_store(self, domain: RuntimeDomain) -> ObjectStore:
         self._require_ready()
         if self._objects is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            )
         return self._objects.object_store(domain)
 
     def working_object_store(
@@ -319,7 +329,9 @@ class RuntimeState:
     ) -> ObjectStore:
         self._require_ready()
         if self._objects is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+            )
         return self._objects.working_object_store(
             domain,
             owner_scope=owner_scope,
