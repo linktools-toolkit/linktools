@@ -34,9 +34,9 @@ from linktools.commands._ai_common import (
     _local_metrics,
     _local_runtime_state,
 )
+from linktools.commands.ai.history import Command as HistoryCommand, _emit_execution_detail
+from linktools.commands.ai.metrics import Command as MetricsCommand, _query_summary
 from linktools.commands.ai.run import Command as RunCommand
-from linktools.commands.ai_history import Command as HistoryCommand, _emit_execution_detail
-from linktools.commands.ai_metrics import Command as MetricsCommand, _query_summary
 
 
 def _info(
@@ -192,12 +192,12 @@ class _DetailHistory:
 
     async def trace(self, *_args, **_kwargs):
         self.trace_called = True
-        raise AssertionError("ai-history must not materialize trace by default")
+        raise AssertionError("ai history must not materialize trace by default")
 
 
-def test_debug_commands_are_top_level_and_minimal() -> None:
-    assert HistoryCommand().name == "ai-history"
-    assert MetricsCommand().name == "ai-metrics"
+def test_debug_commands_use_ai_group_and_minimal_names() -> None:
+    assert HistoryCommand().name == "history"
+    assert MetricsCommand().name == "metrics"
     history_actions = {
         action.dest for action in HistoryCommand().create_parser()._actions
     }

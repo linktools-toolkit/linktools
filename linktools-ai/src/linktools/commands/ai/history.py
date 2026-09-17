@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`lt ai-history`: inspect persisted local Runtime execution history."""
+"""`lt ai history`: inspect persisted local Runtime execution history."""
 
 import json
 from argparse import Namespace
@@ -13,7 +13,7 @@ from linktools.ai.core import Principal, service_principal
 from linktools.ai.runtime import ExecutionInfo, RuntimeHistory
 from linktools.cli import BaseCommand
 
-from ._ai_common import _load_workspace, _local_runtime_state, _run_async
+from .._ai_common import _load_workspace, _local_runtime_state, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -24,8 +24,6 @@ _DEFAULT_LIST_LIMIT = 20
 
 class Command(BaseCommand):
     """Inspect local AI execution history."""
-
-    name = "ai-history"
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("execution_id", nargs="?", help="execution id")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`lt ai-metrics`: inspect local Runtime metrics."""
+"""`lt ai metrics`: inspect local Runtime metrics."""
 
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
@@ -15,7 +15,7 @@ from linktools.ai.observe import (
 )
 from linktools.cli import BaseCommand
 
-from ._ai_common import _load_workspace, _local_metrics, _run_async
+from .._ai_common import _load_workspace, _local_metrics, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -38,10 +38,6 @@ _SUMMARY_METRICS = (
 
 class Command(BaseCommand):
     """Inspect local AI runtime metrics."""
-
-    @property
-    def name(self) -> str:
-        return "ai-metrics"
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("metric", nargs="?", help="metric name")
