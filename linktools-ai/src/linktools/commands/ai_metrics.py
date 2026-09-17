@@ -79,14 +79,16 @@ async def _query_summary(
 ) -> tuple[tuple[str, str, MetricQueryResult], ...]:
     end = datetime.now(timezone.utc)
     window = MetricWindow.between(end - timedelta(days=1), end)
-    return tuple(
-        (
-            label,
-            metric,
-            await _query_metric(metrics, metric, window=window),
+    values: list[tuple[str, str, MetricQueryResult]] = []
+    for label, metric in _SUMMARY_METRICS:
+        values.append(
+            (
+                label,
+                metric,
+                await _query_metric(metrics, metric, window=window),
+            )
         )
-        for label, metric in _SUMMARY_METRICS
-    )
+    return tuple(values)
 
 
 def _emit_summary(values: tuple[tuple[str, str, MetricQueryResult], ...]) -> None:
