@@ -229,11 +229,17 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
 
 
 def _subagent_failure_message(error: AIError) -> str:
+    subagent_id = error.safe_details.get("subagent_id")
+    subject = (
+        f"Subagent {subagent_id!r}"
+        if isinstance(subagent_id, str) and subagent_id
+        else "The delegated subagent"
+    )
     status = error.safe_details.get("status")
     if status == "CANCELLED":
         return (
-            "The delegated subagent was cancelled and produced no result. Continue "
-            "without its result or delegate the task again if it is still needed."
+            f"{subject} was cancelled and produced no result. Continue from the "
+            "parent context without its result."
         )
     raw_code = error.safe_details.get("error_code")
     if isinstance(raw_code, str):
@@ -243,13 +249,12 @@ def _subagent_failure_message(error: AIError) -> str:
             pass
         else:
             return (
-                f"The delegated subagent failed with {code.value} and produced no "
-                "result. Use another approach or delegate the task again if "
-                "appropriate."
+                f"{subject} failed with {code.value} and produced no result. Continue "
+                "from the parent context using this failure reason."
             )
     return (
-        "The delegated subagent failed and produced no result. Use another approach "
-        "or delegate the task again if appropriate."
+        f"{subject} failed and produced no result. Continue from the parent context "
+        "without its result."
     )
 
 
