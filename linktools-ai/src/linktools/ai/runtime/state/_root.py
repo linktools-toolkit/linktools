@@ -32,7 +32,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     from ._maintenance import RuntimeStorageInspection
-    from ._materializer import _MaterializedRuntimeState, _RuntimeObjectRouter
+    from ._materializer import _MaterializedRuntimeState
+    from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
     from ._steps import RuntimeStepStore
 
