@@ -734,10 +734,7 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         *,
         vision: bool,
     ) -> None:
-        super().__init__(
-            id=_WORKSPACE_SANDBOX_CAPABILITY_ID,
-            instructions=_WORKSPACE_INSTRUCTIONS,
-        )
+        super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
         surface = _WorkspaceToolSurface(session, policy, vision=vision)
         for name in selected_tool_names:
             self.add_tool(
@@ -763,6 +760,9 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         self._session = session
         self._policy = policy
         self._vision = vision
+
+    def get_instructions(self) -> InstructionPart:
+        return _WORKSPACE_INSTRUCTIONS
 
     def get_toolset(self) -> _WorkspaceSandboxToolset:
         return _WorkspaceSandboxToolset(

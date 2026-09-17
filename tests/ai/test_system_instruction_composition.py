@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 from linktools.ai.capability import ToolCallRetry, workspace_capabilities
+from pydantic_ai import Agent as PydanticAgent
+from pydantic_ai.capabilities import AbstractCapability, Capability
 from linktools.ai.runtime._local import _RepositoryInstructionBoundary
 from linktools.ai.runtime._tool_boundary import RuntimeToolBoundaryToolset
 from linktools.ai.workspace import (
@@ -18,6 +20,7 @@ from linktools.ai.workspace import (
     Workspace,
 )
 from pydantic_ai.messages import InstructionPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import FunctionToolset
@@ -114,17 +117,84 @@ async def test_workspace_guidance_is_static_when_workspace_tools_are_selected(
             ("read_file",),
             session=session,
         )[0]
-        instructions = await capability.get_toolset().get_instructions(_context())
+        instruction = capability.get_instructions()
+        toolset_instructions = await capability.get_toolset().get_instructions(_context())
     finally:
         await session.close()
 
-    assert instructions is not None and len(instructions) == 1
-    instruction = instructions[0]
     assert isinstance(instruction, InstructionPart)
     assert instruction.name == "workspace"
     assert instruction.dynamic is False
     assert "logical Workspace root" in instruction.content
     assert "not automatically authorized" in instruction.content
+    assert toolset_instructions is None
+
+
+class _InstructionCapture(AbstractCapability[None]):
+    def __init__(self) -> None:
+        self.id = "instruction-capture"
+        self.parts: tuple[InstructionPart, ...] = ()
+
+    async def before_model_request(
+        self,
+        ctx: RunContext[None],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        del ctx
+        self.parts = tuple(
+            request_context.model_request_parameters.instruction_parts or ()
+        )
+        return request_context
+
+
+@pytest.mark.asyncio
+async def test_request_instruction_parts_follow_f0_f1_o_order() -> None:
+    capture = _InstructionCapture()
+
+    def repository_overlay(_: RunContext[None]) -> str:
+        return "O: repository overlay"
+
+    agent = PydanticAgent(
+        TestModel(),
+        system_prompt="standing system prompt",
+        instructions=("F0: agent", repository_overlay),
+    )
+    await agent.run(
+        "test",
+        capabilities=(
+            Capability(id="skill", instructions="F0: skill"),
+            Capability(id="workspace", instructions="F0: workspace"),
+            Capability(id="subagent", instructions="F1: subagent"),
+            Capability(id="memory", instructions="F1: memory"),
+            Capability(id="planning", instructions="F1: planning"),
+            Capability(
+                id="repository-initial",
+                instructions="F1: repository initial",
+            ),
+            capture,
+        ),
+    )
+
+    assert [part.content for part in capture.parts] == [
+        "F0: agent",
+        "F0: skill",
+        "F0: workspace",
+        "F1: subagent",
+        "F1: memory",
+        "F1: planning",
+        "F1: repository initial",
+        "O: repository overlay",
+    ]
+    assert [part.dynamic for part in capture.parts] == [
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
 
 
 @pytest.mark.asyncio
