@@ -2,12 +2,10 @@
 # -*- coding: utf-8 -*-
 """`lt ai-metrics`: inspect local Runtime metrics."""
 
-import asyncio
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from linktools.ai.errors import AIError
 from linktools.ai.observe import (
     MetricPoint,
     MetricQuery,
@@ -15,9 +13,9 @@ from linktools.ai.observe import (
     Metrics,
     MetricWindow,
 )
-from linktools.cli import BaseCommand, CommandError
+from linktools.cli import BaseCommand
 
-from ._ai_common import _load_workspace, _local_metrics
+from ._ai_common import _load_workspace, _local_metrics, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -55,14 +53,11 @@ class Command(BaseCommand):
             metrics = await _local_metrics(workspace)
             if args.metric is None:
                 _emit_summary(await _query_summary(metrics))
-                return 0
-            _emit_metric(await _query_metric(metrics, args.metric))
+            else:
+                _emit_metric(await _query_metric(metrics, args.metric))
             return 0
 
-        try:
-            return asyncio.run(execute())
-        except (AIError, TypeError, ValueError) as error:
-            raise CommandError(str(error)) from error
+        return _run_async(execute())
 
 
 async def _query_metric(
@@ -84,16 +79,14 @@ async def _query_summary(
 ) -> tuple[tuple[str, str, MetricQueryResult], ...]:
     end = datetime.now(timezone.utc)
     window = MetricWindow.between(end - timedelta(days=1), end)
-    values: list[tuple[str, str, MetricQueryResult]] = []
-    for label, metric in _SUMMARY_METRICS:
-        values.append(
-            (
-                label,
-                metric,
-                await _query_metric(metrics, metric, window=window),
-            )
+    return tuple(
+        (
+            label,
+            metric,
+            await _query_metric(metrics, metric, window=window),
         )
-    return tuple(values)
+        for label, metric in _SUMMARY_METRICS
+    )
 
 
 def _emit_summary(values: tuple[tuple[str, str, MetricQueryResult], ...]) -> None:
