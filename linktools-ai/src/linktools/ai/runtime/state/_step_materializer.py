@@ -5,9 +5,9 @@
 from collections.abc import Mapping
 
 from ._contracts import ExecutionRepository
+from ._model_interaction_runtime import ModelInteractionRuntimeStepStore
 from ._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
-    ModelInteractionRuntimeStepStore,
     ModelInteractionStagingStepStore,
     ModelInteractionStateStepArchive,
 )
