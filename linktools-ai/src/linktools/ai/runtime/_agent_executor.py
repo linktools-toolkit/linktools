@@ -87,6 +87,7 @@ from ..capability import (
     SkillSourceRegistry,
     SubagentCapability,
     SubagentDelegate,
+    ToolCallRejected,
     tool_class_from_metadata,
     tool_compaction_keep_result_from_metadata,
     tool_context_dedupe_from_metadata,
@@ -224,6 +225,37 @@ class _RunScope:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.event_sink is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+class _CachedRepositoryInstructionBoundary:
+    def __init__(self, boundary: RepositoryInstructionBoundary) -> None:
+        self._boundary = boundary
+        self._lock = asyncio.Lock()
+        self._rendered = boundary.render()
+
+    def render(self) -> str:
+        return self._rendered
+
+    async def check(
+        self,
+        *,
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        path_fields: tuple[str, ...],
+    ) -> None:
+        async with self._lock:
+            try:
+                await self._boundary.check(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    arguments=arguments,
+                    path_fields=path_fields,
+                )
+            except ToolCallRejected:
+                rendered = self._boundary.render()
+                self._rendered = rendered
+                raise
 
 
 class AgentExecutor:
@@ -645,6 +677,13 @@ async def _materialize_agent(
     tuple[AbstractCapability[AgentContext[object]], ...],
 ]:
     definition = scope.binding.definition
+    repository_boundary = (
+        None
+        if scope.repository_instruction_boundary is None
+        else _CachedRepositoryInstructionBoundary(
+            scope.repository_instruction_boundary
+        )
+    )
     business_tools: list[Tool[AgentContext[object]]] = []
     workspace_names: list[str] = []
     business_descriptors: dict[str, ManagedToolDescriptor] = {}
@@ -760,7 +799,7 @@ async def _materialize_agent(
                 sandbox_session=scope.sandbox_session,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
-                repository_boundary=scope.repository_instruction_boundary,
+                repository_boundary=repository_boundary,
                 background_tasks=scope.background_tasks,
             )
         )
@@ -850,34 +889,25 @@ async def _materialize_agent(
         business_output_type = scope.binding.output_type
     output_type: object = [business_output_type, DeferredToolRequests]
     base_instructions = "\n".join(definition.spec.instructions)
-    repository_boundary = scope.repository_instruction_boundary
+    runtime_instructions: list[Any] = []
+    if base_instructions:
+        runtime_instructions.append(base_instructions)
     if repository_boundary is None:
         repository_instructions = (
             ""
             if scope.repository_instructions is None
             else scope.repository_instructions.render()
         )
-        runtime_instructions: object = "\n\n".join(
-            value
-            for value in (
-                base_instructions,
-                repository_instructions,
-            )
-            if value != ""
-        )
+        if repository_instructions:
+            runtime_instructions.append(repository_instructions)
     else:
 
-        def runtime_instructions(
+        def repository_instructions(
             _: PydanticRunContext[object],
         ) -> str:
-            return "\n\n".join(
-                value
-                for value in (
-                    base_instructions,
-                    repository_boundary.render(),
-                )
-                if value != ""
-            )
+            return repository_boundary.render()
+
+        runtime_instructions.append(repository_instructions)
 
     agent = cast(
         "PydanticAgent[AgentContext[object], object]",
