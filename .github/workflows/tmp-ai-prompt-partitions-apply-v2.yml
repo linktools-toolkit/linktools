@@ -1,0 +1,33 @@
+name: Temporary prompt partition apply v2
+
+on:
+  push:
+    branches:
+      - feat/ai-system-prompt-refresh
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: contains(github.event.head_commit.message, '[apply-prompt-partitions-v2]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-system-prompt-refresh
+      - name: Apply focused source patch
+        run: |
+          python scripts/tmp_apply_prompt_partitions.py
+          python -m py_compile linktools-ai/src/linktools/ai/runtime/_local.py
+      - name: Commit focused patch
+        run: |
+          if git diff --quiet -- linktools-ai/src/linktools/ai/runtime/_local.py; then
+            echo 'No changes produced' >&2
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add linktools-ai/src/linktools/ai/runtime/_local.py
+          git commit -m 'fix(ai): partition repository instruction state'
+          git push origin HEAD:feat/ai-system-prompt-refresh
