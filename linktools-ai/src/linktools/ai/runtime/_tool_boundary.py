@@ -38,7 +38,9 @@ from ._tool_metrics import (
 
 
 class RepositoryInstructionBoundary(Protocol):
-    def render(self) -> str: ...
+    def render_initial(self) -> str: ...
+
+    def render_overlay(self) -> str: ...
 
     async def check(
         self,
