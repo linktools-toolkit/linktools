@@ -3,7 +3,6 @@
 
 """`lt ai acp`: start the local ACP stdio Agent."""
 
-import asyncio
 from argparse import Namespace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,10 +10,8 @@ from typing import TYPE_CHECKING
 from linktools.cli import BaseCommand, CommandError
 
 from linktools.ai.acp import ACPAgent, serve_stdio
-from linktools.ai.errors import AIError
-from linktools.ai.runtime import Runtime
 
-from .._ai_common import _load_workspace, _local_metrics, _local_runtime_state
+from .._ai_common import _load_workspace, _open_local_runtime, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -35,14 +32,8 @@ class Command(BaseCommand):
         workspace = _load_workspace(args.project)
         memory_scope = args.memory if args.memory is not None else workspace.workspace_id
 
-        async def execute() -> None:
-            state = _local_runtime_state(workspace)
-            metrics = await _local_metrics(workspace)
-            async with Runtime.open(
-                workspace,
-                state=state,
-                metrics=metrics,
-            ) as runtime:
+        async def execute() -> int:
+            async with _open_local_runtime(workspace) as runtime:
                 await serve_stdio(
                     ACPAgent(
                         runtime,
@@ -50,16 +41,14 @@ class Command(BaseCommand):
                         memory_scope=memory_scope,
                     )
                 )
+            return 0
 
         try:
-            asyncio.run(execute())
+            return _run_async(execute())
         except ModuleNotFoundError as error:
             raise CommandError(
                 "ai acp requires the agent-client-protocol dependency"
             ) from error
-        except (AIError, ValueError) as error:
-            raise CommandError(str(error)) from error
-        return 0
 
 
 command = Command()
