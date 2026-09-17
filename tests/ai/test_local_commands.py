@@ -5,16 +5,17 @@
 import os
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from linktools.ai.workspace import Workspace
 from linktools.cli.argparse import ConfigAction
 import linktools.commands.ai.acp as acp_module
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
-from linktools.ai.workspace import Workspace
 
 
 def test_ai_run_exposes_model_configuration_but_not_storage_selection() -> None:
@@ -42,46 +43,16 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
-    state = object()
-    metrics = object()
-    opened: dict[str, object] = {}
+    opened: list[Workspace] = []
 
     monkeypatch.setattr(acp_module, "_load_workspace", lambda _root: workspace)
-    monkeypatch.setattr(acp_module, "_local_runtime_state", lambda _workspace: state)
 
-    async def local_metrics(_workspace: Workspace) -> object:
-        return metrics
+    @asynccontextmanager
+    async def open_local_runtime(runtime_workspace: Workspace):
+        opened.append(runtime_workspace)
+        yield SimpleNamespace(default_principal=object())
 
-    monkeypatch.setattr(acp_module, "_local_metrics", local_metrics)
-
-    class RuntimeContext:
-        async def __aenter__(self) -> SimpleNamespace:
-            return SimpleNamespace(default_principal=object())
-
-        async def __aexit__(
-            self,
-            exc_type: object,
-            exc_value: object,
-            traceback: object,
-        ) -> None:
-            return None
-
-    class LocalRuntime:
-        @staticmethod
-        def open(
-            runtime_workspace: Workspace,
-            *,
-            state: object,
-            metrics: object,
-        ) -> RuntimeContext:
-            opened.update(
-                workspace=runtime_workspace,
-                state=state,
-                metrics=metrics,
-            )
-            return RuntimeContext()
-
-    monkeypatch.setattr(acp_module, "Runtime", LocalRuntime)
+    monkeypatch.setattr(acp_module, "_open_local_runtime", open_local_runtime)
     monkeypatch.setattr(acp_module, "ACPAgent", lambda *_args, **_kwargs: object())
 
     async def serve_stdio(_agent: object) -> None:
@@ -90,11 +61,7 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     monkeypatch.setattr(acp_module, "serve_stdio", serve_stdio)
 
     assert acp_command.run(acp_command.create_parser().parse_args([])) == 0
-    assert opened == {
-        "workspace": workspace,
-        "state": state,
-        "metrics": metrics,
-    }
+    assert opened == [workspace]
 
 
 def test_ai_asset_command_is_removed() -> None:
