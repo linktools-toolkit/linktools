@@ -155,8 +155,8 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
         )
 
     assert raised.value.message == (
-        "The delegated subagent failed with MODEL_TIMEOUT and produced no result. "
-        "Use another approach or delegate the task again if appropriate."
+        "Subagent 'child' failed with MODEL_TIMEOUT and produced no result. Continue "
+        "from the parent context using this failure reason."
     )
 
 
