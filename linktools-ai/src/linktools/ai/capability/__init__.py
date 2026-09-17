@@ -46,9 +46,6 @@ from ._workspace import (
     workspace_tool_contributions,
 )
 
-# Internal migration binding for same-package consumers; it is intentionally not public.
-ToolCallRejected = ToolCallRetry
-
 __all__ = [
     "AgentContext",
     "CapabilityContribution",
