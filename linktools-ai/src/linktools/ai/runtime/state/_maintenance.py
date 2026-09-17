@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Offline Runtime storage validation and object mark-and-sweep."""
+"""Runtime storage validation and object reachability inspection."""
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from typing import Protocol
 
 from linktools.core import environ
@@ -56,10 +55,6 @@ _LEASE_FIELDS = frozenset({"owner", "fence", "lease_expires_at"})
 
 class ObjectRouter(Protocol):
     def object_store(self, domain: RuntimeDomain) -> object: ...
-
-
-class OfflineExclusiveStorage(Protocol):
-    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
 class RuntimeStorageInspection:
@@ -265,29 +260,6 @@ class RuntimeStorageInspection:
             references.setdefault(id(object_store), set()).add(reference.key)
 
 
-class OfflineRuntimeStorageMaintenance:
-    """Run destructive object collection under an explicit exclusive guard."""
-
-    def __init__(
-        self,
-        inspection: RuntimeStorageInspection,
-        exclusive_guard: OfflineExclusiveStorage | None = None,
-    ) -> None:
-        self._inspection = inspection
-        self._exclusive_guard = exclusive_guard
-
-    async def compact_objects(self) -> int:
-        if self._exclusive_guard is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        async with self._exclusive_guard.offline_exclusivity():
-            async with AsyncExitStack() as stack:
-                for object_store in self._inspection.object_maintenance_stores():
-                    await stack.enter_async_context(
-                        object_store.offline_exclusivity()
-                    )
-                return await self._inspection._compact_objects()
-
-
 def _validate_reference_free_version(
     value: Mapping[str, object],
     *,
@@ -352,7 +324,4 @@ def _restore_projected_lease_fields(value: object) -> object:
     return restored
 
 
-__all__ = [
-    "OfflineRuntimeStorageMaintenance",
-    "RuntimeStorageInspection",
-]
+__all__ = ["RuntimeStorageInspection"]
