@@ -17,6 +17,7 @@ from ._codec import (
     _iter_enveloped_runtime_object_refs,
     decode_envelope,
 )
+from ._offline_maintenance import OfflineRuntimeStorageMaintenance
 from ._plan import RuntimeDomain, runtime_domain_uses_object_store
 from ._store import (
     FactScanCursor,
@@ -324,4 +325,4 @@ def _restore_projected_lease_fields(value: object) -> object:
     return restored
 
 
-__all__ = ["RuntimeStorageInspection"]
+__all__ = ["OfflineRuntimeStorageMaintenance", "RuntimeStorageInspection"]
