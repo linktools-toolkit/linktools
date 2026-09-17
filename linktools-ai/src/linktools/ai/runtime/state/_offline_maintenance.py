@@ -6,11 +6,17 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from typing import Protocol
 
 from ...errors import AIError, ErrorCode
-from ._maintenance import RuntimeStorageInspection
+from ...storage import ObjectStoreMaintenance
 
 
 class OfflineExclusiveStorage(Protocol):
     def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
+
+
+class _RuntimeStorageInspection(Protocol):
+    def object_maintenance_stores(self) -> tuple[ObjectStoreMaintenance, ...]: ...
+
+    async def _compact_objects(self) -> int: ...
 
 
 class OfflineRuntimeStorageMaintenance:
@@ -18,7 +24,7 @@ class OfflineRuntimeStorageMaintenance:
 
     def __init__(
         self,
-        inspection: RuntimeStorageInspection,
+        inspection: _RuntimeStorageInspection,
         exclusive_guard: OfflineExclusiveStorage | None = None,
     ) -> None:
         self._inspection = inspection
