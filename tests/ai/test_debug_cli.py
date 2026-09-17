@@ -35,11 +35,7 @@ from linktools.commands._ai_common import (
     _local_runtime_state,
 )
 from linktools.commands.ai.run import Command as RunCommand
-from linktools.commands.ai_history import (
-    Command as HistoryCommand,
-    _emit_execution_detail,
-    _recent_executions,
-)
+from linktools.commands.ai_history import Command as HistoryCommand, _emit_execution_detail
 from linktools.commands.ai_metrics import Command as MetricsCommand, _query_summary
 
 
@@ -286,7 +282,7 @@ async def test_runtime_history_returns_exact_recent_executions_and_errors() -> N
     )
     principal = Principal("cli", "default", "service")
 
-    recent = await _recent_executions(history, principal, limit=3)
+    recent = await history.recent_executions(principal=principal, limit=3)
     inspected = await history.inspect_execution("exec-new", principal=principal)
 
     assert [value.execution_id for value in recent] == [
