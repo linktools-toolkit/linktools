@@ -62,19 +62,23 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_invalid_utf8_read_explains_text_boundary(tmp_path: Path) -> None:
+async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path) -> None:
     (tmp_path / "binary.txt").write_bytes(b"\xff")
     workspace = Workspace.load(tmp_path, workspace_id="workspace")
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
             workspace,
-            ("read_file",),
+            ("edit_file",),
             session=session,
         )[0]
         toolset = capability.get_toolset()
         with pytest.raises(ToolCallRetry, match="valid UTF-8 text"):
-            await toolset.tools["read_file"].function("binary.txt")  # type: ignore[attr-defined]
+            await toolset.tools["edit_file"].function(  # type: ignore[attr-defined]
+                "binary.txt",
+                "old",
+                "new",
+            )
     finally:
         await session.close()
 
