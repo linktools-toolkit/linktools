@@ -45,7 +45,8 @@ from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_materializer import build_runtime_steps
 from ._steps import RuntimeStepStore
 from ._store import StateStore
-from ._task_repository import TaskAdmissionRepositoryImpl, TaskRepositoryImpl
+from ._task_admission_repository import TaskAdmissionRepositoryImpl
+from ._task_repository import TaskRepositoryImpl
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 
