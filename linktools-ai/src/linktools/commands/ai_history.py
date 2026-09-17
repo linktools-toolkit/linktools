@@ -25,9 +25,7 @@ _DEFAULT_LIST_LIMIT = 20
 class Command(BaseCommand):
     """Inspect local AI execution history."""
 
-    @property
-    def name(self) -> str:
-        return "ai-history"
+    name = "ai-history"
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("execution_id", nargs="?", help="execution id")
