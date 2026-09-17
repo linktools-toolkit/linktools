@@ -52,7 +52,7 @@ from linktools.ai.storage import (
     SqlObjectStore,
     StoredPayload,
 )
-from linktools.ai.storage import _object as object_module
+from linktools.ai.storage import _object_filesystem as object_module
 from pydantic_ai_harness.planning import PlanItem as HarnessPlanItem
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine
