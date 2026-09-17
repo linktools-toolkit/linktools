@@ -193,23 +193,88 @@ def _merge_repository_instructions(
     return RepositoryInstructions((*initial.documents, *overlay.documents))
 
 
+def _repository_instruction_signature(
+    value: RepositoryInstructions | None,
+) -> tuple[tuple[str, str, str], ...]:
+    if value is None:
+        return ()
+    return tuple(
+        (document.source, document.scope, document.content)
+        for document in value.documents
+    )
+
+
+def _repository_instructions_contain(
+    current: RepositoryInstructions | None,
+    expected: RepositoryInstructions | None,
+) -> bool:
+    expected_documents = {
+        document.source: (document.scope, document.content)
+        for document in (() if expected is None else expected.documents)
+    }
+    if not expected_documents:
+        return True
+    current_documents = {
+        document.source: (document.scope, document.content)
+        for document in (() if current is None else current.documents)
+    }
+    return all(
+        current_documents.get(source) == expected_value
+        for source, expected_value in expected_documents.items()
+    )
+
+
+def _validate_repository_instruction_frontier(
+    checkpoint: RecoveryCheckpoint,
+    overlay: RepositoryInstructions | None,
+) -> None:
+    reference = checkpoint.repository_instruction_overlay
+    barriers = checkpoint.repository_instruction_barriers
+    if reference is None:
+        if overlay is not None or barriers:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return
+    if overlay is None or not barriers:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if (
+        reference.payload.digest != overlay.digest
+        or barriers[-1].resulting_overlay_digest != overlay.digest
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
 class _RepositoryInstructionBoundary:
     def __init__(
         self,
         runtime: "_RecoveryCoordinator",
         execution: ExecutionRecord,
         initial: RepositoryInstructions | None,
-        active: RepositoryInstructions | None,
+        overlay: RepositoryInstructions | None,
     ) -> None:
         self._runtime = runtime
         self._execution = execution
         self._initial = initial
-        self._active = active
+        self._overlay = overlay
+        self._has_initial = bool(initial is not None and initial.documents)
+        self._initial_text = "" if not self._has_initial else initial.render()
+        self._overlay_text = self._render_overlay_text(overlay)
+        self._lock = asyncio.Lock()
+        self._revision = 0
+        self._observed_revision = -1
 
-    def render(self) -> str:
-        if self._active is None:
+    def _render_overlay_text(
+        self, overlay: RepositoryInstructions | None
+    ) -> str:
+        if overlay is None or not overlay.documents:
             return ""
-        return self._active.render()
+        return overlay.render(include_preamble=not self._has_initial)
+
+    def render_initial(self) -> str:
+        return self._initial_text
+
+    def render_overlay(self) -> str:
+        self._observed_revision = self._revision
+        return self._overlay_text
 
     async def check(
         self,
@@ -219,19 +284,31 @@ class _RepositoryInstructionBoundary:
         arguments: dict[str, object],
         path_fields: tuple[str, ...],
     ) -> None:
-        self._active, reconsider = (
-            await self._runtime.check_repository_instructions(
-                execution=self._execution,
-                initial=self._initial,
-                active=self._active,
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                arguments=arguments,
-                path_fields=path_fields,
+        async with self._lock:
+            if self._observed_revision != self._revision:
+                raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
+            previous_signature = _repository_instruction_signature(self._overlay)
+            next_overlay, reconsider = (
+                await self._runtime.check_repository_instructions(
+                    execution=self._execution,
+                    initial=self._initial,
+                    overlay=self._overlay,
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    arguments=arguments,
+                    path_fields=path_fields,
+                )
             )
-        )
-        if reconsider:
-            raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
+            next_signature = _repository_instruction_signature(next_overlay)
+            if next_signature != previous_signature:
+                next_text = self._render_overlay_text(next_overlay)
+                self._overlay = next_overlay
+                self._overlay_text = next_text
+                self._revision += 1
+            else:
+                self._overlay = next_overlay
+            if reconsider:
+                raise ToolCallRetry(_REPOSITORY_INSTRUCTION_RECONSIDER)
 
 
 _REPOSITORY_INSTRUCTION_RECONSIDER = (
@@ -700,7 +777,7 @@ class _RecoveryCoordinator:
         *,
         execution: ExecutionRecord,
         initial: RepositoryInstructions | None,
-        active: RepositoryInstructions | None,
+        overlay: RepositoryInstructions | None,
         tool_name: str,
         tool_call_id: str,
         arguments: dict[str, object],
@@ -710,7 +787,7 @@ class _RecoveryCoordinator:
         paths = _instruction_paths(arguments, path_fields)
         resolver = self._instruction_resolver
         if not paths or resolver is None:
-            return active, False
+            return overlay, False
         checkpoint = await self._port.load_recovery_checkpoint(
             execution.execution_id,
             tenant_id=execution.tenant_id,
@@ -721,6 +798,10 @@ class _RecoveryCoordinator:
             or checkpoint.step_run_id is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        persisted_overlay = await self._port.load_repository_instructions(
+            checkpoint.repository_instruction_overlay
+        )
+        _validate_repository_instruction_frontier(checkpoint, persisted_overlay)
         arguments_digest = canonical_sha256(normalize_json_value(arguments))
         matching = tuple(
             barrier
@@ -732,21 +813,9 @@ class _RecoveryCoordinator:
             barrier = matching[0]
             if barrier.arguments_digest != arguments_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            overlay = await self._port.load_repository_instructions(
-                checkpoint.repository_instruction_overlay
-            )
-            if (
-                checkpoint.repository_instruction_overlay is None
-                or overlay is None
-                or overlay.digest != barrier.resulting_overlay_digest
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return _merge_repository_instructions(initial, overlay), True
+            return persisted_overlay, True
 
-        overlay = await self._port.load_repository_instructions(
-            checkpoint.repository_instruction_overlay
-        )
-        active = _merge_repository_instructions(initial, overlay)
+        active = _merge_repository_instructions(initial, persisted_overlay)
         excluded = frozenset(
             () if active is None else document.source for document in active.documents
         )
@@ -763,9 +832,12 @@ class _RecoveryCoordinator:
                 discovered_sources.add(document.source)
                 discovered.append(document)
         if not discovered:
-            return active, False
+            return persisted_overlay, (
+                _repository_instruction_signature(overlay)
+                != _repository_instruction_signature(persisted_overlay)
+            )
         new_documents = RepositoryInstructions(tuple(discovered))
-        next_overlay = _merge_repository_instructions(overlay, new_documents)
+        next_overlay = _merge_repository_instructions(persisted_overlay, new_documents)
         if next_overlay is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         barrier = RepositoryInstructionBarrier(
@@ -783,7 +855,11 @@ class _RecoveryCoordinator:
         committed_overlay = await self._port.load_repository_instructions(
             committed.repository_instruction_overlay
         )
-        if committed_overlay is None or committed_overlay.digest != next_overlay.digest:
+        _validate_repository_instruction_frontier(committed, committed_overlay)
+        if (
+            committed_overlay is None
+            or not _repository_instructions_contain(committed_overlay, next_overlay)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
             "repository instructions extended: execution=%s step=%s tool_call=%s",
@@ -791,7 +867,7 @@ class _RecoveryCoordinator:
             checkpoint.step_run_id,
             tool_call_id,
         )
-        return _merge_repository_instructions(initial, committed_overlay), True
+        return committed_overlay, True
 
     async def commit_deferred_pause(
         self,
@@ -3899,10 +3975,7 @@ class LocalExecutionBackend:
             repository_overlay = await self.load_repository_instructions(
                 checkpoint.repository_instruction_overlay
             )
-            repository_instructions = _merge_repository_instructions(
-                initial_repository_instructions,
-                repository_overlay,
-            )
+            _validate_repository_instruction_frontier(checkpoint, repository_overlay)
             run_id = checkpoint.step_run_id
             conversation_id = step_conversation_id(
                 namespace=self._namespace,
@@ -4033,7 +4106,7 @@ class LocalExecutionBackend:
                 self._recovery_coordinator,
                 current,
                 initial_repository_instructions,
-                repository_instructions,
+                repository_overlay,
             )
             run_user_prompt = None if resumed_deferred_attempt else request.user_prompt
 
@@ -4142,7 +4215,7 @@ class LocalExecutionBackend:
                         replace_history_system_prompt=(
                             session_history_start and not exact_recovery_context
                         ),
-                        repository_instructions=repository_instructions,
+                        repository_instructions=initial_repository_instructions,
                         repository_instruction_boundary=repository_boundary,
                         deferred_tool_results=deferred_tool_results,
                     )
@@ -5144,6 +5217,8 @@ class LocalExecutionBackend:
         overlay: RepositoryInstructions,
         barrier: RepositoryInstructionBarrier,
     ) -> RecoveryCheckpoint:
+        if barrier.resulting_overlay_digest != overlay.digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing = tuple(
             item
             for item in checkpoint.repository_instruction_barriers
@@ -5158,6 +5233,15 @@ class LocalExecutionBackend:
                 tenant_id=execution.tenant_id,
             )
             if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            current_overlay = await self.load_repository_instructions(
+                current.repository_instruction_overlay
+            )
+            _validate_repository_instruction_frontier(current, current_overlay)
+            if (
+                current_overlay is None
+                or not _repository_instructions_contain(current_overlay, overlay)
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return current
         overlay_reference = await self._store_repository_instructions(
@@ -5197,10 +5281,13 @@ class LocalExecutionBackend:
             if matching:
                 if matching[0] != barrier:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+                current_overlay = await self.load_repository_instructions(
+                    current.repository_instruction_overlay
+                )
+                _validate_repository_instruction_frontier(current, current_overlay)
                 if (
-                    current.repository_instruction_overlay is None
-                    or current.repository_instruction_overlay.payload.digest
-                    != barrier.resulting_overlay_digest
+                    current_overlay is None
+                    or not _repository_instructions_contain(current_overlay, overlay)
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 return current

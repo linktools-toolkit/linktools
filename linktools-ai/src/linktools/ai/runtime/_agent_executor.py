@@ -36,6 +36,7 @@ from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai import TextOutput, Tool
 from pydantic_ai.capabilities import (
     AbstractCapability,
+    Capability,
     CapabilityOrdering,
     PrepareTools,
     ProcessEventStream,
@@ -56,6 +57,7 @@ from pydantic_ai.messages import (
     AgentStreamEvent,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
+    InstructionPart,
     ModelMessage,
     PartDeltaEvent,
     PartEndEvent,
@@ -645,6 +647,7 @@ async def _materialize_agent(
     tuple[AbstractCapability[AgentContext[object]], ...],
 ]:
     definition = scope.binding.definition
+    repository_boundary = scope.repository_instruction_boundary
     business_tools: list[Tool[AgentContext[object]]] = []
     workspace_names: list[str] = []
     business_descriptors: dict[str, ManagedToolDescriptor] = {}
@@ -693,6 +696,23 @@ async def _materialize_agent(
             ),
         )
         capabilities.append(skill_capability)
+
+    workspace_capability_values = workspace_capabilities(
+        scope.context.workspace,
+        workspace_names,
+        session=scope.sandbox_session,
+        vision=definition.model.vision,
+    )
+    if workspace_capability_values:
+        workspace_guidance = workspace_capability_values[0].get_instructions()
+        if workspace_guidance is not None:
+            capabilities.append(
+                Capability(
+                    id="linktools.ai.workspace-guidance",
+                    instructions=workspace_guidance,
+                )
+            )
+
     if scope.subagent_available and scope.binding.snapshot.subagents:
         if scope.subagent_delegate is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -739,15 +759,9 @@ async def _materialize_agent(
         capabilities.append(RuntimeToolMetricsCapability(tool_metrics))
 
     raw_toolsets: list[AbstractToolset[AgentContext[object]]] = []
-    workspace_toolsets = workspace_capabilities(
-        scope.context.workspace,
-        workspace_names,
-        session=scope.sandbox_session,
-        vision=definition.model.vision,
-    )
     workspace_toolset_values = tuple(
         toolset
-        for capability in workspace_toolsets
+        for capability in workspace_capability_values
         if (toolset := capability.get_toolset()) is not None
     )
     if workspace_toolset_values:
@@ -760,7 +774,7 @@ async def _materialize_agent(
                 sandbox_session=scope.sandbox_session,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
-                repository_boundary=scope.repository_instruction_boundary,
+                repository_boundary=repository_boundary,
                 background_tasks=scope.background_tasks,
             )
         )
@@ -843,6 +857,24 @@ async def _materialize_agent(
         cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform)
     )
 
+    repository_initial_instructions = (
+        repository_boundary.render_initial()
+        if repository_boundary is not None
+        else ""
+        if scope.repository_instructions is None
+        else scope.repository_instructions.render()
+    )
+    if repository_initial_instructions:
+        capabilities.append(
+            Capability(
+                id="linktools.ai.repository-initial",
+                instructions=InstructionPart(
+                    content=repository_initial_instructions,
+                    dynamic=False,
+                ),
+            )
+        )
+
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
         business_output_type = TextOutput(_assistant_text_output)
@@ -850,34 +882,17 @@ async def _materialize_agent(
         business_output_type = scope.binding.output_type
     output_type: object = [business_output_type, DeferredToolRequests]
     base_instructions = "\n".join(definition.spec.instructions)
-    repository_boundary = scope.repository_instruction_boundary
-    if repository_boundary is None:
-        repository_instructions = (
-            ""
-            if scope.repository_instructions is None
-            else scope.repository_instructions.render()
-        )
-        runtime_instructions: object = "\n\n".join(
-            value
-            for value in (
-                base_instructions,
-                repository_instructions,
-            )
-            if value != ""
-        )
-    else:
+    runtime_instructions: list[Any] = []
+    if base_instructions:
+        runtime_instructions.append(base_instructions)
+    if repository_boundary is not None:
 
-        def runtime_instructions(
+        def repository_overlay(
             _: PydanticRunContext[object],
         ) -> str:
-            return "\n\n".join(
-                value
-                for value in (
-                    base_instructions,
-                    repository_boundary.render(),
-                )
-                if value != ""
-            )
+            return repository_boundary.render_overlay()
+
+        runtime_instructions.append(repository_overlay)
 
     agent = cast(
         "PydanticAgent[AgentContext[object], object]",

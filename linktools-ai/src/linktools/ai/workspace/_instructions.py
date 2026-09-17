@@ -29,7 +29,7 @@ Explicit user instructions take precedence over conflicting repository guidance 
 
 Each repository instruction source applies only to paths under its declared scope. Do not apply a scoped instruction outside that scope.
 
-For conflicting applicable repository instructions, the more specific scope wins. At the same scope, the later document in the deterministic rendered order wins. For the same source, the version first exposed to this Execution remains authoritative for the lifetime of that Execution."""
+For conflicting applicable repository instructions, the more specific scope wins. At the same scope, `agents:` sources take precedence over `rule:` sources. Within the same source kind, the lexicographically larger complete source identifier wins in deterministic Unicode string order. For the same source, the version first exposed to this Execution remains authoritative for the lifetime of that Execution."""
 _METADATA_FORBIDDEN = frozenset("\r\n|[]")
 
 
@@ -127,13 +127,15 @@ class RepositoryInstructions:
     def digest(self) -> str:
         return canonical_sha256(self.to_payload())
 
-    def render(self) -> str:
+    def render(self, *, include_preamble: bool = True) -> str:
         if not self.documents:
             return ""
-        return _PREAMBLE + "\n\n" + "\n\n".join(
+        documents = "\n\n".join(
             f"[source: {document.source} | scope: {document.scope}]\n{document.content}"
             for document in self.documents
-        ) + "\n"
+        )
+        prefix = f"{_PREAMBLE}\n\n" if include_preamble else ""
+        return f"{prefix}{documents}\n"
 
 
 class RepositoryInstructionResolver(Protocol):

@@ -12,7 +12,7 @@ from typing import Any, TypeVar, cast
 from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import BinaryContent, ToolReturn, UserContent
+from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, UserContent
 from pydantic_ai.toolsets import FunctionToolset
 
 from ..errors import AIError, ErrorCode
@@ -111,6 +111,17 @@ _EFFECTFUL_WORKSPACE_TOOLS = frozenset(
     }
 )
 _WORKSPACE_SANDBOX_CAPABILITY_ID = "workspace-sandbox"
+_WORKSPACE_INSTRUCTIONS = InstructionPart(
+    content=(
+        "Workspace file-tool paths are relative to the logical Workspace root unless "
+        "the tool contract says otherwise. Prefer workspace-relative paths and do not "
+        "infer host absolute paths. A visible Workspace tool is not automatically "
+        "authorized: follow approval requirements and do not switch tools to bypass a "
+        "denied or restricted operation."
+    ),
+    name="workspace",
+    dynamic=False,
+)
 _logger = environ.get_logger("ai.capability.workspace")
 _INVALID_WORKSPACE_REQUEST = (
     "The workspace tool arguments or target are invalid. Correct them and retry."
@@ -749,6 +760,9 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         self._session = session
         self._policy = policy
         self._vision = vision
+
+    def get_instructions(self) -> InstructionPart:
+        return _WORKSPACE_INSTRUCTIONS
 
     def get_toolset(self) -> _WorkspaceSandboxToolset:
         return _WorkspaceSandboxToolset(

@@ -15,7 +15,7 @@ from pydantic_ai.exceptions import (
     CallDeferred,
     SkipToolExecution,
 )
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import InstructionPart, ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 
@@ -38,7 +38,9 @@ from ._tool_metrics import (
 
 
 class RepositoryInstructionBoundary(Protocol):
-    def render(self) -> str: ...
+    def render_initial(self) -> str: ...
+
+    def render_overlay(self) -> str: ...
 
     async def check(
         self,
@@ -169,12 +171,16 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
     async def get_instructions(
         self,
         ctx: PydanticRunContext[AgentContext[object]],
-    ) -> Sequence[object] | None:
-        values: list[object] = []
+    ) -> Sequence[str | InstructionPart] | None:
+        values: list[str | InstructionPart] = []
         for toolset in self._toolsets:
             value = await toolset.get_instructions(ctx)
-            if value is not None:
+            if value is None:
+                continue
+            if isinstance(value, (str, InstructionPart)):
                 values.append(value)
+            else:
+                values.extend(value)
         return values or None
 
     async def get_tools(
