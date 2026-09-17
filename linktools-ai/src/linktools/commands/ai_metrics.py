@@ -4,6 +4,7 @@
 
 import asyncio
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from linktools.ai.errors import AIError
@@ -64,11 +65,16 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
 
 
-async def _query_metric(metrics: Metrics, metric: str) -> MetricQueryResult:
+async def _query_metric(
+    metrics: Metrics,
+    metric: str,
+    *,
+    window: "MetricWindow | None" = None,
+) -> MetricQueryResult:
     return await metrics.query(
         MetricQuery(
             metric,
-            MetricWindow.recent(days=1),
+            MetricWindow.recent(days=1) if window is None else window,
         )
     )
 
@@ -76,9 +82,17 @@ async def _query_metric(metrics: Metrics, metric: str) -> MetricQueryResult:
 async def _query_summary(
     metrics: Metrics,
 ) -> tuple[tuple[str, str, MetricQueryResult], ...]:
+    end = datetime.now(timezone.utc)
+    window = MetricWindow.between(end - timedelta(days=1), end)
     values: list[tuple[str, str, MetricQueryResult]] = []
     for label, metric in _SUMMARY_METRICS:
-        values.append((label, metric, await _query_metric(metrics, metric)))
+        values.append(
+            (
+                label,
+                metric,
+                await _query_metric(metrics, metric, window=window),
+            )
+        )
     return tuple(values)
 
 

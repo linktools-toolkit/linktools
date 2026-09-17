@@ -4,16 +4,14 @@
 
 import asyncio
 from argparse import Namespace
-from collections import deque
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from linktools.ai.core import Principal, service_principal
 from linktools.ai.errors import AIError
 from linktools.ai.runtime import (
     ExecutionHistoryItem,
-    ExecutionTraceItem,
-    ExecutionView,
-    ListExecutionRequest,
+    ExecutionInfo,
     ModelInteractionItem,
     RuntimeHistory,
     TranscriptItem,
@@ -38,11 +36,6 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("execution_id", nargs="?", help="execution id")
-        parser.add_argument(
-            "--json",
-            action="store_true",
-            help="emit JSON output",
-        )
 
     def run(self, args: Namespace) -> int:
         workspace = _load_workspace()
@@ -53,14 +46,13 @@ class Command(BaseCommand):
                 principal = service_principal(history.tenant_id, "ai-history")
                 if args.execution_id is None:
                     executions = await _recent_executions(history, principal)
-                    _emit_execution_list(executions, as_json=args.json)
+                    _emit_execution_list(executions)
                     return 0
-                payload = await _execution_detail(
+                await _emit_execution_detail(
                     history,
                     principal,
                     args.execution_id,
                 )
-                _emit_execution_detail(payload, as_json=args.json)
                 return 0
 
         try:
@@ -74,48 +66,15 @@ async def _recent_executions(
     principal: Principal,
     *,
     limit: int = _DEFAULT_LIST_LIMIT,
-) -> tuple[ExecutionView, ...]:
-    recent: deque[ExecutionView] = deque(maxlen=limit)
-    cursor: str | None = None
-    while True:
-        page = await history.list_executions(
-            ListExecutionRequest(
-                principal=principal,
-                cursor=cursor,
-                limit=_PAGE_LIMIT,
-            )
-        )
-        recent.extend(page.items)
-        if page.next_cursor is None:
-            return tuple(reversed(recent))
-        cursor = page.next_cursor
+) -> tuple[ExecutionInfo, ...]:
+    return await history.recent_executions(principal=principal, limit=limit)
 
 
-async def _execution_detail(
-    history: RuntimeHistory,
-    principal: Principal,
-    execution_id: str,
-) -> dict[str, object]:
-    execution = await history.inspect_execution(execution_id, principal=principal)
-    return {
-        "execution": execution,
-        "history": await _all_history(history, execution_id, principal),
-        "trace": await _all_trace(history, execution_id, principal),
-        "transcript": await _all_transcript(history, execution_id, principal),
-        "model_interactions": await _all_model_interactions(
-            history,
-            execution_id,
-            principal,
-        ),
-    }
-
-
-async def _all_history(
+async def _history_items(
     history: RuntimeHistory,
     execution_id: str,
     principal: Principal,
-) -> tuple[ExecutionHistoryItem, ...]:
-    items: list[ExecutionHistoryItem] = []
+) -> AsyncIterator[ExecutionHistoryItem]:
     cursor: str | None = None
     while True:
         page = await history.history(
@@ -124,38 +83,18 @@ async def _all_history(
             cursor=cursor,
             limit=_PAGE_LIMIT,
         )
-        items.extend(page.items)
+        for item in page.items:
+            yield item
         if page.next_cursor is None:
-            return tuple(items)
+            return
         cursor = page.next_cursor
 
 
-async def _all_trace(
+async def _transcript_items(
     history: RuntimeHistory,
     execution_id: str,
     principal: Principal,
-) -> tuple[ExecutionTraceItem, ...]:
-    items: list[ExecutionTraceItem] = []
-    cursor: str | None = None
-    while True:
-        page = await history.trace(
-            execution_id,
-            principal=principal,
-            cursor=cursor,
-            limit=_PAGE_LIMIT,
-        )
-        items.extend(page.items)
-        if page.next_cursor is None:
-            return tuple(items)
-        cursor = page.next_cursor
-
-
-async def _all_transcript(
-    history: RuntimeHistory,
-    execution_id: str,
-    principal: Principal,
-) -> tuple[TranscriptItem, ...]:
-    items: list[TranscriptItem] = []
+) -> AsyncIterator[TranscriptItem]:
     cursor: str | None = None
     while True:
         page = await history.transcript(
@@ -164,18 +103,18 @@ async def _all_transcript(
             cursor=cursor,
             limit=_PAGE_LIMIT,
         )
-        items.extend(page.items)
+        for item in page.items:
+            yield item
         if page.next_cursor is None:
-            return tuple(items)
+            return
         cursor = page.next_cursor
 
 
-async def _all_model_interactions(
+async def _model_interaction_items(
     history: RuntimeHistory,
     execution_id: str,
     principal: Principal,
-) -> tuple[ModelInteractionItem, ...]:
-    items: list[ModelInteractionItem] = []
+) -> AsyncIterator[ModelInteractionItem]:
     cursor: str | None = None
     while True:
         page = await history.model_interactions(
@@ -184,57 +123,66 @@ async def _all_model_interactions(
             cursor=cursor,
             limit=_PAGE_LIMIT,
         )
-        items.extend(page.items)
+        for item in page.items:
+            yield item
         if page.next_cursor is None:
-            return tuple(items)
+            return
         cursor = page.next_cursor
 
 
-def _emit_execution_list(
-    executions: tuple[ExecutionView, ...],
-    *,
-    as_json: bool,
-) -> None:
-    if as_json:
-        print(_json_dumps({"executions": executions}))
-        return
+def _emit_execution_list(executions: tuple[ExecutionInfo, ...]) -> None:
     if not executions:
         print("No executions.")
         return
-    print("EXECUTION\tSTATUS\tAGENT\tSESSION\tPARENT")
+    print("CREATED\tEXECUTION\tSTATUS\tAGENT\tSESSION\tPARENT\tERROR")
     for execution in executions:
         print(
             "\t".join(
                 (
+                    execution.created_at.isoformat(),
                     execution.execution_id,
                     execution.status.value,
                     execution.agent_id,
                     execution.session_id or "-",
                     execution.parent_execution_id or "-",
+                    execution.error_code or "-",
                 )
             )
         )
 
 
-def _emit_execution_detail(payload: dict[str, object], *, as_json: bool) -> None:
-    if as_json:
-        print(_json_dumps(payload))
-        return
-    sections = (
-        ("Execution", payload["execution"]),
-        ("History", payload["history"]),
-        ("Trace", payload["trace"]),
-        ("Transcript", payload["transcript"]),
-        ("Model interactions", payload["model_interactions"]),
+async def _emit_execution_detail(
+    history: RuntimeHistory,
+    principal: Principal,
+    execution_id: str,
+) -> None:
+    execution = await history.inspect_execution(execution_id, principal=principal)
+    print("Execution")
+    print(_json_dumps(execution, indent=2))
+
+    await _emit_items(
+        "History",
+        _history_items(history, execution_id, principal),
     )
-    for index, (title, value) in enumerate(sections):
-        if index:
-            print()
-        print(title)
-        if isinstance(value, tuple) and not value:
-            print("  (none)")
-        else:
-            print(_json_dumps(value, indent=2))
+    await _emit_items(
+        "Transcript",
+        _transcript_items(history, execution_id, principal),
+    )
+    await _emit_items(
+        "Model interactions",
+        _model_interaction_items(history, execution_id, principal),
+    )
+
+
+async def _emit_items(title: str, items: AsyncIterator[object]) -> None:
+    print()
+    print(title)
+    emitted = False
+    async for item in items:
+        emitted = True
+        print(_json_dumps(item, indent=2))
+    if not emitted:
+        print("  (none)")
 
 
 command = Command()

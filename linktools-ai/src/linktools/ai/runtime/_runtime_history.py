@@ -2,20 +2,30 @@
 # -*- coding: utf-8 -*-
 """Read-only Runtime composition for persisted execution history."""
 
-from collections.abc import AsyncIterator
+import heapq
+from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
 
 from linktools.core import environ
 
 from ..core import (
+    AuthorizationAction,
     AuthorizationPolicy,
+    ExecutionLineageKind,
+    ExecutionStatus,
     HmacCursorSigner,
+    JsonValue,
     Page,
     Principal,
+    ResourceKind,
+    ResourceRef,
     TenantAuthorizationPolicy,
+    validate_page_limit,
     validate_tenant_id,
 )
-from ..errors import AIError, ErrorCode
+from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..workspace import Workspace
 from ._factory import _default_runtime_state, _grant_key
 from ._history import StepExecutionHistoryReader
@@ -30,8 +40,49 @@ from .service_api import (
     TranscriptItem,
 )
 from .state import RuntimeDomain, RuntimeState
+from .state._contracts import ExecutionRecord, ExecutionRepository
 
 _logger = environ.get_logger("ai.runtime.history")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionInfo:
+    """Execution metadata required by local diagnostics."""
+
+    execution_id: str
+    agent_id: str
+    status: ExecutionStatus
+    lineage_kind: ExecutionLineageKind
+    parent_execution_id: str | None
+    root_execution_id: str
+    parent_invocation_id: str | None
+    session_id: str | None
+    created_at: datetime
+    updated_at: datetime
+    error_code: str | None
+    safe_error_details: Mapping[str, JsonValue] = field(default_factory=dict)
+    error_diagnostics: ErrorDiagnostics | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
+
+
+def _project_execution_info(record: ExecutionRecord) -> ExecutionInfo:
+    return ExecutionInfo(
+        execution_id=record.execution_id,
+        agent_id=record.agent_id,
+        status=record.status,
+        lineage_kind=record.lineage_kind,
+        parent_execution_id=record.parent_execution_id,
+        root_execution_id=record.root_execution_id,
+        parent_invocation_id=record.parent_invocation_id,
+        session_id=record.session_id,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        error_code=record.error_code,
+        safe_error_details=record.safe_error_details,
+        error_diagnostics=record.error_diagnostics,
+    )
 
 
 class RuntimeHistory:
@@ -42,9 +93,13 @@ class RuntimeHistory:
         service: ExecutionHistoryService,
         *,
         tenant_id: str,
+        executions: "ExecutionRepository | None" = None,
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
+        self._executions = executions
+        self._authorization = authorization
 
     @property
     def tenant_id(self) -> str:
@@ -52,8 +107,62 @@ class RuntimeHistory:
 
     async def inspect_execution(
         self, execution_id: str, *, principal: Principal
-    ) -> ExecutionView:
-        return await self._service.inspect(execution_id, principal=principal)
+    ) -> ExecutionInfo:
+        return _project_execution_info(
+            await self._authorized_record(execution_id, principal)
+        )
+
+    async def recent_executions(
+        self,
+        *,
+        principal: Principal,
+        limit: int = 20,
+    ) -> tuple[ExecutionInfo, ...]:
+        """Return the exact newest executions with O(limit) memory."""
+        validate_page_limit(limit)
+        executions, authorization = self._require_direct_reader()
+        recent: list[tuple[datetime, str, ExecutionInfo]] = []
+        cursor: str | None = None
+
+        while True:
+            page = await executions.list_candidates(
+                tenant_id=principal.tenant_id,
+                session_id=None,
+                parent_execution_id=None,
+                cursor=cursor,
+                limit=1000,
+            )
+            if not page.items:
+                break
+            for candidate in page.items:
+                record = candidate.record
+                resource = ResourceRef(
+                    ResourceKind.EXECUTION,
+                    record.execution_id,
+                    principal.tenant_id,
+                )
+                try:
+                    await authorization.authorize(
+                        principal,
+                        AuthorizationAction.EXECUTION_READ,
+                        resource,
+                    )
+                except AIError as error:
+                    if error.code is ErrorCode.AUTHORIZATION_DENIED:
+                        continue
+                    raise
+                info = _project_execution_info(record)
+                entry = (record.created_at, record.execution_id, info)
+                if len(recent) < limit:
+                    heapq.heappush(recent, entry)
+                elif entry[:2] > recent[0][:2]:
+                    heapq.heapreplace(recent, entry)
+            cursor = page.items[-1].cursor
+            if not page.has_more:
+                break
+
+        recent.sort(key=lambda value: (value[0], value[1]), reverse=True)
+        return tuple(value[2] for value in recent)
 
     async def list_executions(
         self, request: ListExecutionRequest
@@ -136,6 +245,38 @@ class RuntimeHistory:
             limit=limit,
         )
 
+    def _require_direct_reader(
+        self,
+    ) -> tuple[ExecutionRepository, AuthorizationPolicy]:
+        if self._executions is None or self._authorization is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._executions, self._authorization
+
+    async def _authorized_record(
+        self,
+        execution_id: str,
+        principal: Principal,
+    ) -> ExecutionRecord:
+        executions, authorization = self._require_direct_reader()
+        header = await executions.get_header(
+            execution_id,
+            tenant_id=principal.tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal,
+            AuthorizationAction.EXECUTION_READ,
+            header,
+        )
+        record = await executions.get(
+            execution_id,
+            tenant_id=principal.tenant_id,
+        )
+        if record is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        return record
+
 
 @asynccontextmanager
 async def _open_runtime_history(
@@ -147,7 +288,9 @@ async def _open_runtime_history(
 ) -> AsyncIterator[RuntimeHistory]:
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace must be Workspace")
-    effective_tenant_id = "default" if tenant_id is None else validate_tenant_id(tenant_id)
+    effective_tenant_id = (
+        "default" if tenant_id is None else validate_tenant_id(tenant_id)
+    )
     selected_state = state or _default_runtime_state(workspace)
     if not isinstance(selected_state, RuntimeState):
         raise TypeError("state must be RuntimeState")
@@ -173,17 +316,23 @@ async def _open_runtime_history(
                 _grant_key(workspace),
             ),
         )
+        effective_authorization = (
+            TenantAuthorizationPolicy(effective_tenant_id)
+            if authorization is None
+            else authorization
+        )
         service = DefaultExecutionHistoryService(
             selected_state.execution.executions,
-            (
-                TenantAuthorizationPolicy(effective_tenant_id)
-                if authorization is None
-                else authorization
-            ),
+            effective_authorization,
             reader,
             cursor_signer=HmacCursorSigner("execution", _grant_key(workspace)),
         )
-        yield RuntimeHistory(service, tenant_id=effective_tenant_id)
+        yield RuntimeHistory(
+            service,
+            tenant_id=effective_tenant_id,
+            executions=selected_state.execution.executions,
+            authorization=effective_authorization,
+        )
     except BaseException as error:
         body_error = error
         raise
@@ -207,4 +356,4 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
     )
 
 
-__all__ = ["RuntimeHistory"]
+__all__ = ["ExecutionInfo", "RuntimeHistory"]

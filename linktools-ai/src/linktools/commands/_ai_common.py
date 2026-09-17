@@ -9,21 +9,25 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+from filelock import FileLock
+
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_metrics_sqlite
+from linktools.ai.migrate import provision_metrics_sqlite, validate_metrics_sqlite
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.workspace import Workspace
 
 
 def _load_workspace(root: "Path | None" = None) -> Workspace:
-    workspace_root = Path.cwd() if root is None else root
+    start = Path.cwd()
     try:
-        return Workspace.discover(Path.cwd(), root=workspace_root)
+        if root is None:
+            return Workspace.discover(start)
+        return Workspace.discover(start, root=root)
     except AIError as error:
         if error.code is not ErrorCode.WORKSPACE_CONFIG_INVALID:
             raise
-        return Workspace.initialize(workspace_root)
+        return Workspace.initialize(start if root is None else root)
 
 
 def _local_runtime_root(workspace: Workspace) -> Path:
@@ -38,8 +42,11 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     runtime_root = _local_runtime_root(workspace)
     runtime_root.mkdir(parents=True, exist_ok=True)
     path = runtime_root / "metrics.db"
-    if not path.exists():
-        await provision_metrics_sqlite(path)
+    with FileLock(str(path) + ".lock"):
+        if path.exists():
+            await validate_metrics_sqlite(path)
+        else:
+            await provision_metrics_sqlite(path)
     return Metrics.sqlite(path, namespace=workspace.workspace_id)
 
 
