@@ -83,6 +83,7 @@ class Command(BaseCommand):
                     runtime,
                     args.prompt,
                     workspace_id,
+                    workspace_id,
                     args.json,
                     args.planning,
                     args.thinking,
@@ -94,15 +95,16 @@ class Command(BaseCommand):
 async def _emit_result(
     runtime: Runtime,
     prompt: str,
-    workspace_id: str,
+    session_id: str,
+    memory_scope: str,
     as_json: bool,
     planning: bool,
     thinking: bool,
 ) -> int:
     execution = await runtime.agent().start(
         prompt,
-        session_id=workspace_id,
-        memory_scope=workspace_id,
+        session_id=session_id,
+        memory_scope=memory_scope,
         planning=planning,
         thinking=thinking,
     )
@@ -110,45 +112,76 @@ async def _emit_result(
         if as_json:
             result = await execution.wait()
             print(json.dumps(_result_payload(result), ensure_ascii=False, sort_keys=True))
-        else:
-            async for item in execution.watch():
-                if item.depth != 0:
-                    continue
-                event = item.event
-                if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
-                    text = (
-                        event.payload.get("text")
-                        if isinstance(event.payload, dict)
-                        else None
-                    )
-                    if isinstance(text, str):
-                        sys.stdout.write(text)
-                        sys.stdout.flush()
-                elif event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
-                    _write_stderr("[thinking] " + _payload_text(event.payload))
-                elif event.event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
-                    _write_stderr("[tool] " + _payload_text(event.payload))
-                elif event.event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
-                    _write_stderr("[tool] finished " + _payload_text(event.payload))
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            result = await execution.wait()
+            _raise_for_failure(result)
+            return 0
+        return await _stream_result(execution)
     except asyncio.CancelledError:
         await _cancel_interrupted_execution(execution)
         raise
 
-    _raise_for_failure(result)
+
+async def _stream_result(execution: "Execution[object]") -> int:
+    status = "UNKNOWN"
+    error_code: object = None
+    safe_details: object = {}
+    succeeded = False
+    async for item in execution.watch():
+        if item.depth != 0:
+            continue
+        event = item.event
+        if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
+            text = event.payload.get("text") if isinstance(event.payload, dict) else None
+            if isinstance(text, str):
+                sys.stdout.write(text)
+                sys.stdout.flush()
+        elif event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
+            _write_stderr("[thinking] " + _payload_text(event.payload))
+        elif event.event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
+            _write_stderr("[tool] " + _payload_text(event.payload))
+        elif event.event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
+            _write_stderr("[tool] finished " + _payload_text(event.payload))
+        elif event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value:
+            succeeded = True
+            status = ExecutionStatus.SUCCEEDED.value
+        elif event.event_type in {
+            ExecutionEventType.EXECUTION_FAILED.value,
+            ExecutionEventType.EXECUTION_CANCELLED.value,
+        }:
+            status = event.event_type.removeprefix("EXECUTION_")
+            if isinstance(event.payload, dict):
+                error_code = event.payload.get("error_code")
+                safe_details = event.payload.get("safe_error_details", {})
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    if not succeeded:
+        raise CommandError(
+            _failure_message(execution.execution_id, status, error_code, safe_details)
+        )
     return 0
 
 
 def _raise_for_failure(result: ExecutionResult) -> None:
-    if result.status is ExecutionStatus.SUCCEEDED:
-        return
-    raise CommandError(
+    if result.status is not ExecutionStatus.SUCCEEDED:
+        raise CommandError(
+            _failure_message(
+                result.execution_id,
+                result.status.value,
+                result.error_code,
+                dict(result.safe_error_details),
+            )
+        )
+
+
+def _failure_message(
+    execution_id: str,
+    status: str,
+    error_code: object,
+    safe_details: object,
+) -> str:
+    return (
         "execution failed: "
-        f"execution_id={result.execution_id} status={result.status.value} "
-        f"error_code={result.error_code} "
-        f"safe_error_details={dict(result.safe_error_details)}"
+        f"execution_id={execution_id} status={status} "
+        f"error_code={error_code} safe_error_details={safe_details}"
     )
 
 
