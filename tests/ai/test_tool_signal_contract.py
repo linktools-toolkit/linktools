@@ -3,7 +3,7 @@
 """LinkTools tool signal and final Pydantic boundary contracts."""
 
 import pytest
-from linktools.ai.capability import ToolCallFailed, ToolCallRejected
+from linktools.ai.capability import ToolCallFailed, ToolCallRetry
 from linktools.ai.errors import AIError
 from linktools.ai.runtime._pydantic_tool_control import (
     PydanticToolControlCapability,
@@ -15,7 +15,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import ToolDefinition
 
 
-@pytest.mark.parametrize("signal_type", (ToolCallRejected, ToolCallFailed))
+@pytest.mark.parametrize("signal_type", (ToolCallRetry, ToolCallFailed))
 def test_tool_signal_has_only_a_valid_message(signal_type: type[Exception]) -> None:
     signal = signal_type("valid message")
 
@@ -30,7 +30,7 @@ def test_tool_signal_has_only_a_valid_message(signal_type: type[Exception]) -> N
 
 @pytest.mark.parametrize("message", ("", "   ", "x" * 2049, 1, None))
 def test_tool_signal_rejects_invalid_message(message: object) -> None:
-    for signal_type in (ToolCallRejected, ToolCallFailed):
+    for signal_type in (ToolCallRetry, ToolCallFailed):
         with pytest.raises((TypeError, ValueError)):
             signal_type(message)  # type: ignore[arg-type]
 
@@ -45,12 +45,12 @@ def test_pydantic_tool_control_is_outermost() -> None:
 @pytest.mark.parametrize(
     ("signal", "expected_type"),
     (
-        (ToolCallRejected("correct it"), ModelRetry),
+        (ToolCallRetry("correct it"), ModelRetry),
         (ToolCallFailed("failed"), ToolFailed),
     ),
 )
 async def test_pydantic_tool_control_converts_only_linktools_signals(
-    signal: ToolCallRejected | ToolCallFailed,
+    signal: ToolCallRetry | ToolCallFailed,
     expected_type: type[Exception],
 ) -> None:
     capability = PydanticToolControlCapability()

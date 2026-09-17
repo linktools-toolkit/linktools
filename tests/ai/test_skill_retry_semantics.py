@@ -10,7 +10,7 @@ from linktools.ai.capability import (
     SkillSourceRef,
     SkillSourceRegistry,
     ToolCallFailed,
-    ToolCallRejected,
+    ToolCallRetry,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import SkillSpec
@@ -53,7 +53,7 @@ async def test_missing_skill_id_is_model_retry() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallRejected, match="skill id or resource path is invalid"):
+    with pytest.raises(ToolCallRetry, match="skill id is not available"):
         await toolset.call_tool(
             "load_skill",
             {"skill_id": "missing"},
@@ -71,7 +71,7 @@ async def test_missing_skill_resource_is_tool_failure() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallFailed, match="skill resource is unavailable"):
+    with pytest.raises(ToolCallFailed, match="resource does not exist"):
         await toolset.call_tool(
             "load_skill",
             {"skill_id": "known", "path": "missing.txt"},
@@ -97,7 +97,7 @@ async def test_outside_root_skill_resource_is_only_tool_failure_at_model_boundar
     toolset = capability.get_toolset()
     context = _context()
     tools = await toolset.get_tools(context)
-    with pytest.raises(ToolCallFailed, match="skill resource is unavailable"):
+    with pytest.raises(ToolCallFailed, match="outside the skill root"):
         await toolset.call_tool(
             "load_skill",
             {"skill_id": "known", "path": "resource.txt"},

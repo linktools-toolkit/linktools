@@ -6,8 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import workspace_capabilities, workspace_tool_contributions
-from linktools.ai.capability import ToolCallRejected
+from linktools.ai.capability import ToolCallRetry, workspace_capabilities, workspace_tool_contributions
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalSandbox, Workspace
 from linktools.ai.workspace._sandbox_protocol import (
@@ -56,8 +55,26 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
             session=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRejected, match="does not exist"):
+        with pytest.raises(ToolCallRetry, match="does not exist"):
             await toolset.tools["read_file"].function("missing.txt")  # type: ignore[attr-defined]
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_invalid_utf8_read_explains_text_boundary(tmp_path: Path) -> None:
+    (tmp_path / "binary.txt").write_bytes(b"\xff")
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = await LocalSandbox().open(root=workspace.root)
+    try:
+        capability = workspace_capabilities(
+            workspace,
+            ("read_file",),
+            session=session,
+        )[0]
+        toolset = capability.get_toolset()
+        with pytest.raises(ToolCallRetry, match="valid UTF-8 text"):
+            await toolset.tools["read_file"].function("binary.txt")  # type: ignore[attr-defined]
     finally:
         await session.close()
 
@@ -73,7 +90,7 @@ async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path)
             session=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRejected, match="parent directory"):
+        with pytest.raises(ToolCallRetry, match="parent directory"):
             await toolset.tools["write_file"].function(  # type: ignore[attr-defined]
                 "missing/report.txt",
                 "report",
@@ -94,7 +111,7 @@ async def test_workspace_denied_shell_command_is_model_retry(tmp_path: Path) -> 
             session=session,
         )[0]
         toolset = capability.get_toolset()
-        with pytest.raises(ToolCallRejected, match="not allowed"):
+        with pytest.raises(ToolCallRetry, match="not allowed"):
             await toolset.tools["run_command"].function("ssh example.invalid")  # type: ignore[attr-defined]
     finally:
         await session.close()
