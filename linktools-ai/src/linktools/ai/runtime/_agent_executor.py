@@ -87,7 +87,7 @@ from ..capability import (
     SkillSourceRegistry,
     SubagentCapability,
     SubagentDelegate,
-    ToolCallRejected,
+    ToolCallRetry,
     tool_class_from_metadata,
     tool_compaction_keep_result_from_metadata,
     tool_context_dedupe_from_metadata,
@@ -252,7 +252,7 @@ class _CachedRepositoryInstructionBoundary:
                     arguments=arguments,
                     path_fields=path_fields,
                 )
-            except ToolCallRejected:
+            except ToolCallRetry:
                 rendered = self._boundary.render()
                 self._rendered = rendered
                 raise
