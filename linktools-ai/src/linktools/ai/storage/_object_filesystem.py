@@ -24,12 +24,13 @@ from ._object import (
     _settle_task,
     _spool_file,
     _track_object_task,
+    _validate_digest,
     _validate_key,
     _validate_put,
     _validate_store_id,
 )
 
-_logger = environ.get_logger("ai.storage.object.filesystem")
+_logger = environ.get_logger("ai.storage.object")
 
 
 class FilesystemObjectStore:
@@ -395,8 +396,6 @@ def _read_filesystem_metadata(
         size = int(value["size"])
     except (OSError, TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    from ._object import _validate_digest
-
     _validate_digest(digest)
     if size < 0:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
