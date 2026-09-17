@@ -6,7 +6,11 @@ import json
 from pathlib import Path
 
 import pytest
-from linktools.ai.capability import ToolCallRetry, workspace_capabilities, workspace_tool_contributions
+from linktools.ai.capability import (
+    ToolCallRetry,
+    workspace_capabilities,
+    workspace_tool_contributions,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalSandbox, Workspace
 from linktools.ai.workspace._sandbox_protocol import (
@@ -62,6 +66,27 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_invalid_read_window_explains_correction(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("line\n", encoding="utf-8")
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = await LocalSandbox().open(root=workspace.root)
+    try:
+        capability = workspace_capabilities(
+            workspace,
+            ("read_file",),
+            session=session,
+        )[0]
+        toolset = capability.get_toolset()
+        with pytest.raises(ToolCallRetry, match="non-negative offset"):
+            await toolset.tools["read_file"].function(  # type: ignore[attr-defined]
+                "note.txt",
+                offset=-1,
+            )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path) -> None:
     (tmp_path / "binary.txt").write_bytes(b"\xff")
     workspace = Workspace.load(tmp_path, workspace_id="workspace")
@@ -78,6 +103,66 @@ async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path
                 "binary.txt",
                 "old",
                 "new",
+            )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_edit_miss_explains_unique_match_requirement(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("before\n", encoding="utf-8")
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = await LocalSandbox().open(root=workspace.root)
+    try:
+        capability = workspace_capabilities(
+            workspace,
+            ("edit_file",),
+            session=session,
+        )[0]
+        toolset = capability.get_toolset()
+        with pytest.raises(ToolCallRetry, match="matches exactly once"):
+            await toolset.tools["edit_file"].function(  # type: ignore[attr-defined]
+                "note.txt",
+                "missing",
+                "after",
+            )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_unknown_attachment_type_explains_alternative(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = await LocalSandbox().open(root=workspace.root)
+    try:
+        capability = workspace_capabilities(
+            workspace,
+            ("attach_files",),
+            session=session,
+        )[0]
+        toolset = capability.get_toolset()
+        with pytest.raises(ToolCallRetry, match="recognized media type"):
+            await toolset.tools["attach_files"].function(  # type: ignore[attr-defined]
+                ["evidence.unknown"]
+            )
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_unknown_command_id_explains_source(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    session = await LocalSandbox().open(root=workspace.root)
+    try:
+        capability = workspace_capabilities(
+            workspace,
+            ("check_command",),
+            session=session,
+        )[0]
+        toolset = capability.get_toolset()
+        with pytest.raises(ToolCallRetry, match="active command id"):
+            await toolset.tools["check_command"].function(  # type: ignore[attr-defined]
+                "missing-command"
             )
     finally:
         await session.close()
