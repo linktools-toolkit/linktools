@@ -12,7 +12,7 @@ from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import WorkspaceAccess
 from linktools.ai.core import Principal
-from linktools.ai.capability import ToolCallRejected
+from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import DefaultExecutionService
@@ -295,7 +295,7 @@ async def test_final_tool_boundary_returns_model_retry_for_correctable_path_erro
     context = _context()
     tools = await boundary.get_tools(context)
 
-    with pytest.raises(ToolCallRejected, match="not allowed"):
+    with pytest.raises(ToolCallRetry, match="not allowed"):
         await boundary.call_tool(
             "_echo_path",
             {"path": "../secret.txt"},

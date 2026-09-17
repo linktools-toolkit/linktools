@@ -11,7 +11,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ToolCallRejected
+from linktools.ai.capability import ToolCallRetry
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -113,7 +113,7 @@ async def test_invalid_workspace_target_retries_before_instruction_lookup(
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallRejected):
+    with pytest.raises(ToolCallRetry):
         await toolset.call_tool(
             "_list_directory",
             {"path": path},
