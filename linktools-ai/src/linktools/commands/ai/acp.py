@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 
-from linktools.ai.acp import ACPApplication
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import Workspace
+from linktools.ai.acp import ACPAgent, serve_stdio
+from linktools.ai.errors import AIError
+from linktools.ai.runtime import Runtime
+
+from .._ai_common import _load_workspace, _local_metrics, _local_runtime_state
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -30,21 +32,32 @@ class Command(BaseCommand):
         )
 
     def run(self, args: Namespace) -> int:
-        workspace_root = Path.cwd() if args.project is None else args.project
+        workspace = _load_workspace(args.project)
+        memory_scope = args.memory if args.memory is not None else workspace.workspace_id
+
+        async def execute() -> None:
+            state = _local_runtime_state(workspace)
+            metrics = await _local_metrics(workspace)
+            async with Runtime.open(
+                workspace,
+                state=state,
+                metrics=metrics,
+            ) as runtime:
+                await serve_stdio(
+                    ACPAgent(
+                        runtime,
+                        principal=runtime.default_principal,
+                        memory_scope=memory_scope,
+                    )
+                )
+
         try:
-            workspace = Workspace.discover(Path.cwd(), root=workspace_root)
-        except AIError as error:
-            if error.code is not ErrorCode.WORKSPACE_CONFIG_INVALID:
-                raise
-            workspace = Workspace.initialize(workspace_root)
-        try:
-            memory_scope = args.memory if args.memory is not None else workspace.workspace_id
-            asyncio.run(ACPApplication.for_workspace(workspace).serve(memory_scope=memory_scope))
+            asyncio.run(execute())
         except ModuleNotFoundError as error:
             raise CommandError(
                 "ai acp requires the agent-client-protocol dependency"
             ) from error
-        except ValueError as error:
+        except (AIError, ValueError) as error:
             raise CommandError(str(error)) from error
         return 0
 
