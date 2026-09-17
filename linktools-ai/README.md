@@ -190,6 +190,10 @@ spec = AgentSpec(
 
 The compiler resolves these selectors once from the frozen candidate universe. Missing or conflicting required candidates fail closed.
 
+Model-visible control text is composed as a stable front-of-request instruction prefix plus the current repository contribution. `AgentSpec.system_prompt` remains the standing Agent prompt; literal Agent instructions, selected Skill/Subagent guidance, explicit preloaded Skill content, Workspace usage guidance, and other static capability instructions remain stable for the run. Repository instructions from the applicable `AGENTS.md` and `.linktools/rules` sources are refreshed only when the existing path-scoped repository boundary activates additional rules. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel; the Python field used to declare a contribution does not by itself define its provider role.
+
+Loaded Skill bodies, Memory content, current plans, user input, tool results, and retry/error feedback keep their existing contextual positions instead of becoming permanent system guidance. Workspace instruction text describes only stable usage constraints; authorization and approval remain Runtime-enforced behavior and are not inferred from prompt text. Model-interaction history can therefore record the same stable instruction content on multiple requests without that meaning LinkTools appended a new historical instruction each time.
+
 `allow_tools` controls ordinary/external model-visible tools. Planning is an execution mode and is not enabled or disabled by pretending `write_plan` is an ordinary business tool. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.
 
 Subagents are root Agent definitions selected from the same frozen catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
