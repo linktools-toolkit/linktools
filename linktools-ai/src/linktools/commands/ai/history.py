@@ -13,7 +13,7 @@ from linktools.ai.core import Principal, service_principal
 from linktools.ai.runtime import ExecutionInfo, RuntimeHistory
 from linktools.cli import BaseCommand
 
-from .._ai_common import _load_workspace, _local_runtime_state, _run_async
+from ._common import _load_workspace, _local_runtime_state, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser

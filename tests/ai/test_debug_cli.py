@@ -29,7 +29,7 @@ from linktools.ai.runtime import (
     TranscriptItem,
 )
 from linktools.ai.workspace import Workspace
-from linktools.commands._ai_common import (
+from linktools.commands.ai._common import (
     _load_workspace,
     _local_metrics,
     _local_runtime_state,

@@ -11,7 +11,7 @@ from linktools.cli import BaseCommand, CommandError
 
 from linktools.ai.acp import ACPAgent, serve_stdio
 
-from .._ai_common import _load_workspace, _open_local_runtime, _run_async
+from ._common import _load_workspace, _open_local_runtime, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser

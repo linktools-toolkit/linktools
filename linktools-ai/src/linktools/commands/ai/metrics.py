@@ -15,7 +15,7 @@ from linktools.ai.observe import (
 )
 from linktools.cli import BaseCommand
 
-from .._ai_common import _load_workspace, _local_metrics, _run_async
+from ._common import _load_workspace, _local_metrics, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser

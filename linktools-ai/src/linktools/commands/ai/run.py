@@ -17,7 +17,7 @@ from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionS
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Execution, ExecutionResult, Runtime
 
-from .._ai_common import _load_workspace, _open_local_runtime, _run_async
+from ._common import _load_workspace, _open_local_runtime, _run_async
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
