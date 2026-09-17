@@ -32,8 +32,11 @@ class _Boundary:
         self.fail = fail
         self.calls: list[dict[str, Any]] = []
 
-    def render(self) -> str:
-        return "repository instructions"
+    def render_initial(self) -> str:
+        return "repository initial instructions"
+
+    def render_overlay(self) -> str:
+        return "repository overlay instructions"
 
     async def check(
         self,
