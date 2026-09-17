@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability import ToolCallFailed, ToolCallRejected
+from linktools.ai.capability import ToolCallFailed, ToolCallRetry
 from linktools.ai.runtime._tool import ToolOperationDecision
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -35,7 +35,7 @@ class _Bridge:
         *,
         cached_result: Any = None,
         has_cached_result: bool = False,
-        cached_error: ToolCallRejected | ToolCallFailed | None = None,
+        cached_error: ToolCallRetry | ToolCallFailed | None = None,
     ) -> None:
         self.decision = ToolOperationDecision(
             "operation",
@@ -64,7 +64,7 @@ class _Bridge:
     async def fail(
         self,
         decision: ToolOperationDecision,
-        error: ToolCallRejected | ToolCallFailed,
+        error: ToolCallRetry | ToolCallFailed,
     ) -> bool:
         del decision, error
         self.calls.append("fail")
@@ -159,12 +159,12 @@ async def test_workspace_approval_precedes_tool_operation_admission() -> None:
 
 
 @pytest.mark.asyncio
-async def test_replay_safe_rejected_tool_call_is_terminalized() -> None:
+async def test_replay_safe_retry_tool_call_is_terminalized() -> None:
     async def retry() -> None:
-        raise ToolCallRejected("retry")
+        raise ToolCallRetry("retry")
 
     bridge = _Bridge(True)
-    with pytest.raises(ToolCallRejected):
+    with pytest.raises(ToolCallRetry):
         await _call(
             retry,
             ManagedToolDescriptor(
@@ -338,8 +338,8 @@ async def test_cached_failure_skips_raw_leaf() -> None:
     async def unexpected() -> None:
         raise AssertionError("cached operation must not invoke the leaf")
 
-    bridge = _Bridge(True, cached_error=ToolCallRejected("retry cached"))
-    with pytest.raises(ToolCallRejected) as raised:
+    bridge = _Bridge(True, cached_error=ToolCallRetry("retry cached"))
+    with pytest.raises(ToolCallRetry) as raised:
         await _call(
             unexpected,
             ManagedToolDescriptor(

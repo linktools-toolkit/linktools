@@ -15,7 +15,7 @@ from linktools.ai.runtime._tool_boundary import (
     RepositoryInstructionBoundary,
     RuntimeToolBoundaryToolset,
 )
-from linktools.ai.capability import ToolCallRejected
+from linktools.ai.capability import ToolCallRetry
 from linktools.ai.workspace import (
     WorkspaceToolPermissionPolicy,
 )
@@ -52,7 +52,7 @@ class _Boundary:
             }
         )
         if self.fail:
-            raise ToolCallRejected("repository instructions changed")
+            raise ToolCallRetry("repository instructions changed")
 
 
 async def _read_file(path: str) -> str:
@@ -96,11 +96,7 @@ def _boundary(
         {name: descriptor},
         id="workspace",
         sandbox_session=_Session(),  # type: ignore[arg-type]
-        workspace_policy=(
-            None
-            if policy is None
-            else policy
-        ),
+        workspace_policy=(None if policy is None else policy),
         repository_boundary=repository,
     )
 
@@ -117,7 +113,7 @@ async def test_repository_instruction_check_precedes_ask_permission() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallRejected, match="repository instructions changed"):
+    with pytest.raises(ToolCallRetry, match="repository instructions changed"):
         await toolset.call_tool(
             "_read_file",
             {"path": "pkg/file.txt"},
@@ -136,7 +132,7 @@ async def test_repository_instruction_refresh_can_fence_one_model_call() -> None
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(ToolCallRejected):
+    with pytest.raises(ToolCallRetry):
         await toolset.call_tool(
             "_read_file",
             {"path": "pkg/file.txt"},

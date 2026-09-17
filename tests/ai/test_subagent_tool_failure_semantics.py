@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from linktools.ai.capability import SubagentCapability, ToolCallFailed, ToolCallRejected
+from linktools.ai.capability import SubagentCapability, ToolCallFailed, ToolCallRetry
 from linktools.ai.core import ExecutionStatus, Principal, UsageMetrics
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._subagent import SubagentDispatcher
@@ -122,7 +122,7 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
         "phase": "subagent_execution",
         "subagent_id": "child",
         "execution_id": "child-execution",
-        "status": "failed",
+        "status": ExecutionStatus.FAILED.value,
         "error_code": ErrorCode.MODEL_TIMEOUT.value,
         "safe_error_details": {"phase": "agent_execution"},
     }
@@ -154,7 +154,10 @@ async def test_subagent_adapter_returns_child_failure_to_parent_model() -> None:
             tools["delegate_task"],
         )
 
-    assert raised.value.message == "subagent execution failed; adapt and continue"
+    assert raised.value.message == (
+        "Subagent 'child' failed with MODEL_TIMEOUT and produced no result. Continue "
+        "from the parent context using this failure reason."
+    )
 
 
 async def test_subagent_tool_retries_its_own_oversized_task() -> None:
@@ -180,10 +183,7 @@ async def test_subagent_tool_retries_its_own_oversized_task() -> None:
     context = _context()
     tools = await toolset.get_tools(context)
 
-    with pytest.raises(
-        ToolCallRejected,
-        match="delegated task is invalid or too large",
-    ):
+    with pytest.raises(ToolCallRetry, match="exceeds the allowed prompt size"):
         await toolset.call_tool(
             "delegate_task",
             {"subagent_id": "child", "task": "x" * (1024 * 1024 + 1)},
@@ -192,6 +192,34 @@ async def test_subagent_tool_retries_its_own_oversized_task() -> None:
         )
 
     assert called is False
+
+
+async def test_unknown_subagent_id_gives_model_a_selection_action() -> None:
+    async def delegate(
+        ref: SubagentRef,
+        task: str,
+        *,
+        files: tuple[str, ...],
+        invocation_id: str,
+    ) -> "dict[str, object]":
+        del ref, task, files, invocation_id
+        raise AssertionError("delegate should not be called")
+
+    capability = SubagentCapability(
+        (SubagentRef("agent", "child"),),
+        delegate,
+    )
+    toolset = capability.get_toolset()
+    context = _context()
+    tools = await toolset.get_tools(context)
+
+    with pytest.raises(ToolCallRetry, match="Call list_subagents"):
+        await toolset.call_tool(
+            "delegate_task",
+            {"subagent_id": "missing", "task": "do work"},
+            context,
+            tools["delegate_task"],
+        )
 
 
 async def test_subagent_downstream_prompt_error_is_not_reclassified() -> None:

@@ -13,14 +13,14 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.tools import ToolDefinition
 
-from ..capability import AgentContext, ToolCallFailed, ToolCallRejected
+from ..capability import AgentContext, ToolCallFailed, ToolCallRetry
 
 _OWNS_PYDANTIC_TOOL_CONTROL = True
 _logger = environ.get_logger("ai.runtime.pydantic_tool_control")
 
 
 def build_model_retry(message: str) -> ModelRetry:
-    """Construct the Pydantic retry control for one LinkTools rejection."""
+    """Construct the Pydantic retry control for one LinkTools retry signal."""
     return ModelRetry(message)
 
 
@@ -48,9 +48,9 @@ class PydanticToolControlCapability(AbstractCapability[AgentContext[object]]):
         error: Exception,
     ) -> None:
         del ctx, args
-        if isinstance(error, ToolCallRejected):
+        if isinstance(error, ToolCallRetry):
             _logger.debug(
-                "converting rejected tool call: tool=%s call=%s",
+                "converting tool call retry: tool=%s call=%s",
                 tool_def.name,
                 call.tool_call_id,
             )

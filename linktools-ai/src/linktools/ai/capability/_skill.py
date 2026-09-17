@@ -20,7 +20,7 @@ from ._skill_source import (
     SkillSourceRegistry,
     normalize_skill_resource_path,
 )
-from ._tool_signal import ToolCallFailed, ToolCallRejected
+from ._tool_signal import ToolCallFailed, ToolCallRetry
 from ._tool_semantic import tool_semantic_metadata
 
 
@@ -167,19 +167,41 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
                     result["location"] = self._resource_paths[skill_id]
                 return result
             except AIError as error:
-                if error.code in {
-                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                }:
-                    raise ToolCallRejected(
-                        "skill id or resource path is invalid"
+                if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
+                    raise ToolCallRetry(
+                        "The requested skill id is not available. Call list_skills and "
+                        "retry with one of the returned skill ids."
                     ) from error
-                if error.code in {
-                    ErrorCode.ASSET_PATH_OUTSIDE_ROOT,
-                    ErrorCode.ASSET_NOT_FOUND,
-                    ErrorCode.ASSET_CODEC_UNKNOWN,
-                }:
-                    raise ToolCallFailed("skill resource is unavailable") from error
+                if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+                    raise ToolCallRetry(
+                        "The skill resource path is invalid. Load the skill root and "
+                        "retry with one of its listed resource paths."
+                    ) from error
+                if error.code is ErrorCode.ASSET_PATH_OUTSIDE_ROOT:
+                    raise ToolCallFailed(
+                        "The requested skill resource is outside the skill root and "
+                        "cannot be accessed. Use a listed resource inside the skill "
+                        "root or continue without it."
+                    ) from error
+                if error.code is ErrorCode.ASSET_NOT_FOUND:
+                    if path is None:
+                        message = (
+                            "The requested skill resource root is unavailable. Repeating "
+                            "the same load_skill call will not resolve it; use another "
+                            "skill or continue without it."
+                        )
+                    else:
+                        message = (
+                            "The requested skill resource does not exist. Load the skill "
+                            "root and choose one of its listed resources, or continue "
+                            "without it."
+                        )
+                    raise ToolCallFailed(message) from error
+                if error.code is ErrorCode.ASSET_CODEC_UNKNOWN:
+                    raise ToolCallFailed(
+                        "The requested skill resource is not UTF-8 text and cannot be "
+                        "loaded by load_skill. Use another resource or another tool."
+                    ) from error
                 raise
 
         return toolset

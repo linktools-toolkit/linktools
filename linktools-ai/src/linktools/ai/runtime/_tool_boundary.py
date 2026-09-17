@@ -22,7 +22,7 @@ from pydantic_ai.toolsets import AbstractToolset, ToolsetTool
 from ..capability import (
     AgentContext,
     ToolCallFailed,
-    ToolCallRejected,
+    ToolCallRetry,
     tool_class_from_metadata,
     tool_effect_from_metadata,
     tool_path_fields_from_metadata,
@@ -258,7 +258,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
                         "The workspace tool arguments or target are invalid. "
                         "Correct them and retry."
                     )
-                signal = ToolCallRejected(message)
+                signal = ToolCallRetry(message)
                 self._record_pre_effect_error(
                     raw_call,
                     tool.tool_def,
@@ -340,7 +340,7 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             if cancelled:
                 raise asyncio.CancelledError
             raise
-        except (ToolCallRejected, ToolCallFailed) as error:
+        except (ToolCallRetry, ToolCallFailed) as error:
             cancelled = await bridge.fail(decision, error)
             if cancelled:
                 raise asyncio.CancelledError
@@ -425,7 +425,11 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT) from error
         if decision == "deny":
-            raise ToolCallFailed("workspace permission denied")
+            raise ToolCallFailed(
+                "Workspace policy does not allow this tool in the current run. "
+                "Repeating the same call will not change the policy; use an allowed "
+                "tool or another approach."
+            )
         if decision == "ask" and not approved:
             raise ApprovalRequired(
                 metadata={

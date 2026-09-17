@@ -26,7 +26,7 @@ from ..core import (
     validate_resource_id,
     validate_tenant_id,
 )
-from ..capability import ToolCallFailed, ToolCallRejected
+from ..capability import ToolCallFailed, ToolCallRetry
 from ..errors import AIError, ErrorCode
 from ..storage import (
     ObjectStore,
@@ -60,7 +60,7 @@ class ToolOperationDecision:
     replay_safe: bool
     cached_result: JsonValue = None
     has_cached_result: bool = False
-    cached_error: ToolCallRejected | ToolCallFailed | None = None
+    cached_error: ToolCallRetry | ToolCallFailed | None = None
 
 
 class ToolOperationBridge(Protocol):
@@ -80,7 +80,7 @@ class ToolOperationBridge(Protocol):
     async def fail(
         self,
         decision: ToolOperationDecision,
-        error: ToolCallRejected | ToolCallFailed,
+        error: ToolCallRetry | ToolCallFailed,
     ) -> bool: ...
 
     async def unknown(
@@ -478,7 +478,7 @@ class RuntimeToolOperationBridge:
     async def fail(
         self,
         decision: "ToolOperationDecision",
-        error: ToolCallRejected | ToolCallFailed,
+        error: ToolCallRetry | ToolCallFailed,
     ) -> bool:
         code, payload = await self._error_payload(error)
 
@@ -731,7 +731,7 @@ class RuntimeToolOperationBridge:
     async def _decode_error(
         self,
         record: ToolOperationRecord,
-    ) -> ToolCallRejected | ToolCallFailed:
+    ) -> ToolCallRetry | ToolCallFailed:
         if record.error_payload is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = await self._payload_json(record.error_payload)
@@ -754,7 +754,7 @@ class RuntimeToolOperationBridge:
             if record.error_code != ErrorCode.TOOL_RETRY_REQUIRED.value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
-                return ToolCallRejected(message)
+                return ToolCallRetry(message)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if kind == "tool_call_failed":
@@ -768,9 +768,9 @@ class RuntimeToolOperationBridge:
 
     async def _error_payload(
         self,
-        error: ToolCallRejected | ToolCallFailed,
+        error: ToolCallRetry | ToolCallFailed,
     ) -> tuple[str, StoredPayload]:
-        if isinstance(error, ToolCallRejected):
+        if isinstance(error, ToolCallRetry):
             code = ErrorCode.TOOL_RETRY_REQUIRED.value
             kind = "tool_call_rejected"
         elif isinstance(error, ToolCallFailed):
