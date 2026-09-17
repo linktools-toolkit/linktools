@@ -26,9 +26,11 @@ from linktools.ai.runtime._model_interaction import (
     project_public_messages,
 )
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state._model_interaction_runtime import (
+    ModelInteractionRuntimeStepStore,
+)
 from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionInMemoryStepArchive,
-    ModelInteractionRuntimeStepStore,
     ModelInteractionStagingStepStore,
 )
 from linktools.ai.runtime.state._step_contracts import RunRecord
