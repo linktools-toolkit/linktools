@@ -1,0 +1,38 @@
+name: Temporary prompt order fix
+
+on:
+  push:
+    branches:
+      - feat/ai-system-prompt-refresh
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: contains(github.event.head_commit.message, '[fix-prompt-order]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ai-system-prompt-refresh
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Apply focused prompt-order patch
+        run: |
+          python scripts/tmp_fix_prompt_order.py
+          python -m py_compile \
+            linktools-ai/src/linktools/ai/capability/_workspace.py \
+            linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
+            tests/ai/test_system_instruction_composition.py
+      - name: Commit focused patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            linktools-ai/src/linktools/ai/capability/_workspace.py \
+            linktools-ai/src/linktools/ai/runtime/_agent_executor.py \
+            tests/ai/test_system_instruction_composition.py
+          git commit -m 'fix(ai): order prompt instruction partitions'
+          git push origin HEAD:feat/ai-system-prompt-refresh
