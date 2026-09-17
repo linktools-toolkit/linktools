@@ -27,7 +27,7 @@ from ..workspace import (
 )
 from ._context import AgentContext
 from ._group import CapabilityContribution
-from ._tool_signal import ToolCallRejected
+from ._tool_signal import ToolCallRetry
 from ._tool_semantic import tool_effect_from_metadata, tool_semantic_metadata
 
 _ResultT = TypeVar("_ResultT")
@@ -137,6 +137,10 @@ _TOO_MANY_WORKSPACE_COMMANDS = (
 _UNSUPPORTED_IMAGE_INPUT = (
     "The current model does not support image attachments. "
     "Use a non-image input or another approach."
+)
+_INVALID_UTF8_WORKSPACE_CONTENT = (
+    "The requested workspace content is not valid UTF-8 text. Use a binary-capable "
+    "approach or choose a UTF-8 text target."
 )
 
 
@@ -758,12 +762,14 @@ def _workspace_tool_rejected(
     name: str,
     error: AIError,
     default_message: str,
-) -> ToolCallRejected:
+) -> ToolCallRetry:
     if (
         name == "attach_files"
         and error.safe_details.get("reason") == "image_input_not_supported"
     ):
         message = _UNSUPPORTED_IMAGE_INPUT
+    elif error.safe_details.get("reason") == "invalid_utf8":
+        message = _INVALID_UTF8_WORKSPACE_CONTENT
     elif error.code is ErrorCode.STORAGE_NOT_FOUND:
         message = _MISSING_WORKSPACE_TARGET
     elif error.code is ErrorCode.STORAGE_CONFLICT:
@@ -777,11 +783,11 @@ def _workspace_tool_rejected(
     else:
         message = default_message
     _logger.debug(
-        "workspace tool call rejected: operation=%s code=%s",
+        "workspace tool call retry: operation=%s code=%s",
         name,
         error.code.value,
     )
-    return ToolCallRejected(message)
+    return ToolCallRetry(message)
 
 
 __all__ = [

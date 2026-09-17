@@ -14,7 +14,7 @@ from ..core import JsonValue, validate_user_prompt
 from ..errors import AIError, ErrorCode
 from ..spec import SubagentRef
 from ._context import AgentContext
-from ._tool_signal import ToolCallFailed, ToolCallRejected
+from ._tool_signal import ToolCallFailed, ToolCallRetry
 from ._tool_semantic import tool_semantic_metadata
 
 SUBAGENT_CAPABILITY_ID = "linktools.ai.subagents"
@@ -98,21 +98,41 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
                     invocation_id=ctx.tool_call_id,
                 )
             except _DelegatedTaskPromptError as error:
-                raise ToolCallRejected(
-                    "The delegated task is invalid or too large. Shorten it and retry."
+                raise ToolCallRetry(
+                    "The delegated task exceeds the allowed prompt size. Shorten the "
+                    "task and retry."
                 ) from error
             except AIError as error:
                 if error.code is ErrorCode.TOOL_EXECUTION_FAILED:
-                    raise ToolCallFailed(
-                        "subagent execution failed; adapt and continue"
+                    raise ToolCallFailed(_subagent_failure_message(error)) from error
+                if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
+                    raise ToolCallRetry(
+                        "The requested subagent id is not available. Call "
+                        "list_subagents and retry with one of the returned ids."
                     ) from error
-                if error.code in {
-                    ErrorCode.CAPABILITY_RESOLUTION_INVALID,
-                    ErrorCode.REQUEST_FIELD_INVALID,
-                }:
-                    raise ToolCallRejected(
-                        "requested subagent, task, or files are invalid"
-                    ) from error
+                if error.code is ErrorCode.REQUEST_FIELD_INVALID:
+                    field = error.safe_details.get("field")
+                    if field == "subagent_id":
+                        message = (
+                            "The subagent id is invalid. Call list_subagents and retry "
+                            "with one of the returned ids."
+                        )
+                    elif field == "task":
+                        message = (
+                            "The delegated task is invalid. Provide a non-empty task "
+                            "and retry."
+                        )
+                    elif field == "files":
+                        message = (
+                            "The delegated files are invalid. Provide non-empty "
+                            "workspace file paths or omit files and retry."
+                        )
+                    else:
+                        message = (
+                            "The delegate_task arguments are invalid. Correct them and "
+                            "retry."
+                        )
+                    raise ToolCallRetry(message) from error
                 raise
 
         return toolset
@@ -160,9 +180,15 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
         invocation_id: str,
     ) -> "dict[str, JsonValue]":
         if not isinstance(subagent_id, str) or not subagent_id.strip():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "subagent_id"},
+            )
         if not isinstance(task, str) or not task.strip():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "task"},
+            )
         try:
             validate_user_prompt(task)
         except AIError as error:
@@ -175,10 +201,16 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
             files,
             (str, bytes, bytearray),
         ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "files"},
+            )
         paths = tuple(files)
         if any(not isinstance(path, str) or not path for path in paths):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "files"},
+            )
         ref = self._by_id.get(subagent_id)
         if ref is None:
             raise AIError(
@@ -194,6 +226,31 @@ class SubagentCapability(AbstractCapability[AgentContext[object]]):
         if not isinstance(result, dict):
             raise AIError(ErrorCode.INTERNAL_ERROR)
         return result
+
+
+def _subagent_failure_message(error: AIError) -> str:
+    status = error.safe_details.get("status")
+    if status == "CANCELLED":
+        return (
+            "The delegated subagent was cancelled and produced no result. Continue "
+            "without its result or delegate the task again if it is still needed."
+        )
+    raw_code = error.safe_details.get("error_code")
+    if isinstance(raw_code, str):
+        try:
+            code = ErrorCode(raw_code)
+        except ValueError:
+            pass
+        else:
+            return (
+                f"The delegated subagent failed with {code.value} and produced no "
+                "result. Use another approach or delegate the task again if "
+                "appropriate."
+            )
+    return (
+        "The delegated subagent failed and produced no result. Use another approach "
+        "or delegate the task again if appropriate."
+    )
 
 
 __all__ = ["SUBAGENT_CAPABILITY_ID", "SubagentCapability", "SubagentDelegate"]

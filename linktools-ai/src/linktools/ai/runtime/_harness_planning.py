@@ -13,13 +13,17 @@ from pydantic_ai_harness.planning import (
     TaskStatus,
 )
 
-from ..capability import ToolCallRejected, tool_semantic_metadata
+from ..capability import ToolCallRetry, tool_semantic_metadata
 from ..errors import AIError, ErrorCode
 from ._harness import HarnessPlanStoreAdapter
 
 _PLANNING_CAPABILITY_ID = "linktools.ai.planning"
 _PLANNING_TOOL_NAME = "write_plan"
 _INVALID_PLAN = "The plan content is invalid. Correct the plan and retry."
+_EMPTY_PLAN_CONTENT = (
+    "Each plan item must have non-empty content. Fill every item and retry."
+)
+_DUPLICATE_PLAN_IDS = "Plan item ids must be unique. Remove duplicate ids and retry."
 _FLAT_PLAN = (
     "Subtasks and dependencies are not enabled. Use a flat plan and retry."
 )
@@ -86,20 +90,20 @@ class _PlanningToolset(AbstractToolset[None]):
 
 def _validate_model_plan(items: object) -> None:
     if not isinstance(items, list):
-        raise ToolCallRejected(_INVALID_PLAN)
+        raise ToolCallRetry(_INVALID_PLAN)
     identifiers: list[str] = []
     for item in items:
         if not isinstance(item, HarnessPlanItem):
-            raise ToolCallRejected(_INVALID_PLAN)
+            raise ToolCallRetry(_INVALID_PLAN)
         identifiers.append(item.id)
         if item.parent_id is not None or item.depends_on:
-            raise ToolCallRejected(_FLAT_PLAN)
+            raise ToolCallRetry(_FLAT_PLAN)
         if item.status not in _PLAIN_PLAN_STATUSES:
-            raise ToolCallRejected(_FLAT_PLAN)
+            raise ToolCallRetry(_FLAT_PLAN)
         if not isinstance(item.content, str) or not item.content.strip():
-            raise ToolCallRejected(_INVALID_PLAN)
+            raise ToolCallRetry(_EMPTY_PLAN_CONTENT)
     if len(identifiers) != len(set(identifiers)):
-        raise ToolCallRejected(_INVALID_PLAN)
+        raise ToolCallRetry(_DUPLICATE_PLAN_IDS)
 
 
 class HarnessPlanning(Planning[None]):
