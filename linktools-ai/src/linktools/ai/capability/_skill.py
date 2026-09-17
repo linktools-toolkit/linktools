@@ -184,11 +184,19 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
                         "root or continue without it."
                     ) from error
                 if error.code is ErrorCode.ASSET_NOT_FOUND:
-                    raise ToolCallFailed(
-                        "The requested skill resource does not exist. Load the skill "
-                        "root and choose one of its listed resources, or continue "
-                        "without it."
-                    ) from error
+                    if path is None:
+                        message = (
+                            "The requested skill resource root is unavailable. Repeating "
+                            "the same load_skill call will not resolve it; use another "
+                            "skill or continue without it."
+                        )
+                    else:
+                        message = (
+                            "The requested skill resource does not exist. Load the skill "
+                            "root and choose one of its listed resources, or continue "
+                            "without it."
+                        )
+                    raise ToolCallFailed(message) from error
                 if error.code is ErrorCode.ASSET_CODEC_UNKNOWN:
                     raise ToolCallFailed(
                         "The requested skill resource is not UTF-8 text and cannot be "
