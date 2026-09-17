@@ -28,8 +28,8 @@ from ._graph import (
     ready_nodes,
 )
 from ._handler import TaskDependency, TaskFunction, TaskNodeContext, TaskNodeHandler
-from ._local import (
-    LocalTaskGraphLauncher,
+from ._local import LocalTaskGraphLauncher
+from ._runner import (
     TaskNodeInvocation,
     TaskNodeRunControl,
     TaskNodeRunError,
