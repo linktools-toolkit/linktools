@@ -1,0 +1,24 @@
+name: Refactor workspace export
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refactor-workspace-export-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refactor-workspace-${{ github.sha }}
+          path: .
+          include-hidden-files: true
+          retention-days: 1
