@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from linktools.ai.capability import ToolCallRejected, workspace_capabilities
+from linktools.ai.capability import ToolCallRetry, workspace_capabilities
 from linktools.ai.runtime._agent_executor import _CachedRepositoryInstructionBoundary
 from linktools.ai.runtime._tool_boundary import RuntimeToolBoundaryToolset
 from linktools.ai.workspace import LocalSandbox, Workspace
@@ -46,7 +46,7 @@ class _RefreshBoundary:
                 return
             self.applied.append(path)
             self.rendered = "root rules\n" + "\n".join(self.applied)
-            raise ToolCallRejected("Repository instructions changed; reconsider the call")
+            raise ToolCallRetry("Repository instructions changed; reconsider the call")
         finally:
             self.active_checks -= 1
 
@@ -118,7 +118,7 @@ async def test_repository_instruction_refresh_is_serialized_and_published_atomic
     assert boundary.render() == "root rules"
 
     async def refresh(path: str) -> None:
-        with pytest.raises(ToolCallRejected):
+        with pytest.raises(ToolCallRetry):
             await boundary.check(
                 tool_name="read_file",
                 tool_call_id=f"call-{path}",
