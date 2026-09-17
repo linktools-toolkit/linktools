@@ -4,13 +4,19 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from linktools.ai.capability import ToolCallRetry, workspace_capabilities
-from linktools.ai.runtime._agent_executor import _CachedRepositoryInstructionBoundary
+from linktools.ai.runtime._local import _RepositoryInstructionBoundary
 from linktools.ai.runtime._tool_boundary import RuntimeToolBoundaryToolset
-from linktools.ai.workspace import LocalSandbox, Workspace
+from linktools.ai.workspace import (
+    LocalSandbox,
+    RepositoryInstructionDocument,
+    RepositoryInstructions,
+    Workspace,
+)
 from pydantic_ai.messages import InstructionPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -18,35 +24,46 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage
 
 
-class _RefreshBoundary:
+class _RefreshCoordinator:
     def __init__(self) -> None:
-        self.rendered = "root rules"
         self.active_checks = 0
         self.max_active_checks = 0
-        self.applied: list[str] = []
+        self.paths: list[str] = []
 
-    def render(self) -> str:
-        return self.rendered
-
-    async def check(
+    async def check_repository_instructions(
         self,
         *,
+        execution: object,
+        initial: RepositoryInstructions | None,
+        overlay: RepositoryInstructions | None,
         tool_name: str,
         tool_call_id: str,
-        arguments: dict[str, Any],
+        arguments: dict[str, object],
         path_fields: tuple[str, ...],
-    ) -> None:
-        del tool_name, tool_call_id, path_fields
+    ) -> tuple[RepositoryInstructions | None, bool]:
+        del execution, initial, tool_name, tool_call_id, path_fields
         self.active_checks += 1
         self.max_active_checks = max(self.max_active_checks, self.active_checks)
         try:
             await asyncio.sleep(0)
             path = arguments.get("path")
             if not isinstance(path, str):
-                return
-            self.applied.append(path)
-            self.rendered = "root rules\n" + "\n".join(self.applied)
-            raise ToolCallRetry("Repository instructions changed; reconsider the call")
+                return overlay, False
+            self.paths.append(path)
+            if path != "a" or overlay is not None:
+                return overlay, False
+            return (
+                RepositoryInstructions(
+                    (
+                        RepositoryInstructionDocument(
+                            "agents:pkg/AGENTS.md",
+                            "pkg",
+                            "package rules",
+                        ),
+                    )
+                ),
+                True,
+            )
         finally:
             self.active_checks -= 1
 
@@ -111,11 +128,28 @@ async def test_workspace_guidance_is_static_when_workspace_tools_are_selected(
 
 
 @pytest.mark.asyncio
-async def test_repository_instruction_refresh_is_serialized_and_published_atomically() -> None:
-    source = _RefreshBoundary()
-    boundary = _CachedRepositoryInstructionBoundary(source)
+async def test_repository_partition_is_stable_and_fences_same_turn_siblings() -> None:
+    initial = RepositoryInstructions(
+        (
+            RepositoryInstructionDocument(
+                "agents:AGENTS.md",
+                ".",
+                "root rules",
+            ),
+        )
+    )
+    coordinator = _RefreshCoordinator()
+    boundary = _RepositoryInstructionBoundary(
+        coordinator,  # type: ignore[arg-type]
+        SimpleNamespace(execution_id="execution", tenant_id="tenant"),  # type: ignore[arg-type]
+        initial,
+        None,
+    )
 
-    assert boundary.render() == "root rules"
+    initial_text = boundary.render_initial()
+    assert "Repository instructions are workspace guidance." in initial_text
+    assert "root rules" in initial_text
+    assert boundary.render_overlay() == ""
 
     async def refresh(path: str) -> None:
         with pytest.raises(ToolCallRetry):
@@ -128,6 +162,17 @@ async def test_repository_instruction_refresh_is_serialized_and_published_atomic
 
     await asyncio.gather(refresh("a"), refresh("b"))
 
-    assert source.max_active_checks == 1
-    assert source.applied == ["a", "b"]
-    assert boundary.render() == "root rules\na\nb"
+    assert coordinator.max_active_checks == 1
+    assert coordinator.paths == ["a"]
+    assert boundary.render_initial() == initial_text
+    overlay_text = boundary.render_overlay()
+    assert "package rules" in overlay_text
+    assert "Repository instructions are workspace guidance." not in overlay_text
+
+    await boundary.check(
+        tool_name="read_file",
+        tool_call_id="call-b-next-turn",
+        arguments={"path": "b"},
+        path_fields=("path",),
+    )
+    assert coordinator.paths == ["a", "b"]
