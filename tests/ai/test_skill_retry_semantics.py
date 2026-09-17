@@ -35,6 +35,20 @@ class _OutsideRootSource:
         raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT)
 
 
+class _MissingRootSource:
+    @property
+    def id(self) -> str:
+        return "source"
+
+    async def inspect(self, root: str) -> SkillResourceView:
+        del root
+        raise AIError(ErrorCode.ASSET_NOT_FOUND)
+
+    async def read(self, root: str, path: str) -> bytes:
+        del root, path
+        raise AssertionError("read should not be called")
+
+
 def _context() -> RunContext[None]:
     return RunContext(
         deps=None,
@@ -78,6 +92,31 @@ async def test_missing_skill_resource_is_tool_failure() -> None:
             context,
             tools["load_skill"],
         )
+
+
+async def test_missing_skill_root_does_not_suggest_retrying_the_same_call() -> None:
+    definition = SkillDefinition(
+        SkillSpec("known", content="instructions"),
+        SkillSourceRef("source", "known"),
+    )
+    capability = SkillCapability(
+        (definition,),
+        SkillSourceRegistry((_MissingRootSource(),)),
+    )
+    toolset = capability.get_toolset()
+    context = _context()
+    tools = await toolset.get_tools(context)
+
+    with pytest.raises(ToolCallFailed) as raised:
+        await toolset.call_tool(
+            "load_skill",
+            {"skill_id": "known"},
+            context,
+            tools["load_skill"],
+        )
+
+    assert "resource root is unavailable" in raised.value.message
+    assert "same load_skill call will not resolve it" in raised.value.message
 
 
 async def test_outside_root_skill_resource_is_only_tool_failure_at_model_boundary() -> None:
