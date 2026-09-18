@@ -8,6 +8,7 @@ import json
 import os
 import posixpath
 import shutil
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, cast
@@ -23,10 +24,10 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, read_object
+from ..storage import FilesystemMutationLock, ObjectRef, ObjectStore, read_object
 from ._snapshot_contract import RunSnapshot, snapshot_digest
 from ._runtime_history import RuntimeHistory
-from .state import RuntimeState
+from .state import OfflineExclusiveStorage, RuntimeState
 
 if TYPE_CHECKING:
     from ..workspace import Workspace
@@ -90,7 +91,7 @@ class RuntimeSnapshot:
         state: "RuntimeState",
         object_store: ObjectStore,
         workspace: "Workspace | None" = None,
-        exclusive: object | None = None,
+        exclusive: OfflineExclusiveStorage,
         metadata: Mapping[str, JsonValue] | None = None,
         limits: SnapshotLimits,
     ) -> ObjectRef:
@@ -101,15 +102,14 @@ class RuntimeSnapshot:
         async def publish() -> ObjectRef:
             initialized = False
             try:
-                if not state.ready:
-                    await state.initialize(
-                        namespace=resolved_namespace,
-                        tenant_id=resolved_tenant,
-                        read_only=True,
-                    )
-                    initialized = True
-                elif not state.read_only:
+                if state.ready:
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                await state.initialize(
+                    namespace=resolved_namespace,
+                    tenant_id=resolved_tenant,
+                    read_only=True,
+                )
+                initialized = True
                 if (
                     state.namespace != resolved_namespace
                     or state.tenant_id != resolved_tenant
@@ -150,9 +150,7 @@ class RuntimeSnapshot:
                 if initialized:
                     await state.close()
 
-        if exclusive is None:
-            return await publish()
-        async with cast("object", exclusive):
+        async with exclusive.offline_exclusivity():
             return await publish()
 
     @classmethod
@@ -276,7 +274,7 @@ class RuntimeSnapshot:
         limits: SnapshotLimits,
         replace_policy: str = "same",
         expected_generation: str | None = None,
-        exclusive: object | None = None,
+        exclusive: OfflineExclusiveStorage | None = None,
     ) -> RestoredRuntime:
         manifest = await cls._verified_manifest(ref, object_store, limits)
         resolved_namespace = validate_persistence_namespace(namespace)
@@ -304,46 +302,45 @@ class RuntimeSnapshot:
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 
         async def restore_generation() -> RestoredRuntime:
-            generation = ref.digest
-            locks = root / ".runtime-snapshot-locks"
-            locks.mkdir(parents=True, exist_ok=True)
-            lock = FileLock(str(locks / f"{generation}.lock"))
-            try:
-                await asyncio.to_thread(lock.acquire)
-            except OSError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            try:
+            generation = secrets.token_hex(16)
+            staging = root / ".staging" / generation
+            staging.mkdir(parents=True, exist_ok=False)
+            (staging / ".runtime-snapshot-staging").write_text(
+                generation,
+                encoding="utf-8",
+            )
+            state_root = staging / "state"
+            await RuntimeState.restore_snapshot(
+                _object_ref_from_payload(manifest["state"]),
+                object_store=object_store,
+                root=state_root,
+            )
+            workspace_root = await _restore_workspace(
+                manifest.get("workspace"),
+                object_store=object_store,
+                target=staging / "workspace",
+                limits=limits,
+            )
+            snapshot_payload = canonical_json_bytes(
+                cast(dict[str, JsonValue], manifest)
+            )
+            (staging / "snapshot.json").write_bytes(snapshot_payload)
+            generation_root = root / "generations" / generation
+            generation_root.parent.mkdir(parents=True, exist_ok=True)
+            staging.rename(generation_root)
+
+            publish_lock = root / ".runtime-snapshot-locks" / "publish.lock"
+            async with FilesystemMutationLock(publish_lock):
                 latest = _read_current(current_file)
+                if replace_policy == "missing" and latest is not None:
+                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                if replace_policy == "same" and latest is not None:
+                    if latest.get("snapshot_digest") != ref.digest:
+                        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
                 if replace_policy == "replace":
                     if latest is None or latest.get("generation") != expected_generation:
                         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                generation_root = root / "generations" / generation
-                if generation_root.exists():
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                staging = root / ".staging" / generation
-                staging.mkdir(parents=True, exist_ok=False)
-                (staging / ".runtime-snapshot-staging").write_text(
-                    generation,
-                    encoding="utf-8",
-                )
-                state_root = staging / "state"
-                await RuntimeState.restore_snapshot(
-                    _object_ref_from_payload(manifest["state"]),
-                    object_store=object_store,
-                    root=state_root,
-                )
-                workspace_root = await _restore_workspace(
-                    manifest.get("workspace"),
-                    object_store=object_store,
-                    target=staging / "workspace",
-                    limits=limits,
-                )
-                snapshot_payload = canonical_json_bytes(
-                    cast(dict[str, JsonValue], manifest)
-                )
-                (staging / "snapshot.json").write_bytes(snapshot_payload)
-                generation_root.parent.mkdir(parents=True, exist_ok=True)
-                staging.rename(generation_root)
                 value = {
                     "snapshot_digest": ref.digest,
                     "generation": generation,
@@ -358,12 +355,12 @@ class RuntimeSnapshot:
                 }
                 _write_current(current_file, value)
                 return _restored_runtime(root, value)
-            finally:
-                await asyncio.to_thread(lock.release)
 
-        if exclusive is None:
+        if replace_policy != "replace":
             return await restore_generation()
-        async with cast("object", exclusive):
+        if exclusive is None:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        async with exclusive.offline_exclusivity():
             return await restore_generation()
 
     @classmethod
@@ -435,7 +432,7 @@ class RuntimeSnapshot:
                 continue
             if not generation:
                 continue
-            lock = FileLock(str(locks / f"{generation}.lock"))
+            lock = FileLock(str(locks / f"{generation}.lock"), thread_local=False)
             try:
                 await asyncio.to_thread(lock.acquire, timeout=0)
             except Timeout:
