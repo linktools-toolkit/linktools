@@ -4,6 +4,7 @@
 
 import os
 from argparse import Namespace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich import get_console
@@ -55,12 +56,9 @@ class Command(BaseCommand):
         return 0
 
 
-def _path_state(path: object) -> str:
-    from pathlib import Path
-
-    value = Path(path)
-    state = "exists" if value.exists() else "missing"
-    return f"{value} [{state}]"
+def _path_state(path: Path) -> str:
+    state = "exists" if path.exists() else "missing"
+    return f"{path} [{state}]"
 
 
 def _configured(name: str) -> str:

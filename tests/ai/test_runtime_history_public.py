@@ -159,13 +159,17 @@ class _Sessions:
             ),
         )
 
-    async def list(
+    async def list_page(
         self,
         *,
         tenant_id: str,
-        owner_principal_id: str | None = None,
-    ) -> tuple[object, ...]:
-        return tuple(
+        owner_principal_id: str | None,
+        cursor: str | None,
+        limit: int,
+        snapshot: int | None = None,
+    ) -> tuple[int, Page[object]]:
+        del limit
+        values = tuple(
             record
             for record in self.records
             if record.tenant_id == tenant_id
@@ -173,6 +177,13 @@ class _Sessions:
                 owner_principal_id is None
                 or record.owner_principal_id == owner_principal_id
             )
+        )
+        start = 0 if cursor is None else int(cursor)
+        end = min(len(values), start + 1)
+        next_cursor = None if end == len(values) else str(end)
+        return (
+            1 if snapshot is None else snapshot,
+            Page(values[start:end], next_cursor),
         )
 
     async def get_header(

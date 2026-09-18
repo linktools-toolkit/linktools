@@ -214,34 +214,45 @@ class RuntimeHistory:
     ) -> tuple[SessionInfo, ...]:
         validate_page_limit(limit)
         sessions, authorization = self._require_session_reader()
-        records = await sessions.list(
-            tenant_id=principal.tenant_id,
-            owner_principal_id=principal.principal_id,
-        )
-        allowed: list[SessionInfo] = []
-        for record in records:
-            resource = ResourceRef(
-                ResourceKind.SESSION,
-                record.session_id,
-                record.tenant_id,
-                record.owner_principal_id,
+        recent: list[tuple[datetime, str, SessionInfo]] = []
+        cursor: str | None = None
+        snapshot: int | None = None
+        while True:
+            snapshot, page = await sessions.list_page(
+                tenant_id=principal.tenant_id,
+                owner_principal_id=principal.principal_id,
+                cursor=cursor,
+                limit=1000,
+                snapshot=snapshot,
             )
-            try:
-                await authorization.authorize(
-                    principal,
-                    AuthorizationAction.SESSION_READ,
-                    resource,
+            for record in page.items:
+                resource = ResourceRef(
+                    ResourceKind.SESSION,
+                    record.session_id,
+                    record.tenant_id,
+                    record.owner_principal_id,
                 )
-            except AIError as error:
-                if error.code is ErrorCode.AUTHORIZATION_DENIED:
-                    continue
-                raise
-            allowed.append(_project_session_info(record))
-        allowed.sort(
-            key=lambda value: (value.updated_at, value.session_id),
-            reverse=True,
-        )
-        return tuple(allowed[:limit])
+                try:
+                    await authorization.authorize(
+                        principal,
+                        AuthorizationAction.SESSION_READ,
+                        resource,
+                    )
+                except AIError as error:
+                    if error.code is ErrorCode.AUTHORIZATION_DENIED:
+                        continue
+                    raise
+                info = _project_session_info(record)
+                entry = (record.updated_at, record.session_id, info)
+                if len(recent) < limit:
+                    heapq.heappush(recent, entry)
+                elif entry[:2] > recent[0][:2]:
+                    heapq.heapreplace(recent, entry)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        recent.sort(key=lambda value: (value[0], value[1]), reverse=True)
+        return tuple(value[2] for value in recent)
 
     async def inspect_session(
         self,
