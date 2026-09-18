@@ -57,6 +57,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
+    TaskBindingSnapshot,
     TaskExpanderRef,
     TaskGraph,
     TaskGraphAdmission,
@@ -197,6 +198,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("loaded_model_context", LoadedModelContext),
     ("runtime_payload_ref", RuntimePayloadRef),
     ("stored_user_input", StoredUserInput),
+    ("task_binding_snapshot", TaskBindingSnapshot),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
     ("transcript_message_ref", TranscriptMessageRef),
