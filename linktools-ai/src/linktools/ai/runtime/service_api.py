@@ -144,45 +144,54 @@ class ExecutionHandle:
 
 class _ExecutionViewSource(Protocol):
     execution_id: str
-    binding_kind: str
     agent_id: str | None
-    task_type: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
     session_id: str | None
+    binding_kind: str
+    task_type: str | None
+    task_attempt: int
+    task_deadline_at: datetime | None
+    task_next_attempt_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
-    binding_kind: str
     agent_id: str | None
-    task_type: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
     session_id: str | None = None
+    binding_kind: str = "agent"
+    task_type: str | None = None
+    task_attempt: int = 0
+    task_deadline_at: datetime | None = None
+    task_next_attempt_at: datetime | None = None
 
 
 def project_execution_view(source: object) -> ExecutionView:
     """Project an internal execution source into the stable public view."""
     value = cast(_ExecutionViewSource, source)
     return ExecutionView(
-        value.execution_id,
-        value.binding_kind,
-        value.agent_id,
-        value.task_type,
-        value.status,
-        value.lineage_kind,
-        value.parent_execution_id,
-        value.root_execution_id,
-        value.parent_invocation_id,
-        value.session_id,
+        execution_id=value.execution_id,
+        agent_id=value.agent_id,
+        status=value.status,
+        lineage_kind=value.lineage_kind,
+        parent_execution_id=value.parent_execution_id,
+        root_execution_id=value.root_execution_id,
+        parent_invocation_id=value.parent_invocation_id,
+        session_id=value.session_id,
+        binding_kind=value.binding_kind,
+        task_type=value.task_type,
+        task_attempt=value.task_attempt,
+        task_deadline_at=value.task_deadline_at,
+        task_next_attempt_at=value.task_next_attempt_at,
     )
 
 
