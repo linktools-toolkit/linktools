@@ -18,6 +18,7 @@ from ._skill_source import (
     SkillLocation,
     SkillResourceSource,
     SkillResourceView,
+    SnapshotSkillResourceSource,
     SkillSourceRef,
     SkillSourceRegistry,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "SkillLocation",
     "SkillResourceSource",
     "SkillResourceView",
+    "SnapshotSkillResourceSource",
     "SkillSourceRef",
     "SkillSourceRegistry",
     "SubagentDelegate",
