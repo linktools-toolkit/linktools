@@ -54,6 +54,7 @@ from ..task import (
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
+    TaskGraphRunEvent,
     TaskGraphService,
     TaskNode,
     TaskExpanderRef,
@@ -146,6 +147,7 @@ class _ExecutionTreeStreamer(Protocol):
         *,
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -320,6 +322,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if self._tree_streamer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -327,6 +330,7 @@ class Runtime(Generic[AppT]):
             execution_id,
             principal=principal,
             after_sequences=after_sequences,
+            include_content=include_content,
         )
 
     @property
@@ -770,6 +774,7 @@ class Runtime(Generic[AppT]):
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
         correlation: "Mapping[str, object] | None" = None,
+        observer: "Callable[[TaskGraphRunEvent], object] | None" = None,
     ) -> TaskGraphResult:
         run = await self.start_graph(
             graph,
@@ -778,7 +783,10 @@ class Runtime(Generic[AppT]):
             limits=limits,
             correlation=correlation,
         )
-        return await run.wait(timeout_seconds=timeout_seconds)
+        return await run.wait(
+            timeout_seconds=timeout_seconds,
+            observer=observer,
+        )
 
     async def read_task_result(
         self,
