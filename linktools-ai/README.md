@@ -7,7 +7,7 @@ namespace
     + ModelRegistry
     + RuntimeState
     + CapabilityGroup(s)
-        -> optional Workspace via CapabilityGroup.from_workspace(...)
+        -> optional Workspace via CapabilityGroup(..., workspace=...)
         -> Runtime.open(...)
         -> frozen capability/declaration candidates
         -> AgentCompiler
@@ -20,7 +20,7 @@ namespace
 The main ownership rules are:
 
 - `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
-- `Workspace` owns workspace identity, paths, policy, and sandbox configuration when installed through `CapabilityGroup.from_workspace()`.
+- `Workspace` owns workspace identity, paths, policy, and sandbox configuration when installed through `CapabilityGroup(..., workspace=...)`.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one immutable `AssetStore` snapshot.
 - `AgentSpec` is a runtime-independent Agent declaration.
@@ -62,7 +62,7 @@ async with Runtime.open(
     workspace.workspace_id,
     models=models,
     state=state,
-    capabilities=(CapabilityGroup.from_workspace(workspace),),
+    capabilities=(CapabilityGroup("workspace", workspace=workspace),),
 ) as runtime:
     result = await runtime.agent("default").run(
         "review this change",
@@ -99,7 +99,7 @@ async with Runtime.open(
     workspace.workspace_id,
     models=models,
     state=state,
-    capabilities=(CapabilityGroup.from_workspace(workspace), application),
+    capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
 ) as runtime:
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
@@ -119,7 +119,7 @@ these declarations instead of inferring behavior from Tool names.
 
 ## 3. Workspace declarations
 
-Workspace behavior is opt-in. Install it with `CapabilityGroup.from_workspace(workspace)`; construction is side-effect free, and declaration discovery happens when the Runtime freezes the group. The default Workspace source loads these declaration kinds:
+Workspace behavior is opt-in. Install it with `CapabilityGroup("workspace", workspace=workspace)`; construction is side-effect free, and declaration discovery happens when the Runtime freezes the group. The default Workspace source loads these declaration kinds:
 
 ```text
 .linktools/
@@ -132,7 +132,7 @@ Workspace behavior is opt-in. Install it with `CapabilityGroup.from_workspace(wo
 For a filesystem Workspace, use the dedicated constructor:
 
 ```python
-workspace_group = CapabilityGroup.from_workspace(workspace)
+workspace_group = CapabilityGroup("workspace", workspace=workspace)
 
 async with Runtime.open(
     workspace.workspace_id,
@@ -143,7 +143,7 @@ async with Runtime.open(
     ...
 ```
 
-For caller-owned declaration storage independent of a Workspace, `CapabilityGroup.from_store()` performs discovery over one borrowed immutable `AssetStore` snapshot.
+For caller-owned declaration storage independent of a Workspace, `CapabilityGroup(..., assets=...)` performs discovery over one borrowed immutable `AssetStore` snapshot.
 
 A store-backed group reads metadata, batch-loads the corresponding bytes, verifies content identity, runs its loaders, and verifies that the store revision did not change during the freeze. Conflicting identities or layouts fail closed.
 
