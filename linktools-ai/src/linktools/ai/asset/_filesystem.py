@@ -524,7 +524,11 @@ class FilesystemAssetBackend:
             self._set_empty_state()
             return
         if not self._head_path.is_file():
-            if any(self._entries_path.rglob("*.json")) or any(self._history_path.rglob("*.json")):
+            if (
+                any(self._entries_path.rglob("*.json"))
+                or any(self._history_path.rglob("*.json"))
+                or any(self._receipts_path.rglob("*.json"))
+            ):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             if _read_generation(self._generation_path) != 0:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -809,6 +813,12 @@ class FilesystemAssetBackend:
 
     def _write_receipt(self, digest: str) -> None:
         payload = self._receipts[digest]
+        if not self._head_path.is_file():
+            write_json_atomic(
+                self._head_path,
+                {"store_revision": self._revision},
+                fsync=True,
+            )
         path = self._receipt_file(digest)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json_atomic(path, payload, fsync=True)
