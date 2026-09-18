@@ -429,15 +429,21 @@ def _attachment_summary(messages: Sequence[Mapping[object, object]]) -> str:
             media_types.append(media_type)
         total_bytes += size
     category_text = ", ".join(
-        f"{count} {category}" for category, count in sorted(categories.items())
+        _counted_label(count, category)
+        for category, count in sorted(categories.items())
     )
     type_text = ", ".join(media_types[:4])
     if len(media_types) > 4:
         type_text += ", …"
     return (
-        f"{len(attachments)} attachment(s) · {category_text} · "
+        f"{_counted_label(len(attachments), 'attachment')} · {category_text} · "
         f"{_format_bytes(total_bytes)} · {type_text}"
     )
+
+
+def _counted_label(count: int, label: str) -> str:
+    suffix = "" if count == 1 else "s"
+    return f"{count} {label}{suffix}"
 
 
 def _message_parts(message: Mapping[object, object]) -> tuple[Mapping[object, object], ...]:

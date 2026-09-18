@@ -362,9 +362,11 @@ async def test_history_detail_streams_pages_without_trace(
     assert "hello" in output
     assert "Prompt Architecture" in output
     assert "System Prompt" in output
+    assert "~18 chars" in output
     assert "Fixed Instructions (F0/F1)" in output
     assert "Dynamic Instructions (O)" in output
     assert "Conversation Context" in output
+    assert "system-prompt=1" not in output
     assert "Input Attachments" in output
     assert "1 attachment" in output
     assert "1 image" in output
