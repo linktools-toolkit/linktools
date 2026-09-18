@@ -68,7 +68,12 @@ class TaskNodeRunControl(Protocol):
 
     async def bind_execution(self, execution_id: str) -> None: ...
 
-    async def handoff_execution(self, execution_id: str) -> None: ...
+    async def handoff_execution(
+        self,
+        execution_id: str,
+        *,
+        occupies_concurrency: bool = True,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
