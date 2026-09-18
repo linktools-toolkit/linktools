@@ -755,6 +755,50 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         return next_value
 
+    async def transition_task_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_status: ExecutionStatus,
+        next_status: ExecutionStatus,
+        task_attempt: int,
+        task_deadline_at: datetime | None,
+        task_next_attempt_at: datetime | None,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
+        event_type: str,
+        payload: Mapping[str, JsonValue],
+        occurred_at: datetime,
+    ) -> ExecutionRecord:
+        if (
+            isinstance(task_attempt, bool)
+            or not isinstance(task_attempt, int)
+            or task_attempt < 0
+            or occurred_at.tzinfo is None
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return await self._transition_execution(
+            execution_id,
+            tenant_id=tenant_id,
+            expected_revision=expected_revision,
+            expected_event_sequence=expected_event_sequence,
+            expected_status=expected_status,
+            next_status=next_status,
+            event_type=event_type,
+            payload=payload,
+            updated_at=occurred_at,
+            task_state=(
+                task_attempt,
+                task_deadline_at,
+                task_next_attempt_at,
+                error_code,
+                safe_error_details,
+            ),
+        )
+
     async def mark_start_unknown(
         self, commit: ExecutionStartUnknownCommit
     ) -> ExecutionRecord:
@@ -846,6 +890,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         payload: Mapping[str, object],
         updated_at: datetime,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        task_state: "tuple[int, datetime | None, datetime | None, str | None, Mapping[str, object]] | None" = None,
         transaction: StateTransaction | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
@@ -876,12 +921,31 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             event_count = len(pending_events) + 1
+            task_updates: dict[str, object] = {}
+            if task_state is not None:
+                if not isinstance(stored_value.binding, TaskBindingSnapshot):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                (
+                    task_attempt,
+                    task_deadline_at,
+                    task_next_attempt_at,
+                    error_code,
+                    safe_error_details,
+                ) = task_state
+                task_updates = {
+                    "task_attempt": task_attempt,
+                    "task_deadline_at": task_deadline_at,
+                    "task_next_attempt_at": task_next_attempt_at,
+                    "error_code": error_code,
+                    "safe_error_details": dict(safe_error_details),
+                }
             next_value = replace(
                 stored_value,
                 status=next_status,
                 revision=stored_value.revision + event_count,
                 event_sequence=stored_value.event_sequence + event_count,
                 updated_at=updated_at,
+                **task_updates,
             )
             candidate = _projected_record(self, stored, next_value)
             await _replace_checked(transaction, candidate, stored.storage_version)
