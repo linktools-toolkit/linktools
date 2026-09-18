@@ -154,15 +154,6 @@ class TaskFunction(Generic[AppT]):
         repr=False,
         compare=False,
     )
-    effect: str = "none"
-    output: object | None = field(default=None, repr=False, compare=False)
-    reconcile: (
-        "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
-    ) = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
     def __post_init__(self) -> None:
         if (
             not isinstance(self.type, str)
@@ -178,10 +169,6 @@ class TaskFunction(Generic[AppT]):
             raise ValueError("task handler version must be positive")
         if not callable(self.function):
             raise TypeError("task handler function must be callable")
-        if self.effect not in {"none", "replay_safe", "non_replay_safe"}:
-            raise ValueError("task effect is invalid")
-        if self.reconcile is not None and not callable(self.reconcile):
-            raise TypeError("task reconcile must be callable")
 
     def normalize(
         self,
@@ -230,8 +217,6 @@ class TaskFunction(Generic[AppT]):
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
-            output_schema=self.output,
-            effect=self.effect,
         )
 
 
