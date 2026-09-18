@@ -11,9 +11,9 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import (
+    CapabilityGroup,
     ToolCallRetry,
     workspace_capabilities,
-    workspace_tool_contributions,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (
@@ -21,6 +21,16 @@ from linktools.ai.runtime._tool_boundary import (
     RuntimeToolBoundaryToolset,
 )
 from linktools.ai.workspace import Workspace
+
+
+def __workspace_tool_contributions(workspace: Workspace):
+    return tuple(
+        CapabilityGroup.from_workspace(
+            workspace,
+            discover_assets=False,
+        )._contributions
+    )
+
 
 
 class _AttachmentSession:
@@ -109,7 +119,7 @@ async def _boundary(
 
 
 def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> None:
-    contributions = workspace_tool_contributions(
+    contributions = _workspace_tool_contributions(
         Workspace.load(tmp_path, workspace_id="workspace")
     )
     tool = next(item.value for item in contributions if item.id == "attach_files")

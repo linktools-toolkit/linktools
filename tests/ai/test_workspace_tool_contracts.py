@@ -7,12 +7,22 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import (
+    CapabilityGroup,
     ToolCallRetry,
     workspace_capabilities,
-    workspace_tool_contributions,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalSandbox, Workspace
+
+
+def __workspace_tool_contributions(workspace: Workspace):
+    return tuple(
+        CapabilityGroup.from_workspace(
+            workspace,
+            discover_assets=False,
+        )._contributions
+    )
+
 from linktools.ai.workspace._sandbox_protocol import (
     MAX_FRAME_BYTES,
     encode_frame,
@@ -26,7 +36,7 @@ def _golden_contract() -> dict[str, object]:
 
 
 def test_workspace_tool_semantics_match_frozen_golden(tmp_path: Path) -> None:
-    contributions = workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))
+    contributions = _workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))
     actual = {item.id: item.semantic_contract for item in contributions}
     assert actual == _golden_contract()
 
