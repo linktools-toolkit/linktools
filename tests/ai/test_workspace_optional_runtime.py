@@ -76,7 +76,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.from_root(state_root),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         await runtime.agent("default").create_session(
             "cwd-session",
