@@ -12,6 +12,7 @@ from linktools.ai.asset import (
     AssetRoot,
     AssetStore,
     DirectoryAssetBackend,
+    FilesystemAssetBackend,
     InMemoryAssetBackend,
     SqlAssetBackend,
     StrictConfigReader,
@@ -237,14 +238,86 @@ async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) 
         tables = metadata.tables
         backend = SqlAssetBackend(engine, namespace="test")
         assert backend.root.scheme == "sql"
-        assert tuple(table.name for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_asset_heads"])) == (
+        assert tuple(
+            table.name
+            for table in (
+                tables["ai_asset_entries"],
+                tables["ai_asset_changes"],
+                tables["ai_asset_batch_receipts"],
+                tables["ai_asset_heads"],
+            )
+        ) == (
             "ai_asset_entries",
             "ai_asset_changes",
+            "ai_asset_batch_receipts",
             "ai_asset_heads",
         )
     finally:
         await engine.dispose()
 
+
+
+@pytest.mark.asyncio
+async def test_filesystem_asset_batch_receipt_survives_reopen(tmp_path: Path) -> None:
+    root = tmp_path / "asset-receipts"
+    key = AssetKey("prompt", "one")
+    changes = (
+        StorageChange(StorageOperation.PUT, key, b"one", None),
+    )
+
+    first_backend = FilesystemAssetBackend(root)
+    first = AssetStore(StorageOverlay(first_backend, writer=first_backend))
+    await first.initialize()
+    result = await first.apply_batch(changes, idempotency_key="batch-one")
+    await first.close()
+
+    second_backend = FilesystemAssetBackend(root)
+    second = AssetStore(StorageOverlay(second_backend, writer=second_backend))
+    await second.initialize()
+    try:
+        assert await second.batch_result("batch-one") == result
+        assert await second.apply_batch(
+            changes,
+            idempotency_key="batch-one",
+        ) == result
+        await second.put(key, b"two")
+        assert await second.batch_result("batch-one") == result
+    finally:
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_asset_batch_receipt_survives_reopen(tmp_path: Path) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset-receipts.db'}")
+    key = AssetKey("prompt", "one")
+    changes = (
+        StorageChange(StorageOperation.PUT, key, b"one", None),
+    )
+    try:
+        await provision_asset_database(engine)
+        first_backend = SqlAssetBackend(engine, namespace="receipts")
+        first = AssetStore(StorageOverlay(first_backend, writer=first_backend))
+        await first.initialize()
+        result = await first.apply_batch(changes, idempotency_key="batch-one")
+        await first.close()
+
+        second_backend = SqlAssetBackend(engine, namespace="receipts")
+        second = AssetStore(StorageOverlay(second_backend, writer=second_backend))
+        await second.initialize()
+        try:
+            assert await second.batch_result("batch-one") == result
+            assert await second.apply_batch(
+                changes,
+                idempotency_key="batch-one",
+            ) == result
+            await second.put(key, b"two")
+            assert await second.batch_result("batch-one") == result
+        finally:
+            await second.close()
+    finally:
+        await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_sql_asset_namespace_matches_the_persisted_column_limit() -> None:
@@ -358,7 +431,12 @@ async def test_sql_asset_backend_provisions_its_owner_schema(tmp_path: Path) -> 
         await backend.initialize()
         async with engine.connect() as connection:
             tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
-        assert {"ai_asset_entries", "ai_asset_changes", "ai_asset_heads"} <= set(tables)
+        assert {
+            "ai_asset_entries",
+            "ai_asset_changes",
+            "ai_asset_batch_receipts",
+            "ai_asset_heads",
+        } <= set(tables)
     finally:
         await engine.dispose()
 
