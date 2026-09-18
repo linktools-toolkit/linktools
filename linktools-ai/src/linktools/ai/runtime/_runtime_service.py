@@ -925,13 +925,7 @@ class Runtime(Generic[AppT]):
             "",
             principal,
             self._watch_execution_tree,
-            lambda timeout_seconds: self._wait_task_execution(
-                graph_id,
-                node_id,
-                execution_id,
-                principal,
-                timeout_seconds,
-            ),
+            None,
             lambda idempotency_key, force: self._cancel_task_execution(
                 graph_id,
                 node_id,
@@ -977,59 +971,6 @@ class Runtime(Generic[AppT]):
             node.status is TaskStatus.CANCELLED,
         )
 
-    async def _wait_task_execution(
-        self,
-        graph_id: str,
-        node_id: str,
-        execution_id: str,
-        principal: Principal,
-        timeout_seconds: float | None,
-    ) -> "ExecutionResult":
-        result = await self.graph.wait(
-            graph_id,
-            principal=principal,
-            timeout_seconds=timeout_seconds,
-        )
-        node = next(
-            (value for value in result.node_results if value.node_id == node_id),
-            None,
-        )
-        if node is None or node.execution_id != execution_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if node.status is TaskStatus.SUCCEEDED:
-            output = await self.read_task_result(
-                graph_id,
-                node_id,
-                principal=principal,
-            )
-            return ExecutionResult(
-                execution_id,
-                ExecutionStatus.SUCCEEDED,
-                output,
-                node.result_digest,
-                UsageMetrics(),
-            )
-        if node.status is TaskStatus.CANCELLED:
-            return ExecutionResult(
-                execution_id,
-                ExecutionStatus.CANCELLED,
-                None,
-                None,
-                UsageMetrics(),
-                ErrorCode.EXECUTION_CANCELLED.value,
-            )
-        if node.status is TaskStatus.WAITING:
-            raise AIError(ErrorCode.TASK_NOT_READY)
-        if node.status is TaskStatus.RECOVERY_REQUIRED:
-            raise AIError(ErrorCode.TASK_EFFECT_UNKNOWN)
-        return ExecutionResult(
-            execution_id,
-            ExecutionStatus.FAILED,
-            None,
-            None,
-            UsageMetrics(),
-            node.error_code or ErrorCode.TASK_NODE_FAILED.value,
-        )
 
     async def _admit_graph(
         self,
