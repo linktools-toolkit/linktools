@@ -15,9 +15,9 @@ from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
 )
-from linktools.ai.runtime.state._repositories import (
-    _domain_data,
+from linktools.ai.runtime.state._repository_common import (
     _restore_lease_fields,
+    domain_data as _domain_data,
 )
 from linktools.ai.storage import StoredPayload
 
