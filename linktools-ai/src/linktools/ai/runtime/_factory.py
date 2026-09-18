@@ -159,6 +159,14 @@ async def compose_runtime_components(
         if "default" not in agents:
             agents["default"] = AgentSpec("default")
         resolver = models.snapshot()
+        workspace_ref = (
+            None
+            if workspace is not None
+            and workspace.workspace_id == resolved_namespace
+            else {
+                "id": None if workspace is None else workspace.workspace_id
+            }
+        )
         compiler = AgentCompiler(
             model_resolver=resolver,
             candidates=tuple(
@@ -167,6 +175,8 @@ async def compose_runtime_components(
                 if candidate.kind not in {"agent", "task", "task_expander"}
             ),
             agents=agents,
+            namespace=resolved_namespace,
+            workspace_ref=workspace_ref,
         )
         catalog = AgentCatalog(
             {
@@ -741,6 +751,8 @@ async def _restore_recovery_bindings(
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
                     raise
                 if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                    if error.safe_details.get("reason") == "workspace_mismatch":
+                        raise
                     _logger.warning(
                         "recovery binding unavailable: execution=%s",
                         checkpoint.execution_id,

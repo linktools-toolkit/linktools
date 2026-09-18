@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """Immutable output-independent Agent semantics."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from ..capability import CapabilityContribution, SkillDefinition
+from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import AgentSpec, MCPServerSpec
@@ -28,6 +30,7 @@ class AgentDefinition:
     selected_subagents: "tuple[str, ...]"
     ordinary_tool_policy: "tuple[str, ...]"
     mcp_selector_policy: "tuple[str, ...]"
+    workspace_ref: "Mapping[str, JsonValue] | None" = None
 
     def __post_init__(self) -> None:
         if not _is_digest(self.digest) or not isinstance(self.spec, AgentSpec):
@@ -53,6 +56,18 @@ class AgentDefinition:
                 previous = value.id
         if tuple(sorted(set(self.selected_subagents))) != self.selected_subagents:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.workspace_ref is not None:
+            try:
+                workspace_ref = ImmutableJsonMapping(self.workspace_ref)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+            workspace_id = workspace_ref.get("id")
+            if "id" not in workspace_ref or (
+                workspace_id is not None
+                and (not isinstance(workspace_id, str) or not workspace_id.strip())
+            ):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            object.__setattr__(self, "workspace_ref", workspace_ref)
 
     @property
     def skill_definitions(self) -> "tuple[SkillDefinition, ...]":

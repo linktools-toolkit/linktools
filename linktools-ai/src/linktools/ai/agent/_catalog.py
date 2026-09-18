@@ -93,6 +93,7 @@ def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
         and left.selected_subagents == right.selected_subagents
         and left.ordinary_tool_policy == right.ordinary_tool_policy
         and left.mcp_selector_policy == right.mcp_selector_policy
+        and left.workspace_ref == right.workspace_ref
     )
 
 
