@@ -196,6 +196,15 @@ class _TaskRepository(Protocol):
         node_id: "str | None" = None,
     ) -> object: ...
 
+    async def cancel_node(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> TaskGraphView: ...
+
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
 
 
@@ -504,10 +513,13 @@ class LocalTaskGraphLauncher:
         tenant_id = launch.principal.tenant_id
         key = (tenant_id, graph_id)
         async with self._lock:
-            active_run = self._graphs.get(key)
-        if active_run is not None and active_run.request != launch:
+            run = self._graphs.get(key)
+        if run is not None and run.request != launch:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
+        view = await self._repository.get_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         snapshot = await self._repository.snapshot_graph(
@@ -516,55 +528,40 @@ class LocalTaskGraphLauncher:
         )
         if snapshot is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        states = snapshot.node_states
-        static = {node.node_id: node for node in snapshot.nodes}
         cleanup_error: BaseException | None = None
-        for state in states:
-            if state.status is not TaskStatus.CANCELLED or state.fence < 1:
-                continue
-            node = static.get(state.node_id)
-            if node is None:
-                if cleanup_error is None:
-                    cleanup_error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                continue
+        if run is not None:
             try:
-                await self._runner.cancel(
-                    TaskNodeInvocation(
-                        node,
-                        graph_id,
-                        launch.principal,
-                        launch.correlation,
-                        await self._dependency_results(
-                            graph_id, node, tenant_id=tenant_id
-                        ),
-                        state.execution_id,
-                    )
-                )
+                await self._quiesce_persisted_nodes(run, snapshot)
             except asyncio.CancelledError:
                 raise
             except BaseException as error:  # noqa: BLE001
-                if cleanup_error is None:
-                    cleanup_error = error
+                cleanup_error = error
         async with self._lock:
-            run = self._graphs.pop(key, None)
-            if run is not None:
-                run.closed = True
-                task = run.task
+            current = self._graphs.pop(key, None)
+            if current is not None:
+                current.closed = True
+                task = current.task
             else:
                 task = None
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if run is not None:
-            await self._notify(run)
+        if current is not None:
+            await self._notify(current)
         if self._metric_projector is not None and view.status in _TERMINAL:
-            self._metric_projector.trigger(graph_id, tenant_id=tenant_id)
+            self._metric_projector.trigger(
+                graph_id,
+                tenant_id=tenant_id,
+            )
         if cleanup_error is not None:
             if isinstance(cleanup_error, AIError):
                 raise cleanup_error
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={"phase": "task_graph_cancel_cleanup", "graph_id": graph_id},
+                safe_details={
+                    "phase": "task_graph_cancel_cleanup",
+                    "graph_id": graph_id,
+                },
             ) from cleanup_error
         return view
 
