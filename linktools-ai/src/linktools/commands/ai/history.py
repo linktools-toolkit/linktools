@@ -455,7 +455,10 @@ def _collect_binary_media_types(
         for item in value:
             _collect_binary_media_types(item, result)
 
-def _message_parts(message: Mapping[object, object]) -> tuple[Mapping[object, object], ...]:
+
+def _message_parts(
+    message: Mapping[object, object],
+) -> tuple[Mapping[object, object], ...]:
     parts = message.get("parts")
     if not isinstance(parts, list):
         return ()
@@ -465,52 +468,6 @@ def _message_parts(message: Mapping[object, object]) -> tuple[Mapping[object, ob
 def _part_kind(part: Mapping[object, object]) -> str:
     value = part.get("part_kind") or part.get("kind") or part.get("type")
     return str(value) if value else "other"
-
-
-def _collect_binary_attachments(
-    value: object,
-    result: list[tuple[str, int]],
-) -> None:
-    if isinstance(value, Mapping):
-        media_type = value.get("media_type")
-        size = value.get("size")
-        digest = value.get("digest")
-        if (
-            isinstance(media_type, str)
-            and media_type
-            and isinstance(size, int)
-            and not isinstance(size, bool)
-            and size >= 0
-            and isinstance(digest, str)
-            and len(digest) == 64
-            and all(character in "0123456789abcdef" for character in digest)
-        ):
-            result.append((media_type, size))
-            return
-        for item in value.values():
-            _collect_binary_attachments(item, result)
-        return
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        for item in value:
-            _collect_binary_attachments(item, result)
-
-
-def _attachment_category(media_type: str) -> str:
-    prefix = media_type.split("/", 1)[0].lower()
-    return {
-        "image": "image",
-        "audio": "audio",
-        "video": "video",
-    }.get(prefix, "file")
-
-
-def _format_bytes(value: int) -> str:
-    size = float(value)
-    for unit in ("B", "KiB", "MiB", "GiB"):
-        if size < 1024 or unit == "GiB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    raise AssertionError("unreachable")
 
 
 def _output_summary(parameters: Mapping[object, object]) -> str:
