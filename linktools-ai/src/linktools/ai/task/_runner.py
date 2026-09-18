@@ -10,7 +10,6 @@ from typing import Protocol, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
 from ._graph import TaskDependencyResult, TaskNode
 
 
@@ -18,7 +17,6 @@ from ._graph import TaskDependencyResult, TaskNode
 class TaskNodeRunResult:
     result_digest: str
     execution_id: "str | None" = None
-    result_payload: "StoredPayload | None" = None
     expanded_nodes: "tuple[TaskNode, ...]" = ()
     deferred: bool = False
     retry_at: "datetime | None" = None
@@ -30,11 +28,6 @@ class TaskNodeRunResult:
             not isinstance(self.execution_id, str) or not self.execution_id.strip()
         ):
             raise ValueError("task node result execution id is invalid")
-        if (
-            self.result_payload is not None
-            and self.result_payload.digest != self.result_digest
-        ):
-            raise ValueError("task node result payload digest does not match result")
         expanded_nodes = tuple(self.expanded_nodes)
         if any(not isinstance(node, TaskNode) for node in expanded_nodes):
             raise TypeError("expanded task nodes are invalid")
