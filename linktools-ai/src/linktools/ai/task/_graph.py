@@ -594,7 +594,7 @@ class TaskResultRecord:
     graph_id: str
     node_id: str
     result_digest: str
-    payload: StoredPayload
+    execution_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -603,28 +603,20 @@ class TaskResultRecord:
             raise ValueError("task result node id is required")
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task result digest is invalid")
-        if not isinstance(self.payload, StoredPayload):
-            raise TypeError("task result payload is invalid")
-        if self.payload.digest != self.result_digest:
-            raise ValueError("task result payload digest does not match result")
+        if not isinstance(self.execution_id, str) or not self.execution_id.strip():
+            raise ValueError("task result execution id is required")
 
 
 @dataclass(frozen=True, slots=True)
 class TaskDependencyResult:
     result_digest: str
-    execution_id: "str | None" = None
-    result_payload: "StoredPayload | None" = None
+    execution_id: str
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task dependency result digest is invalid")
-        if self.result_payload is not None:
-            if not isinstance(self.result_payload, StoredPayload):
-                raise TypeError("task dependency result payload is invalid")
-            if self.result_payload.digest != self.result_digest:
-                raise ValueError(
-                    "task dependency result payload digest does not match result"
-                )
+        if not isinstance(self.execution_id, str) or not self.execution_id.strip():
+            raise ValueError("task dependency execution id is required")
 
 
 @dataclass(frozen=True, slots=True)
