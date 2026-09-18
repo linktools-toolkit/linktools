@@ -7,6 +7,7 @@ dependencies:
   - pydantic-ai-slim[mcp,openai]>=2.40.0,<3.0.0
   - pydantic-ai-harness>=0.29.0
   - PyYAML>=6.0,<7.0
+  - rich>=13.0.0,<15.0.0
 
 dev-dependencies:
   - linktools

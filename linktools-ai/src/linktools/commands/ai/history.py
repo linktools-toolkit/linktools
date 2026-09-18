@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""\`lt ai history\`: inspect persisted local Runtime execution history."""
+"""`lt ai history`: inspect persisted local Runtime execution history."""
 
 import json
 from argparse import Namespace
@@ -17,6 +17,7 @@ from linktools.ai.core import Principal, UsageMetrics, service_principal
 from linktools.ai.runtime import (
     ExecutionInfo,
     ModelInteractionItem,
+    Page,
     RuntimeHistory,
 )
 from linktools.cli import BaseCommand
@@ -232,14 +233,14 @@ async def _emit_model_interactions(
     history: RuntimeHistory,
     principal: Principal,
     execution_id: str,
-    first_page: object,
+    first_page: Page[ModelInteractionItem],
 ) -> None:
     console = get_console()
     page = first_page
     first = True
     emitted = False
     while True:
-        items = getattr(page, "items")
+        items = page.items
         if items:
             table = Table(
                 title="Model Requests" if first else None,
@@ -266,7 +267,7 @@ async def _emit_model_interactions(
             console.print(table)
             emitted = True
             first = False
-        cursor = getattr(page, "next_cursor")
+        cursor = page.next_cursor
         if cursor is None:
             break
         page = await history.model_interactions(

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""\`lt ai metrics\`: inspect local Runtime metrics."""
+"""`lt ai metrics`: inspect local Runtime metrics."""
 
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
