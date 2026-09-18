@@ -965,6 +965,14 @@ class DefaultExecutionService:
 
             if session.agent_id != session_agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            if session.cwd is not None and (
+                self._input_materializer is None
+                or self._input_materializer.access is None
+            ):
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={"field": "cwd", "reason": "workspace_required"},
+                )
             conversation_run_id = (
                 None
                 if session.continuation is None

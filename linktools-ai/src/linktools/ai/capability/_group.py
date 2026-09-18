@@ -51,6 +51,7 @@ from ._tool_semantic import (
     tool_semantic_metadata,
     validate_tool_semantic_metadata,
 )
+from ._workspace import _workspace_tool_definitions
 
 AppT = TypeVar("AppT")
 
@@ -382,6 +383,10 @@ class CapabilityGroup(Generic[AppT]):
             raise TypeError("discover_assets must be bool")
         group = cls(group_id)
         group._workspace = workspace
+        group._contributions.extend(
+            CapabilityContribution.from_opaque("tool", tool.name, tool)
+            for tool in _workspace_tool_definitions(workspace)
+        )
         if discover_assets:
             group._owned_store_factory = lambda: _workspace_declaration_store(workspace)
             group._skill_source = LocalSkillResourceSource(

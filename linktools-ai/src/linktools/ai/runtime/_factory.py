@@ -19,7 +19,6 @@ from ..capability import (
     SkillSourceRegistry,
     TaskExpander,
     WorkspaceAccess,
-    workspace_tool_contributions,
 )
 from ..core import (
     HmacCursorSigner,
@@ -126,8 +125,6 @@ async def compose_runtime_components(
     ownership_transferred = False
     try:
         frozen: list[CapabilityContribution[object]] = []
-        if workspace is not None:
-            frozen.extend(workspace_tool_contributions(workspace))
         for group in groups:
             frozen.extend(await group.freeze())
         _validate_candidate_uniqueness(frozen)

@@ -27,7 +27,6 @@ from ..workspace import (
     normalize_workspace_path,
 )
 from ._context import AgentContext
-from ._group import CapabilityContribution
 from ._tool_signal import ToolCallRetry
 from ._tool_semantic import tool_effect_from_metadata, tool_semantic_metadata
 
@@ -785,16 +784,13 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         )
 
 
-def workspace_tool_contributions(
-    workspace: Workspace,
-) -> tuple[CapabilityContribution[object], ...]:
-    """Return the stable workspace tool definitions used by the compiler."""
+def _workspace_tool_definitions(workspace: Workspace) -> tuple[Tool[Any], ...]:
+    """Return stable Workspace tool definitions before execution materialization."""
     surface = _WorkspaceToolSurface(None, workspace.policy, PromptLimits())
-    result: list[CapabilityContribution[object]] = []
-    for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items():
-        tool = _workspace_tool(surface, name, metadata)
-        result.append(CapabilityContribution.from_opaque("tool", name, tool))
-    return tuple(result)
+    return tuple(
+        _workspace_tool(surface, name, metadata)
+        for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items()
+    )
 
 
 def workspace_capabilities(
@@ -884,5 +880,4 @@ def _workspace_tool_rejected(
 __all__ = [
     "WorkspaceAccess",
     "workspace_capabilities",
-    "workspace_tool_contributions",
 ]

@@ -55,7 +55,6 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     return Metrics.sqlite(path, namespace=workspace.workspace_id)
 
 
-@asynccontextmanager
 def _local_models(workspace: Workspace) -> ModelRegistry:
     configured = workspace.config.get("model")
     model = (
