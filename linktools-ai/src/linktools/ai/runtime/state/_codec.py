@@ -607,6 +607,7 @@ def _encode_v1_task_result(
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
         "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
         "execution_id": _encode_domain(value.execution_id, codec, persisted=persisted),
+        "payload": _encode_domain(value.payload, codec, persisted=persisted),
     }
 
 
@@ -617,7 +618,9 @@ def _decode_v1_task_result(
 ) -> TaskResultRecord:
     _require_contract_fields(
         raw_fields,
-        frozenset({"graph_id", "node_id", "result_digest", "execution_id"}),
+        frozenset(
+            {"graph_id", "node_id", "result_digest", "execution_id", "payload"}
+        ),
         persisted=persisted,
     )
     return TaskResultRecord(
@@ -631,6 +634,15 @@ def _decode_v1_task_result(
             str,
             _decode_domain(
                 raw_fields["execution_id"], str, codec, persisted=persisted
+            ),
+        ),
+        cast(
+            StoredPayload,
+            _decode_domain(
+                raw_fields["payload"],
+                StoredPayload,
+                codec,
+                persisted=persisted,
             ),
         ),
     )

@@ -2022,6 +2022,7 @@ class TaskRepositoryImpl(RepositoryBase):
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
+        result_payload: StoredPayload | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
@@ -2031,6 +2032,8 @@ class TaskRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         if not _is_sha256(result_digest):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if result_payload is None or result_payload.digest != result_digest:
+            raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
         if lease is None:
             if (
                 not isinstance(graph_id, str)
@@ -2100,6 +2103,7 @@ class TaskRepositoryImpl(RepositoryBase):
                     or current_result.node_id != target_node_id
                     or current_result.result_digest != node.result_digest
                     or current_result.execution_id != node.execution_id
+                    or current_result.payload.digest != node.result_digest
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if node.status in _TERMINAL_TASK_STATUSES:
@@ -2110,6 +2114,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 if node.result_digest != result_digest or (
                     execution_id is not None and node.execution_id != execution_id
                 ):
+                    raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+                if current_result is None or current_result.payload != result_payload:
                     raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
                 if expanded:
                     source = next(
@@ -2250,6 +2256,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 target_node_id,
                 result_digest,
                 resolved_execution_id,
+                result_payload,
             )
             if added:
                 await transaction.insert_records(
