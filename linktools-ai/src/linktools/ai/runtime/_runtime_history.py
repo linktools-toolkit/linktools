@@ -58,7 +58,9 @@ class ExecutionInfo:
     """Execution metadata required by local diagnostics."""
 
     execution_id: str
-    agent_id: str
+    binding_kind: str
+    agent_id: str | None
+    task_type: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
@@ -93,7 +95,9 @@ def _project_session_view(record: SessionRecord) -> SessionView:
 def _project_execution_info(record: ExecutionRecord) -> ExecutionInfo:
     return ExecutionInfo(
         execution_id=record.execution_id,
+        binding_kind=record.binding_kind,
         agent_id=record.agent_id,
+        task_type=record.task_type,
         status=record.status,
         lineage_kind=record.lineage_kind,
         parent_execution_id=record.parent_execution_id,
