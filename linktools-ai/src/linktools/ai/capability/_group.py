@@ -37,7 +37,7 @@ from ..spec import (
     ThinkingValue,
     parse_mcp_tool_selector,
 )
-from ..task import TaskExpanderRef, TaskNodeHandler
+from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
 from ..workspace import Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
@@ -80,6 +80,36 @@ _TOOL_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,127}$")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESERVED_TASK_TYPE_PREFIX = "linktools.ai."
 _RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
+
+
+@dataclass(frozen=True, slots=True)
+class _RegisteredTaskHandler(Generic[AppT]):
+    handler: TaskNodeHandler[AppT]
+    effect: Literal["none", "replay_safe", "non_replay_safe"]
+    output: object | None
+    reconcile: (
+        Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None
+    ) = field(default=None, repr=False, compare=False)
+
+    @property
+    def type(self) -> str:
+        return self.handler.type
+
+    @property
+    def version(self) -> int:
+        return self.handler.version
+
+    def normalize(
+        self,
+        input: Mapping[str, JsonValue],
+    ) -> Mapping[str, JsonValue]:
+        return self.handler.normalize(input)
+
+    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue:
+        return await self.handler.run(context)
+
+    async def cancel(self, context: TaskNodeContext[AppT]) -> None:
+        await self.handler.cancel(context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,16 +462,35 @@ class CapabilityGroup(Generic[AppT]):
         )
         return adapted
 
-    def task(self, handler: "TaskNodeHandler[AppT]") -> "TaskNodeHandler[AppT]":
+    def task(
+        self,
+        handler: "TaskNodeHandler[AppT]",
+        *,
+        effect: Literal["none", "replay_safe", "non_replay_safe"] = "non_replay_safe",
+        output: object | None = None,
+        reconcile: (
+            "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
+        ) = None,
+    ) -> "TaskNodeHandler[AppT]":
         """Register one application-owned TaskNode handler version."""
-        task_type, task_version = _task_identity(handler)
+        if effect not in {"none", "replay_safe", "non_replay_safe"}:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if reconcile is not None and not callable(reconcile):
+            raise TypeError("reconcile must be callable")
+        registered = _RegisteredTaskHandler(
+            handler,
+            effect,
+            output,
+            reconcile,
+        )
+        task_type, task_version = _task_identity(registered)
         identity = f"{task_type}@{task_version}"
         contract: dict[str, JsonValue] = {
             "version": 1,
             "task_type": task_type,
             "task_version": task_version,
-            "effect": _task_effect(handler),
-            "output": _task_output_contract(handler),
+            "effect": _task_effect(registered),
+            "output": _task_output_contract(registered),
         }
         if any(
             value.kind == "task" and value.id == identity
@@ -453,11 +502,11 @@ class CapabilityGroup(Generic[AppT]):
                 "task",
                 identity,
                 capability_fingerprint("task", identity, contract),
-                handler,
+                registered,
                 contract,
             )
         )
-        return handler
+        return registered
 
     def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
         """Register one pure application-owned TaskGraph expander version."""
