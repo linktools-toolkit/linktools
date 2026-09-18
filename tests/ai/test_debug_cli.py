@@ -369,8 +369,6 @@ async def test_history_detail_streams_pages_without_trace(
     assert "system-prompt=1" not in output
     assert "Input Attachments" in output
     assert "1 attachment" in output
-    assert "1 image" in output
-    assert "2.0 KiB" in output
     assert "image/png" in output
     assert "workspace" in output
     assert "duplicate instruction mirror" not in output

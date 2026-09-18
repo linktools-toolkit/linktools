@@ -411,40 +411,49 @@ def _conversation_summary(messages: Sequence[Mapping[object, object]]) -> str:
 
 
 def _attachment_summary(messages: Sequence[Mapping[object, object]]) -> str:
-    attachments: list[tuple[str, int]] = []
+    media_types: dict[str, int] = {}
     for message in messages:
         for part in _message_parts(message):
             if _part_kind(part) != "user-prompt":
                 continue
-            _collect_binary_attachments(part.get("content"), attachments)
-    if not attachments:
+            _collect_binary_media_types(part.get("content"), media_types)
+    count = sum(media_types.values())
+    if count == 0:
         return "0 attachments"
-    categories: dict[str, int] = {}
-    media_types: list[str] = []
-    total_bytes = 0
-    for media_type, size in attachments:
-        category = _attachment_category(media_type)
-        categories[category] = categories.get(category, 0) + 1
-        if media_type not in media_types:
-            media_types.append(media_type)
-        total_bytes += size
-    category_text = ", ".join(
-        _counted_label(count, category)
-        for category, count in sorted(categories.items())
+    details = ", ".join(
+        media_type if amount == 1 else f"{media_type} ×{amount}"
+        for media_type, amount in sorted(media_types.items())
     )
-    type_text = ", ".join(media_types[:4])
-    if len(media_types) > 4:
-        type_text += ", …"
-    return (
-        f"{_counted_label(len(attachments), 'attachment')} · {category_text} · "
-        f"{_format_bytes(total_bytes)} · {type_text}"
-    )
+    noun = "attachment" if count == 1 else "attachments"
+    return f"{count} {noun} · {details}"
 
 
-def _counted_label(count: int, label: str) -> str:
-    suffix = "" if count == 1 else "s"
-    return f"{count} {label}{suffix}"
-
+def _collect_binary_media_types(
+    value: object,
+    result: dict[str, int],
+) -> None:
+    if isinstance(value, Mapping):
+        media_type = value.get("media_type")
+        size = value.get("size")
+        digest = value.get("digest")
+        if (
+            isinstance(media_type, str)
+            and media_type
+            and isinstance(size, int)
+            and not isinstance(size, bool)
+            and size >= 0
+            and isinstance(digest, str)
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+        ):
+            result[media_type] = result.get(media_type, 0) + 1
+            return
+        for item in value.values():
+            _collect_binary_media_types(item, result)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            _collect_binary_media_types(item, result)
 
 def _message_parts(message: Mapping[object, object]) -> tuple[Mapping[object, object], ...]:
     parts = message.get("parts")
