@@ -15,7 +15,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import LocalSandbox, Workspace
 
 
-def __workspace_tool_contributions(workspace: Workspace):
+def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
         CapabilityGroup.from_workspace(
             workspace,

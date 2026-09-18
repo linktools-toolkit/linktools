@@ -34,7 +34,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 
-def __workspace_tool_contributions(workspace: Workspace):
+def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
         CapabilityGroup.from_workspace(
             workspace,

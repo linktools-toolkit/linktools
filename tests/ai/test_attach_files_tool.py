@@ -23,7 +23,7 @@ from linktools.ai.runtime._tool_boundary import (
 from linktools.ai.workspace import Workspace
 
 
-def __workspace_tool_contributions(workspace: Workspace):
+def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
         CapabilityGroup.from_workspace(
             workspace,
