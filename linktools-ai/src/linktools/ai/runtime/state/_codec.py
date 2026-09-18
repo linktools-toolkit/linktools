@@ -470,6 +470,12 @@ def _encode_v1_task_node_view(
         "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
         "error_code": _encode_domain(value.error_code, codec, persisted=persisted),
         "error_digest": _encode_domain(value.error_digest, codec, persisted=persisted),
+        "next_attempt_at": _encode_domain(
+            value.next_attempt_at, codec, persisted=persisted
+        ),
+        "occupies_concurrency": _encode_domain(
+            value.occupies_concurrency, codec, persisted=persisted
+        ),
     }
     if not persisted:
         fields.update(
@@ -502,6 +508,8 @@ def _decode_v1_task_node_view(
         "result_digest",
         "error_code",
         "error_digest",
+        "next_attempt_at",
+        "occupies_concurrency",
     }
     if not persisted:
         expected.update({"dependencies", "owner", "fence", "lease_expires_at"})
@@ -567,6 +575,23 @@ def _decode_v1_task_node_view(
                 raw_fields["execution_id"], str | None, codec, persisted=persisted
             ),
         ),
+        cast(
+            datetime | None,
+            _decode_domain(
+                raw_fields["next_attempt_at"],
+                datetime | None,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+        bool(
+            _decode_domain(
+                raw_fields["occupies_concurrency"],
+                bool,
+                codec,
+                persisted=persisted,
+            )
+        ),
     )
 
 
@@ -581,7 +606,7 @@ def _encode_v1_task_result(
         "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
         "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
-        "payload": _encode_domain(value.payload, codec, persisted=persisted),
+        "execution_id": _encode_domain(value.execution_id, codec, persisted=persisted),
     }
 
 
@@ -592,7 +617,7 @@ def _decode_v1_task_result(
 ) -> TaskResultRecord:
     _require_contract_fields(
         raw_fields,
-        frozenset({"graph_id", "node_id", "result_digest", "payload"}),
+        frozenset({"graph_id", "node_id", "result_digest", "execution_id"}),
         persisted=persisted,
     )
     return TaskResultRecord(
@@ -603,8 +628,10 @@ def _decode_v1_task_result(
             _decode_domain(raw_fields["result_digest"], str, codec, persisted=persisted),
         ),
         cast(
-            StoredPayload,
-            _decode_domain(raw_fields["payload"], StoredPayload, codec, persisted=persisted),
+            str,
+            _decode_domain(
+                raw_fields["execution_id"], str, codec, persisted=persisted
+            ),
         ),
     )
 
@@ -696,7 +723,7 @@ def _decode_v1_stored_user_input(
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
     )
-    if codec_name not in {"text", "user-content-v1"}:
+    if codec_name not in {"text", "user-content-v1", "task-input-v1"}:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     payload = _decode_domain(
         raw_fields["payload"], StoredPayload, codec, persisted=persisted
