@@ -151,7 +151,7 @@ async def test_runtime_closes_owned_workspace_assets_once(
         workspace.workspace_id,
         models=ModelRegistry.openai(model="gpt-test"),
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     )
 
     await components.close_callback()
@@ -191,7 +191,7 @@ async def test_runtime_open_failure_closes_owned_workspace_assets(
             workspace.workspace_id,
             models=ModelRegistry.openai(model="gpt-test"),
             state=RuntimeState.in_memory(),
-            capabilities=(CapabilityGroup.from_workspace(workspace),),
+            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         )
 
     assert closed == ["store", "backend"]
@@ -202,7 +202,7 @@ async def test_runtime_does_not_close_borrowed_workspace_store(tmp_path: Path) -
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
-    group = CapabilityGroup.from_store("workspace", store)
+    group = CapabilityGroup("workspace", assets=store)
     components = await compose_runtime_components(
         "workspace",
         models=ModelRegistry.openai(model="gpt-test"),
@@ -330,7 +330,7 @@ async def test_runtime_persists_model_usage_through_history_views(
         workspace.workspace_id,
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         result = await runtime.agent("default").run(
             "hello",
