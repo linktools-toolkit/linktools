@@ -35,7 +35,7 @@ from .service_api import (
 )
 
 if TYPE_CHECKING:
-    from ..task import TaskExpanderRef, TaskNode
+    from ..task import TaskExpanderRef, TaskNode, TaskResultRef
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -577,6 +577,10 @@ class Agent(Generic[AppT]):
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
@@ -591,6 +595,10 @@ class Agent(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
