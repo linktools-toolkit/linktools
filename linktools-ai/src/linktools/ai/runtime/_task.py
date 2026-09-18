@@ -45,6 +45,7 @@ class _ExecutionTreeWatcher(Protocol):
         *,
         principal: Principal,
         after_sequences: "Mapping[str, int] | None" = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -75,17 +76,25 @@ class TaskGraphRun(Generic[AppT]):
             self._observe(observer),
             name=f"task-graph-observer-{self.graph_id}",
         )
-        done, _ = await asyncio.wait(
-            (wait_task, observer_task),
-            return_when=asyncio.FIRST_EXCEPTION,
-        )
-        if observer_task in done:
-            error = observer_task.exception()
-            if error is not None:
-                _detach_task(observer_task)
-                _detach_task(wait_task)
-                raise error
-        return _public_task_result(await wait_task)
+        try:
+            done, _ = await asyncio.wait(
+                (wait_task, observer_task),
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            if observer_task in done:
+                error = observer_task.exception()
+                if error is not None:
+                    raise error
+            return _public_task_result(await wait_task)
+        finally:
+            for task in (observer_task, wait_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                observer_task,
+                wait_task,
+                return_exceptions=True,
+            )
 
     async def recover(self, *, idempotency_key: str | None = None) -> TaskGraphResult:
         return _public_task_result(await self._runtime.graph.recover(
@@ -327,7 +336,6 @@ class TaskGraphRun(Generic[AppT]):
         after_execution_sequences: Mapping[str, Mapping[str, int]],
         include_content: bool,
     ) -> AsyncIterator[TaskGraphRunEvent]:
-        del include_content
         snapshot = await self._snapshot()
         states = {state.node_id: state for state in snapshot.node_states}
         if len(states) != len(snapshot.node_states):
@@ -361,6 +369,7 @@ class TaskGraphRun(Generic[AppT]):
                 execution_id,
                 principal=self._principal,
                 after_sequences=after_execution_sequences.get(node_id),
+                include_content=include_content,
             )
             execution_streams[node_id] = stream
             execution_tasks[node_id] = asyncio.create_task(
@@ -442,16 +451,25 @@ class TaskGraphRun(Generic[AppT]):
     async def _capture_replay_events(
         self,
     ) -> tuple[TaskGraphRunEvent, ...]:
-        page = await self._runtime.graph.list_events(
-            self.graph_id,
-            principal=self._principal,
-            after_sequence=0,
-            limit=1000,
-        )
-        return tuple(
-            TaskGraphRunEvent(self.graph_id, event.node_id, event)
-            for event in page.items
-        )
+        events: list[TaskGraphRunEvent] = []
+        after_sequence = 0
+        while True:
+            page = await self._runtime.graph.list_events(
+                self.graph_id,
+                principal=self._principal,
+                after_sequence=after_sequence,
+                limit=200,
+            )
+            if not page.items:
+                break
+            events.extend(
+                TaskGraphRunEvent(self.graph_id, event.node_id, event)
+                for event in page.items
+            )
+            after_sequence = page.items[-1].sequence
+            if page.next_cursor is None:
+                break
+        return tuple(events)
 
 
 def _normalize_execution_sequences(
