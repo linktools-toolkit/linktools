@@ -1687,6 +1687,25 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_event_sequence: int,
         expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
+    async def transition_task_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_status: ExecutionStatus,
+        next_status: ExecutionStatus,
+        task_attempt: int,
+        task_deadline_at: datetime | None,
+        task_next_attempt_at: datetime | None,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
+        event_type: str,
+        payload: Mapping[str, JsonValue],
+        occurred_at: datetime,
+    ) -> ExecutionRecord: ...
+
     async def mark_start_unknown(
         self, commit: ExecutionStartUnknownCommit
     ) -> ExecutionRecord: ...
