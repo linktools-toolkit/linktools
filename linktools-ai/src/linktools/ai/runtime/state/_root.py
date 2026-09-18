@@ -5,7 +5,7 @@
 import asyncio
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,7 +33,7 @@ from ._plan import (
     RuntimeStateRoute,
     runtime_domain_uses_object_store,
 )
-from ._store import StateStore
+from ._store import StateStore, StateTransaction, StoredAlias
 from ._codec import (
     decode_fact,
     decode_operation,
@@ -392,14 +392,6 @@ class RuntimeState:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         if not self._plan.durable_domains:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        if any(
-            self._plan.route(domain).kind in {"sqlite", "sql"}
-            for domain in self._plan.durable_domains
-        ):
-            raise AIError(
-                ErrorCode.SNAPSHOT_UNSUPPORTED,
-                safe_details={"reason": "scoped_sql_export_unavailable"},
-            )
         domains: dict[str, dict[str, list[object]]] = {}
         objects: list[dict[str, object]] = []
         copied_objects: set[tuple[str, str, str, int]] = set()
@@ -410,10 +402,27 @@ class RuntimeState:
             operations = await store.read(
                 lambda transaction: transaction.scan_operations()
             )
+            aliases = await store.read(
+                lambda transaction: transaction.scan_aliases()
+            )
+            sequences = await store.read(
+                lambda transaction: transaction.scan_sequences()
+            )
             domains[domain.value] = {
                 "records": [encode_record(value) for value in records],
+                "aliases": [
+                    {
+                        "alias_digest": value.alias_digest.hex(),
+                        "record_key_digest": value.record_key_digest.hex(),
+                    }
+                    for value in aliases
+                ],
                 "facts": [encode_fact(value) for value in facts],
                 "operations": [encode_operation(value) for value in operations],
+                "sequences": [
+                    {"key_digest": key.hex(), "value": sequences[key]}
+                    for key in sorted(sequences)
+                ],
             }
             encoded_values = (
                 [encode_record(value) for value in records]
@@ -572,16 +581,22 @@ class RuntimeState:
                 facts = tuple(
                     decode_fact(value) for value in raw_domain.get("facts", [])
                 )
+                aliases = _decode_snapshot_aliases(raw_domain.get("aliases", []))
                 operations = tuple(
                     decode_operation(value)
                     for value in raw_domain.get("operations", [])
+                )
+                sequences = _decode_snapshot_sequences(
+                    raw_domain.get("sequences", [])
                 )
                 await state._stores[domain].mutate(
                     lambda transaction: _insert_snapshot_values(
                         transaction,
                         records,
+                        aliases,
                         facts,
                         operations,
+                        sequences,
                     )
                 )
         finally:
@@ -647,16 +662,77 @@ def _object_ref_from_payload(value: object) -> ObjectRef:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+def _decode_snapshot_digest(value: object) -> bytes:
+    if not isinstance(value, str) or len(value) != 64:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if len(decoded) != 32:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return decoded
+
+
+def _decode_snapshot_aliases(value: object) -> tuple[StoredAlias, ...]:
+    if not isinstance(value, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    aliases: list[StoredAlias] = []
+    seen: set[bytes] = set()
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "alias_digest",
+            "record_key_digest",
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        alias = StoredAlias(
+            _decode_snapshot_digest(raw["alias_digest"]),
+            _decode_snapshot_digest(raw["record_key_digest"]),
+        )
+        if alias.alias_digest in seen:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        seen.add(alias.alias_digest)
+        aliases.append(alias)
+    return tuple(sorted(aliases, key=lambda item: item.alias_digest))
+
+
+def _decode_snapshot_sequences(value: object) -> Mapping[bytes, int]:
+    if not isinstance(value, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    sequences: dict[bytes, int] = {}
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {"key_digest", "value"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = _decode_snapshot_digest(raw["key_digest"])
+        sequence = raw["value"]
+        if (
+            key in sequences
+            or isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        sequences[key] = sequence
+    return sequences
+
+
 async def _insert_snapshot_values(
-    transaction: object,
+    transaction: StateTransaction,
     records: tuple[object, ...],
+    aliases: tuple[StoredAlias, ...],
     facts: tuple[object, ...],
     operations: tuple[object, ...],
+    sequences: Mapping[bytes, int],
 ) -> None:
     await transaction.insert_records(records)
+    await transaction.insert_aliases(aliases)
     await transaction.insert_facts(facts)
     for operation in operations:
         await transaction.insert_operation(operation)
+    if sequences:
+        restored = await transaction.reserve_sequences(sequences)
+        if dict(restored) != dict(sequences):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 async def _snapshot_chunk(value: bytes):
