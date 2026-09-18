@@ -15,6 +15,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import BinaryContent, InstructionPart, ToolReturn, UserContent
 from pydantic_ai.toolsets import FunctionToolset
 
+from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..workspace import (
     LocalSandbox,
@@ -273,11 +274,13 @@ class _WorkspaceToolSurface:
         self,
         session: SandboxSession | None,
         policy: WorkspacePolicy,
+        limits: PromptLimits,
         *,
         vision: bool = True,
     ) -> None:
         self._session = session
         self._policy = policy
+        self._limits = limits
         self._vision = vision
         self._mime = mimetypes.MimeTypes(filenames=())
 
@@ -332,7 +335,7 @@ class _WorkspaceToolSurface:
         if not paths:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         unique_paths = tuple(dict.fromkeys(paths))
-        if len(unique_paths) > self._policy.max_binary_input_parts:
+        if len(unique_paths) > self._limits.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         session = self._require_session()
@@ -357,12 +360,12 @@ class _WorkspaceToolSurface:
                         "reason": "image_input_not_supported",
                     },
                 )
-            remaining = self._policy.max_binary_input_bytes - total_bytes
+            remaining = self._limits.max_binary_input_bytes - total_bytes
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             body = await session.read_bytes(path, max_bytes=remaining)
             total_bytes += len(body)
-            if total_bytes > self._policy.max_binary_input_bytes:
+            if total_bytes > self._limits.max_binary_input_bytes:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             metadata.append(
                 {
@@ -731,11 +734,17 @@ class _WorkspaceSandboxToolset(FunctionToolset[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         session: SandboxSession | None,
         policy: WorkspacePolicy,
+        limits: PromptLimits,
         *,
         vision: bool,
     ) -> None:
         super().__init__(id=_WORKSPACE_SANDBOX_CAPABILITY_ID)
-        surface = _WorkspaceToolSurface(session, policy, vision=vision)
+        surface = _WorkspaceToolSurface(
+            session,
+            policy,
+            limits,
+            vision=vision,
+        )
         for name in selected_tool_names:
             self.add_tool(
                 _workspace_tool(
@@ -752,6 +761,7 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         selected_tool_names: tuple[str, ...],
         session: SandboxSession | None,
         policy: WorkspacePolicy,
+        limits: PromptLimits,
         *,
         vision: bool,
     ) -> None:
@@ -759,6 +769,7 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
         self._selected_tool_names = selected_tool_names
         self._session = session
         self._policy = policy
+        self._limits = limits
         self._vision = vision
 
     def get_instructions(self) -> InstructionPart:
@@ -769,6 +780,7 @@ class _WorkspaceCapability(AbstractCapability[AgentContext[object]]):
             self._selected_tool_names,
             self._session,
             self._policy,
+            self._limits,
             vision=self._vision,
         )
 
@@ -777,7 +789,7 @@ def workspace_tool_contributions(
     workspace: Workspace,
 ) -> tuple[CapabilityContribution[object], ...]:
     """Return the stable workspace tool definitions used by the compiler."""
-    surface = _WorkspaceToolSurface(None, workspace.policy)
+    surface = _WorkspaceToolSurface(None, workspace.policy, PromptLimits())
     result: list[CapabilityContribution[object]] = []
     for name, metadata in _WORKSPACE_TOOL_DECLARATIONS.items():
         tool = _workspace_tool(surface, name, metadata)
@@ -789,10 +801,14 @@ def workspace_capabilities(
     workspace: Workspace,
     selected_tool_names: Sequence[str],
     *,
+    limits: "PromptLimits | None" = None,
     session: SandboxSession | None = None,
     vision: bool = True,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Adapt selected tools to a caller-owned, already-opened session."""
+    selected_limits = PromptLimits() if limits is None else limits
+    if not isinstance(selected_limits, PromptLimits):
+        raise TypeError("limits must be PromptLimits")
     selected = frozenset(selected_tool_names)
     unknown = selected.difference(_WORKSPACE_TOOL_DECLARATIONS)
     if unknown:
@@ -814,6 +830,7 @@ def workspace_capabilities(
             ordered,
             session,
             workspace.policy,
+            selected_limits,
             vision=vision,
         ),
     )

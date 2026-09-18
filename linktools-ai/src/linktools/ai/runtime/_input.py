@@ -25,10 +25,10 @@ from pydantic_ai.messages import (
 )
 
 from ..capability import WorkspaceAccess
-from ..core import JsonValue, canonical_json_bytes, normalize_json_value
+from ..core import JsonValue, PromptLimits, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from ..workspace import WorkspacePolicy, normalize_workspace_path
+from ..workspace import normalize_workspace_path
 from ._input_contract import (
     CanonicalUserInput,
     UserPromptInput,
@@ -115,38 +115,48 @@ class ExecutionInputMaterializer:
 
     def __init__(
         self,
-        access: WorkspaceAccess,
-        policy: WorkspacePolicy,
+        access: "WorkspaceAccess | None",
+        limits: PromptLimits,
         *,
         object_store: ObjectStore | None = None,
         object_key_factory: "RuntimeObjectKeyFactory | None" = None,
         payload_policy: PayloadPolicy | None = None,
     ) -> None:
-        if not isinstance(access, WorkspaceAccess):
-            raise TypeError("access must be WorkspaceAccess")
-        policy.validate()
+        if access is not None and not isinstance(access, WorkspaceAccess):
+            raise TypeError("access must be WorkspaceAccess or None")
+        if not isinstance(limits, PromptLimits):
+            raise TypeError("limits must be PromptLimits")
         self._access = access
-        self._policy = policy
+        self._limits = limits
         self._object_store = object_store
         self._object_key_factory = object_key_factory
         self._payload_policy = payload_policy or PayloadPolicy()
         self._mime = mimetypes.MimeTypes(filenames=())
 
     async def close(self) -> None:
-        await self._access.close()
+        if self._access is not None:
+            await self._access.close()
 
     @property
-    def access(self) -> WorkspaceAccess:
+    def access(self) -> "WorkspaceAccess | None":
         return self._access
 
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:
         raw_files = _require_files(files)
+        if raw_files and self._access is None:
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "files", "reason": "workspace_required"},
+            )
         result: list[str] = []
         seen: set[str] = set()
         for path in raw_files:
             try:
+                access = self._access
+                if access is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 canonical = normalize_workspace_path(
-                    await self._access.canonicalize_path(path)
+                    await access.canonicalize_path(path)
                 )
             except AIError as error:
                 mapped = _file_request_error(error, request_invalid_reason="path_invalid")
@@ -180,32 +190,38 @@ class ExecutionInputMaterializer:
         canonical = validate_user_input(value)
         files = _require_canonical_files(canonical_files)
         direct_binary = _binary_parts(canonical)
-        if len(direct_binary) > self._policy.max_binary_input_parts:
+        if len(direct_binary) > self._limits.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         total_bytes = sum(len(item.data) for item in direct_binary)
-        if total_bytes > self._policy.max_binary_input_bytes:
+        if total_bytes > self._limits.max_binary_input_bytes:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if len(direct_binary) + len(files) > self._policy.max_binary_input_parts:
+        if len(direct_binary) + len(files) > self._limits.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if not files:
             return canonical
+        access = self._access
+        if access is None:
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "files", "reason": "workspace_required"},
+            )
 
         additions: list[UserContent] = []
         file_views: list[dict[str, JsonValue]] = []
         for path in files:
             media_type = self._media_type(path)
-            remaining = self._policy.max_binary_input_bytes - total_bytes
+            remaining = self._limits.max_binary_input_bytes - total_bytes
             if remaining < 0:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             try:
-                body = await self._access.read_bytes(path, max_bytes=remaining)
+                body = await access.read_bytes(path, max_bytes=remaining)
             except AIError as error:
                 mapped = _file_request_error(error, request_invalid_reason="file_invalid")
                 if mapped is None:
                     raise
                 raise mapped from error
             total_bytes += len(body)
-            if total_bytes > self._policy.max_binary_input_bytes:
+            if total_bytes > self._limits.max_binary_input_bytes:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             file_views.append(
                 {

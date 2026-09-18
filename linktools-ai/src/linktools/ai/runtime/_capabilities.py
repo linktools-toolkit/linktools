@@ -24,6 +24,7 @@ from pydantic_ai.tools import DeferredToolRequests
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai_harness.step_persistence import StepPersistence
 
+from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ._compaction import (
     ExternalModelRequestCapture,
@@ -320,6 +321,7 @@ async def compose_platform_capabilities(
     memory_store: MemoryStore | None,
     ordinary_tool_policy: tuple[str, ...],
     compaction_policy: RuntimeCompactionPolicy,
+    limits: PromptLimits,
     planning: bool,
     context_target_tokens: int | None,
     parent_step_run_id: str | None,
@@ -382,6 +384,7 @@ async def compose_platform_capabilities(
     capabilities.append(
         RuntimeCompaction(
             context_target_tokens,
+            limits=limits,
             policy=compaction_policy,
             journal=model_journal,
             request_observer=model_request_observer,

@@ -24,7 +24,7 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
 )
 
-from ..capability import AgentContext
+from ..core import PromptLimits
 from ..errors import AIError, ErrorCode
 from ..workspace import normalize_workspace_path
 from ._journal import ModelRequestFact, ModelRequestJournal
@@ -226,6 +226,7 @@ class RuntimeCompaction(AbstractCapability[None]):
         self,
         target_tokens: int | None,
         *,
+        limits: PromptLimits,
         journal: ModelRequestJournal | None = None,
         observer: ExternalModelRequestObserver | None = None,
         request_observer: ExternalModelRequestCapture | None = None,
@@ -239,7 +240,10 @@ class RuntimeCompaction(AbstractCapability[None]):
             or target_tokens <= 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not isinstance(limits, PromptLimits):
+            raise TypeError("limits must be PromptLimits")
         self._target_tokens = target_tokens
+        self._limits = limits
         self._journal = journal
         self._observer = observer
         self._request_observer = request_observer
@@ -269,7 +273,10 @@ class RuntimeCompaction(AbstractCapability[None]):
             request_context,
             messages=list(binary_projected),
         )
-        _validate_pending_binary_content(ctx, projected_context.messages)
+        _validate_pending_binary_content(
+            projected_context.messages,
+            self._limits,
+        )
         if self._target_tokens is None:
             projected_context = await self._deduplicate.before_model_request(
                 ctx,
@@ -341,17 +348,13 @@ class RuntimeCompaction(AbstractCapability[None]):
 
 
 def _validate_pending_binary_content(
-    ctx: PydanticRunContext[Any],
     messages: Sequence[ModelMessage],
+    limits: PromptLimits,
 ) -> None:
-    deps = ctx.deps
-    if not isinstance(deps, AgentContext):
-        return
     count, total_bytes = binary_content_usage(messages)
-    policy = deps.workspace.policy
     if (
-        count > policy.max_binary_input_parts
-        or total_bytes > policy.max_binary_input_bytes
+        count > limits.max_binary_input_parts
+        or total_bytes > limits.max_binary_input_bytes
     ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
