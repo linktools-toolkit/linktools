@@ -446,3 +446,31 @@ async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: 
     with pytest.raises(AIError) as raised:
         await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_workspace_group_can_disable_default_asset_discovery(
+    tmp_path: Path,
+) -> None:
+    storage = tmp_path / ".linktools"
+    agent = storage / "agents" / "broken"
+    agent.parent.mkdir(parents=True)
+    agent.write_text("not a valid agent declaration", encoding="utf-8")
+    sandbox = _RecordingSandbox()
+    workspace = Workspace.load(
+        tmp_path,
+        workspace_id="workspace",
+        sandbox=sandbox,
+    )
+
+    group = CapabilityGroup.from_workspace(
+        workspace,
+        discover_assets=False,
+    )
+    frozen = await group.freeze()
+
+    assert group.workspace is workspace
+    assert group.skill_source is None
+    assert frozen
+    assert all(item.kind == "tool" for item in frozen)
+    assert sandbox.sessions == []

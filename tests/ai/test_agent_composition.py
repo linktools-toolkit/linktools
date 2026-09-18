@@ -284,3 +284,49 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
     )
 
     assert registered == ["a" * 64]
+
+
+@pytest.mark.asyncio
+async def test_workspace_mismatch_blocks_startup_recovery() -> None:
+    checkpoint = SimpleNamespace(
+        execution_id="execution",
+        state=RecoveryCheckpointState.ADMITTED,
+    )
+    snapshot = SimpleNamespace(binding_digest="a" * 64)
+    execution = SimpleNamespace(
+        execution_id="execution",
+        binding_digest="a" * 64,
+        binding=snapshot,
+    )
+
+    async def _list_recoverable_page(**kwargs: object) -> object:
+        del kwargs
+        return SimpleNamespace(items=(checkpoint,), next_cursor=None)
+
+    async def _get_execution(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        return execution
+
+    def _restore(_snapshot: object) -> object:
+        raise AIError(
+            ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+            safe_details={"reason": "workspace_mismatch"},
+        )
+
+    state = SimpleNamespace(
+        recovery=SimpleNamespace(
+            checkpoints=SimpleNamespace(list_recoverable_page=_list_recoverable_page)
+        ),
+        execution=SimpleNamespace(executions=SimpleNamespace(get=_get_execution)),
+    )
+
+    with pytest.raises(AIError) as raised:
+        await _restore_recovery_bindings(
+            SimpleNamespace(),
+            SimpleNamespace(restore=_restore),
+            state,
+            tenant_id="tenant",
+        )
+
+    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert raised.value.safe_details == {"reason": "workspace_mismatch"}
