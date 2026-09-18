@@ -538,11 +538,23 @@ class StateTransaction(Protocol):
     async def resolve_alias(self, alias: bytes) -> bytes | None: ...
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
     async def scan_aliases(self) -> tuple[StoredAlias, ...]: ...
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]: ...
     async def insert_alias(self, alias: StoredAlias) -> None: ...
     async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None: ...
     async def get_sequence(self, key: bytes) -> int: ...
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
     async def scan_sequences(self) -> Mapping[bytes, int]: ...
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]: ...
     async def next_sequence(self, key: bytes) -> int: ...
     async def reserve_sequence(self, key: bytes, count: int) -> int: ...
     async def reserve_sequences(self, reservations: Mapping[bytes, int]) -> Mapping[bytes, int]: ...
@@ -620,6 +632,14 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def scan_aliases(self) -> tuple[StoredAlias, ...]:
         return await self._transaction.scan_aliases()
 
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        return await self._transaction.scan_aliases_page(after=after, limit=limit)
+
     async def get_sequence(self, key: bytes) -> int:
         return await self._transaction.get_sequence(key)
 
@@ -628,6 +648,14 @@ class _ReadOnlyStateTransaction(StateTransaction):
 
     async def scan_sequences(self) -> Mapping[bytes, int]:
         return await self._transaction.scan_sequences()
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        return await self._transaction.scan_sequences_page(after=after, limit=limit)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         return await self._transaction.list_facts(query)

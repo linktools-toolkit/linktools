@@ -963,6 +963,32 @@ class _SqlTransaction:
             for row in rows
         )
 
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        _require_scan_limit(limit)
+        from sqlalchemy import select
+
+        table = self._table("ai_state_aliases")
+        statement = select(table).where(table.c.owner_digest == self._owner_hex)
+        if after is not None:
+            statement = statement.where(table.c.alias_digest > _hex(after))
+        rows = (
+            await self._session.execute(
+                statement.order_by(table.c.alias_digest).limit(limit)
+            )
+        ).mappings().all()
+        return tuple(
+            StoredAlias(
+                _row_digest(row["alias_digest"]),
+                _row_digest(row["record_key_digest"]),
+            )
+            for row in rows
+        )
+
     async def insert_alias(self, alias: StoredAlias) -> None:
         await self.insert_aliases((alias,))
 
@@ -1055,6 +1081,29 @@ class _SqlTransaction:
                 select(table)
                 .where(table.c.owner_digest == self._owner_hex)
                 .order_by(table.c.key_digest)
+            )
+        ).mappings().all()
+        return {
+            _row_digest(row["key_digest"]): _row_nonnegative_int(row["value"])
+            for row in rows
+        }
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        _require_scan_limit(limit)
+        from sqlalchemy import select
+
+        table = self._table("ai_state_sequences")
+        statement = select(table).where(table.c.owner_digest == self._owner_hex)
+        if after is not None:
+            statement = statement.where(table.c.key_digest > _hex(after))
+        rows = (
+            await self._session.execute(
+                statement.order_by(table.c.key_digest).limit(limit)
             )
         ).mappings().all()
         return {

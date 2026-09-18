@@ -302,6 +302,20 @@ class _MemoryTransaction:
             for alias, record_key in sorted(self.aliases.items())
         )
 
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        _require_scan_limit(limit)
+        values = [
+            StoredAlias(alias, record_key)
+            for alias, record_key in sorted(self.aliases.items())
+            if after is None or alias > after
+        ]
+        return tuple(values[:limit])
+
     async def insert_alias(self, alias: StoredAlias) -> None:
         await self.insert_aliases((alias,))
 
@@ -322,6 +336,20 @@ class _MemoryTransaction:
 
     async def scan_sequences(self) -> Mapping[bytes, int]:
         return dict(sorted(self.sequences.items()))
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        _require_scan_limit(limit)
+        values = [
+            (key, value)
+            for key, value in sorted(self.sequences.items())
+            if after is None or key > after
+        ][:limit]
+        return dict(values)
 
     async def next_sequence(self, key: bytes) -> int:
         value = self.sequences.get(key, 0) + 1

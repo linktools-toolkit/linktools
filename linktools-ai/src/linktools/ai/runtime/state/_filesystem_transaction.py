@@ -432,6 +432,20 @@ class _FilesystemTransaction:
             for alias, record_key in sorted(values.items())
         )
 
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        _require_scan_limit(limit)
+        values = await self.scan_aliases()
+        return tuple(
+            value
+            for value in values
+            if after is None or value.alias_digest > after
+        )[:limit]
+
     async def insert_alias(self, alias: StoredAlias) -> None:
         await self.insert_aliases((alias,))
 
@@ -484,6 +498,22 @@ class _FilesystemTransaction:
         for key in self.sequences.deleted():
             values.pop(key, None)
         return dict(sorted(values.items()))
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        _require_scan_limit(limit)
+        values = await self.scan_sequences()
+        return dict(
+            list(
+                (key, values[key])
+                for key in sorted(values)
+                if after is None or key > after
+            )[:limit]
+        )
 
     async def next_sequence(self, key: bytes) -> int:
         value = await self.get_sequence(key) + 1
