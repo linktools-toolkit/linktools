@@ -178,7 +178,6 @@ class _TaskRepository(Protocol):
         tenant_id: str,
         execution_id: "str | None",
         result_digest: str,
-        result_payload: "StoredPayload | None" = None,
         graph_id: "str | None" = None,
         node_id: "str | None" = None,
         expanded_nodes: "tuple[TaskNode, ...]" = (),
@@ -817,7 +816,6 @@ class LocalTaskGraphLauncher:
                 node_id=node.node_id,
                 execution_id=completion.execution_id or execution_id,
                 result_digest=completion.result_digest,
-                result_payload=completion.result_payload,
                 expanded_nodes=completion.expanded_nodes,
             )
         except AIError as error:
@@ -1231,12 +1229,16 @@ class LocalTaskGraphLauncher:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             record = records.get(dependency_id)
-            if record is not None and record.result_digest != state.result_digest:
+            if (
+                state.execution_id is None
+                or record is None
+                or record.result_digest != state.result_digest
+                or record.execution_id != state.execution_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result[dependency_id] = TaskDependencyResult(
                 state.result_digest,
                 state.execution_id,
-                None if record is None else record.payload,
             )
         return result
 
