@@ -55,7 +55,6 @@ from ..task import (
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
-    TaskGraphRunEvent,
     TaskGraphService,
     TaskResultRef,
     TaskNode,
@@ -94,6 +93,7 @@ from .service_api import (
     StartEvaluationRequest,
     UpdateSessionRequest,
     ExecutionTreeEvent,
+    TaskGraphRunEvent,
 )
 from .state import RuntimeState
 
@@ -116,6 +116,10 @@ class _TaskNodeRuntimePort(Protocol):
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
