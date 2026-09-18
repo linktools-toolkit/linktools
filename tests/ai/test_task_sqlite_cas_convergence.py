@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     JsonValue,
     Principal,
@@ -139,9 +140,10 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     ) as runtime:
         agent = runtime.agent("default")
         for index in range(20):
@@ -224,9 +226,10 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     ) as runtime:
         agent = runtime.agent("default")
         graph = TaskGraph(
@@ -288,9 +291,10 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     ) as runtime:
         agent = runtime.agent("default")
         graph = TaskGraph("timeout", (agent.task("blocked", "blocked"),))

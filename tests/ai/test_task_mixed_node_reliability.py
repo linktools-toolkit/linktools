@@ -237,10 +237,10 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     state = RuntimeState.in_memory()
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(application,),
+        capabilities=(CapabilityGroup.from_workspace(workspace), application),
     ) as runtime:
         first = handler.node("custom-first", input={"value": "seed"})
         agent = runtime.agent("default").task(
@@ -305,10 +305,10 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     state = RuntimeState.in_memory()
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(application,),
+        capabilities=(CapabilityGroup.from_workspace(workspace), application),
     ) as runtime:
         graph = TaskGraph(
             "dynamic-expansion",
@@ -605,10 +605,10 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
     graph = TaskGraph("shutdown-graph", (handler.node("node"),))
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(application,),
+        capabilities=(CapabilityGroup.from_workspace(workspace), application),
     ) as runtime:
         await runtime.start_graph(
             graph,
