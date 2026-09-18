@@ -103,6 +103,16 @@ class RuntimeSnapshot:
                 )
                 if state_ref.size > limits.max_bytes:
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                state_payload = await read_object(
+                    object_store,
+                    state_ref.key,
+                    expected_digest=state_ref.digest,
+                    expected_size=state_ref.size,
+                )
+                state_manifest = _parse_state_manifest(state_payload)
+                state_entries, state_object_bytes = _state_snapshot_usage(
+                    state_manifest
+                )
                 workspace_entries = await _capture_workspace(
                     workspace,
                     state=state,
@@ -119,7 +129,17 @@ class RuntimeSnapshot:
                     "metadata": dict(metadata or {}),
                 }
                 payload = canonical_json_bytes(manifest)
-                if len(payload) > limits.max_bytes:
+                workspace_count, workspace_bytes = _workspace_snapshot_usage(
+                    workspace_entries
+                )
+                if (
+                    state_entries + workspace_count > limits.max_entries
+                    or len(payload)
+                    + state_ref.size
+                    + state_object_bytes
+                    + workspace_bytes
+                    > limits.max_bytes
+                ):
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 digest = _digest_bytes(payload)
                 key = f"v1/runtime-snapshot/{digest}"
@@ -162,9 +182,10 @@ class RuntimeSnapshot:
             or state_manifest.get("tenant_id") != manifest.get("tenant_id")
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-        state_objects = state_manifest.get("objects", [])
-        if not isinstance(state_objects, list):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        state_entries, state_object_bytes = _state_snapshot_usage(
+            state_manifest
+        )
+        state_objects = cast(list[object], state_manifest["objects"])
 
         workspace = manifest.get("workspace")
         if not isinstance(workspace, Mapping):
@@ -182,12 +203,18 @@ class RuntimeSnapshot:
             present and (workspace_id is None or not workspace_id)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if len(entries) + len(state_objects) > limits.max_entries:
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         kinds = _validate_workspace_entries(entries)
-
-        total_bytes = len(canonical_json_bytes(cast(JsonValue, manifest))) + state.size
-        if total_bytes > limits.max_bytes:
+        workspace_count, workspace_bytes = _workspace_snapshot_usage(workspace)
+        total_bytes = (
+            len(canonical_json_bytes(cast(JsonValue, manifest)))
+            + state.size
+            + state_object_bytes
+            + workspace_bytes
+        )
+        if (
+            state_entries + workspace_count > limits.max_entries
+            or total_bytes > limits.max_bytes
+        ):
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for raw_object in state_objects:
             if not isinstance(raw_object, Mapping):
@@ -196,9 +223,6 @@ class RuntimeSnapshot:
             content = _object_ref_from_payload(raw_object.get("content"))
             if source.digest != content.digest or source.size != content.size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            total_bytes += content.size
-            if total_bytes > limits.max_bytes:
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             await _verify_object(object_store, content)
         for entry in entries:
             if not isinstance(entry, Mapping):
@@ -206,9 +230,6 @@ class RuntimeSnapshot:
             if kinds[cast(str, entry["path"])] != "file":
                 continue
             content = _object_ref_from_payload(entry.get("content"))
-            total_bytes += content.size
-            if total_bytes > limits.max_bytes:
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             await _verify_object(object_store, content)
 
 
@@ -920,6 +941,49 @@ def _read_generation_manifest(root: Path) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or value.get("kind") != "runtime-snapshot":
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     return value
+
+
+def _state_snapshot_usage(
+    manifest: Mapping[str, object],
+) -> tuple[int, int]:
+    domains = manifest.get("domains")
+    objects = manifest.get("objects")
+    if not isinstance(domains, Mapping) or not isinstance(objects, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    entries = len(objects)
+    object_bytes = 0
+    for raw_domain in domains.values():
+        if not isinstance(raw_domain, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for name in ("records", "aliases", "facts", "operations", "sequences"):
+            values = raw_domain.get(name)
+            if not isinstance(values, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            entries += len(values)
+    for raw_object in objects:
+        if not isinstance(raw_object, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = _object_ref_from_payload(raw_object.get("source"))
+        content = _object_ref_from_payload(raw_object.get("content"))
+        if source.digest != content.digest or source.size != content.size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        object_bytes += content.size
+    return entries, object_bytes
+
+
+def _workspace_snapshot_usage(
+    workspace: Mapping[str, object],
+) -> tuple[int, int]:
+    entries = workspace.get("entries")
+    if not isinstance(entries, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    total_bytes = 0
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if "content" in entry:
+            total_bytes += _object_ref_from_payload(entry["content"]).size
+    return len(entries), total_bytes
 
 
 def _parse_state_manifest(payload: bytes) -> Mapping[str, object]:
