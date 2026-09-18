@@ -14,7 +14,7 @@ from linktools.ai.core import Principal, PrincipalKind
 from linktools.ai.runtime import (
     ListExecutionRequest,
     RuntimeHistory,
-    SessionInfo,
+    SessionView,
 )
 from linktools.cli import BaseCommand
 
@@ -68,13 +68,12 @@ class Command(BaseCommand):
         return _run_async(execute())
 
 
-def _emit_sessions(sessions: tuple[SessionInfo, ...]) -> None:
+def _emit_sessions(sessions: tuple[SessionView, ...]) -> None:
     console = get_console()
     if not sessions:
         console.print("[dim]No sessions.[/dim]")
         return
     table = Table(title="Recent AI Sessions", box=None)
-    table.add_column("Updated", style="dim", no_wrap=True)
     table.add_column("Session", no_wrap=True)
     table.add_column("Status")
     table.add_column("Agent")
@@ -84,19 +83,18 @@ def _emit_sessions(sessions: tuple[SessionInfo, ...]) -> None:
     table.add_column("History")
     for session in sessions:
         table.add_row(
-            session.updated_at.isoformat(timespec="seconds"),
             session.session_id,
             _status(session.status.value),
             session.agent_id,
             str(session.revision),
             session.cwd or "-",
-            session.active_execution_id or "-",
+            ", ".join(session.active_execution_ids) or "-",
             session.history_quality,
         )
     console.print(table)
 
 
-def _emit_session(session: SessionInfo) -> None:
+def _emit_session(session: SessionView) -> None:
     table = Table.grid(padding=(0, 2))
     table.add_column(style="bold")
     table.add_column()
@@ -105,10 +103,8 @@ def _emit_session(session: SessionInfo) -> None:
     table.add_row("Agent", session.agent_id)
     table.add_row("Revision", str(session.revision))
     table.add_row("CWD", session.cwd or "-")
-    table.add_row("Active", session.active_execution_id or "-")
+    table.add_row("Active", ", ".join(session.active_execution_ids) or "-")
     table.add_row("History", session.history_quality)
-    table.add_row("Created", session.created_at.isoformat())
-    table.add_row("Updated", session.updated_at.isoformat())
     get_console().print(Panel(table, title="Session", expand=False))
 
 

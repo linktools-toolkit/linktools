@@ -245,7 +245,7 @@ async def test_runtime_history_projects_owned_sessions_without_runtime_open() ->
 
     assert [item.session_id for item in recent] == ["newer", "older"]
     assert selected.agent_id == "auditor"
-    assert selected.active_execution_id == "execution"
+    assert selected.active_execution_ids == ("execution",)
 
     with pytest.raises(AIError) as denied:
         await history.inspect_session(

@@ -21,7 +21,6 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
-    SessionStatus,
     TenantAuthorizationPolicy,
     validate_page_limit,
     validate_persistence_namespace,
@@ -38,6 +37,7 @@ from .service_api import (
     ExecutionView,
     ListExecutionRequest,
     ModelInteractionItem,
+    SessionView,
     TranscriptItem,
 )
 from .state import RuntimeDomain, RuntimeState
@@ -73,32 +73,18 @@ class ExecutionInfo:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
 
 
-@dataclass(frozen=True, slots=True)
-class SessionInfo:
-    """Session metadata required by local diagnostics."""
-
-    session_id: str
-    agent_id: str
-    status: SessionStatus
-    revision: int
-    cwd: str | None
-    active_execution_id: str | None
-    history_quality: str
-    created_at: datetime
-    updated_at: datetime
-
-
-def _project_session_info(record: SessionRecord) -> SessionInfo:
-    return SessionInfo(
+def _project_session_view(record: SessionRecord) -> SessionView:
+    return SessionView(
         session_id=record.session_id,
         agent_id=record.agent_id,
         status=record.status,
         revision=record.revision,
         cwd=record.cwd,
-        active_execution_id=record.active_execution_id,
+        active_execution_ids=(
+            () if record.active_execution_id is None else (record.active_execution_id,)
+        ),
+        metadata=record.metadata,
         history_quality=record.history_quality,
-        created_at=record.created_at,
-        updated_at=record.updated_at,
     )
 
 
@@ -211,10 +197,10 @@ class RuntimeHistory:
         *,
         principal: Principal,
         limit: int = 20,
-    ) -> tuple[SessionInfo, ...]:
+    ) -> tuple[SessionView, ...]:
         validate_page_limit(limit)
         sessions, authorization = self._require_session_reader()
-        recent: list[tuple[datetime, str, SessionInfo]] = []
+        recent: list[tuple[datetime, str, SessionView]] = []
         cursor: str | None = None
         snapshot: int | None = None
         while True:
@@ -242,7 +228,7 @@ class RuntimeHistory:
                     if error.code is ErrorCode.AUTHORIZATION_DENIED:
                         continue
                     raise
-                info = _project_session_info(record)
+                info = _project_session_view(record)
                 entry = (record.updated_at, record.session_id, info)
                 if len(recent) < limit:
                     heapq.heappush(recent, entry)
@@ -259,7 +245,7 @@ class RuntimeHistory:
         session_id: str,
         *,
         principal: Principal,
-    ) -> SessionInfo:
+    ) -> SessionView:
         sessions, authorization = self._require_session_reader()
         header = await sessions.get_header(
             session_id,
@@ -278,7 +264,7 @@ class RuntimeHistory:
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        return _project_session_info(record)
+        return _project_session_view(record)
 
     @classmethod
     def open(
@@ -474,4 +460,4 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
     )
 
 
-__all__ = ["ExecutionInfo", "RuntimeHistory", "SessionInfo"]
+__all__ = ["ExecutionInfo", "RuntimeHistory"]

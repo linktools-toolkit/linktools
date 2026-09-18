@@ -467,19 +467,18 @@ async def test_trace_command_renders_compact_runtime_trace(
 def test_session_command_renders_recent_sessions(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from linktools.ai.runtime import SessionInfo
+    from linktools.ai.runtime import SessionView
     from linktools.ai.core import SessionStatus
 
-    value = SessionInfo(
+    value = SessionView(
         "session",
         "agent",
         SessionStatus.OPEN,
         2,
         ".",
-        None,
+        (),
+        {},
         "complete",
-        datetime(2026, 1, 1, tzinfo=timezone.utc),
-        datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
 
     _emit_sessions((value,))
