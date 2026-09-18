@@ -3,7 +3,6 @@
 """Runtime-owned interpretation of generic TaskNodes."""
 
 import asyncio
-import hashlib
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -125,22 +124,10 @@ class _TaskArtifactPublisher:
             or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        data = bytearray()
-        async for chunk in chunks:
-            if not isinstance(chunk, bytes):
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            data.extend(chunk)
-            if len(data) > expected_size:
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        value = bytes(data)
-        digest = hashlib.sha256(value).hexdigest()
-        if len(value) != expected_size or digest != expected_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         artifact_id = deterministic_id(
             "task-artifact",
             self._execution_id,
             name,
-            expected_digest,
         )
         existing = await self._state.records.get_metadata(
             artifact_id,
@@ -154,13 +141,18 @@ class _TaskArtifactPublisher:
             ):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return existing
-        object_ref = await put_runtime_object(
-            self._object_store,
-            self._object_key_factory,
+        object_key = self._object_key_factory.key(
             RuntimeDomain.ARTIFACT,
             self._principal.tenant_id,
-            value,
+            expected_digest,
         )
+        stat = await self._object_store.put(
+            object_key,
+            chunks,
+            expected_size=expected_size,
+            expected_digest=expected_digest,
+        )
+        object_ref = ObjectRef("runtime", object_key, stat.digest, stat.size)
         record = ArtifactRecord(
             artifact_id,
             self._execution_id,
