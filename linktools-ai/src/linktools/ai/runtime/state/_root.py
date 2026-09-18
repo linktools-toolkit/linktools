@@ -392,10 +392,19 @@ class RuntimeState:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         if not self._plan.durable_domains:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if any(
+            self._plan.route(domain).kind in {"sqlite", "sql"}
+            for domain in self._plan.durable_domains
+        ):
+            raise AIError(
+                ErrorCode.SNAPSHOT_UNSUPPORTED,
+                safe_details={"reason": "scoped_sql_export_unavailable"},
+            )
         domains: dict[str, dict[str, list[object]]] = {}
         objects: list[dict[str, object]] = []
         copied_objects: set[tuple[str, str, str, int]] = set()
-        for domain, store in self._stores.items():
+        for domain in self._plan.durable_domains:
+            store = self._stores[domain]
             records = await store.read(lambda transaction: transaction.scan_records())
             facts = await store.read(lambda transaction: transaction.scan_facts())
             operations = await store.read(
