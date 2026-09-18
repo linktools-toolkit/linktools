@@ -3,6 +3,8 @@
 """Vendor-neutral Skill package resource sources."""
 
 import asyncio
+import hashlib
+import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -11,8 +13,9 @@ from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 from ..asset import AssetKey, AssetStore
-from ..core import DEFAULT_DISCOVERY_POLICY
+from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
+from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +69,19 @@ class SkillResourceSource(Protocol):
     async def read(self, root: str, path: str) -> bytes: ...
 
 
+@runtime_checkable
+class SnapshotSkillResourceSource(SkillResourceSource, Protocol):
+    async def current_revision(self, root: str) -> StorageRevision: ...
+
+    async def snapshot(
+        self,
+        root: str,
+        *,
+        expected_revision: StorageRevision,
+        object_store: ObjectStore,
+    ) -> ObjectRef: ...
+
+
 class LocalSkillResourceSource:
     def __init__(self, source_id: str, root: "str | Path") -> None:
         if not isinstance(source_id, str) or not source_id.strip():
@@ -85,6 +101,25 @@ class LocalSkillResourceSource:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         relative = _normalize_resource_path(path)
         return await asyncio.to_thread(self._read_sync, logical_root, relative)
+
+    async def current_revision(self, root: str) -> StorageRevision:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        return await _skill_source_revision(self, logical_root)
+
+    async def snapshot(
+        self,
+        root: str,
+        *,
+        expected_revision: StorageRevision,
+        object_store: ObjectStore,
+    ) -> ObjectRef:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        return await _snapshot_skill_source(
+            self,
+            logical_root,
+            expected_revision=expected_revision,
+            object_store=object_store,
+        )
 
     def _inspect_sync(self, root: str) -> SkillResourceView:
         package = self._package_path(root)
@@ -182,6 +217,150 @@ class AssetSkillResourceSource:
         return bytes(value)
 
 
+    async def current_revision(self, root: str) -> StorageRevision:
+        _normalize_relative_path(root, field_name="skill root")
+        return await self._store.current_revision()
+
+    async def snapshot(
+        self,
+        root: str,
+        *,
+        expected_revision: StorageRevision,
+        object_store: ObjectStore,
+    ) -> ObjectRef:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        current = await self.current_revision(logical_root)
+        if current != expected_revision:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        return await _snapshot_skill_source(
+            self,
+            logical_root,
+            expected_revision=expected_revision,
+            object_store=object_store,
+        )
+
+
+async def _skill_source_revision(
+    source: SkillResourceSource,
+    root: str,
+) -> StorageRevision:
+    view = await source.inspect(root)
+    if not isinstance(view, SkillResourceView):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    entries: list[dict[str, JsonValue]] = []
+    for relative in view.resources:
+        value = await source.read(root, relative)
+        entries.append(
+            {
+                "path": relative,
+                "digest": hashlib.sha256(value).hexdigest(),
+                "size": len(value),
+            }
+        )
+    return StorageRevision(
+        hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "version": 1,
+                    "resources": entries,
+                }
+            )
+        ).hexdigest()
+    )
+
+
+async def _snapshot_skill_source(
+    source: SnapshotSkillResourceSource,
+    root: str,
+    *,
+    expected_revision: StorageRevision,
+    object_store: ObjectStore,
+) -> ObjectRef:
+    if not isinstance(expected_revision, StorageRevision):
+        raise TypeError("expected_revision must be StorageRevision")
+    if not isinstance(object_store, ObjectStore):
+        raise TypeError("object_store must implement ObjectStore")
+    before = await source.current_revision(root)
+    if before != expected_revision:
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+    view = await source.inspect(root)
+    if not isinstance(view, SkillResourceView):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    entries: list[dict[str, JsonValue]] = []
+    for relative in view.resources:
+        value = await source.read(root, relative)
+        digest = hashlib.sha256(value).hexdigest()
+        key = f"v1/skill-source-content/{digest}"
+        await _put_skill_snapshot_object(
+            object_store,
+            key,
+            value,
+            digest=digest,
+        )
+        entries.append(
+            {
+                "path": relative,
+                "content": {
+                    "key": key,
+                    "digest": digest,
+                    "size": len(value),
+                },
+            }
+        )
+    after = await source.current_revision(root)
+    if after != expected_revision:
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+    manifest: dict[str, JsonValue] = {
+        "kind": "skill-source-snapshot",
+        "format_version": 1,
+        "source_id": source.id,
+        "root": root,
+        "revision": expected_revision.value,
+        "resources": entries,
+    }
+    payload = canonical_json_bytes(manifest)
+    digest = hashlib.sha256(payload).hexdigest()
+    key = f"v1/skill-source-snapshot/{digest}"
+    await _put_skill_snapshot_object(
+        object_store,
+        key,
+        payload,
+        digest=digest,
+    )
+    return ObjectRef(object_store.store_id, key, digest, len(payload))
+
+
+async def _put_skill_snapshot_object(
+    object_store: ObjectStore,
+    key: str,
+    value: bytes,
+    *,
+    digest: str,
+) -> None:
+    current = await object_store.stat(key)
+    if current is not None:
+        if current.digest != digest or current.size != len(value):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await read_object(
+            object_store,
+            key,
+            expected_digest=digest,
+            expected_size=len(value),
+        )
+        return
+
+    async def chunks():
+        yield value
+
+    await object_store.put(
+        key,
+        chunks(),
+        expected_size=len(value),
+        expected_digest=digest,
+    )
+
+
 class SkillSourceRegistry:
     def __init__(self, sources: Sequence[SkillResourceSource] = ()) -> None:
         values: dict[str, SkillResourceSource] = {}
@@ -273,6 +452,7 @@ __all__ = [
     "LocalSkillResourceSource",
     "SkillLocation",
     "SkillResourceSource",
+    "SnapshotSkillResourceSource",
     "SkillResourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
