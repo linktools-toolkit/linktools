@@ -96,7 +96,7 @@ async def _open_local_runtime(
         state=_local_runtime_state(workspace),
         metrics=await _local_metrics(workspace),
         models=_local_models(workspace) if models is None else models,
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         yield runtime
 
