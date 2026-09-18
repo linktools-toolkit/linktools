@@ -226,7 +226,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
             workspace.workspace_id,
             models=_DiagnosticModels(),  # type: ignore[arg-type]
             state=reopened,
-            capabilities=(CapabilityGroup.from_workspace(workspace),),
+            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         ) as runtime:
             result = await runtime.execution.result(
                 started.execution_id,
