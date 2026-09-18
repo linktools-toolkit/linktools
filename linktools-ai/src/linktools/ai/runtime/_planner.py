@@ -37,7 +37,7 @@ from ..core import (
     validate_agent_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
+from ..storage import ObjectRef, ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..task import (
     TaskDependency,
     TaskDependencyResult,
