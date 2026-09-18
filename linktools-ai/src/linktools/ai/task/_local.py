@@ -389,43 +389,24 @@ class LocalTaskGraphLauncher:
         )
         if snapshot is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        node = next(
-            (item for item in snapshot.nodes if item.node_id == node_id),
-            None,
-        )
         state = next(
             (item for item in snapshot.node_states if item.node_id == node_id),
             None,
         )
-        if (
-            node is None
-            or state is None
-            or state.execution_id != execution_id
-        ):
+        if state is None or state.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if state.status is TaskStatus.CANCELLED:
-            await self._runner.cancel(
-                TaskNodeInvocation(
-                    node,
-                    graph_id,
-                    launch.principal,
-                    launch.correlation,
-                    await self._dependency_results(
-                        graph_id,
-                        node,
-                        tenant_id=tenant_id,
-                    ),
-                    execution_id,
-                )
-            )
         key = (tenant_id, graph_id)
         async with self._lock:
             run = self._graphs.get(key)
-            inflight = None if run is None else run.inflight.pop(node_id, None)
-        if inflight is not None and not inflight.task.done():
-            inflight.task.cancel()
-            await asyncio.gather(inflight.task, return_exceptions=True)
-        if run is not None:
+        if run is not None and run.request != launch:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if run is not None and node_id in run.inflight:
+            await self._quiesce_node(
+                run,
+                snapshot,
+                node_id,
+                invoke_cancel=state.status is TaskStatus.CANCELLED,
+            )
             await self._notify(run)
         view = await self._repository.get_graph(
             graph_id,
@@ -434,6 +415,89 @@ class LocalTaskGraphLauncher:
         if view is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return view
+
+    async def _quiesce_node(
+        self,
+        run: _GraphRun,
+        snapshot: TaskGraphSnapshot,
+        node_id: str,
+        *,
+        invoke_cancel: bool,
+    ) -> None:
+        inflight = run.inflight.pop(node_id, None)
+        if inflight is None:
+            return
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        if node is None or state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        cancellation_error: BaseException | None = None
+        if invoke_cancel and state.execution_id is not None:
+            try:
+                await self._runner.cancel(
+                    TaskNodeInvocation(
+                        node,
+                        snapshot.graph_id,
+                        run.request.principal,
+                        run.request.correlation,
+                        await self._dependency_results(
+                            snapshot.graph_id,
+                            node,
+                            tenant_id=run.request.principal.tenant_id,
+                        ),
+                        state.execution_id,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:  # noqa: BLE001
+                cancellation_error = error
+        if not inflight.task.done():
+            inflight.task.cancel()
+        await asyncio.gather(inflight.task, return_exceptions=True)
+        if cancellation_error is not None:
+            if isinstance(cancellation_error, AIError):
+                raise cancellation_error
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "task_node_cancel_cleanup",
+                    "graph_id": snapshot.graph_id,
+                    "node_id": node_id,
+                },
+            ) from cancellation_error
+
+    async def _quiesce_persisted_nodes(
+        self,
+        run: _GraphRun,
+        snapshot: TaskGraphSnapshot,
+    ) -> None:
+        states = {state.node_id: state for state in snapshot.node_states}
+        for node_id in tuple(run.inflight):
+            state = states.get(node_id)
+            if state is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if state.status not in {
+                TaskStatus.CANCELLED,
+                TaskStatus.RECOVERY_REQUIRED,
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+            }:
+                continue
+            await self._quiesce_node(
+                run,
+                snapshot,
+                node_id,
+                invoke_cancel=state.status is TaskStatus.CANCELLED,
+            )
+
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         graph_id = launch.graph_id
@@ -620,6 +684,7 @@ class LocalTaskGraphLauncher:
                     observed_fingerprint = fingerprint
                     run.observation_backoff = 1.0
                     await self._notify(run)
+                await self._quiesce_persisted_nodes(run, snapshot)
                 if view.status is TaskStatus.RECOVERY_REQUIRED:
                     return
                 if view.status in _TERMINAL:
