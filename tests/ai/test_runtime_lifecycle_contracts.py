@@ -493,7 +493,7 @@ async def test_late_build_abort_stops_after_owner_cleanup_failure(
     try:
         with pytest.raises(RuntimeError, match="restore failed"):
             await factory.compose_runtime_components(
-                _workspace(tmp_path),
+                "lifecycle",
                 models=ModelRegistry.openai(model="test-model"),
                 state=state,
             )
