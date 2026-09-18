@@ -181,15 +181,26 @@ class _DetailHistory:
                     output_retry_index=None,
                     model={"name": "test"},
                     request={
-                        "instructions": ["standing system"],
+                        "instructions": ["duplicate instruction mirror"],
                         "messages": [
                             {
                                 "kind": "request",
                                 "parts": [
                                     {
+                                        "part_kind": "system-prompt",
+                                        "content": "real system prompt",
+                                    },
+                                    {
                                         "part_kind": "user-prompt",
-                                        "content": "hello",
-                                    }
+                                        "content": [
+                                            "hello",
+                                            {
+                                                "media_type": "image/png",
+                                                "size": 2048,
+                                                "digest": "a" * 64,
+                                            },
+                                        ],
+                                    },
                                 ],
                             }
                         ],
@@ -350,10 +361,18 @@ async def test_history_detail_streams_pages_without_trace(
     assert '"page": 2' in output
     assert "hello" in output
     assert "Prompt Architecture" in output
-    assert "Fixed instruction prefix (F0/F1)" in output
-    assert "Dynamic overlay (O)" in output
+    assert "System Prompt" in output
+    assert "Fixed Instructions (F0/F1)" in output
+    assert "Dynamic Instructions (O)" in output
+    assert "Conversation Context" in output
+    assert "Input Attachments" in output
+    assert "1 attachment" in output
+    assert "1 image" in output
+    assert "2.0 KiB" in output
+    assert "image/png" in output
     assert "workspace" in output
-    assert "standing system" not in output
+    assert "duplicate instruction mirror" not in output
+    assert "real system prompt" not in output
     assert "fixed workspace guidance" not in output
     assert "repository overlay" not in output
     assert "Model Requests" in output
