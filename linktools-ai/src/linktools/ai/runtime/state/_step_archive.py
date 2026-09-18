@@ -16,7 +16,7 @@ from pydantic_ai.messages import ModelMessage
 
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
-from ...storage import StoredPayload
+from ...storage import ObjectStore, StoredPayload
 from .._message import decode_model_messages
 from .._model_interaction import (
     StagedContextSpan,
