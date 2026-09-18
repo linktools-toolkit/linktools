@@ -11,23 +11,34 @@ from ._graph import (
     TaskGraph,
     TaskGraphAdmission,
     TaskGraphHandle,
+    TaskGraphInfo,
     TaskGraphLaunch,
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphSnapshot,
     TaskGraphView,
+    TaskInputSupplyRequest,
     TaskLease,
     TaskNode,
+    TaskNodeInfo,
     TaskExpanderRef,
     TaskNodeResult,
     TaskNodeView,
     TaskResultRecord,
+    TaskResultRef,
     TaskStatus,
     TaskTerminalRecord,
     ready_nodes,
 )
-from ._handler import TaskDependency, TaskFunction, TaskNodeContext, TaskNodeHandler
+from ._handler import (
+    TaskArtifactPublisher,
+    TaskDependency,
+    TaskEffectResolution,
+    TaskFunction,
+    TaskNodeContext,
+    TaskNodeHandler,
+)
 from ._local import LocalTaskGraphLauncher
 from ._runner import (
     TaskNodeInvocation,
@@ -36,7 +47,12 @@ from ._runner import (
     TaskNodeRunner,
     TaskNodeRunResult,
 )
-from ._service import TaskGraphLauncher, TaskGraphQueryService, TaskGraphService
+from ._service import (
+    TaskEffectResolutionRequest,
+    TaskGraphLauncher,
+    TaskGraphQueryService,
+    TaskGraphService,
+)
 from ._service_impl import DefaultTaskGraphService, TaskPersistence
 
 __all__ = [
@@ -45,6 +61,9 @@ __all__ = [
     "LocalTaskGraphLauncher",
     "RecoverGraphRequest",
     "TaskDependency",
+    "TaskArtifactPublisher",
+    "TaskEffectResolution",
+    "TaskEffectResolutionRequest",
     "TaskDependencyResult",
     "TaskEvent",
     "TaskEventType",
@@ -52,6 +71,7 @@ __all__ = [
     "TaskGraph",
     "TaskGraphAdmission",
     "TaskGraphHandle",
+    "TaskGraphInfo",
     "TaskGraphLaunch",
     "TaskGraphLauncher",
     "TaskGraphLimits",
@@ -61,8 +81,10 @@ __all__ = [
     "TaskGraphService",
     "TaskGraphSnapshot",
     "TaskGraphView",
+    "TaskInputSupplyRequest",
     "TaskLease",
     "TaskNode",
+    "TaskNodeInfo",
     "TaskExpanderRef",
     "TaskNodeContext",
     "TaskNodeHandler",
@@ -75,6 +97,7 @@ __all__ = [
     "TaskNodeView",
     "TaskPersistence",
     "TaskResultRecord",
+    "TaskResultRef",
     "TaskStatus",
     "TaskTerminalRecord",
     "open_local_task_graph_service",

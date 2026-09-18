@@ -64,6 +64,7 @@ class _MaterializedRuntimeState:
     steps: RuntimeStepStore
     retention: RuntimeRetentionController
     maintenance: RuntimeStorageInspection
+    stores: Mapping[RuntimeDomain, StateStore]
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
 
@@ -84,6 +85,7 @@ async def materialize_runtime_state(
     namespace: str,
     tenant_id: str,
     object_store: ObjectStore | None,
+    read_only: bool = False,
 ) -> _MaterializedRuntimeState:
     stores: dict[RuntimeDomain, StateStore] = {}
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}
@@ -93,13 +95,15 @@ async def materialize_runtime_state(
         sql_routes: dict[tuple[str, object], RuntimeStateRoute] = {}
         filesystem_domains: dict[Path, list[RuntimeDomain]] = {}
         filesystem_routes: dict[Path, RuntimeStateRoute] = {}
-        memory_group = MemoryStateStorageGroup()
+        memory_group = MemoryStateStorageGroup(read_only=read_only)
         for domain in RuntimeDomain:
             route = plan.route(domain)
             if route.kind in {"sqlite", "sql"}:
                 if route.kind == "sqlite":
                     if route.path is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if read_only and not route.path.exists():
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                     key = ("sqlite", route.path)
                 else:
                     if route.engine is None:
@@ -125,6 +129,10 @@ async def materialize_runtime_state(
                 domain: _route_domain_path(plan.route(domain), namespace, tenant_id)
                 for domain in domains
             }
+            if read_only and any(
+                not path.is_dir() for path in member_roots.values()
+            ):
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             standalone = route.transaction_root is None
             scope = _filesystem_group_scope(
                 namespace, tenant_id, group_root, member_roots
@@ -135,6 +143,7 @@ async def materialize_runtime_state(
                 tenant_id=tenant_id,
                 scope_digest=scope,
                 standalone=standalone,
+                read_only=read_only,
             )
             for domain in domains:
                 store = FilesystemStateStore(
@@ -160,9 +169,10 @@ async def materialize_runtime_state(
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 bootstrap_local_schema = not route.path.exists()
-                await asyncio.to_thread(
-                    route.path.parent.mkdir, parents=True, exist_ok=True
-                )
+                if not read_only:
+                    await asyncio.to_thread(
+                        route.path.parent.mkdir, parents=True, exist_ok=True
+                    )
                 from sqlalchemy.ext.asyncio import create_async_engine
 
                 engine = create_async_engine(f"sqlite+aiosqlite:///{route.path}")
@@ -185,14 +195,17 @@ async def materialize_runtime_state(
                     for domain in domains
                 ):
                     build_object_sql_metadata(metadata=metadata)
-                if bootstrap_local_schema:
+                if bootstrap_local_schema and not read_only:
                     await context.initialize()
                     async with context.engine.begin() as connection:
                         await connection.run_sync(metadata.create_all)
+                elif read_only and key[0] == "sqlite":
+                    await context.initialize()
                 group = SqlStateStorageGroup(
                     context,
                     metadata,
                     owns_context=key[0] == "sqlite",
+                    read_only=read_only,
                 )
                 for domain in domains:
                     store = SqlStateStore(
@@ -320,6 +333,7 @@ async def materialize_runtime_state(
             steps=steps,
             retention=retention,
             maintenance=maintenance,
+            stores=dict(stores),
             close_actions=tuple(actions),
         )
     except BaseException:

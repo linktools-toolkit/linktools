@@ -335,16 +335,59 @@ class CapabilityLoader(Protocol[AppT]):
 class CapabilityGroup(Generic[AppT]):
     """Register and freeze one named set of runtime candidate definitions."""
 
-    def __init__(self, group_id: str) -> None:
+    def __init__(
+        self,
+        group_id: str,
+        *,
+        assets: "AssetStore | None" = None,
+        workspace: "Workspace | None" = None,
+        skill_source: "SkillResourceSource | None" = None,
+        discover_workspace_assets: bool = True,
+    ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
+        if assets is not None and not isinstance(assets, AssetStore):
+            raise TypeError("assets must be AssetStore")
+        if workspace is not None and not isinstance(workspace, Workspace):
+            raise TypeError("workspace must be Workspace")
+        if skill_source is not None and not isinstance(
+            skill_source,
+            SkillResourceSource,
+        ):
+            raise TypeError("skill_source must implement SkillResourceSource")
+        if not isinstance(discover_workspace_assets, bool):
+            raise TypeError("discover_workspace_assets must be bool")
+        if skill_source is not None and skill_source.id != group_id:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         self._id = group_id
-        self._store: AssetStore | None = None
+        self._store = assets
         self._owned_store_factory: "Callable[[], AssetStore] | None" = None
-        self._workspace: Workspace | None = None
-        self._skill_source: SkillResourceSource | None = None
+        self._workspace = workspace
+        self._skill_source = skill_source
         self._loaders: list[CapabilityLoader[AppT]] = []
         self._contributions: list[CapabilityContribution[AppT]] = []
+        if workspace is not None:
+            self._contributions.extend(
+                CapabilityContribution.from_opaque("tool", tool.name, tool)
+                for tool in _workspace_tool_definitions(workspace)
+            )
+        if assets is not None:
+            self._skill_source = skill_source or AssetSkillResourceSource(
+                group_id,
+                assets,
+            )
+            self._loaders.append(
+                cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader())
+            )
+        elif workspace is not None and discover_workspace_assets:
+            self._owned_store_factory = lambda: _workspace_declaration_store(workspace)
+            self._skill_source = skill_source or LocalSkillResourceSource(
+                group_id,
+                workspace.storage_root / "skills",
+            )
+            self._loaders.append(
+                cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader())
+            )
 
     @classmethod
     def from_store(
@@ -365,11 +408,7 @@ class CapabilityGroup(Generic[AppT]):
         )
         if source.id != group_id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        group = cls(group_id)
-        group._store = store
-        group._skill_source = source
-        group._loaders.append(cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader()))
-        return group
+        return cls(group_id, assets=store, skill_source=source)
 
     @classmethod
     def from_workspace(
@@ -383,22 +422,11 @@ class CapabilityGroup(Generic[AppT]):
             raise TypeError("workspace must be Workspace")
         if not isinstance(discover_assets, bool):
             raise TypeError("discover_assets must be bool")
-        group = cls(group_id)
-        group._workspace = workspace
-        group._contributions.extend(
-            CapabilityContribution.from_opaque("tool", tool.name, tool)
-            for tool in _workspace_tool_definitions(workspace)
+        return cls(
+            group_id,
+            workspace=workspace,
+            discover_workspace_assets=discover_assets,
         )
-        if discover_assets:
-            group._owned_store_factory = lambda: _workspace_declaration_store(workspace)
-            group._skill_source = LocalSkillResourceSource(
-                group_id,
-                workspace.storage_root / "skills",
-            )
-            group._loaders.append(
-                cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader())
-            )
-        return group
 
     @property
     def id(self) -> str:
@@ -451,6 +479,8 @@ class CapabilityGroup(Generic[AppT]):
             "version": 1,
             "task_type": task_type,
             "task_version": task_version,
+            "effect": _task_effect(handler),
+            "output": _task_output_contract(handler),
         }
         if any(
             value.kind == "task" and value.id == identity
@@ -882,6 +912,8 @@ def contribution_semantic_contract(
             "version": 1,
             "task_type": task_type,
             "task_version": task_version,
+            "effect": _task_effect(value),
+            "output": _task_output_contract(value),
         }
     if kind == "task_expander" and isinstance(value, TaskExpander):
         expander_id, expander_version = _expander_identity(value)
@@ -928,6 +960,24 @@ def _task_identity(handler: object) -> tuple[str, int]:
     ):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return task_type, task_version
+
+
+def _task_effect(handler: object) -> str:
+    effect = getattr(handler, "effect", "none")
+    if effect not in {"none", "replay_safe", "non_replay_safe"}:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return effect
+
+
+def _task_output_contract(handler: object) -> JsonValue:
+    output = getattr(handler, "output", None)
+    if output is None:
+        return {"kind": "json"}
+    return {
+        "kind": "schema",
+        "module": getattr(output, "__module__", type(output).__module__),
+        "name": getattr(output, "__qualname__", type(output).__qualname__),
+    }
 
 
 def _expander_identity(expander: object) -> tuple[str, int]:

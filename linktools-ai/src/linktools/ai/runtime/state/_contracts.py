@@ -2020,6 +2020,21 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def scheduler_snapshot(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskGraphSnapshot: ...
+    async def recover_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        cancel_requested: bool = False,
+    ) -> TaskGraphView: ...
+    async def requeue_recovery(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        expected_fence: int,
+    ) -> TaskGraphView: ...
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def claim(
         self,
@@ -2047,6 +2062,7 @@ class TaskRepository(RuntimeRepository, Protocol):
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord: ...
     async def fail(
         self,

@@ -3,7 +3,6 @@
 """Runtime composition and local service graph construction."""
 
 import asyncio
-import hashlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -56,6 +55,8 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
+from ._runtime_history import RuntimeHistory
+from ._runtime_identity import grant_key as runtime_grant_key
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
@@ -83,6 +84,7 @@ class _RuntimeComponents:
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
     metric_control: _RuntimeMetricBuffer | None
+    history: object
 
 
 async def compose_runtime_components(
@@ -151,9 +153,15 @@ async def compose_runtime_components(
             for candidate in frozen
             if candidate.kind == "agent"
         }
-        if "default" not in agents:
-            agents["default"] = AgentSpec("default")
         resolver = models.snapshot()
+        if "default" not in agents:
+            try:
+                resolver.resolve("default")
+            except AIError as error:
+                if error.code is not ErrorCode.MODEL_CONNECTION_NOT_FOUND:
+                    raise
+            else:
+                agents["default"] = AgentSpec("default")
         workspace_ref = (
             None
             if workspace is not None
@@ -383,7 +391,7 @@ def _memory_store_factory(
 
 
 def _grant_key(namespace: str) -> bytes:
-    return hashlib.sha256(f"workspace:{namespace}".encode()).digest()
+    return runtime_grant_key(namespace)
 
 
 def _capture_host_cwd() -> "str | None":
@@ -589,9 +597,13 @@ async def _build_local_components(
             execution,
             catalog,
             compiler,
+            session=session,
+            namespace=namespace,
             app=app,
             task_state=state.task.tasks,
             task_objects=state.object_store(RuntimeDomain.TASK),
+            artifact_state=state.artifact,
+            artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
             handlers=task_handlers,
@@ -721,6 +733,29 @@ async def _build_local_components(
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
+        history=_borrowed_runtime_history(
+            history_service,
+            tenant_id=tenant_id,
+            state=state,
+            authorization=authorization,
+        ),
+    )
+
+
+def _borrowed_runtime_history(
+    service: DefaultExecutionHistoryService,
+    *,
+    tenant_id: str,
+    state: RuntimeState,
+    authorization: object,
+) -> "RuntimeHistory":
+    return RuntimeHistory(
+        service,
+        tenant_id=tenant_id,
+        executions=state.execution.executions,
+        sessions=state.conversation.sessions,
+        tasks=state.task.tasks,
+        authorization=authorization,
     )
 
 

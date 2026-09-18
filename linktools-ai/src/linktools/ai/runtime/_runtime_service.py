@@ -22,12 +22,14 @@ from ..capability import CapabilityGroup
 from ..core import (
     CorrelationData,
     ExecutionMode,
+    ExecutionStatus,
     JsonValue,
     Principal,
     PrincipalKind,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
+    UsageMetrics,
     PromptLimits,
     normalize_correlation,
     normalize_execution_mode,
@@ -45,7 +47,9 @@ from ..model import ModelRegistry
 if TYPE_CHECKING:
     from ..observe import Metrics
     from ..task import TaskResultRecord
+    from ._runtime_history import RuntimeHistory
 from ..task import (
+    CancelGraphRequest,
     TaskGraph,
     TaskGraphLimits,
     TaskGraphRequest,
@@ -75,6 +79,7 @@ from .service_api import (
     EventService,
     ExternalService,
     ExecutionRequest,
+    ExecutionResult,
     ExecutionService,
     ForkExecutionRequest,
     ForkSessionRequest,
@@ -108,6 +113,9 @@ class _TaskNodeRuntimePort(Protocol):
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
+        files: Sequence[str] = (),
+        session_id: "str | None" = None,
+        memory_scope: "str | None" = None,
     ) -> "TaskNode": ...
 
     async def get_result_record(
@@ -185,6 +193,7 @@ class Runtime(Generic[AppT]):
         external: ExternalService,
         event: EventService,
         artifact: ArtifactService,
+        history: "RuntimeHistory | None",
         *,
         namespace: str,
         context: RuntimeContext[AppT],
@@ -221,6 +230,7 @@ class Runtime(Generic[AppT]):
         self.external = external
         self.event = event
         self.artifact = artifact
+        self.history = history
         self._namespace = validate_persistence_namespace(namespace)
         self._context = context
         self._default_principal = Principal(
@@ -411,7 +421,10 @@ class Runtime(Generic[AppT]):
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
+        effective_correlation = _overlay_request_correlation(
+            self.correlation,
+            correlation,
+        )
         resolved_files = _request_files(files)
         definition = self._catalog.definition(agent_digest)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
@@ -458,7 +471,8 @@ class Runtime(Generic[AppT]):
                 resume_request,
             )
         _logger.info(
-            "runtime execution admitted: execution=%s agent=%s session=%s mode=%s planning=%s thinking=%s",
+            "runtime execution admitted: execution=%s agent=%s session=%s "
+            "mode=%s planning=%s thinking=%s",
             handle.execution_id,
             definition.spec.id,
             session_id,
@@ -688,6 +702,9 @@ class Runtime(Generic[AppT]):
         planning: "bool | None",
         thinking: "ThinkingValue | None",
         expander: "TaskExpanderRef | None",
+        files: Sequence[str] = (),
+        session_id: "str | None" = None,
+        memory_scope: "str | None" = None,
     ) -> TaskNode:
         return self._require_task_node_runtime().build_agent_task(
             agent_digest,
@@ -699,6 +716,9 @@ class Runtime(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             expander=expander,
+            files=files,
+            session_id=session_id,
+            memory_scope=memory_scope,
         )
 
     async def start_graph(
@@ -722,6 +742,22 @@ class Runtime(Generic[AppT]):
             self,
             graph.graph_id,
             request.principal,
+            self._watch_execution_tree,
+        )
+
+    def graph_run(
+        self,
+        graph_id: str,
+        *,
+        principal: "Principal | None" = None,
+    ) -> TaskGraphRun[AppT]:
+        """Return a durable graph handle without starting another scheduler."""
+        self._ensure_open()
+        validate_resource_id(graph_id)
+        return TaskGraphRun(
+            self,
+            graph_id,
+            self._resolve_principal(principal),
             self._watch_execution_tree,
         )
 
@@ -802,6 +838,126 @@ class Runtime(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await task_runtime.read_result_record(record)
 
+    def _task_execution(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        principal: Principal,
+    ) -> Execution[AppT]:
+        self._ensure_open()
+        return Execution(
+            self,
+            execution_id,
+            "",
+            principal,
+            self._watch_execution_tree,
+            lambda timeout_seconds: self._wait_task_execution(
+                graph_id,
+                node_id,
+                execution_id,
+                principal,
+                timeout_seconds,
+            ),
+            lambda idempotency_key, force: self._cancel_task_execution(
+                graph_id,
+                node_id,
+                execution_id,
+                principal,
+                idempotency_key,
+                force,
+            ),
+        )
+
+    async def _cancel_task_execution(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        principal: Principal,
+        idempotency_key: str | None,
+        force: bool,
+    ) -> CancelExecutionResult:
+        await self.graph.cancel(
+            graph_id,
+            CancelGraphRequest(
+                principal,
+                idempotency_key or secrets.token_urlsafe(32),
+                force,
+            ),
+        )
+        snapshot = await self.graph.snapshot(graph_id, principal=principal)
+        node = next(
+            (value for value in snapshot.node_states if value.node_id == node_id),
+            None,
+        )
+        if node is None or node.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.info(
+            "task execution cancel settled: graph=%s node=%s status=%s",
+            graph_id,
+            node_id,
+            node.status.value,
+        )
+        return CancelExecutionResult(
+            execution_id,
+            node.status is TaskStatus.CANCELLED,
+        )
+
+    async def _wait_task_execution(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        principal: Principal,
+        timeout_seconds: float | None,
+    ) -> "ExecutionResult":
+        result = await self.graph.wait(
+            graph_id,
+            principal=principal,
+            timeout_seconds=timeout_seconds,
+        )
+        node = next(
+            (value for value in result.node_results if value.node_id == node_id),
+            None,
+        )
+        if node is None or node.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if node.status is TaskStatus.SUCCEEDED:
+            output = await self.read_task_result(
+                graph_id,
+                node_id,
+                principal=principal,
+            )
+            return ExecutionResult(
+                execution_id,
+                ExecutionStatus.SUCCEEDED,
+                output,
+                node.result_digest,
+                UsageMetrics(),
+            )
+        if node.status is TaskStatus.CANCELLED:
+            return ExecutionResult(
+                execution_id,
+                ExecutionStatus.CANCELLED,
+                None,
+                None,
+                UsageMetrics(),
+                ErrorCode.EXECUTION_CANCELLED.value,
+            )
+        if node.status is TaskStatus.WAITING:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        if node.status is TaskStatus.RECOVERY_REQUIRED:
+            raise AIError(ErrorCode.TASK_EFFECT_UNKNOWN)
+        return ExecutionResult(
+            execution_id,
+            ExecutionStatus.FAILED,
+            None,
+            None,
+            UsageMetrics(),
+            node.error_code or ErrorCode.TASK_NODE_FAILED.value,
+        )
+
     async def _admit_graph(
         self,
         graph: TaskGraph,
@@ -813,7 +969,10 @@ class Runtime(Generic[AppT]):
     ) -> TaskGraphRequest:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
+        effective_correlation = _overlay_request_correlation(
+            self.correlation,
+            correlation,
+        )
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -1008,6 +1167,7 @@ async def _open_runtime(
             components.external,
             components.event,
             components.artifact,
+            getattr(components, "history", None),
             namespace=namespace,
             context=context,
             close_callback=components.close_callback,

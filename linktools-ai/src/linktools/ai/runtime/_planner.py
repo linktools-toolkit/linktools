@@ -3,9 +3,11 @@
 """Runtime-owned interpretation of generic TaskNodes."""
 
 import asyncio
+import hashlib
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, cast
 
@@ -13,10 +15,15 @@ from linktools.core import environ
 from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
-from ..agent import AgentCatalog, AgentCompiler, AgentDefinition
+from ..agent import (
+    AgentCatalog,
+    AgentCompiler,
+    AgentDefinition,
+    bind_output,
+    restore_output,
+)
 from ..capability import TaskExpander, TaskExpansionContext
 from ..core import (
-    CorrelationData,
     ExecutionStatus,
     JsonValue,
     Principal,
@@ -24,6 +31,7 @@ from ..core import (
     ThinkingValue,
     canonical_json_bytes,
     canonical_sha256,
+    deterministic_id,
     normalize_json_value,
     normalize_thinking,
     principal_identity_payload,
@@ -41,20 +49,128 @@ from ..task import (
     TaskNodeContext,
     TaskNodeHandler,
     TaskNodeInvocation,
+    TaskNodeRunError,
     TaskNodeRunControl,
     TaskNodeRunResult,
     TaskResultRecord,
+    TaskResultRef,
 )
 from ._agent_task import _AgentTaskNodeHandler, _execution_failure
 from ._input import CanonicalUserInput, task_prompt_draft, validate_user_input
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from .service_api import ExecutionService
-from .state import RuntimeDomain
+from .service_api import ExecutionService, SessionService
+from .state import ArtifactRecord, ArtifactState, RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.planner")
 AppT = TypeVar("AppT")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESERVED_EXPANDER_ID_PREFIX = "linktools.ai."
+_DEFERRED_INPUT_TYPE = "linktools.ai.input"
+_DEFERRED_INPUT_VERSION = 1
+
+
+class _DeferredInputHandler:
+    type = _DEFERRED_INPUT_TYPE
+    version = _DEFERRED_INPUT_VERSION
+    effect = "none"
+
+    def normalize(self, input: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]:
+        return normalize_json_value(dict(input))
+
+    async def run(self, context: TaskNodeContext[AppT]) -> JsonValue:
+        del context
+        raise AIError(ErrorCode.TASK_NOT_READY)
+
+    async def cancel(self, context: TaskNodeContext[AppT]) -> None:
+        del context
+
+
+class _TaskArtifactPublisher:
+    def __init__(
+        self,
+        state: ArtifactState,
+        object_store: ObjectStore,
+        object_key_factory: RuntimeObjectKeyFactory,
+        *,
+        principal: Principal,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+    ) -> None:
+        self._state = state
+        self._object_store = object_store
+        self._object_key_factory = object_key_factory
+        self._principal = principal
+        self._graph_id = graph_id
+        self._node_id = node_id
+        self._execution_id = execution_id
+
+    async def publish(
+        self,
+        name: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        media_type: str,
+        expected_size: int,
+        expected_digest: str,
+    ) -> ArtifactRecord:
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(media_type, str)
+            or not media_type
+            or isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or expected_size < 0
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        data = bytearray()
+        async for chunk in chunks:
+            if not isinstance(chunk, bytes):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            data.extend(chunk)
+            if len(data) > expected_size:
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        value = bytes(data)
+        digest = hashlib.sha256(value).hexdigest()
+        if len(value) != expected_size or digest != expected_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        artifact_id = deterministic_id(
+            "task-artifact",
+            self._execution_id,
+            name,
+            expected_digest,
+        )
+        existing = await self._state.records.get_metadata(
+            artifact_id,
+            tenant_id=self._principal.tenant_id,
+        )
+        if existing is not None:
+            if (
+                existing.execution_id != self._execution_id
+                or existing.digest != expected_digest
+                or existing.media_type != media_type
+            ):
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            return existing
+        object_ref = await put_runtime_object(
+            self._object_store,
+            self._object_key_factory,
+            RuntimeDomain.ARTIFACT,
+            self._principal.tenant_id,
+            value,
+        )
+        record = ArtifactRecord(
+            artifact_id,
+            self._execution_id,
+            self._principal.tenant_id,
+            f"task:{self._graph_id}:{self._node_id}",
+            media_type,
+            object_ref,
+            datetime.now(timezone.utc),
+        )
+        return await self._state.records.put_metadata(record)
 
 
 class _TaskStateReader(Protocol):
@@ -112,6 +228,9 @@ class _TaskExpansionContext:
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
+        files: Sequence[str] = (),
+        session_id: str | None = None,
+        memory_scope: str | None = None,
     ) -> TaskNode:
         node = self._build_agent_task(
             agent_id,
@@ -123,6 +242,9 @@ class _TaskExpansionContext:
             planning=planning,
             thinking=thinking,
             expander=expander,
+            files=files,
+            session_id=session_id,
+            memory_scope=memory_scope,
         )
         self._generated_agent_tasks[node.node_id] = node
         return node
@@ -156,9 +278,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         *,
+        session: SessionService | None = None,
+        namespace: str,
         app: AppT,
         task_state: _TaskStateReader,
         task_objects: ObjectStore,
+        artifact_state: ArtifactState | None = None,
+        artifact_objects: ObjectStore | None = None,
         object_key_factory: RuntimeObjectKeyFactory,
         payload_policy: PayloadPolicy,
         handlers: Sequence[TaskNodeHandler[AppT]] = (),
@@ -169,19 +295,24 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         recovery_durable: bool = True,
     ) -> None:
         self._app = app
+        self._namespace = namespace
         self._catalog = catalog
         self._compiler = compiler
         self._execution = execution
         self._task_state = task_state
         self._task_objects = task_objects
+        self._artifact_state = artifact_state
+        self._artifact_objects = artifact_objects
         self._object_key_factory = object_key_factory
         self._payload_policy = payload_policy
         self._agent = _AgentTaskNodeHandler(
             execution,
             catalog,
             compiler,
+            session=session,
             release_dependency_hold=release_dependency_hold,
         )
+        self._deferred_input = _DeferredInputHandler()
         values: dict[tuple[str, int], TaskNodeHandler[AppT]] = {}
         for handler in handlers:
             key = _external_handler_identity(handler)
@@ -248,6 +379,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             },
             budget_cost=node.budget_cost,
             expander=node.expander,
+            input_refs=node.input_refs,
+            timeout_seconds=node.timeout_seconds,
+            max_attempts=node.max_attempts,
+            retry_delay_seconds=node.retry_delay_seconds,
+            output_schema=node.output_schema,
+            output_contract=_output_contract(handler, node.output_schema),
+            effect=_handler_effect(handler),
         )
 
     def validate_request(self, graph: TaskGraph) -> None:
@@ -289,6 +427,28 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 ) from error
             if node.expander is not None:
                 self._resolve_expander(node.expander, request=False)
+            if node.effect != _handler_effect(handler):
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={
+                        "graph_id": snapshot.graph_id,
+                        "node_id": node.node_id,
+                        "reason": "task_effect_changed",
+                    },
+                )
+            handler_output = getattr(handler, "output", None)
+            if handler_output is not None and node.output_contract != _output_contract(
+                handler,
+                None,
+            ):
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    safe_details={
+                        "graph_id": snapshot.graph_id,
+                        "node_id": node.node_id,
+                        "reason": "task_output_contract_changed",
+                    },
+                )
             if handler is self._agent:
                 canonical_body = self._agent.validate_recovery(
                     body,
@@ -318,6 +478,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 },
                 budget_cost=node.budget_cost,
                 expander=node.expander,
+                input_refs=node.input_refs,
+                timeout_seconds=node.timeout_seconds,
+                max_attempts=node.max_attempts,
+                retry_delay_seconds=node.retry_delay_seconds,
+                output_schema=node.output_schema,
+                output_contract=node.output_contract,
+                effect=node.effect,
             )
             if canonical.input != node.input:
                 raise AIError(
@@ -346,8 +513,22 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
+            tenant_id=principal.tenant_id,
+            graph_id=graph_id,
         )
         execution_id: str | None = None
+        if handler is self._deferred_input:
+            wait_id = _wait_execution_id(
+                graph_id,
+                node.node_id,
+                principal.tenant_id,
+            )
+            await control.handoff_execution(wait_id)
+            return TaskNodeRunResult(
+                canonical_sha256({"wait_id": wait_id}),
+                wait_id,
+                deferred=True,
+            )
         if handler is self._agent:
             output, execution_id = await self._agent.run_node(
                 node,
@@ -358,6 +539,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 control=control,
             )
         else:
+            execution_id = _task_execution_id(
+                graph_id,
+                node.node_id,
+                principal.tenant_id,
+            )
             idempotency_key = _custom_idempotency_key(
                 graph_id,
                 node,
@@ -369,17 +555,26 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 principal,
                 graph_id,
                 node.node_id,
+                execution_id,
                 body,
                 dependencies,
                 idempotency_key,
                 correlation,
+                artifacts=self._artifact_publisher(
+                    principal,
+                    graph_id,
+                    node.node_id,
+                    execution_id,
+                ),
+            )
+            raw_output = await self._run_custom_handler(
+                handler,
+                task_context,
+                node=node,
+                execution_id=execution_id,
             )
             try:
-                output = normalize_json_value(await handler.run(task_context))
-            except asyncio.CancelledError:
-                raise
-            except AIError:
-                raise
+                output = normalize_json_value(raw_output)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
         return await self._complete_output(
@@ -389,6 +584,77 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             graph_id=graph_id,
         )
+
+    def _artifact_publisher(
+        self,
+        principal: Principal,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+    ) -> "_TaskArtifactPublisher | None":
+        if self._artifact_state is None or self._artifact_objects is None:
+            return None
+        return _TaskArtifactPublisher(
+            self._artifact_state,
+            self._artifact_objects,
+            self._object_key_factory,
+            principal=principal,
+            graph_id=graph_id,
+            node_id=node_id,
+            execution_id=execution_id,
+        )
+
+    async def _run_custom_handler(
+        self,
+        handler: TaskNodeHandler[AppT],
+        context: TaskNodeContext[AppT],
+        *,
+        node: TaskNode,
+        execution_id: str,
+    ) -> JsonValue:
+        attempts = 0
+        effect = node.effect
+        while True:
+            attempts += 1
+            try:
+                if node.timeout_seconds is None:
+                    return await handler.run(context)
+                return await asyncio.wait_for(
+                    handler.run(context),
+                    timeout=node.timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError as error:
+                if effect == "non_replay_safe":
+                    raise TaskNodeRunError(
+                        ErrorCode.TASK_EFFECT_UNKNOWN,
+                        execution_id,
+                    ) from error
+                if attempts >= node.max_attempts:
+                    raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT) from error
+            except AIError as error:
+                retryable = bool(error.retryable)
+                if (
+                    attempts >= node.max_attempts
+                    or not retryable
+                    or effect == "non_replay_safe"
+                ):
+                    if effect == "non_replay_safe":
+                        raise TaskNodeRunError(
+                            ErrorCode.TASK_EFFECT_UNKNOWN,
+                            execution_id,
+                        ) from error
+                    raise
+            except Exception as error:  # noqa: BLE001
+                if effect == "non_replay_safe":
+                    raise TaskNodeRunError(
+                        ErrorCode.TASK_EFFECT_UNKNOWN,
+                        execution_id,
+                    ) from error
+                raise AIError(ErrorCode.TASK_NODE_FAILED) from error
+            if node.retry_delay_seconds:
+                await asyncio.sleep(node.retry_delay_seconds)
 
     async def wait_bound(
         self,
@@ -438,6 +704,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
+        files: Sequence[str] = (),
+        session_id: str | None = None,
+        memory_scope: str | None = None,
     ) -> TaskNode:
         definition = self._root_definition(agent_digest)
         if planning is not None and not isinstance(planning, bool):
@@ -464,9 +733,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 "mode": "run",
                 "planning": resolved_planning,
                 "thinking": resolved_thinking,
+                "files": list(files),
+                "session_id": session_id,
+                "memory_scope": memory_scope,
             },
             budget_cost=budget_cost,
             expander=expander,
+            output_schema=output,
         )
 
     def _build_agent_task_by_id(
@@ -481,6 +754,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
+        files: Sequence[str] = (),
+        session_id: str | None = None,
+        memory_scope: str | None = None,
     ) -> TaskNode:
         validate_agent_id(agent_id)
         try:
@@ -502,6 +778,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             expander=expander,
+            files=files,
+            session_id=session_id,
+            memory_scope=memory_scope,
         )
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
@@ -515,6 +794,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
+            tenant_id=principal.tenant_id,
+            graph_id=graph_id,
         )
         if handler is self._agent:
             snapshot = await self._task_state.snapshot_graph(
@@ -547,10 +828,17 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal,
             graph_id,
             node.node_id,
+            _task_execution_id(graph_id, node.node_id, principal.tenant_id),
             body,
             dependencies,
             _custom_idempotency_key(graph_id, node, principal, dependencies),
             correlation,
+            artifacts=self._artifact_publisher(
+                principal,
+                graph_id,
+                node.node_id,
+                _task_execution_id(graph_id, node.node_id, principal.tenant_id),
+            ),
         )
         await handler.cancel(task_context)
 
@@ -584,6 +872,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         graph_id: str,
     ) -> TaskNodeRunResult:
         normalized = normalize_json_value(output)
+        if node.output_contract is not None:
+            _restore_output_contract(node.output_contract).validate_payload(normalized)
+        elif isinstance(node.output_schema, type) and issubclass(
+            node.output_schema,
+            BaseModel,
+        ):
+            bind_output(node.output_schema).validate_payload(normalized)
         digest = canonical_sha256(normalized)
         payload = await self._materialize_result(
             normalized,
@@ -651,7 +946,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 reason="expander_output_invalid",
             )
         raw_nodes = tuple(expanded)
-        raw_ids = tuple(node.node_id for node in raw_nodes if isinstance(node, TaskNode))
+        raw_ids = tuple(
+            node.node_id for node in raw_nodes if isinstance(node, TaskNode)
+        )
         if len(raw_ids) != len(raw_nodes) or len(set(raw_ids)) != len(raw_ids):
             raise _expansion_error(
                 graph_id,
@@ -753,6 +1050,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         node: TaskNode,
         *,
         dependency_results: Mapping[str, TaskDependencyResult],
+        tenant_id: str,
+        graph_id: str,
     ) -> dict[str, TaskDependency]:
         if set(dependency_results) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -762,12 +1061,67 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if dependency.result_payload is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             output = await self._read_payload(dependency.result_payload)
+            execution_id = dependency.execution_id
+            if execution_id == _task_execution_id(
+                graph_id,
+                dependency_id,
+                tenant_id,
+            ):
+                execution_id = None
             values[dependency_id] = TaskDependency(
                 dependency_id,
                 output,
                 dependency.result_digest,
-                dependency.execution_id,
+                execution_id,
             )
+        if node.input_refs:
+            grouped: dict[str, list[tuple[str, TaskResultRef]]] = {}
+            for name, reference in node.input_refs.items():
+                if (
+                    reference.namespace != self._namespace
+                    or reference.tenant_id != tenant_id
+                ):
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                grouped.setdefault(reference.graph_id, []).append((name, reference))
+            for graph_id, entries in grouped.items():
+                records = await self._task_state.get_results(
+                    graph_id,
+                    tuple(reference.node_id for _, reference in entries),
+                    tenant_id=tenant_id,
+                )
+                snapshot = await self._task_state.snapshot_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                states = (
+                    {} if snapshot is None else {
+                        state.node_id: state for state in snapshot.node_states
+                    }
+                )
+                for name, reference in entries:
+                    record = records.get(reference.node_id)
+                    state = states.get(reference.node_id)
+                    if (
+                        record is None
+                        or state is None
+                        or state.status is not TaskStatus.SUCCEEDED
+                        or state.result_digest != reference.result_digest
+                    ):
+                        raise AIError(ErrorCode.TASK_NOT_READY)
+                    output = await self._read_payload(record.payload)
+                    execution_id = state.execution_id
+                    if execution_id == _task_execution_id(
+                        graph_id,
+                        reference.node_id,
+                        tenant_id,
+                    ):
+                        execution_id = None
+                    values[name] = TaskDependency(
+                        reference.node_id,
+                        output,
+                        reference.result_digest,
+                        execution_id,
+                    )
         return values
 
     async def _materialize_result(
@@ -877,6 +1231,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     ) -> TaskNodeHandler[AppT] | _AgentTaskNodeHandler:
         if task_type == self._agent.type and task_version == self._agent.version:
             return self._agent
+        if (
+            task_type == self._deferred_input.type
+            and task_version == self._deferred_input.version
+        ):
+            return self._deferred_input
         handler = self._handlers.get((task_type, task_version))
         if handler is not None:
             return handler
@@ -990,6 +1349,42 @@ def _custom_idempotency_key(
             "principal": principal_identity_payload(principal),
         }
     )
+
+
+def _task_execution_id(graph_id: str, node_id: str, tenant_id: str) -> str:
+    return deterministic_id("task-execution", graph_id, node_id, tenant_id)
+
+
+def _wait_execution_id(graph_id: str, node_id: str, tenant_id: str) -> str:
+    return f"wait:{deterministic_id('task-wait', graph_id, node_id, tenant_id)}"
+
+
+def _handler_effect(handler: object) -> str:
+    value = getattr(handler, "effect", "none")
+    return value if value in {"none", "replay_safe", "non_replay_safe"} else "none"
+
+
+def _output_contract(
+    handler: object,
+    output_schema: object | None,
+) -> dict[str, JsonValue] | None:
+    output = getattr(handler, "output", None) or output_schema
+    if output is None:
+        return None
+    binding = bind_output(cast("type[BaseModel]", output))
+    return {
+        "mode": binding.mode,
+        "schema": binding.schema_definition,
+    }
+
+
+def _restore_output_contract(
+    contract: Mapping[str, JsonValue],
+):
+    try:
+        return restore_output(contract["mode"], contract["schema"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
 
 __all__ = ["RuntimeTaskNodeRunner"]

@@ -4,12 +4,13 @@
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
 from ..core import JsonValue, Page, Principal, ThinkingValue
+from ..errors import AIError, ErrorCode
 from ._input import validate_user_input
 from .recovery import (
     ExecutionRecoveryEffect,
@@ -57,8 +58,14 @@ class Execution(Generic[AppT]):
     _binding_digest: str
     _principal: Principal
     _watch_tree: _ExecutionTreeWatcher
+    _task_wait: Callable[[float | None], Awaitable[ExecutionResult]] | None = None
+    _task_cancel: Callable[
+        [str | None, bool], Awaitable[CancelExecutionResult]
+    ] | None = None
 
     async def wait(self, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        if self._task_wait is not None:
+            return await self._task_wait(timeout_seconds)
         return await self._runtime.execution.wait(
             self.execution_id,
             principal=self._principal,
@@ -68,8 +75,20 @@ class Execution(Generic[AppT]):
     def watch(
         self,
         *,
+        cursor: "str | None" = None,
+        include_content: bool = False,
         after_sequences: "Mapping[str, int] | None" = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if cursor is not None:
+            if (
+                not isinstance(cursor, str)
+                or not cursor.isdecimal()
+                or after_sequences is not None
+            ):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            after_sequences = {self.execution_id: int(cursor)}
         return self._watch_tree(
             self.execution_id,
             principal=self._principal,
@@ -82,6 +101,8 @@ class Execution(Generic[AppT]):
         idempotency_key: "str | None" = None,
         force: bool = False,
     ) -> CancelExecutionResult:
+        if self._task_cancel is not None:
+            return await self._task_cancel(idempotency_key, force)
         return await self._runtime.cancel(
             self.execution_id,
             principal=self._principal,
@@ -484,7 +505,13 @@ class Agent(Generic[AppT]):
         *,
         principal: "Principal | None" = None,
     ) -> "Session[AppT]":
-        return Session(self._runtime, self.id, self._agent_digest, session_id, principal)
+        return Session(
+            self._runtime,
+            self.id,
+            self._agent_digest,
+            session_id,
+            principal,
+        )
 
     async def create_session(
         self,
@@ -503,7 +530,13 @@ class Agent(Generic[AppT]):
             metadata=metadata,
             idempotency_key=idempotency_key,
         )
-        return Session(self._runtime, self.id, self._agent_digest, session_id, principal)
+        return Session(
+            self._runtime,
+            self.id,
+            self._agent_digest,
+            session_id,
+            principal,
+        )
 
     async def start_evaluation(
         self,
@@ -542,6 +575,9 @@ class Agent(Generic[AppT]):
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
+        files: Sequence[str] = (),
+        session_id: "str | None" = None,
+        memory_scope: "str | None" = None,
     ) -> "TaskNode":
         return self._runtime._task_for_agent(
             self._agent_digest,
@@ -553,6 +589,9 @@ class Agent(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             expander=expander,
+            files=files,
+            session_id=session_id,
+            memory_scope=memory_scope,
         )
 
 

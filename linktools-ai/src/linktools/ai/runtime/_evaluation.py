@@ -27,7 +27,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ._handoff import HandoffGate, HandoffState
-from ._snapshot import RunSnapshot
+from ._snapshot_contract import RunSnapshot
 from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,

@@ -3,14 +3,20 @@
 """RuntimeState lifecycle owner."""
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...core import validate_persistence_namespace
+from ...core import (
+    canonical_json_bytes,
+    validate_persistence_namespace,
+    validate_tenant_id,
+)
 from ...errors import AIError, ErrorCode
-from ...storage import FilesystemObjectStore, ObjectStore
+from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_object
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -26,6 +32,16 @@ from ._plan import (
     RuntimeStatePlan,
     RuntimeStateRoute,
     runtime_domain_uses_object_store,
+)
+from ._store import StateStore
+from ._codec import (
+    decode_fact,
+    decode_operation,
+    decode_record,
+    encode_fact,
+    encode_operation,
+    encode_record,
+    iter_runtime_object_refs,
 )
 
 if TYPE_CHECKING:
@@ -78,6 +94,8 @@ class RuntimeState:
         self._steps: RuntimeStepStore | None = None
         self._retention: RuntimeRetentionController | None = None
         self._maintenance: RuntimeStorageInspection | None = None
+        self._stores: dict[RuntimeDomain, StateStore] = {}
+        self._read_only = False
 
     @classmethod
     def in_memory(cls) -> "RuntimeState":
@@ -160,6 +178,10 @@ class RuntimeState:
         return self._lifecycle is _RuntimeStateLifecycle.READY
 
     @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    @property
     def namespace(self) -> str:
         self._require_ready()
         if self._namespace is None:
@@ -209,7 +231,13 @@ class RuntimeState:
     def retention(self) -> "RuntimeRetentionController":
         return self._require_state(self._retention)
 
-    async def initialize(self, *, namespace: str, tenant_id: str) -> None:
+    async def initialize(
+        self,
+        *,
+        namespace: str,
+        tenant_id: str,
+        read_only: bool = False,
+    ) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStateLifecycle.NEW:
                 raise AIError(
@@ -219,6 +247,8 @@ class RuntimeState:
             validate_persistence_namespace(namespace)
             if not tenant_id.strip():
                 raise ValueError("tenant_id is required")
+            if not isinstance(read_only, bool):
+                raise TypeError("read_only must be bool")
             self._lifecycle = _RuntimeStateLifecycle.INITIALIZING
             try:
                 from ._materializer import materialize_runtime_state
@@ -228,12 +258,14 @@ class RuntimeState:
                     namespace=namespace,
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
+                    read_only=read_only,
                 )
                 self._assign_materialized(
                     materialized,
                     namespace,
                     tenant_id,
                 )
+                self._read_only = read_only
                 self._lifecycle = _RuntimeStateLifecycle.READY
             except BaseException:
                 self._lifecycle = _RuntimeStateLifecycle.CLOSED
@@ -294,6 +326,7 @@ class RuntimeState:
         self._steps = value.steps
         self._retention = value.retention
         self._maintenance = value.maintenance
+        self._stores = dict(value.stores)
         self._close_actions = value.close_actions
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -338,6 +371,213 @@ class RuntimeState:
             owner_scope=owner_scope,
         )
 
+    def local_paths(self) -> tuple[Path, ...]:
+        """Return local physical paths owned by this state instance."""
+        self._require_ready()
+        paths: list[Path] = []
+        for domain in RuntimeDomain:
+            route = self._plan.route(domain)
+            if route.path is not None:
+                paths.append(route.path.resolve())
+            if route.transaction_root is not None:
+                paths.append(route.transaction_root.resolve())
+        if self._objects is not None:
+            paths.extend(self._objects.local_paths())
+        return tuple(dict.fromkeys(paths))
+
+    async def export_snapshot(self, *, object_store: ObjectStore) -> ObjectRef:
+        """Export this initialized read-only state as a logical manifest."""
+        self._require_ready()
+        if not self._read_only:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if not self._plan.durable_domains:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        domains: dict[str, dict[str, list[object]]] = {}
+        objects: list[dict[str, object]] = []
+        copied_objects: set[tuple[str, str, str, int]] = set()
+        for domain, store in self._stores.items():
+            records = await store.read(lambda transaction: transaction.scan_records())
+            facts = await store.read(lambda transaction: transaction.scan_facts())
+            operations = await store.read(
+                lambda transaction: transaction.scan_operations()
+            )
+            domains[domain.value] = {
+                "records": [encode_record(value) for value in records],
+                "facts": [encode_fact(value) for value in facts],
+                "operations": [encode_operation(value) for value in operations],
+            }
+            encoded_values = (
+                [encode_record(value) for value in records]
+                + [encode_fact(value) for value in facts]
+                + [encode_operation(value) for value in operations]
+            )
+            for encoded in encoded_values:
+                for source_domain, reference in iter_runtime_object_refs(
+                    encoded,
+                    default_domain=domain,
+                ):
+                    identity = (
+                        source_domain.value,
+                        reference.key,
+                        reference.digest,
+                        reference.size,
+                    )
+                    if identity in copied_objects:
+                        continue
+                    source_store = self.object_store(source_domain)
+                    content = await read_object(
+                        source_store,
+                        reference.key,
+                        expected_digest=reference.digest,
+                        expected_size=reference.size,
+                    )
+                    key = (
+                        "v1/runtime-state-object/"
+                        f"{source_domain.value}/{reference.digest}"
+                    )
+                    await _put_snapshot_object(object_store, key, content)
+                    objects.append(
+                        {
+                            "domain": source_domain.value,
+                            "source": _object_ref_payload(reference),
+                            "content": _object_ref_payload(
+                                ObjectRef(
+                                    object_store.store_id,
+                                    key,
+                                    reference.digest,
+                                    reference.size,
+                                )
+                            ),
+                        }
+                    )
+                    copied_objects.add(identity)
+        manifest = {
+            "kind": "runtime-state-snapshot",
+            "format_version": 1,
+            "namespace": self.namespace,
+            "tenant_id": self.tenant_id,
+            "domains": domains,
+            "objects": objects,
+        }
+        payload = canonical_json_bytes(manifest)
+        digest = hashlib.sha256(payload).hexdigest()
+        key = f"v1/runtime-state-snapshot/{digest}"
+        await _put_snapshot_object(object_store, key, payload)
+        return ObjectRef(object_store.store_id, key, digest, len(payload))
+
+    @classmethod
+    async def restore_snapshot(
+        cls,
+        ref: ObjectRef,
+        *,
+        object_store: ObjectStore,
+        root: str | Path,
+    ) -> None:
+        """Restore a logical state manifest into a new local RuntimeState."""
+        payload = await read_object(
+            object_store,
+            ref.key,
+            expected_digest=ref.digest,
+            expected_size=ref.size,
+        )
+        try:
+            manifest = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("kind") != "runtime-state-snapshot"
+            or manifest.get("format_version") != 1
+            or not isinstance(manifest.get("domains"), dict)
+        ):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        namespace = manifest.get("namespace")
+        tenant_id = manifest.get("tenant_id")
+        if not isinstance(namespace, str) or not isinstance(tenant_id, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        namespace = validate_persistence_namespace(namespace)
+        try:
+            tenant_id = validate_tenant_id(tenant_id)
+        except AIError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH) from error
+        target = Path(root).expanduser().resolve(strict=False)
+        if target.exists() and any(target.iterdir()):
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        state = cls.from_root(root)
+        await state.initialize(
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
+        try:
+            raw_objects = manifest.get("objects", [])
+            if not isinstance(raw_objects, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for raw_object in raw_objects:
+                if not isinstance(raw_object, dict):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    domain = RuntimeDomain(str(raw_object["domain"]))
+                    source = _object_ref_from_payload(raw_object["source"])
+                    content_ref = _object_ref_from_payload(raw_object["content"])
+                except (KeyError, TypeError, ValueError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if (
+                    source.digest != content_ref.digest
+                    or source.size != content_ref.size
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                content = await read_object(
+                    object_store,
+                    content_ref.key,
+                    expected_digest=content_ref.digest,
+                    expected_size=content_ref.size,
+                )
+                destination = state.object_store(domain)
+                current = await destination.stat(source.key)
+                if current is not None:
+                    if current.digest != source.digest or current.size != source.size:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    await read_object(
+                        destination,
+                        source.key,
+                        expected_digest=source.digest,
+                        expected_size=source.size,
+                    )
+                else:
+                    await destination.put(
+                        source.key,
+                        _snapshot_chunk(content),
+                        expected_size=source.size,
+                        expected_digest=source.digest,
+                    )
+            for domain_name, raw_domain in manifest["domains"].items():
+                domain = RuntimeDomain(domain_name)
+                if not isinstance(raw_domain, dict):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                records = tuple(
+                    decode_record(value)
+                    for value in raw_domain.get("records", [])
+                )
+                facts = tuple(
+                    decode_fact(value) for value in raw_domain.get("facts", [])
+                )
+                operations = tuple(
+                    decode_operation(value)
+                    for value in raw_domain.get("operations", [])
+                )
+                await state._stores[domain].mutate(
+                    lambda transaction: _insert_snapshot_values(
+                        transaction,
+                        records,
+                        facts,
+                        operations,
+                    )
+                )
+        finally:
+            await state.close()
+
 
 def _validate_state_configuration(
     plan: RuntimeStatePlan,
@@ -373,6 +613,70 @@ def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise ValueError("RuntimeState path is required")
     return Path(value).expanduser().resolve(strict=False)
+
+
+def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
+    return {
+        "store_id": ref.store_id,
+        "key": ref.key,
+        "digest": ref.digest,
+        "size": ref.size,
+    }
+
+
+def _object_ref_from_payload(value: object) -> ObjectRef:
+    if not isinstance(value, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return ObjectRef(
+            str(value["store_id"]),
+            str(value["key"]),
+            str(value["digest"]),
+            int(value["size"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+async def _insert_snapshot_values(
+    transaction: object,
+    records: tuple[object, ...],
+    facts: tuple[object, ...],
+    operations: tuple[object, ...],
+) -> None:
+    await transaction.insert_records(records)
+    await transaction.insert_facts(facts)
+    for operation in operations:
+        await transaction.insert_operation(operation)
+
+
+async def _snapshot_chunk(value: bytes):
+    yield value
+
+
+async def _put_snapshot_object(
+    object_store: ObjectStore,
+    key: str,
+    value: bytes,
+) -> None:
+    digest = hashlib.sha256(value).hexdigest()
+    current = await object_store.stat(key)
+    if current is not None:
+        if current.digest != digest or current.size != len(value):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await read_object(
+            object_store,
+            key,
+            expected_digest=digest,
+            expected_size=len(value),
+        )
+        return
+    await object_store.put(
+        key,
+        _snapshot_chunk(value),
+        expected_size=len(value),
+        expected_digest=digest,
+    )
 
 
 __all__ = ["RuntimeState"]

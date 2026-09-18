@@ -34,7 +34,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskEvent
 from ._input_contract import validate_user_input
-from ._snapshot import RunSnapshot
+from ._snapshot_contract import RunSnapshot
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -205,7 +205,7 @@ class ExecutionResult:
                 or self.error_diagnostics is not None
             ):
                 raise ValueError("successful execution result cannot carry an error")
-            if self.output is None or not _is_digest(self.output_fingerprint):
+            if not _is_digest(self.output_fingerprint):
                 raise ValueError("successful execution result requires output contract")
             return
         if self.status is ExecutionStatus.CANCELLED:

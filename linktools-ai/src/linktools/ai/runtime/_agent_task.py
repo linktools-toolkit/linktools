@@ -33,6 +33,8 @@ from .service_api import (
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
+    ResumeSessionRequest,
+    SessionService,
 )
 
 _logger = environ.get_logger("ai.runtime.planner")
@@ -45,6 +47,9 @@ _AGENT_BODY_FIELDS = frozenset(
         "mode",
         "planning",
         "thinking",
+        "files",
+        "session_id",
+        "memory_scope",
     }
 )
 
@@ -59,9 +64,11 @@ class _AgentTaskNodeHandler:
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         *,
+        session: SessionService | None = None,
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
     ) -> None:
         self._execution = execution
+        self._session = session
         self._catalog = catalog
         self._compiler = compiler
         self._release_dependency_hold = (
@@ -113,6 +120,16 @@ class _AgentTaskNodeHandler:
         thinking = input.get("thinking")
         if not isinstance(raw_user_prompt, Mapping) or not isinstance(planning, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        files = input.get("files")
+        session_id = input.get("session_id")
+        memory_scope = input.get("memory_scope")
+        if (
+            not isinstance(files, list)
+            or any(not isinstance(value, str) or not value for value in files)
+            or (session_id is not None and not isinstance(session_id, str))
+            or (memory_scope is not None and not isinstance(memory_scope, str))
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         try:
             kind = raw_user_prompt.get("kind")
             if kind == "text":
@@ -149,6 +166,9 @@ class _AgentTaskNodeHandler:
             "mode": "run",
             "planning": planning,
             "thinking": resolved_thinking,
+            "files": list(files),
+            "session_id": session_id,
+            "memory_scope": memory_scope,
         }
 
     def validate_recovery(
@@ -187,21 +207,43 @@ class _AgentTaskNodeHandler:
         dependencies: Mapping[str, TaskDependency],
         control: TaskNodeRunControl,
     ) -> tuple[JsonValue, str]:
-        binding_digest, request = self._prepare_request(
+        prepared = self._prepare_request(
             node,
             graph_id=graph_id,
             principal=principal,
             correlation=correlation,
             dependencies=dependencies,
         )
+        binding_digest, request = prepared[:2]
+        agent_id = prepared[2] if len(prepared) > 2 else ""
+        session_id = prepared[3] if len(prepared) > 3 else None
         key = (principal.tenant_id, graph_id, node.node_id)
         hold_id = f"task:{graph_id}:{node.node_id}"
-        launch_task = asyncio.create_task(
-            self._execution.start(
+        if session_id is None or self._session is None:
+            launch = self._execution.start(
                 binding_digest,
                 request,
                 dependency_hold_id=hold_id,
-            ),
+            )
+        else:
+            launch = self._session.resume(
+                agent_id,
+                binding_digest,
+                session_id,
+                ResumeSessionRequest(
+                    request.principal,
+                    request.user_prompt,
+                    request.idempotency_key,
+                    request.memory_scope,
+                    request.mode,
+                    request.planning,
+                    request.thinking,
+                    request.correlation,
+                    request.files,
+                ),
+            )
+        launch_task = asyncio.create_task(
+            launch,
             name=f"task-execution-launch-{graph_id}-{node.node_id}",
         )
         self._active_launch_tasks[key] = launch_task
@@ -218,7 +260,10 @@ class _AgentTaskNodeHandler:
             )
             self._detach(
                 cast("asyncio.Task[object]", continuation),
-                f"task execution handoff after launch graph={graph_id} task={node.node_id}",
+                (
+                    "task execution handoff after launch "
+                    f"graph={graph_id} task={node.node_id}"
+                ),
             )
             raise
         finally:
@@ -300,7 +345,7 @@ class _AgentTaskNodeHandler:
                 if handle is not None and handle.execution_id:
                     execution_id = handle.execution_id
         if execution_id is None:
-            binding_digest, request = self._prepare_request(
+            binding_digest, request, _, _ = self._prepare_request(
                 node,
                 graph_id=graph_id,
                 principal=principal,
@@ -344,7 +389,7 @@ class _AgentTaskNodeHandler:
         principal: Principal,
         correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
-    ) -> tuple[str, ExecutionRequest]:
+    ) -> tuple[str, ExecutionRequest, str, str | None]:
         payload = node.input
         if payload.get("type") != self.type or payload.get("version") != self.version:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -407,15 +452,22 @@ class _AgentTaskNodeHandler:
                 "principal": principal_identity_payload(principal),
             }
         )
-        return binding.digest, ExecutionRequest(
+        request = ExecutionRequest(
             user_prompt=effective_user_prompt,
             principal=principal,
             idempotency_key=idempotency_key,
-            memory_scope=None,
+            memory_scope=cast("str | None", normalized["memory_scope"]),
             mode=cast(ExecutionMode, normalized["mode"]),
             planning=cast(bool, normalized["planning"]),
             thinking=cast(ThinkingValue, normalized["thinking"]),
             correlation=correlation,
+            files=tuple(cast(list[str], normalized["files"])),
+        )
+        return (
+            binding.digest,
+            request,
+            binding.definition.spec.id,
+            cast("str | None", normalized["session_id"]),
         )
 
     async def _handoff_execution(

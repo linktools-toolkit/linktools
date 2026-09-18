@@ -3,23 +3,36 @@
 """Runtime-bound TaskGraph behavior and complete observation projection."""
 
 import asyncio
+import inspect
+import json
 import secrets
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
-from ..core import Principal
+from pydantic import BaseModel
+
+from ..agent import bind_output, restore_output
+from ..core import JsonValue, Principal, TaskStatus
 from ..errors import AIError, ErrorCode
 from ..task import (
     CancelGraphRequest,
     TaskEvent,
+    TaskGraphInfo,
     TaskGraphResult,
     TaskGraphSnapshot,
     TaskGraphView,
+    TaskEffectResolution,
+    TaskEffectResolutionRequest,
+    RecoverGraphRequest,
+    TaskNodeResult,
+    TaskResultRef,
+    TaskInputSupplyRequest,
 )
 from .service_api import ExecutionTreeEvent, TaskGraphRunEvent
 
 if TYPE_CHECKING:
+    from ._agent import Execution
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -46,12 +59,185 @@ class TaskGraphRun(Generic[AppT]):
         self,
         *,
         timeout_seconds: "float | None" = None,
+        observer: "Callable[[TaskGraphRunEvent], object] | None" = None,
     ) -> TaskGraphResult:
-        return await self._runtime.graph.wait(
-            self.graph_id,
-            principal=self._principal,
-            timeout_seconds=timeout_seconds,
+        wait_task = asyncio.create_task(
+            self._runtime.graph.wait(
+                self.graph_id,
+                principal=self._principal,
+                timeout_seconds=timeout_seconds,
+            ),
+            name=f"task-graph-wait-{self.graph_id}",
         )
+        if observer is None:
+            return _public_task_result(await wait_task)
+        observer_task = asyncio.create_task(
+            self._observe(observer),
+            name=f"task-graph-observer-{self.graph_id}",
+        )
+        done, _ = await asyncio.wait(
+            (wait_task, observer_task),
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        if observer_task in done:
+            error = observer_task.exception()
+            if error is not None:
+                _detach_task(observer_task)
+                _detach_task(wait_task)
+                raise error
+        return _public_task_result(await wait_task)
+
+    async def recover(self, *, idempotency_key: str | None = None) -> TaskGraphResult:
+        return _public_task_result(await self._runtime.graph.recover(
+            self.graph_id,
+            RecoverGraphRequest(
+                self._principal,
+                idempotency_key or secrets.token_urlsafe(32),
+            ),
+        ))
+
+    async def resume(
+        self,
+        node_id: str,
+        request: "TaskInputSupplyRequest",
+    ) -> TaskGraphResult:
+        if request.principal != self._principal:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        snapshot = await self._snapshot()
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        if node is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if node.output_contract is not None:
+            try:
+                restore_output(
+                    node.output_contract["mode"],
+                    node.output_contract["schema"],
+                ).validate_payload(request.value)
+            except (KeyError, TypeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        elif isinstance(node.output_schema, type) and issubclass(
+            node.output_schema,
+            BaseModel,
+        ):
+            bind_output(node.output_schema).validate_payload(request.value)
+        return _public_task_result(await self._runtime.graph.resume(
+            self.graph_id,
+            node_id,
+            request,
+        ))
+
+    async def resolve_effect(
+        self,
+        node_id: str,
+        expected_fence: int,
+        resolution: TaskEffectResolution,
+        *,
+        idempotency_key: str,
+    ) -> TaskGraphResult:
+        if not isinstance(resolution, TaskEffectResolution):
+            raise TypeError("resolution must be TaskEffectResolution")
+        snapshot = await self._snapshot()
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        if node is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if resolution.kind == "applied" and node.output_contract is not None:
+            restore_output(
+                node.output_contract["mode"],
+                node.output_contract["schema"],
+            ).validate_payload(resolution.value)
+        return _public_task_result(
+            await self._runtime.graph.resolve_effect(
+                self.graph_id,
+                node_id,
+                TaskEffectResolutionRequest(
+                    self._principal,
+                    expected_fence,
+                    resolution,
+                    idempotency_key,
+                ),
+            )
+        )
+
+    async def result(self, node_id: str) -> JsonValue:
+        return await self._runtime.read_task_result(
+            self.graph_id,
+            node_id,
+            principal=self._principal,
+        )
+
+    async def result_ref(self, node_id: str) -> TaskResultRef:
+        snapshot = await self._snapshot()
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if state.status is not TaskStatus.SUCCEEDED or state.result_digest is None:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        return TaskResultRef(
+            self._runtime.namespace,
+            self._principal.tenant_id,
+            self.graph_id,
+            node_id,
+            state.result_digest,
+        )
+
+    async def execution(self, node_id: str) -> "Execution[AppT]":
+        snapshot = await self._snapshot()
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if state.execution_id is None:
+            raise AIError(ErrorCode.EXECUTION_NOT_READY)
+        return self._runtime._task_execution(
+            self.graph_id,
+            node_id,
+            state.execution_id,
+            self._principal,
+        )
+
+    async def replay(
+        self,
+        observer: "Callable[[TaskGraphRunEvent], object] | None" = None,
+    ) -> TaskGraphResult:
+        snapshot = await self._snapshot()
+        result = TaskGraphResult(
+            snapshot.graph_id,
+            _public_task_status(snapshot.status, snapshot.node_states),
+            tuple(
+                state.execution_id
+                for state in snapshot.node_states
+                if state.execution_id is not None
+            ),
+            tuple(
+                TaskNodeResult(
+                    state.node_id,
+                    state.status,
+                    state.result_digest,
+                    state.execution_id,
+                    state.error_code,
+                    state.error_digest,
+                )
+                for state in snapshot.node_states
+            ),
+        )
+        if observer is not None:
+            events = await self._capture_replay_events()
+            for event in events:
+                value = observer(event)
+                if inspect.isawaitable(value):
+                    await value
+        return result
 
     async def inspect(self) -> TaskGraphView:
         return await self._runtime.graph.inspect(
@@ -59,7 +245,19 @@ class TaskGraphRun(Generic[AppT]):
             principal=self._principal,
         )
 
-    async def snapshot(self) -> TaskGraphSnapshot:
+    async def snapshot(
+        self,
+        *,
+        include_content: bool = False,
+    ) -> "TaskGraphInfo | TaskGraphSnapshot":
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        snapshot = await self._snapshot()
+        if include_content:
+            return snapshot
+        return TaskGraphInfo.from_snapshot(snapshot)
+
+    async def _snapshot(self) -> TaskGraphSnapshot:
         return await self._runtime.graph.snapshot(
             self.graph_id,
             principal=self._principal,
@@ -70,8 +268,8 @@ class TaskGraphRun(Generic[AppT]):
         *,
         idempotency_key: "str | None" = None,
         force: bool = False,
-    ) -> TaskGraphView:
-        return await self._runtime.graph.cancel(
+    ) -> TaskGraphResult:
+        await self._runtime.graph.cancel(
             self.graph_id,
             CancelGraphRequest(
                 self._principal,
@@ -79,15 +277,35 @@ class TaskGraphRun(Generic[AppT]):
                 force,
             ),
         )
+        return _snapshot_result(await self._snapshot())
+
+    async def _observe(
+        self,
+        observer: "Callable[[TaskGraphRunEvent], object]",
+    ) -> None:
+        async for event in self.watch():
+            result = observer(event)
+            if inspect.isawaitable(result):
+                await result
 
     def watch(
         self,
         *,
+        cursor: "str | None" = None,
+        include_content: bool = False,
         after_graph_sequence: int = 0,
         after_execution_sequences: (
             "Mapping[str, Mapping[str, int]] | None"
         ) = None,
     ) -> AsyncIterator[TaskGraphRunEvent]:
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        cursor_sequence, cursor_execution_sequences = _decode_cursor(cursor)
+        if cursor_sequence is not None:
+            if after_graph_sequence != 0 or after_execution_sequences:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            after_graph_sequence = cursor_sequence
+            after_execution_sequences = cursor_execution_sequences
         if (
             isinstance(after_graph_sequence, bool)
             or not isinstance(after_graph_sequence, int)
@@ -99,6 +317,7 @@ class TaskGraphRun(Generic[AppT]):
             after_execution_sequences=_normalize_execution_sequences(
                 after_execution_sequences
             ),
+            include_content=include_content,
         )
 
     async def _watch(
@@ -106,8 +325,10 @@ class TaskGraphRun(Generic[AppT]):
         *,
         after_graph_sequence: int,
         after_execution_sequences: Mapping[str, Mapping[str, int]],
+        include_content: bool,
     ) -> AsyncIterator[TaskGraphRunEvent]:
-        snapshot = await self.snapshot()
+        del include_content
+        snapshot = await self._snapshot()
         states = {state.node_id: state for state in snapshot.node_states}
         if len(states) != len(snapshot.node_states):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -134,6 +355,8 @@ class TaskGraphRun(Generic[AppT]):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return
             execution_ids[node_id] = execution_id
+            if _is_task_execution_id(execution_id):
+                return
             stream = self._watch_tree(
                 execution_id,
                 principal=self._principal,
@@ -216,6 +439,20 @@ class TaskGraphRun(Generic[AppT]):
                 if close is not None:
                     await close()
 
+    async def _capture_replay_events(
+        self,
+    ) -> tuple[TaskGraphRunEvent, ...]:
+        page = await self._runtime.graph.list_events(
+            self.graph_id,
+            principal=self._principal,
+            after_sequence=0,
+            limit=1000,
+        )
+        return tuple(
+            TaskGraphRunEvent(self.graph_id, event.node_id, event)
+            for event in page.items
+        )
+
 
 def _normalize_execution_sequences(
     value: "Mapping[str, Mapping[str, int]] | None",
@@ -247,4 +484,128 @@ def _normalize_execution_sequences(
     return result
 
 
+def _is_task_execution_id(value: str) -> bool:
+    return value.startswith("task-execution-") or value.startswith("wait:")
+
+
 __all__ = ["TaskGraphRun"]
+
+
+def _decode_cursor(
+    value: str | None,
+) -> tuple[int | None, Mapping[str, Mapping[str, int]] | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str) or not value:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if value.isdecimal():
+        return int(value), None
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+    if not isinstance(payload, Mapping):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    sequence = payload.get("graph_sequence")
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence < 0
+    ):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    raw_execution = payload.get("execution_sequences")
+    execution = _normalize_execution_sequences(raw_execution)
+    return sequence, execution
+
+
+def _public_task_status(
+    status: TaskStatus,
+    states: object = (),
+) -> TaskStatus:
+    if status is not TaskStatus.RUNNING or not isinstance(states, tuple):
+        return status
+    unfinished = tuple(
+        state
+        for state in states
+        if getattr(state, "status", None)
+        not in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }
+    )
+    if unfinished and any(
+        getattr(state, "status", None) is TaskStatus.WAITING
+        for state in unfinished
+    ) and all(
+        getattr(state, "status", None)
+        not in {TaskStatus.READY, TaskStatus.RUNNING}
+        for state in unfinished
+    ):
+        return TaskStatus.WAITING
+    return status
+
+
+def _public_task_result(result: TaskGraphResult) -> TaskGraphResult:
+    if result.status is not TaskStatus.RUNNING:
+        return result
+    if not result.node_results:
+        return result
+    unfinished = tuple(
+        node
+        for node in result.node_results
+        if node.status
+        not in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }
+    )
+    if unfinished and any(
+        node.status is TaskStatus.WAITING for node in unfinished
+    ) and all(
+        node.status not in {TaskStatus.READY, TaskStatus.RUNNING}
+        for node in unfinished
+    ):
+        return TaskGraphResult(
+            result.graph_id,
+            TaskStatus.WAITING,
+            result.execution_ids,
+            result.node_results,
+        )
+    return result
+
+
+def _snapshot_result(snapshot: TaskGraphSnapshot) -> TaskGraphResult:
+    return TaskGraphResult(
+        snapshot.graph_id,
+        _public_task_status(snapshot.status, snapshot.node_states),
+        tuple(
+            state.execution_id
+            for state in snapshot.node_states
+            if state.execution_id is not None
+        ),
+        tuple(
+            TaskNodeResult(
+                state.node_id,
+                state.status,
+                state.result_digest,
+                state.execution_id,
+                state.error_code,
+                state.error_digest,
+            )
+            for state in snapshot.node_states
+        ),
+    )
+
+
+def _detach_task(task: "asyncio.Task[object]") -> None:
+    def consume(done: "asyncio.Task[object]") -> None:
+        try:
+            done.exception()
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    task.add_done_callback(consume)

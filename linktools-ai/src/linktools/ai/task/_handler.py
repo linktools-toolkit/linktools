@@ -3,7 +3,7 @@
 """Application-owned TaskNode handler contracts."""
 
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, runtime_checkable
@@ -17,7 +17,7 @@ from ..core import (
     normalize_json_value,
     normalize_correlation,
 )
-from ._graph import TaskExpanderRef, TaskNode
+from ._graph import TaskExpanderRef, TaskNode, TaskResultRef
 
 AppT = TypeVar("AppT")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -35,7 +35,10 @@ class TaskDependency:
     def __post_init__(self) -> None:
         if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise ValueError("task dependency node id is required")
-        if not isinstance(self.result_digest, str) or _RESULT_DIGEST.fullmatch(self.result_digest) is None:
+        if (
+            not isinstance(self.result_digest, str)
+            or _RESULT_DIGEST.fullmatch(self.result_digest) is None
+        ):
             raise ValueError("task dependency result digest is invalid")
         output = normalize_json_value(self.output)
         if canonical_sha256(output) != self.result_digest:
@@ -47,23 +50,57 @@ class TaskDependency:
         object.__setattr__(self, "output", output)
 
 
+class TaskArtifactPublisher(Protocol):
+    async def publish(
+        self,
+        name: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        media_type: str,
+        expected_size: int,
+        expected_digest: str,
+    ) -> object: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TaskEffectResolution:
+    """A read-only reconciliation result for an external task effect."""
+
+    kind: str
+    value: JsonValue | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"applied", "not_applied", "unknown"}:
+            raise ValueError("task effect resolution kind is invalid")
+        if self.kind != "applied" and self.value is not None:
+            raise ValueError("only an applied effect can carry a value")
+        object.__setattr__(self, "value", normalize_json_value(self.value))
+
+
 @dataclass(frozen=True, slots=True)
 class TaskNodeContext(Generic[AppT]):
     app: AppT
     principal: Principal
     graph_id: str
     node_id: str
+    execution_id: str
     input: Mapping[str, JsonValue]
     dependencies: Mapping[str, TaskDependency]
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
+    artifacts: "TaskArtifactPublisher | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
             raise ValueError("task graph id is required")
         if not isinstance(self.node_id, str) or not self.node_id.strip():
             raise ValueError("task node id is required")
-        if not isinstance(self.idempotency_key, str) or not self.idempotency_key.strip():
+        if not isinstance(self.execution_id, str) or not self.execution_id.strip():
+            raise ValueError("task execution id is required")
+        if (
+            not isinstance(self.idempotency_key, str)
+            or not self.idempotency_key.strip()
+        ):
             raise ValueError("task idempotency key is required")
         if not isinstance(self.input, Mapping):
             raise TypeError("task node input must be a mapping")
@@ -74,13 +111,21 @@ class TaskNodeContext(Generic[AppT]):
         if any(
             not isinstance(key, str)
             or not isinstance(value, TaskDependency)
-            or key != value.node_id
             for key, value in dependencies.items()
         ):
             raise ValueError("task dependency mapping is invalid")
         object.__setattr__(self, "input", ImmutableJsonMapping(normalized_input))
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
+
+    def read_dependency(self, name: str) -> TaskDependency:
+        """Read one dependency by its declared node identity."""
+        if not isinstance(name, str) or not name:
+            raise KeyError(name)
+        try:
+            return self.dependencies[name]
+        except KeyError as error:
+            raise KeyError(name) from error
 
 
 @runtime_checkable
@@ -109,6 +154,15 @@ class TaskFunction(Generic[AppT]):
         repr=False,
         compare=False,
     )
+    effect: str = "none"
+    output: object | None = field(default=None, repr=False, compare=False)
+    reconcile: (
+        "Callable[[TaskNodeContext[AppT]], Awaitable[TaskEffectResolution]] | None"
+    ) = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
     def __post_init__(self) -> None:
         if (
             not isinstance(self.type, str)
@@ -124,6 +178,10 @@ class TaskFunction(Generic[AppT]):
             raise ValueError("task handler version must be positive")
         if not callable(self.function):
             raise TypeError("task handler function must be callable")
+        if self.effect not in {"none", "replay_safe", "non_replay_safe"}:
+            raise ValueError("task effect is invalid")
+        if self.reconcile is not None and not callable(self.reconcile):
+            raise TypeError("task reconcile must be callable")
 
     def normalize(
         self,
@@ -152,6 +210,10 @@ class TaskFunction(Generic[AppT]):
         dependencies: "tuple[str, ...]" = (),
         budget_cost: int = 1,
         expander: "TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
     ) -> TaskNode:
         normalized = self.normalize({} if input is None else input)
         return TaskNode(
@@ -164,11 +226,19 @@ class TaskFunction(Generic[AppT]):
             },
             budget_cost=budget_cost,
             expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            output_schema=self.output,
+            effect=self.effect,
         )
 
 
 __all__ = [
     "TaskDependency",
+    "TaskArtifactPublisher",
+    "TaskEffectResolution",
     "TaskFunction",
     "TaskNodeContext",
     "TaskNodeHandler",

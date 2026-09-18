@@ -10,11 +10,14 @@ from ._plan import (
     runtime_domain_uses_object_store,
 )
 from ._root import RuntimeState
+from ._contracts import ArtifactRecord, ArtifactState
 
 __all__ = [
     "RuntimeDomain",
     "RuntimeRetentionMode",
     "RuntimeState",
+    "ArtifactRecord",
+    "ArtifactState",
     "RuntimeStatePlan",
     "RuntimeStateRoute",
     "runtime_domain_uses_object_store",

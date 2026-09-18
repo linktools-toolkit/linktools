@@ -148,6 +148,8 @@ class StorageBatchResult(Generic[InfoT, KeyT]):
     store_revision: StorageRevision
     atomic: bool
     results: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT], ...]"
+    request_digest: "str | None" = None
+    idempotency_key: "str | None" = None
 
 
 class MetadataLoadMode(str, Enum):

@@ -89,6 +89,7 @@ _TERMINAL_TASK_STATUSES = frozenset(
 )
 _RECOVERY_REQUIRED_CODES = frozenset(
     {
+        ErrorCode.TASK_EFFECT_UNKNOWN.value,
         ErrorCode.TOOL_EFFECT_UNKNOWN.value,
         ErrorCode.STORAGE_COMMIT_UNKNOWN.value,
         ErrorCode.STORAGE_RECOVERY_REQUIRED.value,
@@ -1316,6 +1317,100 @@ class TaskRepositoryImpl(RepositoryBase):
                 ) from error
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
 
+    async def requeue_recovery(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        expected_fence: int,
+    ) -> TaskGraphView:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if (
+            isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        async def mutate(transaction: StateTransaction) -> TaskGraphView:
+            before = await self._event_state_in_transaction(transaction, graph_id)
+            if before is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            selected = next(
+                (value for value in before.node_states if value.node_id == node_id),
+                None,
+            )
+            if selected is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if (
+                selected.status is not TaskStatus.RECOVERY_REQUIRED
+                or selected.fence != expected_fence
+                or selected.execution_id is None
+            ):
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
+            next_nodes = tuple(
+                replace(
+                    value,
+                    status=TaskStatus.READY,
+                    owner=None,
+                    lease_expires_at=None,
+                    execution_id=None,
+                    result_digest=None,
+                    error_code=None,
+                    error_digest=None,
+                )
+                if value.node_id == node_id
+                else value
+                for value in before.node_states
+            )
+            next_nodes = _reconciled_task_nodes(next_nodes)
+            return await self._apply_graph_transition(
+                transaction,
+                before,
+                graph_record,
+                next_nodes,
+                _isolated_graph_status(next_nodes),
+            )
+
+        try:
+            return await self._mutate_with_event_retry(mutate)
+        except AIError as error:
+            if error.code not in _COMMIT_READBACK_CODES:
+                raise
+            view, converged = await self._projection_readback(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if converged:
+                current = next(
+                    (
+                        value
+                        for value in await self.list_nodes(
+                            graph_id,
+                            tenant_id=tenant_id,
+                        )
+                        if value.node_id == node_id
+                    ),
+                    None,
+                )
+                if current is not None and current.status is TaskStatus.READY:
+                    return view
+            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_requeue_recovery",
+                        "graph_id": graph_id,
+                        "node_id": node_id,
+                    },
+                ) from error
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
     async def scheduler_snapshot(self, graph_id: str, *, tenant_id: str) -> TaskGraphSnapshot:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -1622,6 +1717,7 @@ class TaskRepositoryImpl(RepositoryBase):
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -1737,13 +1833,22 @@ class TaskRepositoryImpl(RepositoryBase):
                 )
             now = await transaction.now()
             if lease is None:
-                if (
-                    node.status is not TaskStatus.WAITING
-                    or node.execution_id is None
-                    or execution_id != node.execution_id
-                    or node.owner is not None
-                    or node.lease_expires_at is not None
-                ):
+                if node.status is TaskStatus.WAITING:
+                    if (
+                        node.execution_id is None
+                        or execution_id != node.execution_id
+                        or node.owner is not None
+                        or node.lease_expires_at is not None
+                    ):
+                        raise AIError(ErrorCode.TASK_FENCE_STALE)
+                elif node.status is TaskStatus.RECOVERY_REQUIRED:
+                    if (
+                        expected_fence != node.fence
+                        or node.execution_id is None
+                        or execution_id != node.execution_id
+                    ):
+                        raise AIError(ErrorCode.TASK_FENCE_STALE)
+                else:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
                 resolved_execution_id = node.execution_id
             else:

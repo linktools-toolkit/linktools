@@ -54,8 +54,6 @@ class AgentCompiler:
         if len({(item.kind, item.id) for item in ordered}) != len(ordered):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         current_agents = dict(agents)
-        if not current_agents:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         for agent_id, specification in current_agents.items():
             if not isinstance(agent_id, str) or not isinstance(specification, AgentSpec) or specification.id != agent_id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)

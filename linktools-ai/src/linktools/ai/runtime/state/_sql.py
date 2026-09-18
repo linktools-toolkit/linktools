@@ -82,10 +82,12 @@ class SqlStateStorageGroup:
         metadata: "MetaData",
         *,
         owns_context: bool = False,
+        read_only: bool = False,
     ) -> None:
         self._context = context
         self._metadata = metadata
         self._owns_context = owns_context
+        self._read_only = read_only
         self._closed = False
         self._initialized = False
 
@@ -144,6 +146,8 @@ class SqlStateStorageGroup:
         stores: Sequence["SqlStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
+        if self._read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
         members = tuple(dict.fromkeys(stores))
         if not members:
             raise ValueError("StateStorageGroup mutation requires a store")

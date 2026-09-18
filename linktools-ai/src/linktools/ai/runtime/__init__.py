@@ -3,11 +3,23 @@
 """Public runtime contracts and composition entry point."""
 
 from ..core import PromptLimits
-from ..task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphService
+from ..task import (
+    CancelGraphRequest,
+    TaskEvent,
+    TaskEventType,
+    TaskGraphInfo,
+    TaskGraphService,
+)
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
 from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
 from ._runtime_history import ExecutionInfo, RuntimeHistory
+from ._snapshot import (
+    RestoredRuntime,
+    RuntimeSnapshot,
+    SnapshotLimits,
+    SnapshotTargetInspection,
+)
 from ._runtime_service import Runtime
 from ._task import TaskGraphRun
 from .recovery import (
@@ -152,6 +164,10 @@ __all__ = [
     "RuntimeState",
     "RuntimeStatePlan",
     "RuntimeStateRoute",
+    "RestoredRuntime",
+    "RuntimeSnapshot",
+    "SnapshotLimits",
+    "SnapshotTargetInspection",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
@@ -161,6 +177,7 @@ __all__ = [
     "StartEvaluationRequest",
     "TaskEvent",
     "TaskEventType",
+    "TaskGraphInfo",
     "TaskGraphRun",
     "TaskGraphRunEvent",
     "TaskGraphService",

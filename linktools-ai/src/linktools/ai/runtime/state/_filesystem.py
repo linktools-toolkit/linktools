@@ -70,12 +70,14 @@ class FilesystemStateStorageGroup:
         tenant_id: str,
         scope_digest: str,
         standalone: bool = False,
+        read_only: bool = False,
     ) -> None:
         self._transaction_root = transaction_root.resolve()
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._scope_digest = scope_digest
         self._standalone = standalone
+        self._read_only = read_only
         self._members: list[FilesystemStateStore] = []
         self._mutation_lock = asyncio.Lock()
         self._group_lock = FilesystemWriterLock(self._metadata_root / "state.lock")
@@ -134,6 +136,9 @@ class FilesystemStateStorageGroup:
         await asyncio.shield(task)
 
     async def _initialize_owned(self) -> None:
+        if self._read_only:
+            await asyncio.to_thread(self._initialize_read_only_sync)
+            return
         async with self._mutation_lock:
             if self._closed:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
@@ -207,6 +212,12 @@ class FilesystemStateStorageGroup:
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN)
             self._closed = True
             self._initialized = False
+            if self._read_only:
+                _logger.debug(
+                    "filesystem read-only StateStorageGroup closed: scope=%s",
+                    self._scope_digest,
+                )
+                return
             locks = tuple(
                 sorted(self._members, key=lambda value: value.root.as_posix())
             )
@@ -281,6 +292,8 @@ class FilesystemStateStorageGroup:
         stores: Sequence["FilesystemStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
+        if self._read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
         members = tuple(
             sorted(dict.fromkeys(stores), key=lambda value: value.root.as_posix())
         )
@@ -392,6 +405,59 @@ class FilesystemStateStorageGroup:
             member._index = member._new_index()
             member._index_generation = member._generation()
         self._generation = self._read_generation()
+
+    def _initialize_read_only_sync(self) -> None:
+        if self._standalone:
+            member = self._members[0]
+            member._validate_existing_root()
+            member._index = member._load_index()
+            member._index_generation = member._generation()
+            self._generation = member._index_generation
+            self._initialized = True
+            return
+        self._validate_group_read_only_sync()
+        for member in self._members:
+            member._validate_existing_root()
+            member._index = member._load_index()
+            member._index_generation = member._generation()
+        self._generation = self._read_generation()
+        self._initialized = True
+
+    def _validate_group_read_only_sync(self) -> None:
+        if not self._transaction_root.is_dir() or not self._metadata_root.is_dir():
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        manifest = self._metadata_root / "manifest.json"
+        generation = self._metadata_root / "generation"
+        try:
+            actual = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if not self._manifest_matches(actual, self._expected_manifest()):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not generation.is_file():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._validate_roots_read_only_sync()
+
+    def _validate_roots_read_only_sync(self) -> None:
+        if not self._transaction_root.is_dir():
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        device = os.stat(self._transaction_root).st_dev
+        paths = [member.root for member in self._members]
+        if len(paths) != len(set(paths)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for path in paths:
+            if not path.is_dir() or os.stat(path).st_dev != device:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            try:
+                relative = path.relative_to(self._transaction_root)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if (
+                not relative.parts
+                or relative.parts[0] == ".state-groups"
+                or relative.parts[0].startswith(".txn-")
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _provision_group_sync(self) -> None:
         self._metadata_root.mkdir(parents=True, exist_ok=True)

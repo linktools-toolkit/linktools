@@ -27,9 +27,10 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ._factory import _grant_key
+from ..task import TaskEvent, TaskGraphInfo
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
+from ._runtime_identity import grant_key
 from .service_api import (
     ExecutionHistoryItem,
     ExecutionHistoryService,
@@ -46,6 +47,7 @@ from .state._contracts import (
     ExecutionRepository,
     SessionRecord,
     SessionRepository,
+    TaskRepository,
 )
 
 _logger = environ.get_logger("ai.runtime.history")
@@ -116,12 +118,14 @@ class RuntimeHistory:
         tenant_id: str,
         executions: "ExecutionRepository | None" = None,
         sessions: "SessionRepository | None" = None,
+        tasks: "TaskRepository | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
         self._executions = executions
         self._sessions = sessions
+        self._tasks = tasks
         self._authorization = authorization
 
     @property
@@ -191,6 +195,66 @@ class RuntimeHistory:
         self, request: ListExecutionRequest
     ) -> Page[ExecutionView]:
         return await self._service.list(request)
+
+    async def task_graph(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> TaskGraphInfo:
+        tasks, authorization = self._require_task_reader()
+        header = await tasks.get_header(graph_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            header,
+        )
+        snapshot = await tasks.snapshot_graph(
+            graph_id,
+            tenant_id=principal.tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        return TaskGraphInfo.from_snapshot(snapshot)
+
+    async def list_events(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> Page[TaskEvent]:
+        if (
+            isinstance(after_sequence, bool)
+            or not isinstance(after_sequence, int)
+            or after_sequence < 0
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit < 1
+            or limit > 1000
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        tasks, authorization = self._require_task_reader()
+        header = await tasks.get_header(graph_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal,
+            AuthorizationAction.TASK_READ,
+            header,
+        )
+        return await tasks.list_events(
+            graph_id,
+            tenant_id=principal.tenant_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
 
     async def recent_sessions(
         self,
@@ -356,6 +420,13 @@ class RuntimeHistory:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._executions, self._authorization
 
+    def _require_task_reader(
+        self,
+    ) -> tuple[TaskRepository, AuthorizationPolicy]:
+        if self._tasks is None or self._authorization is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._tasks, self._authorization
+
     async def _authorized_record(
         self,
         execution_id: str,
@@ -403,6 +474,7 @@ async def _open_runtime_history(
         await selected_state.initialize(
             namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
+            read_only=True,
         )
         initialized = True
         if (
@@ -416,7 +488,7 @@ async def _open_runtime_history(
             store=selected_state.steps.read_store(RuntimeDomain.EXECUTION),
             cursor_signer=HmacCursorSigner(
                 "execution-history",
-                _grant_key(resolved_namespace),
+                grant_key(resolved_namespace),
             ),
         )
         effective_authorization = (
@@ -428,13 +500,14 @@ async def _open_runtime_history(
             selected_state.execution.executions,
             effective_authorization,
             reader,
-            cursor_signer=HmacCursorSigner("execution", _grant_key(resolved_namespace)),
+            cursor_signer=HmacCursorSigner("execution", grant_key(resolved_namespace)),
         )
         yield RuntimeHistory(
             service,
             tenant_id=effective_tenant_id,
             executions=selected_state.execution.executions,
             sessions=selected_state.conversation.sessions,
+            tasks=selected_state.task.tasks,
             authorization=effective_authorization,
         )
     except BaseException as error:

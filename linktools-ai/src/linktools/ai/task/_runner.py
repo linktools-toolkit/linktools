@@ -19,6 +19,7 @@ class TaskNodeRunResult:
     execution_id: "str | None" = None
     result_payload: "StoredPayload | None" = None
     expanded_nodes: "tuple[TaskNode, ...]" = ()
+    deferred: bool = False
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:

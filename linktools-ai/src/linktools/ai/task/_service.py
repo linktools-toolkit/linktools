@@ -3,13 +3,16 @@
 """Generic TaskGraph service contracts."""
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Protocol
 
-from ..core import Page, Principal
+from ..core import Page, Principal, validate_idempotency_key
+from ._handler import TaskEffectResolution
 from ._event import TaskEvent
 from ._graph import (
     CancelGraphRequest,
     RecoverGraphRequest,
+    TaskInputSupplyRequest,
     TaskGraphHandle,
     TaskGraphLaunch,
     TaskGraphRequest,
@@ -17,6 +20,25 @@ from ._graph import (
     TaskGraphSnapshot,
     TaskGraphView,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskEffectResolutionRequest:
+    principal: Principal
+    expected_fence: int
+    resolution: TaskEffectResolution
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.expected_fence, bool)
+            or not isinstance(self.expected_fence, int)
+            or self.expected_fence < 1
+        ):
+            raise ValueError("task effect fence is invalid")
+        if not isinstance(self.resolution, TaskEffectResolution):
+            raise TypeError("task effect resolution is invalid")
+        validate_idempotency_key(self.idempotency_key)
 
 
 class TaskGraphQueryService(Protocol):
@@ -76,6 +98,20 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
         request: RecoverGraphRequest,
     ) -> TaskGraphResult: ...
 
+    async def resume(
+        self,
+        graph_id: str,
+        node_id: str,
+        request: TaskInputSupplyRequest,
+    ) -> TaskGraphResult: ...
+
+    async def resolve_effect(
+        self,
+        graph_id: str,
+        node_id: str,
+        request: TaskEffectResolutionRequest,
+    ) -> TaskGraphResult: ...
+
     async def cancel(
         self,
         graph_id: str,
@@ -91,4 +127,9 @@ class TaskGraphLauncher(Protocol):
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView: ...
 
 
-__all__ = ["TaskGraphLauncher", "TaskGraphQueryService", "TaskGraphService"]
+__all__ = [
+    "TaskEffectResolutionRequest",
+    "TaskGraphLauncher",
+    "TaskGraphQueryService",
+    "TaskGraphService",
+]

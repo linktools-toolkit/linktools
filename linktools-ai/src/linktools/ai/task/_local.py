@@ -49,6 +49,7 @@ _RECOVERY_UNKNOWN_CODES = frozenset(
         ErrorCode.STORAGE_RECOVERY_REQUIRED,
         ErrorCode.EXECUTION_START_UNKNOWN,
         ErrorCode.TOOL_EFFECT_UNKNOWN,
+        ErrorCode.TASK_EFFECT_UNKNOWN,
     }
 )
 _TERMINAL = frozenset(
@@ -163,6 +164,7 @@ class _TaskRepository(Protocol):
         graph_id: "str | None" = None,
         node_id: "str | None" = None,
         expanded_nodes: "tuple[TaskNode, ...]" = (),
+        expected_fence: "int | None" = None,
     ) -> object: ...
 
     async def fail(
@@ -545,6 +547,8 @@ class LocalTaskGraphLauncher:
                     node = static.get(state.node_id)
                     if node is None or state.execution_id is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if state.execution_id.startswith("wait:"):
+                        continue
                     task = asyncio.create_task(
                         self._wait_bound_node(run, node, state.execution_id),
                         name=f"task-wait-{request.graph_id}-{node.node_id}",
@@ -966,6 +970,9 @@ class LocalTaskGraphLauncher:
             recovery_error: AIError | None = None
             async with lease_state.lock:
                 try:
+                    if completion.deferred:
+                        await self._notify(run)
+                        return
                     await self._repository.complete(
                         None
                         if control.handed_off_execution_id is not None
@@ -1019,7 +1026,7 @@ class LocalTaskGraphLauncher:
             raise
         finally:
             execution_id = control.handed_off_execution_id
-            if execution_id is not None:
+            if execution_id is not None and not execution_id.startswith("wait:"):
                 await self._release_execution_hold(
                     execution_id,
                     tenant_id=tenant_id,
