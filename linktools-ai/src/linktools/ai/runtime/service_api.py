@@ -991,6 +991,13 @@ class ExecutionService(Protocol):
         principal: Principal,
         error_code: str,
     ) -> ExecutionView: ...
+    async def cancel_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> CancelExecutionResult: ...
+
 
     async def resolve_existing(
         self,
