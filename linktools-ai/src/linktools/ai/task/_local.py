@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
@@ -133,12 +133,30 @@ class _TaskRepository(Protocol):
         lease_seconds: int,
     ) -> TaskLease: ...
 
+    async def bind_execution(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> TaskNodeView: ...
+
     async def handoff_execution(
         self,
         lease: TaskLease,
         *,
         tenant_id: str,
         execution_id: str,
+        occupies_concurrency: bool = True,
+    ) -> TaskNodeView: ...
+
+    async def requeue_retry(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        next_attempt_at: datetime,
     ) -> TaskNodeView: ...
 
     async def mark_recovery_required(
@@ -224,10 +242,34 @@ class _TaskNodeRunControlImpl:
         self._execution_id: str | None = None
 
     @property
+    def execution_id(self) -> str | None:
+        return self._execution_id or self._lease_state.lease.execution_id
+
+    @property
     def handed_off_execution_id(self) -> str | None:
         return self._execution_id
 
-    async def handoff_execution(self, execution_id: str) -> None:
+    async def bind_execution(self, execution_id: str) -> None:
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            raise ValueError("execution id is required")
+        async with self._lease_state.lock:
+            await self._repository.bind_execution(
+                self._lease_state.lease,
+                tenant_id=self._tenant_id,
+                execution_id=execution_id,
+            )
+            self._lease_state.lease = replace(
+                self._lease_state.lease,
+                execution_id=execution_id,
+            )
+        await self._on_activity()
+
+    async def handoff_execution(
+        self,
+        execution_id: str,
+        *,
+        occupies_concurrency: bool = True,
+    ) -> None:
         if not isinstance(execution_id, str) or not execution_id.strip():
             raise ValueError("execution id is required")
         async with self._lease_state.lock:
@@ -236,6 +278,7 @@ class _TaskNodeRunControlImpl:
                     self._lease_state.lease,
                     tenant_id=self._tenant_id,
                     execution_id=execution_id,
+                    occupies_concurrency=occupies_concurrency,
                 )
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -555,7 +598,13 @@ class LocalTaskGraphLauncher:
                     )
                     inflight[node.node_id] = _InflightNode(task, None)
                     await self._notify(run)
-                used = persisted | {
+                waiting = {
+                    state.node_id
+                    for state in states
+                    if state.status is TaskStatus.WAITING
+                    and state.occupies_concurrency
+                }
+                used = persisted | waiting | {
                     node_id
                     for node_id, value in inflight.items()
                     if value.lease_state is not None
@@ -977,6 +1026,17 @@ class LocalTaskGraphLauncher:
                     if completion.deferred:
                         await self._notify(run)
                         return
+                    if completion.retry_at is not None:
+                        if completion.execution_id is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        await self._repository.requeue_retry(
+                            lease_state.lease,
+                            tenant_id=tenant_id,
+                            execution_id=completion.execution_id,
+                            next_attempt_at=completion.retry_at,
+                        )
+                        await self._notify(run)
+                        return
                     await self._repository.complete(
                         None
                         if control.handed_off_execution_id is not None
@@ -1288,7 +1348,10 @@ def _scheduler_observation_fingerprint(
 
 
 def _runnable(node: TaskNodeView, now: datetime) -> bool:
-    return node.status is TaskStatus.READY or (
+    return (
+        node.status is TaskStatus.READY
+        and (node.next_attempt_at is None or node.next_attempt_at <= now)
+    ) or (
         node.status is TaskStatus.RUNNING
         and node.lease_expires_at is not None
         and node.lease_expires_at <= now
