@@ -10,6 +10,7 @@ from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.workspace import Workspace
 
 from ._runtime_test_helpers import RuntimeUsageModels
@@ -99,3 +100,20 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
             "field": "cwd",
             "reason": "workspace_required",
         }
+
+
+@pytest.mark.asyncio
+async def test_workspace_less_runtime_does_not_require_host_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_factory, "_capture_host_cwd", lambda: None)
+    components = await runtime_factory.compose_runtime_components(
+        "web-chat",
+        models=RuntimeUsageModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+    )
+    try:
+        backend = components.execution.runtime_backend()
+        assert backend._mcp_cwd is None  # type: ignore[attr-defined]
+    finally:
+        await components.close_callback()

@@ -56,6 +56,27 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
+    principal = Principal("principal", "tenant")
+    execution = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
+
+    with pytest.raises(AIError) as error:
+        await materialize_mcp_capabilities(
+            (MCPServerSpec("server", "echo"),),
+            ("mcp__server__*",),
+            principal=principal,
+            execution=execution,
+            execution_root=None,
+            tool_operations=None,
+            tool_metrics=None,
+            background_tasks=set(),
+        )
+
+    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    assert error.value.safe_details == {"reason": "mcp_cwd_unavailable"}
+
+
+@pytest.mark.asyncio
 async def test_asset_sql_apply_preserves_cancellation(monkeypatch) -> None:
     async def cancelled(self, changes, expected_revision):
         del self, changes, expected_revision
