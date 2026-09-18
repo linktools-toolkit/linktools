@@ -9,7 +9,7 @@ import json
 import mimetypes
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
 from linktools.core import environ
 from pydantic_ai.messages import (
@@ -24,7 +24,6 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from ..capability import WorkspaceAccess
 from ..core import JsonValue, PromptLimits, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
@@ -110,20 +109,31 @@ def decode_user_content_payload(value: Mapping[str, JsonValue]) -> tuple[UserCon
     return _decode_user_content(cast(dict[str, JsonValue], value))
 
 
+class _InputFileSource(Protocol):
+    async def canonicalize_path(self, path: str) -> str: ...
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: "int | None" = None,
+    ) -> bytes: ...
+
+    async def close(self) -> None: ...
+
+
 class ExecutionInputMaterializer:
-    """Own every Workspace file read used to admit an execution."""
+    """Own input materialization and optional file-source reads."""
 
     def __init__(
         self,
-        access: "WorkspaceAccess | None",
+        access: "_InputFileSource | None",
         limits: PromptLimits,
         *,
         object_store: ObjectStore | None = None,
         object_key_factory: "RuntimeObjectKeyFactory | None" = None,
         payload_policy: PayloadPolicy | None = None,
     ) -> None:
-        if access is not None and not isinstance(access, WorkspaceAccess):
-            raise TypeError("access must be WorkspaceAccess or None")
         if not isinstance(limits, PromptLimits):
             raise TypeError("limits must be PromptLimits")
         self._access = access
@@ -138,7 +148,7 @@ class ExecutionInputMaterializer:
             await self._access.close()
 
     @property
-    def access(self) -> "WorkspaceAccess | None":
+    def access(self) -> "_InputFileSource | None":
         return self._access
 
     async def canonicalize_files(self, files: Sequence[str]) -> tuple[str, ...]:

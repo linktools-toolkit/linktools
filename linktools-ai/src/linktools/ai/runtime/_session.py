@@ -13,7 +13,6 @@ from typing import Protocol, cast
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
-from ..capability import WorkspaceAccess
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -38,7 +37,7 @@ from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._handoff import HandoffGate, HandoffState
-from ._input import stored_user_input_view
+from ._input import _InputFileSource, stored_user_input_view
 from .service_api import (
     CancelExecutionRequest,
     CloseSessionRequest,
@@ -237,7 +236,7 @@ class DefaultSessionService:
         history_reader: SessionHistoryReader,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
-        workspace_access: WorkspaceAccess | None = None,
+        workspace_access: _InputFileSource | None = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions

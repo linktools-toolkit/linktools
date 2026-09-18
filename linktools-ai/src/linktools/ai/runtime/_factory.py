@@ -178,12 +178,12 @@ async def compose_runtime_components(
             namespace=resolved_namespace,
             workspace_ref=workspace_ref,
         )
-        catalog = AgentCatalog(
-            {
-                agent_id: compiler.compile(agents[agent_id])
-                for agent_id in sorted(agents)
-            }
-        )
+        definitions = {
+            agent_id: compiler.compile(agents[agent_id])
+            for agent_id in sorted(agents)
+        }
+        catalog = AgentCatalog(definitions)
+        has_mcp = any(definition.mcp_servers for definition in definitions.values())
 
         effective_tenant_id = (
             "default" if tenant_id is None else validate_tenant_id(tenant_id)
@@ -197,7 +197,7 @@ async def compose_runtime_components(
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = None
             workspace_access = None
-            mcp_cwd = str(Path.cwd().resolve())
+            mcp_cwd = str(Path.cwd().resolve()) if has_mcp else ""
         else:
             rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
             instruction_resolver = LocalRepositoryInstructionResolver(
@@ -266,6 +266,7 @@ async def compose_runtime_components(
                 workspace_access=workspace_access,
             )
         raise
+
 
 def _runtime_close_actions(
     *,
