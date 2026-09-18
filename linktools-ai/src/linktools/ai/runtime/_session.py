@@ -705,6 +705,11 @@ class DefaultSessionService:
                 session_id, request.principal, AuthorizationAction.SESSION_READ
             )
             record = await self._reconcile_terminal_admission(record)
+            if record.cwd is not None and self._workspace_access is None:
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={"field": "cwd", "reason": "workspace_required"},
+                )
             await self._authorization.authorize(
                 request.principal,
                 AuthorizationAction.EXECUTION_RUN,
@@ -754,6 +759,16 @@ class DefaultSessionService:
             )
             if source.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            target_cwd = (
+                source.cwd
+                if request.cwd is None
+                else await self._canonicalize_cwd(request.cwd)
+            )
+            if target_cwd is not None and self._workspace_access is None:
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={"field": "cwd", "reason": "workspace_required"},
+                )
             digest = canonical_sha256(
                 {
                     "action": "session.fork",
@@ -762,17 +777,8 @@ class DefaultSessionService:
                     "source": session_id,
                     "target": request.new_session_id,
                     "agent_id": source.agent_id,
-                    "cwd": (
-                        source.cwd
-                        if request.cwd is None
-                        else await self._canonicalize_cwd(request.cwd)
-                    ),
+                    "cwd": target_cwd,
                 }
-            )
-            target_cwd = (
-                source.cwd
-                if request.cwd is None
-                else await self._canonicalize_cwd(request.cwd)
             )
             now = datetime.now(timezone.utc)
             target_metadata = dict(source.metadata)
@@ -876,7 +882,10 @@ class DefaultSessionService:
         if value is None:
             return None
         if self._workspace_access is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "cwd", "reason": "workspace_required"},
+            )
         try:
             return await self._workspace_access.canonicalize_path(value)
         except AIError:

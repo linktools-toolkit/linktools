@@ -3,6 +3,7 @@
 """Shared local composition for AI CLI commands."""
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +12,9 @@ from typing import TypeVar
 from filelock import FileLock
 
 from linktools.cli import CommandError
+from linktools.core import environ
 
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_sqlite, validate_metrics_sqlite
 from linktools.ai.model import ModelRegistry
@@ -53,16 +56,48 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
 
 
 @asynccontextmanager
+def _local_models(workspace: Workspace) -> ModelRegistry:
+    configured = workspace.config.get("model")
+    model = (
+        configured.strip()
+        if isinstance(configured, str) and configured.strip()
+        else os.getenv("OPENAI_MODEL", "").strip()
+    )
+    if not model:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
+    raw_vision = os.getenv("OPENAI_VISION")
+    try:
+        vision = (
+            False
+            if raw_vision is None or not raw_vision.strip()
+            else environ.config.cast(raw_vision, bool)
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(
+            ErrorCode.MODEL_CONFIG_INVALID,
+            retryable=False,
+            safe_details={"provider": "openai", "field": "vision"},
+        ) from error
+    return ModelRegistry.openai(
+        model=model,
+        vision=vision,
+        base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
+        api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
+    )
+
+
+@asynccontextmanager
 async def _open_local_runtime(
     workspace: Workspace,
     *,
     models: "ModelRegistry | None" = None,
 ) -> AsyncIterator[Runtime]:
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         state=_local_runtime_state(workspace),
         metrics=await _local_metrics(workspace),
-        models=models,
+        models=_local_models(workspace) if models is None else models,
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     ) as runtime:
         yield runtime
 
