@@ -4,44 +4,42 @@
 
 import asyncio
 import hashlib
-import os
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TypeVar, cast
 
 from linktools.core import environ
 
 from ..agent import AgentCatalog, AgentCompiler
-from ..asset import (
-    AssetKey,
-    AssetPathAdapter,
-    AssetStore,
-    DirectoryAssetBackend,
-    PrefixAssetPathAdapter,
-)
 from ..capability import (
     CapabilityContribution,
     CapabilityGroup,
-    LocalSkillResourceSource,
     SkillSourceRegistry,
     TaskExpander,
     WorkspaceAccess,
     workspace_tool_contributions,
 )
 from ..core import (
-    DEFAULT_DISCOVERY_POLICY,
     HmacCursorSigner,
+    PromptLimits,
     TenantAuthorizationPolicy,
+    validate_persistence_namespace,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import AgentSpec
-from ..storage import ObjectStore, PayloadPolicy, StorageOverlay
+from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
-from ..workspace import LocalRepositoryInstructionResolver, LocalRuleCatalog, Workspace
+from ..workspace import (
+    LocalRepositoryInstructionResolver,
+    LocalRuleCatalog,
+    RepositoryInstructionResolver,
+    Workspace,
+)
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
@@ -63,7 +61,6 @@ from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeState
-from .state import RuntimeStatePlan, RuntimeStateRoute
 from .state._contracts import RecoveryCheckpointState
 
 AppT = TypeVar("AppT")
@@ -90,69 +87,56 @@ class _RuntimeComponents:
 
 
 async def compose_runtime_components(
-    workspace: Workspace,
+    namespace: str,
     *,
     app: "AppT | None" = None,
     tenant_id: "str | None" = None,
-    models: "ModelRegistry | None" = None,
-    state: "RuntimeState | None" = None,
+    models: ModelRegistry,
+    state: RuntimeState,
     capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
     metrics: "Metrics | None" = None,
+    limits: "PromptLimits | None" = None,
 ) -> _RuntimeComponents:
-    """Freeze declarations and build Runtime-private services without constructing Runtime."""
-    if not isinstance(workspace, Workspace):
-        raise TypeError("workspace must be Workspace")
-    workspace.policy.validate()
+    """Freeze declarations and build Runtime-private services."""
+    resolved_namespace = validate_persistence_namespace(namespace)
+    if not isinstance(models, ModelRegistry):
+        raise TypeError("models must be ModelRegistry")
+    if not isinstance(state, RuntimeState):
+        raise TypeError("state must be RuntimeState")
     if metrics is not None and not isinstance(metrics, Metrics):
         raise TypeError("metrics must be Metrics")
+    selected_limits = PromptLimits() if limits is None else limits
+    if not isinstance(selected_limits, PromptLimits):
+        raise TypeError("limits must be PromptLimits")
     groups = tuple(capabilities)
     if any(not isinstance(group, CapabilityGroup) for group in groups):
         raise TypeError("capabilities must contain CapabilityGroup values")
-    workspace_groups = tuple(group for group in groups if group.id == "workspace")
+    group_ids = tuple(group.id for group in groups)
+    if len(group_ids) != len(set(group_ids)):
+        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+    workspace_groups = tuple(group for group in groups if group.workspace is not None)
     if len(workspace_groups) > 1:
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+    workspace = None if not workspace_groups else workspace_groups[0].workspace
+    if workspace is not None:
+        workspace.policy.validate()
 
-    owned_workspace_assets: AssetStore | None = None
     selected_state: RuntimeState | None = None
     workspace_access: WorkspaceAccess | None = None
     input_materializer: ExecutionInputMaterializer | None = None
     initialized = False
     ownership_transferred = False
     try:
-        if workspace_groups:
-            effective_groups: tuple[CapabilityGroup[object], ...] = cast(
-                "tuple[CapabilityGroup[object], ...]", groups
-            )
-        else:
-            owned_workspace_assets = _default_workspace_store(workspace)
-            await owned_workspace_assets.initialize()
-            workspace_group: CapabilityGroup[object] = CapabilityGroup.from_store(
-                "workspace",
-                owned_workspace_assets,
-                skill_source=LocalSkillResourceSource(
-                    "workspace",
-                    workspace.storage_root / "skills",
-                ),
-            )
-            effective_groups = (
-                workspace_group,
-                *cast("tuple[CapabilityGroup[object], ...]", groups),
-            )
-
-        group_ids = tuple(group.id for group in effective_groups)
-        if len(group_ids) != len(set(group_ids)):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-
-        frozen: list[CapabilityContribution[object]] = list(
-            workspace_tool_contributions(workspace)
-        )
-        for group in effective_groups:
+        frozen: list[CapabilityContribution[object]] = []
+        if workspace is not None:
+            frozen.extend(workspace_tool_contributions(workspace))
+        for group in groups:
             frozen.extend(await group.freeze())
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
                 source
-                for group in effective_groups
+                for group in groups
                 if (source := group.skill_source) is not None
             )
         )
@@ -174,8 +158,7 @@ async def compose_runtime_components(
         }
         if "default" not in agents:
             agents["default"] = AgentSpec("default")
-        model_registry = models or _build_default_models(workspace)
-        resolver = model_registry.snapshot()
+        resolver = models.snapshot()
         compiler = AgentCompiler(
             model_resolver=resolver,
             candidates=tuple(
@@ -195,44 +178,49 @@ async def compose_runtime_components(
         effective_tenant_id = (
             "default" if tenant_id is None else validate_tenant_id(tenant_id)
         )
-        selected_state = state or _default_runtime_state(workspace)
+        selected_state = state
         await selected_state.initialize(
-            namespace=workspace.workspace_id,
+            namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
         )
         initialized = True
-        rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
-        instruction_resolver = LocalRepositoryInstructionResolver(
-            workspace.root,
-            workspace.policy,
-            rules,
-        )
-        object_key_factory = RuntimeObjectKeyFactory(workspace.workspace_id)
+        if workspace is None:
+            instruction_resolver: RepositoryInstructionResolver | None = None
+            workspace_access = None
+            mcp_cwd = str(Path.cwd().resolve())
+        else:
+            rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
+            instruction_resolver = LocalRepositoryInstructionResolver(
+                workspace.root,
+                workspace.policy,
+                rules,
+            )
+            workspace_access = WorkspaceAccess.for_workspace(workspace)
+            mcp_cwd = str(workspace.root)
+        object_key_factory = RuntimeObjectKeyFactory(resolved_namespace)
         payload_policy = PayloadPolicy()
-        workspace_access = WorkspaceAccess.for_workspace(workspace)
         input_materializer = ExecutionInputMaterializer(
             workspace_access,
-            workspace.policy,
+            selected_limits,
             object_store=selected_state.object_store(RuntimeDomain.EXECUTION),
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
-        grant_key = _grant_key(workspace)
+        grant_key = _grant_key(resolved_namespace)
         history_reader = _execution_history_reader(
-            workspace,
+            resolved_namespace,
             selected_state,
+            grant_key,
         )
         session_history_reader = StepSessionHistoryReader(
             store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
             cursor_signer=HmacCursorSigner("session-history", grant_key),
         )
-        memory_store_factory = _memory_store_factory(workspace, selected_state)
-        authorization = TenantAuthorizationPolicy(effective_tenant_id)
-        owned_workspace_close = (
-            None
-            if owned_workspace_assets is None
-            else owned_workspace_assets.close
+        memory_store_factory = _memory_store_factory(
+            resolved_namespace,
+            selected_state,
         )
+        authorization = TenantAuthorizationPolicy(effective_tenant_id)
         ownership_transferred = True
         return await _build_local_components(
             state=selected_state,
@@ -240,8 +228,10 @@ async def compose_runtime_components(
             compiler=compiler,
             authorization=authorization,
             tenant_id=effective_tenant_id,
-            namespace=workspace.workspace_id,
+            namespace=resolved_namespace,
             workspace=workspace,
+            limits=selected_limits,
+            mcp_cwd=mcp_cwd,
             app=app,
             task_handlers=task_handlers,
             task_expanders=task_expanders,
@@ -256,7 +246,6 @@ async def compose_runtime_components(
             input_materializer=input_materializer,
             session_execution_ready=True,
             metrics=metrics,
-            owned_workspace_close=owned_workspace_close,
         )
     except BaseException:
         if not ownership_transferred:
@@ -265,46 +254,8 @@ async def compose_runtime_components(
                 initialized=initialized,
                 input_materializer=input_materializer,
                 workspace_access=workspace_access,
-                owned_workspace_assets=owned_workspace_assets,
             )
         raise
-
-
-class _WorkspaceDeclarationPathAdapter:
-    def __init__(self) -> None:
-        self._delegate = PrefixAssetPathAdapter(
-            {"agent": "agents", "skill": "skills", "mcp": "mcp"}
-        )
-
-    def validate(self, kinds: Sequence[str]) -> None:
-        self._delegate.validate(kinds)
-
-    def root_path(self, kind: str) -> str:
-        return self._delegate.root_path(kind)
-
-    def to_path(self, key: AssetKey) -> str:
-        return self._delegate.to_path(key)
-
-    def from_path(self, path: str) -> "AssetKey | None":
-        key = self._delegate.from_path(path)
-        if key is None or key.kind != "skill":
-            return key
-        if "/" not in key.id or key.id.endswith("/SKILL.md"):
-            return key
-        return None
-
-
-def _default_workspace_store(workspace: Workspace) -> AssetStore:
-    adapter: AssetPathAdapter = _WorkspaceDeclarationPathAdapter()
-    source = DirectoryAssetBackend(
-        str(workspace.storage_root),
-        path_adapter=adapter,
-        kinds=("agent", "skill", "mcp"),
-        follow_external_symlinks=True,
-        ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
-    )
-    return AssetStore(StorageOverlay(source))
-
 
 def _runtime_close_actions(
     *,
@@ -315,7 +266,6 @@ def _runtime_close_actions(
     input_materializer: ExecutionInputMaterializer,
     metric_buffer: _RuntimeMetricBuffer | None,
     state: RuntimeState,
-    owned_workspace_close: "Callable[[], Awaitable[None]] | None",
 ) -> tuple[tuple[str, Callable[[], Awaitable[None]]], ...]:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
     if graph_service is not None:
@@ -338,8 +288,6 @@ def _runtime_close_actions(
     if metric_buffer is not None:
         actions.append(("runtime.metrics", metric_buffer.close))
     actions.append(("runtime.state", state.close))
-    if owned_workspace_close is not None:
-        actions.append(("runtime.workspace", owned_workspace_close))
     return tuple(actions)
 
 
@@ -363,7 +311,6 @@ async def _cleanup_compose_resources(
     initialized: bool,
     input_materializer: ExecutionInputMaterializer | None,
     workspace_access: WorkspaceAccess | None,
-    owned_workspace_assets: AssetStore | None,
 ) -> None:
     actions: list[tuple[str, Callable[[], Awaitable[None]]]] = []
     if input_materializer is not None:
@@ -372,8 +319,6 @@ async def _cleanup_compose_resources(
         actions.append(("runtime.compose.workspace_access", workspace_access.close))
     if initialized and selected_state is not None:
         actions.append(("runtime.compose.state", selected_state.close))
-    if owned_workspace_assets is not None:
-        actions.append(("runtime.compose.workspace", owned_workspace_assets.close))
     await _run_cleanup_actions(actions, stop_on_error=False)
 
 
@@ -395,74 +340,21 @@ def _validate_candidate_uniqueness(
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
 
-def _build_default_models(workspace: Workspace) -> ModelRegistry:
-    configured = workspace.config.get("model")
-    model = (
-        configured.strip()
-        if isinstance(configured, str) and configured.strip()
-        else os.getenv("OPENAI_MODEL", "").strip()
-    )
-    if not model:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
-    raw_vision = os.getenv("OPENAI_VISION")
-    try:
-        vision = (
-            False
-            if raw_vision is None or not raw_vision.strip()
-            else environ.config.cast(raw_vision, bool)
-        )
-    except (TypeError, ValueError) as error:
-        raise AIError(
-            ErrorCode.MODEL_CONFIG_INVALID,
-            retryable=False,
-            safe_details={"provider": "openai", "field": "vision"},
-        ) from error
-    return ModelRegistry.openai(
-        model=model,
-        vision=vision,
-        base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
-        api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
-    )
-
-
-def _default_runtime_state(workspace: Workspace) -> RuntimeState:
-    runtime_root = workspace.storage_root / "runtime"
-    return RuntimeState.from_plan(
-        RuntimeStatePlan(
-            conversation=RuntimeStateRoute.filesystem(
-                runtime_root / "conversation",
-                transaction_root=runtime_root,
-            ),
-            execution=RuntimeStateRoute.filesystem(
-                runtime_root / "execution",
-                transaction_root=runtime_root,
-            ),
-            recovery=RuntimeStateRoute.filesystem(
-                runtime_root / "recovery",
-                transaction_root=runtime_root,
-            ),
-            task=RuntimeStateRoute.filesystem(
-                runtime_root / "task",
-                transaction_root=runtime_root,
-            ),
-        )
-    )
-
-
 def _execution_history_reader(
-    workspace: Workspace,
+    namespace: str,
     state: RuntimeState,
+    grant_key: bytes,
 ) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
-        namespace=workspace.workspace_id,
+        namespace=namespace,
         executions=state.execution.executions,
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
-        cursor_signer=HmacCursorSigner("execution-history", _grant_key(workspace)),
+        cursor_signer=HmacCursorSigner("execution-history", grant_key),
     )
 
 
 def _memory_store_factory(
-    workspace: Workspace,
+    namespace: str,
     state: RuntimeState,
 ) -> "Callable[[str, str, str, ObjectStore, bool], MemoryStore]":
     def build(
@@ -475,7 +367,7 @@ def _memory_store_factory(
         return RuntimeMemoryStore(
             state.memory,
             object_store=object_store,
-            namespace=workspace.workspace_id,
+            namespace=namespace,
             tenant_id=tenant_id,
             execution_id=execution_id,
             memory_scope=memory_scope,
@@ -485,8 +377,8 @@ def _memory_store_factory(
     return build
 
 
-def _grant_key(workspace: Workspace) -> bytes:
-    return hashlib.sha256(f"workspace:{workspace.workspace_id}".encode()).digest()
+def _grant_key(namespace: str) -> bytes:
+    return hashlib.sha256(f"workspace:{namespace}".encode()).digest()
 
 
 def _require_state_identity(
@@ -507,7 +399,9 @@ async def _build_local_components(
     authorization: TenantAuthorizationPolicy,
     tenant_id: str,
     namespace: str,
-    workspace: Workspace,
+    workspace: "Workspace | None",
+    limits: PromptLimits,
+    mcp_cwd: str,
     app: AppT,
     task_handlers: Sequence[TaskNodeHandler[AppT]],
     task_expanders: Sequence[TaskExpander],
@@ -516,13 +410,12 @@ async def _build_local_components(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
     grant_key: bytes,
-    instruction_resolver: LocalRepositoryInstructionResolver,
+    instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
     input_materializer: ExecutionInputMaterializer,
     session_execution_ready: bool,
     metrics: "Metrics | None",
-    owned_workspace_close: "Callable[[], Awaitable[None]] | None" = None,
 ) -> _RuntimeComponents:
     metric_buffer: _RuntimeMetricBuffer | None = None
     metric_source_namespace: str | None = None
@@ -594,8 +487,6 @@ async def _build_local_components(
         if metric_buffer is not None:
             actions.append(("runtime.build.metrics", metric_buffer.close))
         actions.append(("runtime.build.state", state.close))
-        if owned_workspace_close is not None:
-            actions.append(("runtime.build.workspace", owned_workspace_close))
         await _run_cleanup_actions(actions, stop_on_error=False)
         raise
 
@@ -641,6 +532,8 @@ async def _build_local_components(
             catalog,
             tenant_id=tenant_id,
             workspace=workspace,
+            limits=limits,
+            mcp_cwd=mcp_cwd,
             instruction_resolver=instruction_resolver,
             app=app,
             step_reads={
@@ -776,7 +669,6 @@ async def _build_local_components(
             input_materializer=input_materializer,
             metric_buffer=metric_buffer,
             state=state,
-            owned_workspace_close=owned_workspace_close,
         )
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
@@ -797,7 +689,6 @@ async def _build_local_components(
                 input_materializer=input_materializer,
                 metric_buffer=metric_buffer,
                 state=state,
-                owned_workspace_close=owned_workspace_close,
             )
         )
         await _run_cleanup_actions(abort_actions)

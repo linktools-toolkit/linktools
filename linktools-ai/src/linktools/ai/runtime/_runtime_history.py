@@ -23,11 +23,11 @@ from ..core import (
     ResourceRef,
     TenantAuthorizationPolicy,
     validate_page_limit,
+    validate_persistence_namespace,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..workspace import Workspace
-from ._factory import _default_runtime_state, _grant_key
+from ._factory import _grant_key
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from .service_api import (
@@ -172,16 +172,16 @@ class RuntimeHistory:
     @classmethod
     def open(
         cls,
-        workspace: Workspace,
+        namespace: str,
         *,
+        state: RuntimeState,
         tenant_id: "str | None" = None,
-        state: "RuntimeState | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
     ) -> AbstractAsyncContextManager["RuntimeHistory"]:
         return _open_runtime_history(
-            workspace,
-            tenant_id=tenant_id,
+            namespace,
             state=state,
+            tenant_id=tenant_id,
             authorization=authorization,
         )
 
@@ -280,40 +280,39 @@ class RuntimeHistory:
 
 @asynccontextmanager
 async def _open_runtime_history(
-    workspace: Workspace,
+    namespace: str,
     *,
+    state: RuntimeState,
     tenant_id: "str | None",
-    state: "RuntimeState | None",
     authorization: "AuthorizationPolicy | None",
 ) -> AsyncIterator[RuntimeHistory]:
-    if not isinstance(workspace, Workspace):
-        raise TypeError("workspace must be Workspace")
+    resolved_namespace = validate_persistence_namespace(namespace)
     effective_tenant_id = (
         "default" if tenant_id is None else validate_tenant_id(tenant_id)
     )
-    selected_state = state or _default_runtime_state(workspace)
-    if not isinstance(selected_state, RuntimeState):
+    if not isinstance(state, RuntimeState):
         raise TypeError("state must be RuntimeState")
+    selected_state = state
     initialized = False
     body_error: BaseException | None = None
     try:
         await selected_state.initialize(
-            namespace=workspace.workspace_id,
+            namespace=resolved_namespace,
             tenant_id=effective_tenant_id,
         )
         initialized = True
         if (
-            selected_state.namespace != workspace.workspace_id
+            selected_state.namespace != resolved_namespace
             or selected_state.tenant_id != effective_tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         reader = StepExecutionHistoryReader(
-            namespace=workspace.workspace_id,
+            namespace=resolved_namespace,
             executions=selected_state.execution.executions,
             store=selected_state.steps.read_store(RuntimeDomain.EXECUTION),
             cursor_signer=HmacCursorSigner(
                 "execution-history",
-                _grant_key(workspace),
+                _grant_key(resolved_namespace),
             ),
         )
         effective_authorization = (
@@ -325,7 +324,7 @@ async def _open_runtime_history(
             selected_state.execution.executions,
             effective_authorization,
             reader,
-            cursor_signer=HmacCursorSigner("execution", _grant_key(workspace)),
+            cursor_signer=HmacCursorSigner("execution", _grant_key(resolved_namespace)),
         )
         yield RuntimeHistory(
             service,
