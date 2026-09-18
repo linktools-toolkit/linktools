@@ -1619,11 +1619,47 @@ class TaskRepositoryImpl(RepositoryBase):
             graph_record = await transaction.get_record(self._graph_key(graph_id))
             if graph_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            next_nodes = tuple(
-                (
-                    node
-                    if node.status is TaskStatus.RECOVERY_REQUIRED
-                    else replace(
+            definitions = {
+                node.node_id: node for node in before.graph.nodes
+            }
+            next_values: list[TaskNodeView] = []
+            for node in before.node_states:
+                definition = definitions.get(node.node_id)
+                if definition is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if node.status is TaskStatus.RECOVERY_REQUIRED:
+                    next_values.append(node)
+                    continue
+                if node.status in _TERMINAL_TASK_STATUSES:
+                    next_values.append(node)
+                    continue
+                if (
+                    node.status is TaskStatus.RUNNING
+                    and node.execution_id is not None
+                    and definition.effect == "non_replay_safe"
+                ):
+                    next_values.append(
+                        replace(
+                            node,
+                            status=TaskStatus.RECOVERY_REQUIRED,
+                            owner=None,
+                            lease_expires_at=None,
+                            next_attempt_at=None,
+                            occupies_concurrency=False,
+                            result_digest=None,
+                            error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                            error_digest=canonical_sha256(
+                                {
+                                    "graph_id": graph_id,
+                                    "node_id": node.node_id,
+                                    "code": ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                                }
+                            ),
+                        )
+                    )
+                    continue
+                next_values.append(
+                    replace(
                         node,
                         status=TaskStatus.CANCELLED,
                         owner=None,
@@ -1631,11 +1667,8 @@ class TaskRepositoryImpl(RepositoryBase):
                         next_attempt_at=None,
                         occupies_concurrency=False,
                     )
-                    if node.status not in _TERMINAL_TASK_STATUSES
-                    else node
                 )
-                for node in before.node_states
-            )
+            next_nodes = tuple(next_values)
             isolated = _isolated_graph_status(next_nodes)
             next_status = (
                 TaskStatus.RECOVERY_REQUIRED
