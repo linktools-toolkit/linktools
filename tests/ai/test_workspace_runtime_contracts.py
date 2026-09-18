@@ -199,11 +199,20 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     ]
 
 
+def _workspace_runtime_state(workspace: Workspace) -> RuntimeState:
+    return RuntimeState.from_root(workspace.storage_root / "runtime")
+
+
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path, workspace_id="workspace")
     models = ModelRegistry.openai(model="gpt-test")
-    async with Runtime.open(workspace, models=models) as runtime:
+    async with Runtime.open(
+        workspace.workspace_id,
+        models=models,
+        state=_workspace_runtime_state(workspace),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
+    ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
         created = await runtime.agent("default").create_session("remember")
@@ -216,15 +225,22 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         ).items == ()
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
+        state=_workspace_runtime_state(workspace),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
         await runtime.agent("default").create_session("custom-tenant")
 
-    async with Runtime.open(workspace, models=models) as runtime:
+    async with Runtime.open(
+        workspace.workspace_id,
+        models=models,
+        state=_workspace_runtime_state(workspace),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
+    ) as runtime:
         loaded = await runtime.session.get(
             created.session_id,
             principal=runtime.default_principal,
