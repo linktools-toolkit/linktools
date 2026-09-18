@@ -353,6 +353,9 @@ async def test_history_detail_streams_pages_without_trace(
     assert "Fixed instruction prefix (F0/F1)" in output
     assert "Dynamic overlay (O)" in output
     assert "workspace" in output
+    assert "standing system" not in output
+    assert "fixed workspace guidance" not in output
+    assert "repository overlay" not in output
     assert "Model Requests" in output
     assert "Trace" not in output
     assert history.trace_called is False
