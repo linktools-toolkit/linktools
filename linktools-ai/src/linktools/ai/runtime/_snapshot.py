@@ -10,7 +10,7 @@ import posixpath
 import shutil
 import secrets
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Mapping, cast
 
 from filelock import FileLock, Timeout
@@ -181,6 +181,7 @@ class RuntimeSnapshot:
         state_objects = state_manifest.get("objects", [])
         if not isinstance(state_objects, list):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
         workspace = manifest.get("workspace")
         if not isinstance(workspace, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -199,7 +200,11 @@ class RuntimeSnapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if len(entries) + len(state_objects) > limits.max_entries:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        _validate_workspace_entries(entries)
+        kinds = _validate_workspace_entries(entries)
+
+        total_bytes = len(canonical_json_bytes(cast(JsonValue, manifest))) + state.size
+        if total_bytes > limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         for raw_object in state_objects:
             if not isinstance(raw_object, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -207,23 +212,21 @@ class RuntimeSnapshot:
             content = _object_ref_from_payload(raw_object.get("content"))
             if source.digest != content.digest or source.size != content.size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await read_object(
-                object_store,
-                content.key,
-                expected_digest=content.digest,
-                expected_size=content.size,
-            )
+            total_bytes += content.size
+            if total_bytes > limits.max_bytes:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            await _verify_object(object_store, content)
         for entry in entries:
             if not isinstance(entry, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if "symlink" not in entry:
-                content = _object_ref_from_payload(entry.get("content"))
-                await read_object(
-                    object_store,
-                    content.key,
-                    expected_digest=content.digest,
-                    expected_size=content.size,
-                )
+            if kinds[cast(str, entry["path"])] != "file":
+                continue
+            content = _object_ref_from_payload(entry.get("content"))
+            total_bytes += content.size
+            if total_bytes > limits.max_bytes:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            await _verify_object(object_store, content)
+
 
     @classmethod
     async def copy(
@@ -258,30 +261,18 @@ class RuntimeSnapshot:
             raw_workspace.get("entries"), list
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        entries = cast(list[object], raw_workspace["entries"])
+        kinds = _validate_workspace_entries(entries)
         refs.extend(
             _object_ref_from_payload(entry["content"])
-            for entry in cast(
-                list[Mapping[str, object]],
-                raw_workspace["entries"],
-            )
-            if "symlink" not in entry
+            for entry in cast(list[Mapping[str, object]], entries)
+            if kinds[cast(str, entry["path"])] == "file"
         )
         for item in refs:
-            value = await read_object(
-                source_store,
-                item.key,
-                expected_digest=item.digest,
-                expected_size=item.size,
-            )
-            await _put_object(target_store, item.key, value)
-        payload = await read_object(
-            source_store,
-            ref.key,
-            expected_digest=ref.digest,
-            expected_size=ref.size,
-        )
-        await _put_object(target_store, ref.key, payload)
+            await _copy_object(source_store, target_store, item)
+        await _copy_object(source_store, target_store, ref)
         return ObjectRef(target_store.store_id, ref.key, ref.digest, ref.size)
+
 
     @classmethod
     async def restore(
@@ -443,7 +434,12 @@ class RuntimeSnapshot:
                     object_store=object_store,
                     limits=limits,
                 )
-            except AIError:
+            except AIError as error:
+                if error.code not in {
+                    ErrorCode.STORAGE_CONFLICT,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                }:
+                    raise
                 status = "modified"
         return SnapshotTargetInspection(status, generation, ref.digest)
 
@@ -500,9 +496,11 @@ async def _capture_workspace(
     )
     if any(path == root for path in excluded):
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
     entries: list[dict[str, JsonValue]] = []
     total_bytes = 0
-    for path in sorted(root.rglob("*")):
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        relative = _safe_relative_path(path.relative_to(root).as_posix())
         try:
             resolved = path.resolve(strict=False)
         except RuntimeError as error:
@@ -511,63 +509,74 @@ async def _capture_workspace(
             if path.is_symlink():
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             continue
-        relative = path.relative_to(root)
+        if len(entries) >= limits.max_entries:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
         if path.is_symlink():
             try:
                 target = os.readlink(path)
-                target_path = (path.parent / target).resolve(strict=False)
+                target_path = (path.parent / target).resolve(strict=True)
             except (OSError, RuntimeError) as error:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED) from error
+            _safe_symlink_target(relative, target)
             if (
-                Path(target).is_absolute()
-                or not _is_child_or_same(target_path, root)
+                not _is_child_or_same(target_path, root)
                 or any(_is_child_or_same(target_path, item) for item in excluded)
-                or not target_path.exists()
             ):
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-            entries.append(
-                {
-                    "path": relative.as_posix(),
-                    "symlink": target,
-                }
-            )
-            if len(entries) > limits.max_entries:
-                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            entries.append({"path": relative, "symlink": target})
             continue
+
         if path.is_dir():
+            entries.append({"path": relative, "directory": True})
             continue
         if not path.is_file():
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
         try:
             before = path.stat()
-            value = path.read_bytes()
-            after = path.stat()
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if (
-            before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
-            or before.st_ino != after.st_ino
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        total_bytes += len(value)
-        if len(entries) >= limits.max_entries or total_bytes > limits.max_bytes:
+        remaining = limits.max_bytes - total_bytes
+        if before.st_size > remaining:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        digest = _digest_bytes(value)
+        digest, size = await _read_file_digest(path, remaining)
+        try:
+            after_digest = path.stat()
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        if not _same_file_snapshot(before, after_digest, size):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
         key = f"v1/runtime-workspace/{digest}"
-        await _put_object(object_store, key, value)
+        await object_store.put(
+            key,
+            _file_chunks(path),
+            expected_size=size,
+            expected_digest=digest,
+        )
+        try:
+            after_publish = path.stat()
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        if not _same_file_snapshot(before, after_publish, size):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        total_bytes += size
         entries.append(
             {
-                "path": relative.as_posix(),
-                "mode": after.st_mode & 0o111,
+                "path": relative,
+                "mode": after_publish.st_mode & 0o111,
                 "content": {
                     "store_id": object_store.store_id,
                     "key": key,
                     "digest": digest,
-                    "size": len(value),
+                    "size": size,
                 },
             }
         )
+
+    _validate_workspace_entries(entries)
     return {
         "present": True,
         "workspace_id": workspace.workspace_id,
@@ -601,62 +610,79 @@ async def _restore_workspace(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if len(entries) > limits.max_entries:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+    kinds = _validate_workspace_entries(entries)
+    total_bytes = sum(
+        _object_ref_from_payload(entry.get("content")).size
+        for entry in entries
+        if isinstance(entry, Mapping) and kinds[cast(str, entry["path"])] == "file"
+    )
+    if total_bytes > limits.max_bytes:
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
     target.mkdir(parents=True, exist_ok=False)
-    if not entries:
-        return target
-    seen: set[str] = set()
-    links: list[tuple[Path, str]] = []
-    relative_paths: list[str] = []
+
+    for relative in sorted(
+        (path for path, kind in kinds.items() if kind == "directory"),
+        key=lambda value: (value.count("/"), value),
+    ):
+        (target / relative).mkdir(parents=False, exist_ok=False)
+
     for entry in entries:
-        if not isinstance(entry, Mapping) or not isinstance(entry.get("path"), str):
+        if not isinstance(entry, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _validate_workspace_entry(entry)
-        relative = _safe_relative_path(entry["path"])
-        if relative in seen:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        seen.add(relative)
-        relative_paths.append(relative)
-    for relative in relative_paths:
-        parts = relative.split("/")
-        if any("/".join(parts[:index]) in seen for index in range(1, len(parts))):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-    total_bytes = 0
-    seen.clear()
-    for entry in raw:
-        relative = _safe_relative_path(cast(str, entry["path"]))
-        seen.add(relative)
-        destination = target / relative
-        if "symlink" in entry:
-            links.append((destination, cast(str, entry["symlink"])))
+        relative = cast(str, entry["path"])
+        if kinds[relative] != "file":
             continue
+        destination = target / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
         content = _object_ref_from_payload(entry.get("content"))
-        total_bytes += content.size
-        if total_bytes > limits.max_bytes:
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(
-            await read_object(
-                object_store,
-                content.key,
-                expected_digest=content.digest,
-                expected_size=content.size,
-            )
+        await _write_object_file(
+            object_store,
+            content,
+            destination,
+            max_bytes=limits.max_bytes,
         )
-        if int(entry.get("mode", 0)):
-            os.chmod(destination, 0o755)
-    for destination, link_target in links:
+        mode = entry.get("mode", 0)
+        if isinstance(mode, bool) or not isinstance(mode, int) or mode < 0 or mode > 0o111:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            current_mode = destination.stat().st_mode
+            os.chmod(destination, (current_mode & ~0o111) | mode)
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+    entry_by_path = {
+        cast(str, entry["path"]): entry
+        for entry in entries
+        if isinstance(entry, Mapping)
+    }
+    links: list[tuple[Path, str, bool]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        relative = cast(str, entry["path"])
+        if kinds[relative] != "symlink":
+            continue
+        link_target = cast(str, entry["symlink"])
+        logical_target = _safe_symlink_target(relative, link_target)
+        final_kind = _resolve_workspace_entry_kind(logical_target, entry_by_path, kinds)
+        links.append((target / relative, link_target, final_kind == "directory"))
+
+    for destination, link_target, target_is_directory in links:
         destination.parent.mkdir(parents=True, exist_ok=True)
         try:
-            resolved = (destination.parent / link_target).resolve(strict=False)
-        except RuntimeError as error:
+            destination.symlink_to(
+                link_target,
+                target_is_directory=target_is_directory,
+            )
+        except OSError as error:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED) from error
-        if not _is_child_or_same(resolved, target) or not os.path.lexists(resolved):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        destination.symlink_to(link_target)
-    for destination, _ in links:
+
+    for destination, _link_target, _target_is_directory in links:
         try:
-            resolved = destination.resolve(strict=False)
-        except RuntimeError as error:
+            resolved = destination.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED) from error
         if not _is_child_or_same(resolved, target):
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
@@ -664,50 +690,142 @@ async def _restore_workspace(
 
 
 def _safe_relative_path(value: str) -> str:
-    path = Path(value)
     if (
-        not value
-        or path.is_absolute()
+        not isinstance(value, str)
+        or not value
         or "\x00" in value
-        or any(part in {"", ".", ".."} for part in path.parts)
+        or "\\" in value
+        or value.startswith("/")
+        or value.startswith("./")
+        or value.endswith("/")
+        or "//" in value
     ):
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-    return path.as_posix()
+    path = PurePosixPath(value)
+    parts = path.parts
+    if (
+        not parts
+        or any(part in {"", ".", ".."} for part in parts)
+        or (len(parts[0]) == 2 and parts[0][1] == ":" and parts[0][0].isalpha())
+        or path.as_posix() != value
+    ):
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    return value
 
 
-def _validate_workspace_entry(entry: Mapping[str, object]) -> None:
+def _safe_symlink_target(source: str, target: str) -> str:
+    if (
+        not isinstance(target, str)
+        or not target
+        or "\x00" in target
+        or "\\" in target
+        or target.startswith("/")
+    ):
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    first = PurePosixPath(target).parts[:1]
+    if first and len(first[0]) == 2 and first[0][1] == ":" and first[0][0].isalpha():
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    combined = posixpath.normpath(
+        posixpath.join(posixpath.dirname(source), target)
+    )
+    if combined in {"", ".", ".."} or combined.startswith("../"):
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    return _safe_relative_path(combined)
+
+
+def _workspace_entry_kind(entry: Mapping[str, object]) -> str:
+    is_directory = entry.get("directory") is True
+    has_symlink = "symlink" in entry
+    has_content = "content" in entry
+    if sum((is_directory, has_symlink, has_content)) != 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if is_directory:
+        if set(entry) - {"path", "directory"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return "directory"
+    if has_symlink:
+        if set(entry) - {"path", "symlink"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return "symlink"
+    if set(entry) - {"path", "mode", "content"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    mode = entry.get("mode", 0)
+    if isinstance(mode, bool) or not isinstance(mode, int) or mode < 0 or mode > 0o111:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _object_ref_from_payload(entry.get("content"))
+    return "file"
+
+
+def _validate_workspace_entry(entry: Mapping[str, object]) -> str:
     value = entry.get("path")
     if not isinstance(value, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _safe_relative_path(value)
-    if "symlink" in entry:
-        target = entry["symlink"]
-        if not isinstance(target, str) or not target or Path(target).is_absolute():
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        combined = posixpath.normpath(
-            posixpath.join(posixpath.dirname(value), target)
-        )
-        if combined == ".." or combined.startswith("../"):
-            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-        return
-    if "content" not in entry:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    path = _safe_relative_path(value)
+    kind = _workspace_entry_kind(entry)
+    if kind == "symlink":
+        target = entry.get("symlink")
+        if not isinstance(target, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _safe_symlink_target(path, target)
+    return kind
 
 
-def _validate_workspace_entries(entries: list[object]) -> None:
-    paths: set[str] = set()
+def _validate_workspace_entries(entries: list[object]) -> dict[str, str]:
+    kinds: dict[str, str] = {}
+    collision_keys: dict[str, str] = {}
+    values: dict[str, Mapping[str, object]] = {}
     for raw_entry in entries:
         if not isinstance(raw_entry, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _validate_workspace_entry(raw_entry)
+        kind = _validate_workspace_entry(raw_entry)
         path = cast(str, raw_entry["path"])
-        if path in paths:
+        if path in kinds:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        paths.add(path)
-    for path in paths:
+        collision_key = os.path.normcase(path)
+        previous = collision_keys.get(collision_key)
+        if previous is not None and previous != path:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        collision_keys[collision_key] = path
+        kinds[path] = kind
+        values[path] = raw_entry
+
+    for path, kind in kinds.items():
         parts = path.split("/")
-        if any("/".join(parts[:index]) in paths for index in range(1, len(parts))):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        for index in range(1, len(parts)):
+            parent = "/".join(parts[:index])
+            parent_kind = kinds.get(parent)
+            if parent_kind is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if parent_kind != "directory":
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if kind == "symlink":
+            target = cast(str, values[path]["symlink"])
+            logical_target = _safe_symlink_target(path, target)
+            _resolve_workspace_entry_kind(logical_target, values, kinds)
+    return kinds
+
+
+def _resolve_workspace_entry_kind(
+    path: str,
+    entries: Mapping[str, Mapping[str, object]],
+    kinds: Mapping[str, str],
+) -> str:
+    current = path
+    seen: set[str] = set()
+    while True:
+        kind = kinds.get(current)
+        if kind is None:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if kind != "symlink":
+            return kind
+        if current in seen:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        seen.add(current)
+        entry = entries[current]
+        target = entry.get("symlink")
+        if not isinstance(target, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        current = _safe_symlink_target(current, target)
 
 
 async def _verify_restored_generation(
@@ -719,7 +837,7 @@ async def _verify_restored_generation(
 ) -> None:
     state_root = root / "state"
     if not state_root.is_dir():
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
     namespace = manifest.get("namespace")
     tenant_id = manifest.get("tenant_id")
     if not isinstance(namespace, str) or not isinstance(tenant_id, str):
@@ -731,6 +849,10 @@ async def _verify_restored_generation(
             tenant_id=tenant_id,
             read_only=True,
         )
+    except AIError as error:
+        if error.code is ErrorCode.STORAGE_NOT_FOUND:
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        raise
     finally:
         if restored_state.ready:
             await restored_state.close()
@@ -754,41 +876,53 @@ async def _verify_restored_generation(
         return
     if workspace_id is None or not workspace_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _validate_workspace_entries(expected)
-    expected_by_path: dict[str, Mapping[str, object]] = {}
-    for entry in expected:
-        if not isinstance(entry, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        path = cast(str, entry["path"])
-        if path in expected_by_path:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        expected_by_path[path] = entry
-    if not expected_by_path:
-        if not workspace_root.is_dir() or any(workspace_root.iterdir()):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return
     if not workspace_root.is_dir():
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    kinds = _validate_workspace_entries(expected)
+    expected_by_path = {
+        cast(str, entry["path"]): entry
+        for entry in expected
+        if isinstance(entry, Mapping)
+    }
     actual = {
         path.relative_to(workspace_root).as_posix(): path
         for path in workspace_root.rglob("*")
-        if path.is_file() or path.is_symlink()
     }
     if set(actual) != set(expected_by_path):
         raise AIError(ErrorCode.STORAGE_CONFLICT)
     if len(actual) > limits.max_entries:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+    total_bytes = 0
     for relative, entry in expected_by_path.items():
         path = actual[relative]
-        if "symlink" in entry:
-            if not path.is_symlink() or os.readlink(path) != entry["symlink"]:
+        kind = kinds[relative]
+        if kind == "directory":
+            if path.is_symlink() or not path.is_dir():
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             continue
-        if path.is_symlink():
+        if kind == "symlink":
+            if not path.is_symlink() or os.readlink(path) != entry["symlink"]:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            if not _is_child_or_same(resolved, workspace_root):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            continue
+        if path.is_symlink() or not path.is_file():
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         content = _object_ref_from_payload(entry.get("content"))
-        digest, size = await _read_file_digest(path, limits.max_bytes)
+        total_bytes += content.size
+        if total_bytes > limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        digest, size = await _read_file_digest(path, content.size)
         if digest != content.digest or size != content.size:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        mode = entry.get("mode", 0)
+        if path.stat().st_mode & 0o111 != mode:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
 
@@ -818,18 +952,101 @@ def _parse_state_manifest(payload: bytes) -> Mapping[str, object]:
     return value
 
 
-async def _read_file_digest(path: Path, limit: int) -> tuple[str, int]:
-    size = 0
-    digest = hashlib.sha256()
+def _same_file_snapshot(before: os.stat_result, after: os.stat_result, size: int) -> bool:
+    return (
+        before.st_size == size
+        and after.st_size == size
+        and before.st_mtime_ns == after.st_mtime_ns
+        and before.st_ino == after.st_ino
+    )
+
+
+async def _file_chunks(path: Path):
+    handle = await asyncio.to_thread(path.open, "rb")
     try:
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                size += len(chunk)
-                if size > limit:
-                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                digest.update(chunk)
+        while True:
+            chunk = await asyncio.to_thread(handle.read, 1024 * 1024)
+            if not chunk:
+                return
+            yield chunk
+    finally:
+        await asyncio.to_thread(handle.close)
+
+
+async def _verify_object(store: ObjectStore, ref: ObjectRef) -> None:
+    digest = hashlib.sha256()
+    size = 0
+    async for chunk in store.open(ref.key):
+        if not isinstance(chunk, bytes) or not chunk:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        size += len(chunk)
+        if size > ref.size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        digest.update(chunk)
+    if size != ref.size or digest.hexdigest() != ref.digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+async def _copy_object(
+    source: ObjectStore,
+    target: ObjectStore,
+    ref: ObjectRef,
+) -> None:
+    if source is target:
+        return
+    await target.put(
+        ref.key,
+        source.open(ref.key),
+        expected_size=ref.size,
+        expected_digest=ref.digest,
+    )
+
+
+async def _write_object_file(
+    store: ObjectStore,
+    ref: ObjectRef,
+    path: Path,
+    *,
+    max_bytes: int,
+) -> None:
+    if ref.size > max_bytes:
+        raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+    digest = hashlib.sha256()
+    size = 0
+    handle = await asyncio.to_thread(path.open, "wb")
+    try:
+        async for chunk in store.open(ref.key):
+            if not isinstance(chunk, bytes) or not chunk:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            size += len(chunk)
+            if size > ref.size or size > max_bytes:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            digest.update(chunk)
+            await asyncio.to_thread(handle.write, chunk)
+        await asyncio.to_thread(handle.flush)
+        await asyncio.to_thread(os.fsync, handle.fileno())
+    finally:
+        await asyncio.to_thread(handle.close)
+    if size != ref.size or digest.hexdigest() != ref.digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+async def _read_file_digest(path: Path, limit: int) -> tuple[str, int]:
+    try:
+        return await asyncio.to_thread(_read_file_digest_sync, path, limit)
     except OSError as error:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+
+def _read_file_digest_sync(path: Path, limit: int) -> tuple[str, int]:
+    size = 0
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            size += len(chunk)
+            if size > limit:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            digest.update(chunk)
     return digest.hexdigest(), size
 
 
