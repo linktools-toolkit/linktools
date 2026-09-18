@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast
 
+from linktools.core import environ
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -54,6 +55,7 @@ from ._tool_semantic import (
 from ._workspace import _workspace_tool_definitions
 
 AppT = TypeVar("AppT")
+_logger = environ.get_logger("ai.capability.group")
 
 
 ContributionKind = Literal[
@@ -572,10 +574,11 @@ class CapabilityGroup(Generic[AppT]):
         owned_store = (
             None if self._owned_store_factory is None else self._owned_store_factory()
         )
-        if owned_store is not None:
-            await owned_store.initialize()
-            store = owned_store
+        primary_error: BaseException | None = None
         try:
+            if owned_store is not None:
+                await owned_store.initialize()
+                store = owned_store
             if store is not None:
                 if not store.ready:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -598,9 +601,21 @@ class CapabilityGroup(Generic[AppT]):
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     contributions.extend(loaded)
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
             if owned_store is not None:
-                await owned_store.close()
+                try:
+                    await owned_store.close()
+                except BaseException as error:
+                    if primary_error is None:
+                        raise
+                    _logger.error(
+                        "owned capability store cleanup failed: group=%s exception_type=%s",
+                        self._id,
+                        type(error).__name__,
+                    )
         frozen = tuple(_freeze_contribution(item) for item in contributions)
         _validate_unique(frozen)
         generic = [item for item in frozen if item.kind == "capability"]
