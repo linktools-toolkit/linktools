@@ -4,7 +4,6 @@
 
 import asyncio
 import hashlib
-import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -278,8 +277,6 @@ async def _snapshot_skill_source(
 ) -> ObjectRef:
     if not isinstance(expected_revision, StorageRevision):
         raise TypeError("expected_revision must be StorageRevision")
-    if not isinstance(object_store, ObjectStore):
-        raise TypeError("object_store must implement ObjectStore")
     before = await source.current_revision(root)
     if before != expected_revision:
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
