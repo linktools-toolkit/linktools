@@ -51,6 +51,7 @@ from ..core import (
     OperationStatus,
     Page,
     Principal,
+    PromptLimits,
     ResourceKind,
     SessionStatus,
     StopReason,
@@ -247,7 +248,9 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         catalog: AgentCatalog,
         *,
-        workspace: Workspace,
+        workspace: "Workspace | None",
+        limits: PromptLimits,
+        mcp_cwd: str,
         instruction_resolver: RepositoryInstructionResolver | None = None,
         app: object,
         tenant_id: str,
@@ -275,6 +278,8 @@ class LocalExecutionBackend:
         self._segment_runner = _AgentSegmentRunner(executor)
         self._catalog = catalog
         self._workspace = workspace
+        self._limits = limits
+        self._mcp_cwd = mcp_cwd
         self._app = app
         self._tenant_id = validate_tenant_id(tenant_id)
         self._memory_store_factory = memory_store_factory
@@ -2885,7 +2890,7 @@ class LocalExecutionBackend:
             public_context = AgentContext(
                 app=self._app,
                 principal=request.principal,
-                workspace=self._workspace,
+                namespace=self._namespace,
                 session_id=current.session_id,
                 execution_id=current.execution_id,
                 session_metadata=session_metadata,
@@ -2906,6 +2911,9 @@ class LocalExecutionBackend:
                     _AgentSegmentInput(
                         binding=binding,
                         context=public_context,
+                        workspace=self._workspace,
+                        limits=self._limits,
+                        mcp_cwd=self._mcp_cwd,
                         user_prompt=run_user_prompt,
                         history=history,
                         conversation_id=conversation_id,
