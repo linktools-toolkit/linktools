@@ -377,6 +377,26 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             self._validate_durability(node, graph_id=graph.graph_id, request=True)
 
+    def validate_input(self, node: TaskNode, value: JsonValue) -> None:
+        task_type, task_version, _body = _parse_node(node, request=False)
+        if (
+            task_type != self._deferred_input.type
+            or task_version != self._deferred_input.version
+        ):
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        _validate_task_output(node, normalize_json_value(value))
+
+    def validate_effect_resolution(
+        self,
+        node: TaskNode,
+        resolution: TaskEffectResolution,
+    ) -> None:
+        if resolution.kind == "applied":
+            _validate_task_output(
+                node,
+                normalize_json_value(resolution.value),
+            )
+
     def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None:
         for node, state in zip(snapshot.nodes, snapshot.node_states, strict=True):
             if state.status in {

@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
-from ..agent import bind_output, restore_output
 from ..core import JsonValue, Principal, TaskStatus
 from ..errors import AIError, ErrorCode
 from ..task import (
@@ -120,19 +119,6 @@ class TaskGraphRun(Generic[AppT]):
         )
         if node is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        if node.output_contract is not None:
-            try:
-                restore_output(
-                    node.output_contract["mode"],
-                    node.output_contract["schema"],
-                ).validate_payload(request.value)
-            except (KeyError, TypeError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        elif isinstance(node.output_schema, type) and issubclass(
-            node.output_schema,
-            BaseModel,
-        ):
-            bind_output(node.output_schema).validate_payload(request.value)
         return _public_task_result(await self._runtime.graph.resume(
             self.graph_id,
             node_id,
@@ -156,11 +142,6 @@ class TaskGraphRun(Generic[AppT]):
         )
         if node is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        if resolution.kind == "applied" and node.output_contract is not None:
-            restore_output(
-                node.output_contract["mode"],
-                node.output_contract["schema"],
-            ).validate_payload(resolution.value)
         return _public_task_result(
             await self._runtime.graph.resolve_effect(
                 self.graph_id,

@@ -17,6 +17,7 @@ from ..core import (
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
+    JsonValue,
     Page,
     Principal,
     ResourceKind,
@@ -30,6 +31,7 @@ from ..errors import AIError, ErrorCode
 from ..observe import MetricRecorder
 from ..storage import StoredPayload
 from ._event import TaskEvent
+from ._handler import TaskEffectResolution
 from ._graph import (
     CancelGraphRequest,
     RecoverGraphRequest,
@@ -41,6 +43,7 @@ from ._graph import (
     TaskGraphSnapshot,
     TaskGraphView,
     TaskInputSupplyRequest,
+    TaskNode,
     TaskNodeResult,
     TaskNodeView,
 )
@@ -84,6 +87,14 @@ class _TaskGraphPreflight(Protocol):
     def validate_request(self, graph: TaskGraph) -> None: ...
 
     def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None: ...
+
+    def validate_input(self, node: TaskNode, value: JsonValue) -> None: ...
+
+    def validate_effect_resolution(
+        self,
+        node: TaskNode,
+        resolution: TaskEffectResolution,
+    ) -> None: ...
 
 
 class _TaskRepository(Protocol):
@@ -539,8 +550,14 @@ class DefaultTaskGraphService(TaskGraphService):
             (item for item in snapshot.node_states if item.node_id == node_id),
             None,
         )
-        if state is None:
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        if state is None or node is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if self._preflight is not None:
+            self._preflight.validate_input(node, request.value)
         operation_id = idempotency_key_digest(request.idempotency_key)
         request_digest = canonical_sha256(
             {
@@ -706,8 +723,17 @@ class DefaultTaskGraphService(TaskGraphService):
             (item for item in snapshot.node_states if item.node_id == node_id),
             None,
         )
-        if state is None:
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        if state is None or node is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if self._preflight is not None:
+            self._preflight.validate_effect_resolution(
+                node,
+                request.resolution,
+            )
         operation_id = idempotency_key_digest(request.idempotency_key)
         request_digest = canonical_sha256(
             {
