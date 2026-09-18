@@ -330,7 +330,7 @@ async def test_execution_model_interactions_are_durable_and_public(tmp_path: Pat
         workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
@@ -346,7 +346,7 @@ async def test_execution_model_interactions_support_volatile_memory_state(
         workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
