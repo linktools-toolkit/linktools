@@ -1,0 +1,31 @@
+name: Apply state refactor batch
+
+on:
+  push:
+    branches:
+      - refactor/ai-split-large-modules
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refactor/ai-split-large-modules
+      - name: Apply verified refactor patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/refactor_state_batch.patch.gz.b64 > /tmp/refactor.patch.gz
+          gzip -dc /tmp/refactor.patch.gz > /tmp/refactor.patch
+          git apply --check /tmp/refactor.patch
+          git apply --index /tmp/refactor.patch
+          git rm .github/refactor_state_batch.patch.gz.b64
+          git rm .github/workflows/refactor-apply.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "refactor(ai): split state storage owners"
+          git push origin HEAD:refactor/ai-split-large-modules
