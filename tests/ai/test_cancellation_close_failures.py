@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._local import LocalExecutionBackend, _WorkerFailure
+from linktools.ai.runtime._agent_segment import _WorkerFailure
+from linktools.ai.runtime._local import LocalExecutionBackend
 
 
 @pytest.mark.asyncio

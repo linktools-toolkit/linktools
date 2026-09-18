@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
+import linktools.ai.storage._object_filesystem as object_module
 from linktools.ai.asset import (
     AssetCacheAdapter,
     AssetKey,
@@ -18,7 +19,6 @@ from linktools.ai.asset import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_database
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore, StorageOverlay
-from linktools.ai.storage import _object as object_module
 from sqlalchemy.ext.asyncio import create_async_engine
 
 pytestmark = pytest.mark.asyncio

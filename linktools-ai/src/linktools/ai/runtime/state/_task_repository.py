@@ -5,22 +5,17 @@
 import asyncio
 import heapq
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import TypeVar
 
 from linktools.core import environ
 
 from ...core import (
-    OperationKind,
-    OperationLedgerInput,
-    OperationLedgerRecord,
-    OperationStatus,
     Page,
     ResourceKind,
     ResourceRef,
     TaskStatus,
-    canonical_sha256,
     validate_lease_owner,
     validate_lease_seconds,
 )
@@ -28,10 +23,8 @@ from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
 from ...task import (
     TaskEvent,
-    TaskEventType,
     TaskGraph,
     TaskGraphAdmission,
-    TaskGraphLaunch,
     TaskGraphLimits,
     TaskGraphSnapshot,
     TaskGraphView,
@@ -41,15 +34,10 @@ from ...task import (
     TaskResultRecord,
     TaskTerminalRecord,
 )
-from ._durability import CommitObservation, DurableCommitState, run_durable_commit
 from ._plan import RuntimeDomain
 from ._repositories import (
     RepositoryBase,
-    append_operation,
-    decode_operation,
-    decode_record_cursor,
     projected_record,
-    record_cursor,
     replace_checked,
     require_repository_tenant,
 )
@@ -60,12 +48,27 @@ from ._store import (
     StateStore,
     StateTransaction,
     StoredFact,
-    StoredOperation,
     StoredRecord,
-    operation_key,
-    sequence_key,
     sortable_identity,
-    stream_digest,
+)
+
+from ._task_events import (
+    _TaskEventAppendConflict,
+    _TaskEventDraft,
+    _TaskEventState,
+    _append_task_events,
+    _decode_task_event,
+    _guard_task_event_owner,
+    _task_completion_event_drafts,
+    _task_event_stream,
+    _task_graph_event_drafts,
+    _task_node_event_drafts,
+)
+from ._task_state import (
+    _effective_graph_status,
+    _is_sha256,
+    _isolated_graph_status,
+    _require_canonical_graph_status,
 )
 
 _logger = environ.get_logger("ai.runtime.state.task_repository")
@@ -84,13 +87,6 @@ _TERMINAL_TASK_STATUSES = frozenset(
         TaskStatus.CANCELLED,
     }
 )
-_RECOVERABLE_GRAPH_STATES = frozenset(
-    {
-        TaskStatus.PENDING.value,
-        TaskStatus.RUNNING.value,
-        TaskStatus.RECOVERY_REQUIRED.value,
-    }
-)
 _RECOVERY_REQUIRED_CODES = frozenset(
     {
         ErrorCode.TOOL_EFFECT_UNKNOWN.value,
@@ -101,31 +97,6 @@ _RECOVERY_REQUIRED_CODES = frozenset(
 )
 
 
-class _TaskEventAppendConflict(AIError):
-    def __init__(self) -> None:
-        super().__init__(ErrorCode.STORAGE_CONFLICT)
-
-
-@dataclass(frozen=True, slots=True)
-class _TaskEventDraft:
-    event_type: TaskEventType
-    status: TaskStatus
-    previous_status: "TaskStatus | None" = None
-    node_id: "str | None" = None
-    owner: "str | None" = None
-    fence: int = 0
-    execution_id: "str | None" = None
-    result_digest: "str | None" = None
-    error_code: "str | None" = None
-    error_digest: "str | None" = None
-    source_node_id: "str | None" = None
-    added_node_ids: "tuple[str, ...]" = ()
-
-
-@dataclass(frozen=True, slots=True)
-class _TaskEventState:
-    graph: TaskGraphView
-    node_states: tuple[TaskNodeView, ...]
 
 
 def _resolve_task_execution_id(
@@ -159,166 +130,26 @@ def _validate_task_lease_scope(lease: TaskLease, tenant_id: str) -> None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
-def _is_sha256(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
-def _task_submit_result_digest(graph: TaskGraph) -> str:
-    status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
-    return canonical_sha256({"graph_id": graph.graph_id, "status": status.value})
 
 
-def _same_task_admission_contract(
-    left: TaskGraphAdmission,
-    right: TaskGraphAdmission,
-) -> bool:
-    return (
-        left.version == right.version
-        and left.graph_id == right.graph_id
-        and left.principal == right.principal
-        and left.limits == right.limits
-        and left.operation_id == right.operation_id
-        and left.initial_request_digest == right.initial_request_digest
-    )
 
 
-def _require_canonical_graph_status(status: TaskStatus) -> None:
-    if status in {TaskStatus.READY, TaskStatus.WAITING}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _task_event_stream(
-    namespace: str,
-    tenant_id: str,
-    domain: str,
-    graph_id: str,
-) -> bytes:
-    return stream_digest(namespace, tenant_id, domain, "task_event", graph_id)
 
 
-def _task_event_sequence(
-    namespace: str,
-    tenant_id: str,
-    domain: str,
-    graph_id: str,
-) -> bytes:
-    return sequence_key(namespace, tenant_id, domain, "task_event", graph_id)
 
 
-def _task_node_changed(left: TaskNodeView, right: TaskNodeView) -> bool:
-    return (
-        left.status is not right.status
-        or left.owner != right.owner
-        or left.fence != right.fence
-        or left.execution_id != right.execution_id
-        or left.result_digest != right.result_digest
-        or left.error_code != right.error_code
-        or left.error_digest != right.error_digest
-    )
 
 
-def _task_node_event_drafts(
-    before: TaskNodeView,
-    after: TaskNodeView,
-) -> tuple[_TaskEventDraft, ...]:
-    if before.graph_id != after.graph_id or before.node_id != after.node_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if not _task_node_changed(before, after):
-        return ()
-    return (
-        _TaskEventDraft(
-            TaskEventType.NODE_CHANGED,
-            after.status,
-            previous_status=before.status,
-            node_id=after.node_id,
-            owner=after.owner,
-            fence=after.fence,
-            execution_id=after.execution_id,
-            result_digest=after.result_digest,
-            error_code=after.error_code,
-            error_digest=after.error_digest,
-        ),
-    )
 
 
-def _task_graph_event_drafts(
-    before: TaskGraphView,
-    after: TaskGraphView,
-) -> tuple[_TaskEventDraft, ...]:
-    if before.graph_id != after.graph_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if before.status is after.status:
-        return ()
-    return (
-        _TaskEventDraft(
-            TaskEventType.GRAPH_CHANGED,
-            after.status,
-            previous_status=before.status,
-        ),
-    )
 
 
-def _task_event_drafts(
-    before: "_TaskEventState | None",
-    after: _TaskEventState,
-) -> tuple[_TaskEventDraft, ...]:
-    if before is None:
-        return (_TaskEventDraft(TaskEventType.GRAPH_ADMITTED, after.graph.status),)
-    if before.graph.graph_id != after.graph.graph_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    before_nodes = {node.node_id: node for node in before.node_states}
-    if len(before_nodes) != len(before.node_states):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    values: list[_TaskEventDraft] = []
-    for node in after.node_states:
-        previous = before_nodes.get(node.node_id)
-        if previous is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        values.extend(_task_node_event_drafts(previous, node))
-    if len(before_nodes) != len(after.node_states):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    values.extend(_task_graph_event_drafts(before.graph, after.graph))
-    return tuple(values)
 
 
-def _task_completion_event_drafts(
-    before: _TaskEventState,
-    after: _TaskEventState,
-    *,
-    source_node_id: str,
-    added_node_ids: tuple[str, ...],
-) -> tuple[_TaskEventDraft, ...]:
-    before_nodes = {node.node_id: node for node in before.node_states}
-    after_nodes = {node.node_id: node for node in after.node_states}
-    if set(before_nodes) - set(after_nodes):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    source_before = before_nodes.get(source_node_id)
-    source_after = after_nodes.get(source_node_id)
-    if source_before is None or source_after is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    values = list(_task_node_event_drafts(source_before, source_after))
-    if added_node_ids:
-        values.append(
-            _TaskEventDraft(
-                TaskEventType.GRAPH_EXPANDED,
-                after.graph.status,
-                source_node_id=source_node_id,
-                added_node_ids=added_node_ids,
-            )
-        )
-    for node_id in sorted(set(after_nodes) - set(before_nodes)):
-        if node_id not in added_node_ids:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for node_id in sorted(before_nodes):
-        if node_id == source_node_id:
-            continue
-        values.extend(_task_node_event_drafts(before_nodes[node_id], after_nodes[node_id]))
-    values.extend(_task_graph_event_drafts(before.graph, after.graph))
-    return tuple(values)
 
 
 def _reconciled_task_nodes(
@@ -475,186 +306,14 @@ def _validate_expansion(
     return ordered
 
 
-def _task_event_payload(
-    draft: _TaskEventDraft, occurred_at: datetime
-) -> dict[str, object]:
-    return {
-        "version": 1,
-        "occurred_at": occurred_at.isoformat(),
-        "previous_status": (
-            None if draft.previous_status is None else draft.previous_status.value
-        ),
-        "status": draft.status.value,
-        "node_id": draft.node_id,
-        "owner": draft.owner,
-        "fence": draft.fence,
-        "execution_id": draft.execution_id,
-        "result_digest": draft.result_digest,
-        "error_code": draft.error_code,
-        "error_digest": draft.error_digest,
-        "source_node_id": draft.source_node_id,
-        "added_node_ids": list(draft.added_node_ids),
-    }
 
 
-async def _guard_task_event_owner(
-    transaction: StateTransaction,
-    graph_key: bytes,
-    *,
-    missing_code: ErrorCode = ErrorCode.STORAGE_INTEGRITY_ERROR,
-) -> StoredRecord:
-    graph_record = await transaction.get_record(graph_key)
-    if graph_record is None:
-        raise AIError(missing_code)
-    guarded = await transaction.guard_record(
-        graph_key,
-        expected_storage_version=graph_record.storage_version,
-    )
-    if guarded is None:
-        raise _TaskEventAppendConflict
-    return guarded
 
 
-async def _append_task_events(
-    transaction: StateTransaction,
-    *,
-    namespace: str,
-    tenant_id: str,
-    domain: str,
-    graph_id: str,
-    graph_key: bytes,
-    drafts: tuple[_TaskEventDraft, ...],
-    owner_guarded: bool = False,
-) -> None:
-    if not drafts:
-        return
-    if not owner_guarded:
-        await _guard_task_event_owner(transaction, graph_key)
-    final_sequence = await transaction.reserve_sequence(
-        _task_event_sequence(namespace, tenant_id, domain, graph_id),
-        len(drafts),
-    )
-    first_sequence = final_sequence - len(drafts) + 1
-    occurred_at = await transaction.now()
-    stream = _task_event_stream(namespace, tenant_id, domain, graph_id)
-    events = tuple(
-        TaskEvent(
-            1,
-            graph_id,
-            first_sequence + index,
-            draft.event_type,
-            occurred_at,
-            draft.status,
-            draft.previous_status,
-            draft.node_id,
-            draft.owner,
-            draft.fence,
-            draft.execution_id,
-            draft.result_digest,
-            draft.error_code,
-            draft.error_digest,
-            draft.source_node_id,
-            draft.added_node_ids,
-        )
-        for index, draft in enumerate(drafts)
-    )
-    facts = tuple(
-        StoredFact(
-            stream,
-            event.sequence,
-            graph_key,
-            event.event_type.value,
-            None,
-            None,
-            _task_event_payload(draft, occurred_at),
-        )
-        for event, draft in zip(events, drafts, strict=True)
-    )
-    await transaction.insert_facts(facts)
 
 
-async def _append_task_state_events(
-    transaction: StateTransaction,
-    *,
-    namespace: str,
-    tenant_id: str,
-    domain: str,
-    graph_key: bytes,
-    before: "_TaskEventState | None",
-    after: _TaskEventState,
-) -> None:
-    await _append_task_events(
-        transaction,
-        namespace=namespace,
-        tenant_id=tenant_id,
-        domain=domain,
-        graph_id=after.graph.graph_id,
-        graph_key=graph_key,
-        drafts=_task_event_drafts(before, after),
-    )
 
 
-def _decode_task_event(graph_id: str, fact: StoredFact) -> TaskEvent:
-    try:
-        data = fact.data
-        version = data["version"]
-        if not isinstance(version, int) or isinstance(version, bool):
-            raise TypeError("task event version is invalid")
-        if version != 1:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        occurred_at = data["occurred_at"]
-        status = data["status"]
-        previous_status = data.get("previous_status")
-        node_id = data.get("node_id")
-        owner = data.get("owner")
-        fence = data.get("fence", 0)
-        execution_id = data.get("execution_id")
-        result_digest = data.get("result_digest")
-        error_code = data.get("error_code")
-        error_digest = data.get("error_digest")
-        source_node_id = data.get("source_node_id")
-        added_node_ids = data.get("added_node_ids", [])
-        if not isinstance(occurred_at, str) or not isinstance(status, str):
-            raise TypeError("task event payload is invalid")
-        if previous_status is not None and not isinstance(previous_status, str):
-            raise TypeError("task event previous status is invalid")
-        if node_id is not None and not isinstance(node_id, str):
-            raise TypeError("task event node id is invalid")
-        if owner is not None and not isinstance(owner, str):
-            raise TypeError("task event owner is invalid")
-        if not isinstance(fence, int) or isinstance(fence, bool):
-            raise TypeError("task event fence is invalid")
-        for value in (execution_id, result_digest, error_code, error_digest):
-            if value is not None and not isinstance(value, str):
-                raise TypeError("task event string field is invalid")
-        if source_node_id is not None and not isinstance(source_node_id, str):
-            raise TypeError("task event source node id is invalid")
-        if not isinstance(added_node_ids, list) or any(
-            not isinstance(node_id, str) for node_id in added_node_ids
-        ):
-            raise TypeError("task event added node ids are invalid")
-        return TaskEvent(
-            version,
-            graph_id,
-            fact.sequence,
-            TaskEventType(fact.kind),
-            datetime.fromisoformat(occurred_at),
-            TaskStatus(status),
-            None if previous_status is None else TaskStatus(previous_status),
-            node_id,
-            owner,
-            fence,
-            execution_id,
-            result_digest,
-            error_code,
-            error_digest,
-            source_node_id,
-            tuple(added_node_ids),
-        )
-    except AIError:
-        raise
-    except (KeyError, TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 class TaskRepositoryImpl(RepositoryBase):
@@ -2613,767 +2272,10 @@ class TaskRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-class TaskAdmissionRepositoryImpl(RepositoryBase):
-    def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
-        super().__init__(
-            store,
-            namespace=namespace,
-            tenant_id=tenant_id,
-            domain=RuntimeDomain.TASK,
-        )
-        self._background_tasks: set[asyncio.Task[object]] = set()
-
-    def _graph_key(self, graph_id: str) -> bytes:
-        return self._key("task_graph", graph_id)
-
-    def _definition_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node_definition", [graph_id, node_id])
-
-    def _state_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node_state", [graph_id, node_id])
-
-    def _definition_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_node_definition", "graph", graph_id)
-
-    def _state_parent(self, graph_id: str) -> bytes:
-        return self._parent("task_node_state", "graph", graph_id)
-
-    def _admission_key(self, graph_id: str) -> bytes:
-        return self._key("task_admission", graph_id)
-
-    def _recovery_scope(self) -> bytes:
-        return self._scope("task_admission", "recoverable", "graphs")
-
-    async def _current_graph_in_transaction(
-        self,
-        transaction: StateTransaction,
-        graph_id: str,
-    ) -> tuple[TaskGraphView, tuple[TaskNodeView, ...]]:
-        graph_record = await transaction.get_record(self._graph_key(graph_id))
-        if graph_record is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._validate_graph_record(graph_record, graph_id)
-        header = await self._decode(graph_record, TaskGraphView)
-        if header.graph_id != graph_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        definition_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._definition_parent(graph_id),
-                kind="task_node_definition",
-            )
-        )
-        state_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._state_parent(graph_id),
-                kind="task_node_state",
-            )
-        )
-        definitions: dict[str, TaskNode] = {}
-        for record in definition_records:
-            value = await self._decode(record, TaskNode)
-            self._validate_definition_record(record, graph_id, value.node_id)
-            if value.node_id in definitions:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            definitions[value.node_id] = value
-        states: dict[str, TaskNodeView] = {}
-        for record in state_records:
-            value = await self._decode(record, TaskNodeView)
-            self._validate_state_record(record, graph_id, value.node_id)
-            if value.node_id in states:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            states[value.node_id] = value
-        if set(definitions) != set(states):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        nodes = tuple(definitions[node_id] for node_id in sorted(definitions))
-        ordered_states = tuple(
-            replace(states[node.node_id], dependencies=node.dependencies)
-            for node in nodes
-        )
-        TaskGraph(graph_id, nodes)
-        return (
-            TaskGraphView(
-                graph_id,
-                _effective_graph_status(header, ordered_states),
-                nodes,
-            ),
-            ordered_states,
-        )
-
-    def _validate_graph_record(self, record: StoredRecord, graph_id: str) -> None:
-        if (
-            record.kind != "task_graph"
-            or record.key_digest != self._graph_key(graph_id)
-            or record.partition_digest != self._partition("task_graph")
-            or record.scope_digest is not None
-            or record.parent_digest is not None
-            or record.sort_key != sortable_identity(graph_id)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_admission_record(
-        self,
-        record: StoredRecord,
-        graph_id: str,
-    ) -> None:
-        if (
-            record.kind != "task_admission"
-            or record.key_digest != self._admission_key(graph_id)
-            or record.partition_digest != self._partition("task_admission")
-            or record.scope_digest != self._recovery_scope()
-            or record.parent_digest is not None
-            or record.sort_key != sortable_identity(graph_id)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_definition_record(
-        self,
-        record: StoredRecord,
-        graph_id: str,
-        node_id: str,
-    ) -> None:
-        if (
-            record.kind != "task_node_definition"
-            or record.key_digest != self._definition_key(graph_id, node_id)
-            or record.partition_digest != self._partition("task_node_definition")
-            or record.scope_digest is not None
-            or record.parent_digest != self._definition_parent(graph_id)
-            or record.sort_key != sortable_identity([graph_id, node_id])
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_state_record(
-        self,
-        record: StoredRecord,
-        graph_id: str,
-        node_id: str,
-    ) -> None:
-        if (
-            record.kind != "task_node_state"
-            or record.key_digest != self._state_key(graph_id, node_id)
-            or record.partition_digest != self._partition("task_node_state")
-            or record.scope_digest is not None
-            or record.parent_digest != self._state_parent(graph_id)
-            or record.sort_key != sortable_identity([graph_id, node_id])
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    async def admit(
-        self,
-        admission: TaskGraphAdmission,
-        graph: TaskGraph,
-    ) -> TaskGraphView:
-        admission.validate_graph(graph)
-        launch = admission.launch()
-        if launch.principal.tenant_id != self._tenant_id:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-
-        async def operation() -> TaskGraphView:
-            return await self._store.mutate(
-                lambda transaction: self._admit_in_transaction(
-                    transaction,
-                    admission,
-                    graph,
-                )
-            )
-
-        async def readback() -> CommitObservation[TaskGraphView]:
-            return await self._store.read(
-                lambda transaction: self._read_admission(
-                    transaction,
-                    admission,
-                    graph,
-                )
-            )
-
-        result = await run_durable_commit(
-            operation,
-            readback,
-            background_tasks=self._background_tasks,
-        )
-        if result.state is DurableCommitState.COMMITTED and result.value is not None:
-            if result.cancelled:
-                raise asyncio.CancelledError
-            return result.value
-        if result.state is DurableCommitState.PARTIAL_INTEGRITY_ERROR:
-            if isinstance(result.error, AIError):
-                raise result.error
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from result.error
-        if result.state is DurableCommitState.NOT_COMMITTED:
-            if result.cancelled:
-                raise asyncio.CancelledError
-            if result.error is not None:
-                raise result.error
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if result.cancelled:
-            raise asyncio.CancelledError
-        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
-
-    async def get(
-        self,
-        graph_id: str,
-        *,
-        tenant_id: str,
-    ) -> TaskGraphAdmission | None:
-        if tenant_id != self._tenant_id:
-            return None
-
-        async def read(transaction: StateTransaction) -> TaskGraphAdmission | None:
-            graph_key = self._graph_key(graph_id)
-            admission_key = self._admission_key(graph_id)
-            records = await transaction.get_records((graph_key, admission_key))
-            graph_record = records.get(graph_key)
-            admission_record = records.get(admission_key)
-            if graph_record is None and admission_record is None:
-                return None
-            if graph_record is None or admission_record is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_graph_record(graph_record, graph_id)
-            self._validate_admission_record(admission_record, graph_id)
-            admission = await self._decode(admission_record, TaskGraphAdmission)
-            if (
-                admission.graph_id != graph_id
-                or admission.principal.tenant_id != tenant_id
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            stored_operation = await transaction.get_operation(
-                operation_key(
-                    self._namespace,
-                    self._tenant_id,
-                    self._domain.value,
-                    admission.operation_id,
-                )
-            )
-            if stored_operation is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            existing, _ = await self._require_committed_admission(
-                transaction,
-                graph_record,
-                admission_record,
-                stored_operation=stored_operation,
-            )
-            if existing != admission:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return admission
-
-        return await self.state_store.read(read)
-
-    async def list_recoverable_page(
-        self,
-        *,
-        cursor: str | None,
-        limit: int,
-    ) -> Page[TaskGraphLaunch]:
-        if limit != 128:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        after_sort_key, after_key_digest = decode_record_cursor(cursor)
-
-        async def read(transaction: StateTransaction) -> Page[TaskGraphLaunch]:
-            records = await transaction.list_records(
-                RecordQuery(
-                    partition_digest=self._partition("task_graph"),
-                    kind="task_graph",
-                    states=_RECOVERABLE_GRAPH_STATES,
-                    after_sort_key=after_sort_key,
-                    after_key_digest=after_key_digest,
-                    limit=limit + 1,
-                )
-            )
-            selected = records[:limit]
-            headers: list[TaskGraphView] = []
-            for record in selected:
-                header = await self._decode(record, TaskGraphView)
-                self._validate_graph_record(record, header.graph_id)
-                _require_canonical_graph_status(header.status)
-                if (
-                    record.state != header.status.value
-                    or header.status.value not in _RECOVERABLE_GRAPH_STATES
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                headers.append(header)
-            admission_keys = tuple(
-                self._admission_key(header.graph_id) for header in headers
-            )
-            admission_records = (
-                await transaction.get_records(admission_keys)
-                if admission_keys
-                else {}
-            )
-            launches: list[TaskGraphLaunch] = []
-            for header, admission_key in zip(headers, admission_keys, strict=True):
-                admission_record = admission_records.get(admission_key)
-                if admission_record is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                self._validate_admission_record(admission_record, header.graph_id)
-                admission = await self._decode(admission_record, TaskGraphAdmission)
-                if (
-                    admission.graph_id != header.graph_id
-                    or admission.principal.tenant_id != self._tenant_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                stored_operation = await transaction.get_operation(
-                    operation_key(
-                        self._namespace,
-                        self._tenant_id,
-                        self._domain.value,
-                        admission.operation_id,
-                    )
-                )
-                if stored_operation is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                operation = decode_operation(stored_operation)
-                self._validate_operation_identity(operation, admission)
-                if (
-                    operation.request_digest != admission.initial_request_digest
-                    or operation.status is not OperationStatus.SUCCEEDED
-                    or operation.result_ref != admission.graph_id
-                    or not _is_sha256(operation.result_digest)
-                    or operation.error_code is not None
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                launches.append(admission.launch())
-            next_cursor = (
-                record_cursor(selected[-1])
-                if len(records) > limit and selected
-                else None
-            )
-            return Page(tuple(launches), next_cursor)
-
-        return await self.state_store.read(read)
-
-    async def _admit_in_transaction(
-        self,
-        transaction: StateTransaction,
-        admission: TaskGraphAdmission,
-        graph: TaskGraph,
-    ) -> TaskGraphView:
-        graph_key = self._graph_key(graph.graph_id)
-        admission_key = self._admission_key(graph.graph_id)
-        operation_key_value = operation_key(
-            self._namespace,
-            self._tenant_id,
-            self._domain.value,
-            admission.operation_id,
-        )
-        records = await transaction.get_records((graph_key, admission_key))
-        graph_record = records.get(graph_key)
-        admission_record = records.get(admission_key)
-        stored_operation = await transaction.get_operation(operation_key_value)
-        definition_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._definition_parent(graph.graph_id),
-                kind="task_node_definition",
-            )
-        )
-        state_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._state_parent(graph.graph_id),
-                kind="task_node_state",
-            )
-        )
-        if (
-            graph_record is None
-            and admission_record is None
-            and stored_operation is None
-        ):
-            if definition_records or state_records:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await self._create_admission(transaction, admission, graph)
-
-        if (
-            graph_record is not None
-            and admission_record is not None
-            and stored_operation is None
-        ):
-            if await self._is_canonical_occupied_admission(
-                transaction,
-                graph_record,
-                admission_record,
-                admission,
-            ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        if graph_record is None or admission_record is None or stored_operation is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        operation = decode_operation(stored_operation)
-        if operation.request_digest != admission.initial_request_digest:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        self._validate_operation_identity(operation, admission)
-        existing, view = await self._require_committed_admission(
-            transaction,
-            graph_record,
-            admission_record,
-            stored_operation=stored_operation,
-        )
-        if existing.correlation != admission.correlation:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        if existing != admission and not _same_task_admission_contract(existing, admission):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await self._repair_aggregate_projection(
-            transaction,
-            graph_record,
-            view,
-        )
-
-    async def _create_admission(
-        self,
-        transaction: StateTransaction,
-        admission: TaskGraphAdmission,
-        graph: TaskGraph,
-    ) -> TaskGraphView:
-        view = await self._insert_admission_records(transaction, admission, graph)
-        now = await transaction.now()
-        operation_input = OperationLedgerInput(
-            admission.operation_id,
-            self._tenant_id,
-            ResourceKind.TASK_GRAPH,
-            graph.graph_id,
-            None,
-            OperationKind.TASK_NODE,
-            OperationStatus.SUCCEEDED,
-            admission.initial_request_digest,
-            graph.graph_id,
-            _task_submit_result_digest(graph),
-            None,
-            False,
-            now,
-            now,
-        )
-        await append_operation(transaction, self, operation_input)
-        _logger.info(
-            "task graph durably admitted: tenant=%s graph=%s",
-            self._tenant_id,
-            graph.graph_id,
-        )
-        return view
-
-    async def _insert_admission_records(
-        self,
-        transaction: StateTransaction,
-        admission: TaskGraphAdmission,
-        graph: TaskGraph,
-    ) -> TaskGraphView:
-        status = TaskStatus.SUCCEEDED if not graph.nodes else TaskStatus.PENDING
-        header = TaskGraphView(graph.graph_id, status, ())
-        view = TaskGraphView(graph.graph_id, status, graph.nodes)
-        records = [
-            self._stored(
-                "task_graph",
-                graph.graph_id,
-                header,
-                state=status.value,
-            ),
-            self._stored(
-                "task_admission",
-                graph.graph_id,
-                admission,
-                scope=self._recovery_scope(),
-            ),
-        ]
-        node_views: list[TaskNodeView] = []
-        for node in graph.nodes:
-            node_status = (
-                TaskStatus.READY if not node.dependencies else TaskStatus.PENDING
-            )
-            node_view = TaskNodeView(
-                graph.graph_id,
-                node.node_id,
-                node.dependencies,
-                node_status,
-                None,
-                0,
-                None,
-                None,
-                None,
-                None,
-            )
-            node_views.append(node_view)
-            records.append(
-                self._stored(
-                    "task_node_definition",
-                    [graph.graph_id, node.node_id],
-                    node,
-                    parent=self._definition_parent(graph.graph_id),
-                )
-            )
-            records.append(
-                self._stored(
-                    "task_node_state",
-                    [graph.graph_id, node.node_id],
-                    node_view,
-                    parent=self._state_parent(graph.graph_id),
-                    state=node_status.value,
-                )
-            )
-        await transaction.insert_records(tuple(records))
-        await _append_task_state_events(
-            transaction,
-            namespace=self._namespace,
-            tenant_id=self._tenant_id,
-            domain=self._domain.value,
-            graph_key=self._graph_key(graph.graph_id),
-            before=None,
-            after=_TaskEventState(view, tuple(node_views)),
-        )
-        return view
-
-    async def _read_admission(
-        self,
-        transaction: StateTransaction,
-        admission: TaskGraphAdmission,
-        graph: TaskGraph,
-    ) -> CommitObservation[TaskGraphView]:
-        graph_key = self._graph_key(graph.graph_id)
-        admission_key = self._admission_key(graph.graph_id)
-        records = await transaction.get_records((graph_key, admission_key))
-        graph_record = records.get(graph_key)
-        admission_record = records.get(admission_key)
-        stored_operation = await transaction.get_operation(
-            operation_key(
-                self._namespace,
-                self._tenant_id,
-                self._domain.value,
-                admission.operation_id,
-            )
-        )
-        definition_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._definition_parent(graph.graph_id),
-                kind="task_node_definition",
-            )
-        )
-        state_records = await transaction.list_records(
-            RecordQuery(
-                parent_digest=self._state_parent(graph.graph_id),
-                kind="task_node_state",
-            )
-        )
-        if (
-            graph_record is None
-            and admission_record is None
-            and stored_operation is None
-            and not definition_records
-            and not state_records
-        ):
-            return CommitObservation(DurableCommitState.NOT_COMMITTED)
-        try:
-            if (
-                graph_record is None
-                or admission_record is None
-                or stored_operation is None
-            ):
-                if (
-                    graph_record is not None
-                    and admission_record is not None
-                    and await self._is_canonical_occupied_admission(
-                        transaction,
-                        graph_record,
-                        admission_record,
-                        admission,
-                    )
-                ):
-                    return CommitObservation(
-                        DurableCommitState.NOT_COMMITTED,
-                        error=AIError(ErrorCode.STORAGE_CONFLICT),
-                    )
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            operation = decode_operation(stored_operation)
-            if operation.request_digest != admission.initial_request_digest:
-                return CommitObservation(
-                    DurableCommitState.NOT_COMMITTED,
-                    error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
-                )
-            self._validate_operation_identity(operation, admission)
-            existing, view = await self._require_committed_admission(
-                transaction,
-                graph_record,
-                admission_record,
-                stored_operation=stored_operation,
-            )
-            if existing.correlation != admission.correlation:
-                return CommitObservation(
-                    DurableCommitState.NOT_COMMITTED,
-                    error=AIError(ErrorCode.IDEMPOTENCY_CONFLICT),
-                )
-            if existing != admission and not _same_task_admission_contract(existing, admission):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return CommitObservation(DurableCommitState.COMMITTED, view)
-        except (KeyError, TypeError, ValueError):
-            return CommitObservation(
-                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
-            )
-        except AIError as error:
-            return CommitObservation(
-                DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                error=error,
-            )
-
-    async def _is_canonical_occupied_admission(
-        self,
-        transaction: StateTransaction,
-        graph_record: StoredRecord,
-        admission_record: StoredRecord,
-        candidate: TaskGraphAdmission,
-    ) -> bool:
-        existing = await self._decode(admission_record, TaskGraphAdmission)
-        if existing.operation_id == candidate.operation_id:
-            return False
-        stored_operation = await transaction.get_operation(
-            operation_key(
-                self._namespace,
-                self._tenant_id,
-                self._domain.value,
-                existing.operation_id,
-            )
-        )
-        if stored_operation is None:
-            return False
-        await self._require_committed_admission(
-            transaction,
-            graph_record,
-            admission_record,
-            stored_operation=stored_operation,
-        )
-        return True
-
-    async def _require_committed_admission(
-        self,
-        transaction: StateTransaction,
-        graph_record: StoredRecord,
-        admission_record: StoredRecord,
-        *,
-        stored_operation: StoredOperation | None = None,
-    ) -> tuple[TaskGraphAdmission, TaskGraphView]:
-        existing = await self._decode(admission_record, TaskGraphAdmission)
-        graph_header = await self._decode(graph_record, TaskGraphView)
-        self._validate_graph_record(graph_record, graph_header.graph_id)
-        self._validate_admission_record(admission_record, graph_header.graph_id)
-        current, _states = await self._current_graph_in_transaction(
-            transaction,
-            graph_header.graph_id,
-        )
-        persisted_graph = TaskGraph(current.graph_id, current.nodes)
-        if stored_operation is None:
-            stored_operation = await transaction.get_operation(
-                operation_key(
-                    self._namespace,
-                    self._tenant_id,
-                    self._domain.value,
-                    existing.operation_id,
-                )
-            )
-        if stored_operation is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        operation = decode_operation(stored_operation)
-        self._validate_operation_identity(operation, existing)
-        if operation.request_digest != existing.initial_request_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._validate_succeeded_operation(operation, persisted_graph)
-        return existing, current
-
-    async def _repair_aggregate_projection(
-        self,
-        transaction: StateTransaction,
-        graph_record: StoredRecord,
-        view: TaskGraphView,
-    ) -> TaskGraphView:
-        header = await self._decode(graph_record, TaskGraphView)
-        graph_view = TaskGraphView(header.graph_id, header.status, view.nodes)
-        if (
-            graph_view.status is view.status
-            and graph_record.state == view.status.value
-        ):
-            return view
-        graph_record = await _guard_task_event_owner(
-            transaction,
-            self._graph_key(view.graph_id),
-        )
-        if (
-            graph_view.status is not view.status
-            or graph_record.state != view.status.value
-        ):
-            await replace_checked(
-                transaction,
-                projected_record(
-                    self,
-                    graph_record,
-                    replace(graph_view, status=view.status),
-                ),
-                graph_record.storage_version,
-            )
-        await _append_task_events(
-            transaction,
-            namespace=self._namespace,
-            tenant_id=self._tenant_id,
-            domain=self._domain.value,
-            graph_id=view.graph_id,
-            graph_key=self._graph_key(view.graph_id),
-            drafts=_task_graph_event_drafts(graph_view, view),
-            owner_guarded=True,
-        )
-        return view
-
-    def _validate_succeeded_operation(
-        self,
-        operation: OperationLedgerRecord,
-        graph: TaskGraph,
-    ) -> None:
-        if (
-            operation.status is not OperationStatus.SUCCEEDED
-            or operation.result_ref != graph.graph_id
-            or not _is_sha256(operation.result_digest)
-            or operation.error_code is not None
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    def _validate_operation_identity(
-        self,
-        operation: OperationLedgerRecord,
-        admission: TaskGraphAdmission,
-    ) -> None:
-        if (
-            operation.operation_id != admission.operation_id
-            or operation.tenant_id != self._tenant_id
-            or operation.resource_kind is not ResourceKind.TASK_GRAPH
-            or operation.resource_id != admission.graph_id
-            or operation.execution_id is not None
-            or operation.operation_kind is not OperationKind.TASK_NODE
-            or operation.compactable
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _isolated_graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
-    statuses = {node.status for node in nodes}
-    if TaskStatus.RECOVERY_REQUIRED in statuses:
-        return TaskStatus.RECOVERY_REQUIRED
-    if not statuses or statuses <= {TaskStatus.SUCCEEDED}:
-        return TaskStatus.SUCCEEDED
-    if TaskStatus.RUNNING in statuses or TaskStatus.WAITING in statuses:
-        return TaskStatus.RUNNING
-    if TaskStatus.PENDING in statuses or TaskStatus.READY in statuses:
-        return TaskStatus.PENDING
-    if TaskStatus.FAILED in statuses:
-        return TaskStatus.FAILED
-    if TaskStatus.BLOCKED in statuses:
-        return TaskStatus.BLOCKED
-    if statuses <= {TaskStatus.CANCELLED, TaskStatus.SUCCEEDED}:
-        return TaskStatus.CANCELLED
-    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _effective_graph_status(
-    graph: TaskGraphView,
-    nodes: tuple[TaskNodeView, ...],
-) -> TaskStatus:
-    isolated = _isolated_graph_status(nodes)
-    if isolated is TaskStatus.RECOVERY_REQUIRED:
-        return isolated
-    if graph.status is TaskStatus.CANCELLED:
-        return TaskStatus.CANCELLED
-    return isolated
 
 
-__all__ = ["TaskAdmissionRepositoryImpl", "TaskRepositoryImpl"]
+__all__ = ["TaskRepositoryImpl"]

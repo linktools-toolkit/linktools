@@ -104,19 +104,17 @@ from ._lock import (
 )
 from ._names import TABLE_PREFIX, namespace_digest, storage_name
 from ._object import (
-    FilesystemObjectStore,
-    InMemoryObjectStore,
     ObjectRef,
     ObjectStat,
     ObjectStore,
     ObjectStoreInspection,
     ObjectStoreMaintenance,
-    SqlObjectStore,
-    TransientObjectStore,
-    build_object_sql_metadata,
     read_object,
     runtime_object_key,
 )
+from ._object_filesystem import FilesystemObjectStore
+from ._object_memory import InMemoryObjectStore, TransientObjectStore
+from ._object_sql import SqlObjectStore, build_object_sql_metadata
 from ._payload import PayloadPolicy, StoredPayload, payload_fits_inline
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 

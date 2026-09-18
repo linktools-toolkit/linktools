@@ -31,7 +31,7 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptSeekRecord,
 )
 from linktools.ai.runtime.state._maintenance import RuntimeStorageInspection
-from linktools.ai.runtime.state._repositories import _domain_data
+from linktools.ai.runtime.state._repository_common import domain_data as _domain_data
 from linktools.ai.runtime.state._store import StoredFact, StoredRecord
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskNodeView, TaskStatus

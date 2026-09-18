@@ -26,10 +26,8 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptHeadRecord,
     TranscriptSeekDimension,
 )
-from linktools.ai.runtime.state._filesystem import (
-    FilesystemStateStore,
-    _FilesystemTransaction,
-)
+from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+from linktools.ai.runtime.state._filesystem_transaction import _FilesystemTransaction
 from linktools.ai.runtime.state._history import TranscriptRepository
 from linktools.ai.runtime.state._maintenance import (
     OfflineRuntimeStorageMaintenance,
@@ -52,7 +50,7 @@ from linktools.ai.storage import (
     SqlObjectStore,
     StoredPayload,
 )
-from linktools.ai.storage import _object as object_module
+from linktools.ai.storage import _object_filesystem as object_module
 from pydantic_ai_harness.planning import PlanItem as HarnessPlanItem
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import create_async_engine

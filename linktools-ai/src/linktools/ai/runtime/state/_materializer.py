@@ -4,7 +4,7 @@
 
 import asyncio
 import hashlib
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,13 +13,8 @@ from linktools.core import environ
 from ...core import canonical_sha256
 from ...errors import AIError, ErrorCode
 from ...storage import (
-    FilesystemObjectStore,
-    InMemoryObjectStore,
-    ObjectRef,
     ObjectStore,
-    SqlObjectStore,
     SqlStorageContext,
-    TransientObjectStore,
     build_object_sql_metadata,
     create_sql_storage_context,
     namespace_digest,
@@ -28,7 +23,6 @@ from ._contracts import (
     ArtifactState,
     ConversationState,
     EvaluationState,
-    ExecutionRepository,
     ExecutionState,
     MemoryState,
     RecoveryState,
@@ -37,15 +31,9 @@ from ._contracts import (
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
 from ._maintenance import RuntimeStorageInspection
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
-from ._model_interaction_store import (
-    ModelInteractionInMemoryStepArchive,
-    ModelInteractionRuntimeStepStore,
-    ModelInteractionStagingStepStore,
-    ModelInteractionStateStepArchive,
-)
+from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import (
     RuntimeDomain,
-    RuntimeRetentionMode,
     RuntimeStatePlan,
     RuntimeStateRoute,
     runtime_domain_uses_object_store,
@@ -54,16 +42,13 @@ from ._recovery_repositories import build_recovery_repository_bundle
 from ._repositories import OperationLedgerRepository, build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
+from ._step_materializer import build_runtime_steps
+from ._steps import RuntimeStepStore
 from ._store import StateStore
-from ._steps import RuntimeStepStore, StateStepArchive
-from ._task_repository import TaskAdmissionRepositoryImpl, TaskRepositoryImpl
+from ._task_admission_repository import TaskAdmissionRepositoryImpl
+from ._task_repository import TaskRepositoryImpl
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
-_STEP_DOMAINS = (
-    RuntimeDomain.CONVERSATION,
-    RuntimeDomain.EXECUTION,
-    RuntimeDomain.RECOVERY,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +60,7 @@ class _MaterializedRuntimeState:
     task: TaskState
     evaluation: EvaluationState
     recovery: RecoveryState
-    objects: "_RuntimeObjectRouter"
+    objects: _RuntimeObjectRouter
     steps: RuntimeStepStore
     retention: RuntimeRetentionController
     maintenance: RuntimeStorageInspection
@@ -91,75 +76,6 @@ class _RuntimeStates:
     task: TaskState
     evaluation: EvaluationState
     recovery: RecoveryState
-
-
-class _RuntimeObjectRouter:
-    def __init__(
-        self,
-        stores: Mapping[RuntimeDomain, ObjectStore],
-        *,
-        close_guard_stores: Sequence[ObjectStore],
-    ) -> None:
-        self._stores = dict(stores)
-        self._close_guard_stores = tuple(close_guard_stores)
-
-    def object_store(self, domain: RuntimeDomain) -> ObjectStore:
-        try:
-            return self._stores[domain]
-        except KeyError as error:
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
-
-    def resolve_object(
-        self, domain: RuntimeDomain, reference: ObjectRef
-    ) -> ObjectStore:
-        """Resolve an object by its durable Runtime domain."""
-        return self.object_store(domain)
-
-    def working_object_store(
-        self, domain: RuntimeDomain, *, owner_scope: str
-    ) -> ObjectStore:
-        store = self.object_store(domain)
-        if isinstance(store, TransientObjectStore):
-            return store.scoped(f"runtime:{domain.value}:{owner_scope}")
-        return store
-
-    async def release_object_scope(
-        self, domain: RuntimeDomain, *, owner_scope: str
-    ) -> None:
-        store = self.object_store(domain)
-        if isinstance(store, TransientObjectStore):
-            await store.release_scope(f"runtime:{domain.value}:{owner_scope}")
-
-    async def clear_transient(self) -> None:
-        seen: set[int] = set()
-        for store in self._close_guard_stores:
-            if isinstance(store, TransientObjectStore) and id(store) not in seen:
-                store.clear()
-                seen.add(id(store))
-
-    async def preflight_close(self) -> None:
-        pending: dict[int, asyncio.Task[object]] = {}
-        seen: set[int] = set()
-        for store in self._close_guard_stores:
-            if id(store) in seen:
-                continue
-            seen.add(id(store))
-            if not isinstance(store, (FilesystemObjectStore, SqlObjectStore)):
-                continue
-            for task in store.pending_background_tasks:
-                pending[id(task)] = task
-        if pending:
-            _logger.warning(
-                "runtime object preflight found pending background work: tasks=%s",
-                len(pending),
-            )
-            raise AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={
-                    "phase": "object_preflight_close",
-                    "pending_tasks": len(pending),
-                },
-            )
 
 
 async def materialize_runtime_state(
@@ -351,8 +267,8 @@ async def materialize_runtime_state(
             await component.initialize()
 
         states = _states(bundles)
-        objects = _build_object_router(plan, object_store, stores, sql_contexts)
-        steps = _build_steps(
+        objects = build_runtime_object_router(plan, object_store, stores, sql_contexts)
+        steps = build_runtime_steps(
             plan,
             stores,
             objects,
@@ -464,102 +380,6 @@ def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> _RuntimeSt
         )
     except KeyError as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _build_object_router(
-    plan: RuntimeStatePlan,
-    external: ObjectStore | None,
-    stores: Mapping[RuntimeDomain, object],
-    contexts: Mapping[RuntimeDomain, SqlStorageContext],
-) -> _RuntimeObjectRouter:
-    values: dict[RuntimeDomain, ObjectStore] = {}
-    close_guard_stores: list[ObjectStore] = []
-    sql_objects: dict[int, SqlObjectStore] = {}
-    for domain in RuntimeDomain:
-        if not runtime_domain_uses_object_store(domain):
-            continue
-        route = plan.route(domain)
-        if route.retention is RuntimeRetentionMode.DURABLE and external is not None:
-            values[domain] = external
-        elif route.retention is RuntimeRetentionMode.VOLATILE:
-            store = InMemoryObjectStore()
-            values[domain] = store
-            close_guard_stores.append(store)
-        elif route.retention is RuntimeRetentionMode.TRANSIENT:
-            store = TransientObjectStore()
-            values[domain] = store
-            close_guard_stores.append(store)
-        elif route.kind == "filesystem" and route.path is not None:
-            store = FilesystemObjectStore(route.path / "objects")
-            values[domain] = store
-            close_guard_stores.append(store)
-        elif route.kind in {"sqlite", "sql"} and domain in contexts:
-            context = contexts[domain]
-            context_key = id(context)
-            store = sql_objects.get(context_key)
-            if store is None:
-                store = SqlObjectStore.from_context(context)
-                sql_objects[context_key] = store
-            values[domain] = store
-            close_guard_stores.append(store)
-        else:
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-    return _RuntimeObjectRouter(
-        values,
-        close_guard_stores=close_guard_stores,
-    )
-
-
-def _build_steps(
-    plan: RuntimeStatePlan,
-    stores: Mapping[RuntimeDomain, object],
-    objects: _RuntimeObjectRouter,
-    history_repository: object,
-    execution_repository: ExecutionRepository,
-    *,
-    namespace: str,
-    tenant_id: str,
-) -> RuntimeStepStore:
-    archives: dict[RuntimeDomain, object] = {}
-    for domain in _STEP_DOMAINS:
-        route = plan.route(domain)
-        if (
-            route.retention is RuntimeRetentionMode.TRANSIENT
-            and domain is not RuntimeDomain.CONVERSATION
-        ):
-            continue
-        if route.retention is RuntimeRetentionMode.DURABLE:
-            context_sources = None
-            conversation_archive = archives.get(RuntimeDomain.CONVERSATION)
-            if isinstance(conversation_archive, StateStepArchive):
-                context_sources = {
-                    RuntimeDomain.CONVERSATION: conversation_archive.transcript_repository,
-                }
-            archives[domain] = ModelInteractionStateStepArchive(
-                stores[domain],
-                object_store=objects.object_store(domain),
-                namespace=namespace,
-                tenant_id=tenant_id,
-                runtime_domain=domain,
-                context_sources=context_sources,
-                history_repository=(
-                    history_repository if domain is RuntimeDomain.CONVERSATION else None
-                ),
-                execution_repository=(
-                    execution_repository if domain is RuntimeDomain.EXECUTION else None
-                ),
-            )
-        else:
-            archives[domain] = ModelInteractionInMemoryStepArchive(domain)
-    return ModelInteractionRuntimeStepStore(
-        ModelInteractionStagingStepStore(),
-        conversation_archive=archives[RuntimeDomain.CONVERSATION],
-        execution_archive=archives.get(RuntimeDomain.EXECUTION),
-        recovery_archive=archives.get(RuntimeDomain.RECOVERY),
-        conversation_retention=plan.route(RuntimeDomain.CONVERSATION).retention,
-        execution_retention=plan.route(RuntimeDomain.EXECUTION).retention,
-        recovery_retention=plan.route(RuntimeDomain.RECOVERY).retention,
-    )
 
 
 def _unique(values: tuple[object, ...]) -> tuple[object, ...]:

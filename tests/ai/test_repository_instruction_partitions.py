@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._local import _RecoveryCoordinator
+from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.runtime.state._contracts import (
     RecoveryCheckpointState,
     RepositoryInstructionBarrier,

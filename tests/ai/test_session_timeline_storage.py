@@ -10,7 +10,7 @@ import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state import RuntimeState
-from linktools.ai.runtime.state._commands import _timeline_turn_message_range
+from linktools.ai.runtime.state._runtime_commands import _timeline_turn_message_range
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ConversationHistoryRecord,

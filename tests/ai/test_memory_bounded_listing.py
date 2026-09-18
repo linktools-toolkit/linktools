@@ -212,7 +212,7 @@ async def test_filesystem_memory_listing_reads_only_requested_record_page(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state import _filesystem as filesystem
+    from linktools.ai.runtime.state import _filesystem_layout as filesystem
     from linktools.ai.runtime.state._filesystem import FilesystemStateStore
     from linktools.ai.runtime.state._plan import RuntimeDomain
 
@@ -293,7 +293,7 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from linktools.ai.runtime.state import _filesystem as filesystem
+    from linktools.ai.runtime.state import _filesystem_layout as filesystem
     from linktools.ai.runtime.state._filesystem import FilesystemStateStore
     from linktools.ai.runtime.state._plan import RuntimeDomain
 

@@ -21,9 +21,9 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime
+from linktools.ai.runtime._agent_task import _cancel_execution
 from linktools.ai.runtime._approval import DefaultApprovalService
 from linktools.ai.runtime._factory import compose_runtime_components
-from linktools.ai.runtime._planner import _cancel_execution
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain

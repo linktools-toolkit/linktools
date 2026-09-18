@@ -11,7 +11,7 @@ import pytest
 from linktools.ai.capability import ToolCallRetry, workspace_capabilities
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import AbstractCapability, Capability
-from linktools.ai.runtime._local import _RepositoryInstructionBoundary
+from linktools.ai.runtime._repository_instructions import _RepositoryInstructionBoundary
 from linktools.ai.runtime._tool_boundary import RuntimeToolBoundaryToolset
 from linktools.ai.workspace import (
     LocalSandbox,
