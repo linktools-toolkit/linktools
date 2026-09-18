@@ -27,31 +27,12 @@ from ..errors import AIError, ErrorCode
 from ..storage import FilesystemMutationLock, ObjectRef, ObjectStore, read_object
 from ._snapshot_contract import RunSnapshot, snapshot_digest
 from ._runtime_history import RuntimeHistory
-from .state import OfflineExclusiveStorage, RuntimeState
+from .state import OfflineExclusiveStorage, RuntimeState, SnapshotLimits
 
 if TYPE_CHECKING:
     from ..workspace import Workspace
 
 _logger = environ.get_logger("ai.runtime.snapshot")
-
-
-@dataclass(frozen=True, slots=True)
-class SnapshotLimits:
-    """Local admission limits for portable snapshot operations."""
-
-    max_entries: int
-    max_bytes: int
-
-    def __post_init__(self) -> None:
-        if (
-            isinstance(self.max_entries, bool)
-            or not isinstance(self.max_entries, int)
-            or self.max_entries < 1
-            or isinstance(self.max_bytes, bool)
-            or not isinstance(self.max_bytes, int)
-            or self.max_bytes < 1
-        ):
-            raise ValueError("snapshot limits must be positive integers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +97,10 @@ class RuntimeSnapshot:
                     or state.tenant_id != resolved_tenant
                 ):
                     raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
-                state_ref = await state.export_snapshot(object_store=object_store)
+                state_ref = await state.export_snapshot(
+                    object_store=object_store,
+                    limits=limits,
+                )
                 if state_ref.size > limits.max_bytes:
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 workspace_entries = await _capture_workspace(
@@ -334,6 +318,7 @@ class RuntimeSnapshot:
                 _object_ref_from_payload(manifest["state"]),
                 object_store=object_store,
                 root=state_root,
+                limits=limits,
             )
             workspace_root = await _restore_workspace(
                 manifest.get("workspace"),

@@ -33,7 +33,15 @@ from ._plan import (
     RuntimeStateRoute,
     runtime_domain_uses_object_store,
 )
-from ._store import StateStore, StateTransaction, StoredAlias
+from ._store import (
+    FactScanCursor,
+    OperationScanCursor,
+    RecordScanCursor,
+    StateStore,
+    StateTransaction,
+    StoredAlias,
+)
+from ._snapshot import SnapshotLimits
 from ._codec import (
     decode_fact,
     decode_operation,
@@ -385,90 +393,190 @@ class RuntimeState:
             paths.extend(self._objects.local_paths())
         return tuple(dict.fromkeys(paths))
 
-    async def export_snapshot(self, *, object_store: ObjectStore) -> ObjectRef:
-        """Export this initialized read-only state as a logical manifest."""
+    async def export_snapshot(
+        self,
+        *,
+        object_store: ObjectStore,
+        limits: SnapshotLimits,
+    ) -> ObjectRef:
+        """Export this initialized read-only state as one bounded logical snapshot."""
         self._require_ready()
         if not self._read_only:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if not isinstance(limits, SnapshotLimits):
+            raise TypeError("limits must be SnapshotLimits")
         if not self._plan.durable_domains:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
         domains: dict[str, dict[str, list[object]]] = {}
         objects: list[dict[str, object]] = []
         copied_objects: set[tuple[str, str, str, int]] = set()
-        for domain in self._plan.durable_domains:
-            store = self._stores[domain]
-            records = await store.read(lambda transaction: transaction.scan_records())
-            facts = await store.read(lambda transaction: transaction.scan_facts())
-            operations = await store.read(
-                lambda transaction: transaction.scan_operations()
-            )
-            aliases = await store.read(
-                lambda transaction: transaction.scan_aliases()
-            )
-            sequences = await store.read(
-                lambda transaction: transaction.scan_sequences()
-            )
-            domains[domain.value] = {
-                "records": [encode_record(value) for value in records],
-                "aliases": [
-                    {
-                        "alias_digest": value.alias_digest.hex(),
-                        "record_key_digest": value.record_key_digest.hex(),
-                    }
-                    for value in aliases
-                ],
-                "facts": [encode_fact(value) for value in facts],
-                "operations": [encode_operation(value) for value in operations],
-                "sequences": [
-                    {"key_digest": key.hex(), "value": sequences[key]}
-                    for key in sorted(sequences)
-                ],
-            }
-            encoded_values = (
-                [encode_record(value) for value in records]
-                + [encode_fact(value) for value in facts]
-                + [encode_operation(value) for value in operations]
-            )
-            for encoded in encoded_values:
-                for source_domain, reference in iter_runtime_object_refs(
-                    encoded,
-                    default_domain=domain,
+        entry_count = 0
+        object_bytes = 0
+
+        def accept(value: object) -> object:
+            nonlocal entry_count
+            entry_count += 1
+            if entry_count > limits.max_entries:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            return value
+
+        async def copy_references(encoded: object, domain: RuntimeDomain) -> None:
+            nonlocal entry_count, object_bytes
+            for source_domain, reference in iter_runtime_object_refs(
+                encoded,
+                default_domain=domain,
+            ):
+                identity = (
+                    source_domain.value,
+                    reference.key,
+                    reference.digest,
+                    reference.size,
+                )
+                if identity in copied_objects:
+                    continue
+                entry_count += 1
+                object_bytes += reference.size
+                if (
+                    entry_count > limits.max_entries
+                    or object_bytes > limits.max_bytes
                 ):
-                    identity = (
-                        source_domain.value,
-                        reference.key,
-                        reference.digest,
-                        reference.size,
+                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+                key = (
+                    "v1/runtime-state-object/"
+                    f"{source_domain.value}/{reference.digest}"
+                )
+                await object_store.put(
+                    key,
+                    self.object_store(source_domain).open(reference.key),
+                    expected_size=reference.size,
+                    expected_digest=reference.digest,
+                )
+                objects.append(
+                    {
+                        "domain": source_domain.value,
+                        "source": _object_ref_payload(reference),
+                        "content": _object_ref_payload(
+                            ObjectRef(
+                                object_store.store_id,
+                                key,
+                                reference.digest,
+                                reference.size,
+                            )
+                        ),
+                    }
+                )
+                copied_objects.add(identity)
+
+        for domain in sorted(self._plan.durable_domains, key=lambda item: item.value):
+            store = self._stores[domain]
+            raw_domain: dict[str, list[object]] = {
+                "records": [],
+                "aliases": [],
+                "facts": [],
+                "operations": [],
+                "sequences": [],
+            }
+
+            record_cursor: RecordScanCursor | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=record_cursor: transaction.scan_records_page(
+                        after=cursor,
+                        limit=128,
                     )
-                    if identity in copied_objects:
-                        continue
-                    source_store = self.object_store(source_domain)
-                    content = await read_object(
-                        source_store,
-                        reference.key,
-                        expected_digest=reference.digest,
-                        expected_size=reference.size,
+                )
+                if not page:
+                    break
+                for value in page:
+                    encoded = encode_record(value)
+                    raw_domain["records"].append(accept(encoded))
+                    await copy_references(encoded, domain)
+                last = page[-1]
+                record_cursor = RecordScanCursor(last.kind, last.key_digest)
+                if len(page) < 128:
+                    break
+
+            alias_cursor: bytes | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=alias_cursor: transaction.scan_aliases_page(
+                        after=cursor,
+                        limit=128,
                     )
-                    key = (
-                        "v1/runtime-state-object/"
-                        f"{source_domain.value}/{reference.digest}"
+                )
+                if not page:
+                    break
+                for value in page:
+                    raw_domain["aliases"].append(
+                        accept(
+                            {
+                                "alias_digest": value.alias_digest.hex(),
+                                "record_key_digest": value.record_key_digest.hex(),
+                            }
+                        )
                     )
-                    await _put_snapshot_object(object_store, key, content)
-                    objects.append(
-                        {
-                            "domain": source_domain.value,
-                            "source": _object_ref_payload(reference),
-                            "content": _object_ref_payload(
-                                ObjectRef(
-                                    object_store.store_id,
-                                    key,
-                                    reference.digest,
-                                    reference.size,
-                                )
-                            ),
-                        }
+                alias_cursor = page[-1].alias_digest
+                if len(page) < 128:
+                    break
+
+            fact_cursor: FactScanCursor | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=fact_cursor: transaction.scan_facts_page(
+                        after=cursor,
+                        limit=128,
                     )
-                    copied_objects.add(identity)
+                )
+                if not page:
+                    break
+                for value in page:
+                    encoded = encode_fact(value)
+                    raw_domain["facts"].append(accept(encoded))
+                    await copy_references(encoded, domain)
+                last = page[-1]
+                fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
+                if len(page) < 128:
+                    break
+
+            operation_cursor: OperationScanCursor | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=operation_cursor: transaction.scan_operations_page(
+                        after=cursor,
+                        limit=128,
+                    )
+                )
+                if not page:
+                    break
+                for value in page:
+                    encoded = encode_operation(value)
+                    raw_domain["operations"].append(accept(encoded))
+                    await copy_references(encoded, domain)
+                operation_cursor = OperationScanCursor(page[-1].key_digest)
+                if len(page) < 128:
+                    break
+
+            sequence_cursor: bytes | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=sequence_cursor: transaction.scan_sequences_page(
+                        after=cursor,
+                        limit=128,
+                    )
+                )
+                if not page:
+                    break
+                for key in sorted(page):
+                    raw_domain["sequences"].append(
+                        accept({"key_digest": key.hex(), "value": page[key]})
+                    )
+                sequence_cursor = max(page)
+                if len(page) < 128:
+                    break
+
+            domains[domain.value] = raw_domain
+
         manifest = {
             "kind": "runtime-state-snapshot",
             "format_version": 1,
@@ -478,6 +586,8 @@ class RuntimeState:
             "objects": objects,
         }
         payload = canonical_json_bytes(manifest)
+        if len(payload) + object_bytes > limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         digest = hashlib.sha256(payload).hexdigest()
         key = f"v1/runtime-state-snapshot/{digest}"
         await _put_snapshot_object(object_store, key, payload)
@@ -490,8 +600,13 @@ class RuntimeState:
         *,
         object_store: ObjectStore,
         root: str | Path,
+        limits: SnapshotLimits,
     ) -> None:
-        """Restore a logical state manifest into a new local RuntimeState."""
+        """Restore a bounded logical state snapshot into a new local RuntimeState."""
+        if not isinstance(limits, SnapshotLimits):
+            raise TypeError("limits must be SnapshotLimits")
+        if ref.size > limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         payload = await read_object(
             object_store,
             ref.key,
@@ -514,83 +629,137 @@ class RuntimeState:
         if not isinstance(namespace, str) or not isinstance(tenant_id, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         namespace = validate_persistence_namespace(namespace)
-        try:
-            tenant_id = validate_tenant_id(tenant_id)
-        except AIError:
-            raise
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH) from error
+        tenant_id = validate_tenant_id(tenant_id)
+
+        raw_domains = manifest["domains"]
+        raw_objects = manifest.get("objects", [])
+        if not isinstance(raw_objects, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        entry_count = len(raw_objects)
+        object_bytes = 0
+        expected_objects: set[tuple[str, str, str, int]] = set()
+        decoded_domains: dict[
+            RuntimeDomain,
+            tuple[
+                tuple[object, ...],
+                tuple[StoredAlias, ...],
+                tuple[object, ...],
+                tuple[object, ...],
+                Mapping[bytes, int],
+            ],
+        ] = {}
+
+        for domain_name, raw_domain in raw_domains.items():
+            try:
+                domain = RuntimeDomain(domain_name)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if not isinstance(raw_domain, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raw_records = raw_domain.get("records", [])
+            raw_aliases = raw_domain.get("aliases", [])
+            raw_facts = raw_domain.get("facts", [])
+            raw_operations = raw_domain.get("operations", [])
+            raw_sequences = raw_domain.get("sequences", [])
+            if not all(
+                isinstance(value, list)
+                for value in (
+                    raw_records,
+                    raw_aliases,
+                    raw_facts,
+                    raw_operations,
+                    raw_sequences,
+                )
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            entry_count += sum(
+                len(value)
+                for value in (
+                    raw_records,
+                    raw_aliases,
+                    raw_facts,
+                    raw_operations,
+                    raw_sequences,
+                )
+            )
+            if entry_count > limits.max_entries:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+            records = tuple(decode_record(value) for value in raw_records)
+            aliases = _decode_snapshot_aliases(raw_aliases)
+            facts = tuple(decode_fact(value) for value in raw_facts)
+            operations = tuple(decode_operation(value) for value in raw_operations)
+            sequences = _decode_snapshot_sequences(raw_sequences)
+            decoded_domains[domain] = (
+                records,
+                aliases,
+                facts,
+                operations,
+                sequences,
+            )
+            for encoded in (*raw_records, *raw_facts, *raw_operations):
+                for source_domain, reference in iter_runtime_object_refs(
+                    encoded,
+                    default_domain=domain,
+                ):
+                    expected_objects.add(
+                        (
+                            source_domain.value,
+                            reference.key,
+                            reference.digest,
+                            reference.size,
+                        )
+                    )
+
+        actual_objects: set[tuple[str, str, str, int]] = set()
+        decoded_objects: list[tuple[RuntimeDomain, ObjectRef, ObjectRef]] = []
+        for raw_object in raw_objects:
+            if not isinstance(raw_object, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                domain = RuntimeDomain(raw_object["domain"])
+                source = _object_ref_from_payload(raw_object["source"])
+                content_ref = _object_ref_from_payload(raw_object["content"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if source.digest != content_ref.digest or source.size != content_ref.size:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            identity = (domain.value, source.key, source.digest, source.size)
+            if identity in actual_objects:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            actual_objects.add(identity)
+            decoded_objects.append((domain, source, content_ref))
+            object_bytes += content_ref.size
+            if len(payload) + object_bytes > limits.max_bytes:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if actual_objects != expected_objects:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
         target = Path(root).expanduser().resolve(strict=False)
         if target.exists() and any(target.iterdir()):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         state = cls.from_root(root)
-        await state.initialize(
-            namespace=namespace,
-            tenant_id=tenant_id,
-        )
+        await state.initialize(namespace=namespace, tenant_id=tenant_id)
         try:
-            raw_objects = manifest.get("objects", [])
-            if not isinstance(raw_objects, list):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for raw_object in raw_objects:
-                if not isinstance(raw_object, dict):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                try:
-                    domain = RuntimeDomain(str(raw_object["domain"]))
-                    source = _object_ref_from_payload(raw_object["source"])
-                    content_ref = _object_ref_from_payload(raw_object["content"])
-                except (KeyError, TypeError, ValueError) as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                if (
-                    source.digest != content_ref.digest
-                    or source.size != content_ref.size
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                content = await read_object(
-                    object_store,
-                    content_ref.key,
-                    expected_digest=content_ref.digest,
-                    expected_size=content_ref.size,
-                )
+            for domain, source, content_ref in decoded_objects:
                 destination = state.object_store(domain)
                 current = await destination.stat(source.key)
                 if current is not None:
                     if current.digest != source.digest or current.size != source.size:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    await read_object(
-                        destination,
-                        source.key,
-                        expected_digest=source.digest,
-                        expected_size=source.size,
-                    )
                 else:
                     await destination.put(
                         source.key,
-                        _snapshot_chunk(content),
+                        object_store.open(content_ref.key),
                         expected_size=source.size,
                         expected_digest=source.digest,
                     )
-            for domain_name, raw_domain in manifest["domains"].items():
-                domain = RuntimeDomain(domain_name)
-                if not isinstance(raw_domain, dict):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                records = tuple(
-                    decode_record(value)
-                    for value in raw_domain.get("records", [])
-                )
-                facts = tuple(
-                    decode_fact(value) for value in raw_domain.get("facts", [])
-                )
-                aliases = _decode_snapshot_aliases(raw_domain.get("aliases", []))
-                operations = tuple(
-                    decode_operation(value)
-                    for value in raw_domain.get("operations", [])
-                )
-                sequences = _decode_snapshot_sequences(
-                    raw_domain.get("sequences", [])
-                )
+
+            for domain, values in decoded_domains.items():
+                records, aliases, facts, operations, sequences = values
                 await state._stores[domain].mutate(
-                    lambda transaction: _insert_snapshot_values(
+                    lambda transaction, records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences: _insert_snapshot_values(
                         transaction,
                         records,
                         aliases,
