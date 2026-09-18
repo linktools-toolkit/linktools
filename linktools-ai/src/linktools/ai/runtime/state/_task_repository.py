@@ -1297,7 +1297,9 @@ class TaskRepositoryImpl(RepositoryBase):
                 status=TaskStatus.RECOVERY_REQUIRED,
                 owner=None,
                 lease_expires_at=None,
-                result_digest=None,
+                            next_attempt_at=None,
+                            occupies_concurrency=False,
+                            result_digest=None,
                 error_code=error_code,
                 error_digest=error_digest,
                 execution_id=resolved_execution_id,
@@ -1382,6 +1384,8 @@ class TaskRepositoryImpl(RepositoryBase):
                             status=TaskStatus.CANCELLED,
                             owner=None,
                             lease_expires_at=None,
+                            next_attempt_at=None,
+                            occupies_concurrency=False,
                             result_digest=None,
                             error_code=None,
                             error_digest=None,
@@ -1404,6 +1408,8 @@ class TaskRepositoryImpl(RepositoryBase):
                             ),
                             owner=None,
                             lease_expires_at=None,
+                            next_attempt_at=None,
+                            occupies_concurrency=False,
                             result_digest=None,
                             error_code=None,
                             error_digest=None,
@@ -1622,6 +1628,8 @@ class TaskRepositoryImpl(RepositoryBase):
                         status=TaskStatus.CANCELLED,
                         owner=None,
                         lease_expires_at=None,
+                        next_attempt_at=None,
+                        occupies_concurrency=False,
                     )
                     if node.status not in _TERMINAL_TASK_STATUSES
                     else node
@@ -2026,6 +2034,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 error_code=None,
                 error_digest=None,
                 execution_id=resolved_execution_id,
+                next_attempt_at=None,
+                occupies_concurrency=False,
             )
             state_by_id[target_node_id] = source_value
             new_states: list[TaskNodeView] = []
@@ -2296,10 +2306,14 @@ class TaskRepositoryImpl(RepositoryBase):
                 status=TaskStatus.FAILED,
                 owner=None,
                 lease_expires_at=None,
-                result_digest=None,
+                            next_attempt_at=None,
+                            occupies_concurrency=False,
+                            result_digest=None,
                 error_code=error_code,
                 error_digest=error_digest,
                 execution_id=resolved_execution_id,
+                next_attempt_at=None,
+                occupies_concurrency=False,
             )
             guarded_graph_record = await transaction.guard_record(
                 graph_key,
