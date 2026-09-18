@@ -242,6 +242,7 @@ class TaskLease:
     owner: str
     fence: int
     lease_expires_at: datetime
+    execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
         try:
@@ -254,6 +255,13 @@ class TaskLease:
             or not self.node_id.strip()
             or self.fence < 1
             or self.lease_expires_at.tzinfo is None
+            or (
+                self.execution_id is not None
+                and (
+                    not isinstance(self.execution_id, str)
+                    or not self.execution_id.strip()
+                )
+            )
         ):
             raise ValueError("task lease is invalid")
 
@@ -279,14 +287,11 @@ class TaskNodeView:
                 validate_lease_owner(self.owner)
             except AIError as error:
                 raise ValueError("task node lease owner is invalid") from error
-        if self.status in {
-            TaskStatus.PENDING,
-            TaskStatus.READY,
-            TaskStatus.RUNNING,
-        } and self.execution_id is not None:
-            raise ValueError("unbound task node state cannot carry an execution id")
+        if self.status is TaskStatus.PENDING and self.execution_id is not None:
+            raise ValueError("pending task node cannot carry an execution id")
         if self.next_attempt_at is not None and (
             self.status is not TaskStatus.READY
+            or self.execution_id is None
             or self.next_attempt_at.tzinfo is None
         ):
             raise ValueError("task retry schedule is invalid")
