@@ -934,16 +934,25 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         execution_id: str,
     ) -> TaskNodeRunResult:
         node = invocation.node
-        task_type, task_version, _body = _parse_node(node, request=False)
-        if (task_type, task_version) != (self._agent.type, self._agent.version):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        task_type, task_version, _body = _parse_node(
+            node,
+            request=False,
+        )
+        handler = self._handler(
+            task_type,
+            task_version,
+            request=False,
+        )
         view = await self._execution.inspect(
             execution_id,
             principal=invocation.principal,
         )
         if view.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if view.status is ExecutionStatus.RECOVERY_REQUIRED:
+        if (
+            handler is self._agent
+            and view.status is ExecutionStatus.RECOVERY_REQUIRED
+        ):
             await self._execution.recover(
                 execution_id,
                 principal=invocation.principal,
@@ -963,6 +972,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=invocation.principal,
             graph_id=invocation.graph_id,
         )
+
 
     def build_agent_task(
         self,
