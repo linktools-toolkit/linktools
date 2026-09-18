@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from functools import wraps
 from typing import TYPE_CHECKING, Protocol
@@ -44,6 +44,7 @@ from ..core import (
     UsageMetrics,
     canonical_json_bytes,
     canonical_sha256,
+    normalize_json_value,
     overlay_correlation,
     principal_identity_payload,
 )
@@ -51,6 +52,7 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ..task import TaskBindingSnapshot
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -642,6 +644,436 @@ class DefaultExecutionService:
             owner = await self._handoff.leave(key, state)
             if owner:
                 await self._run_handoff_cleanup(execution_id, tenant_id, state)
+
+    async def start_task(
+        self,
+        binding: TaskBindingSnapshot,
+        *,
+        principal: Principal,
+        input: Mapping[str, JsonValue],
+        idempotency_key: str,
+        correlation: Mapping[str, str | int],
+    ) -> ExecutionHandle:
+        if not isinstance(binding, TaskBindingSnapshot):
+            raise TypeError("binding must be TaskBindingSnapshot")
+        normalized_input = normalize_json_value(dict(input))
+        if not isinstance(normalized_input, dict):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        normalized_correlation = _overlay_execution_correlation({}, correlation)
+        execution_id = self._operation_ids()
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+            ResourceRef(ResourceKind.EXECUTION, execution_id, principal.tenant_id),
+        )
+        stored_input = StoredUserInput(
+            "task-input-v1",
+            StoredPayload.inline_json(normalized_input),
+            {
+                "version": 1,
+                "kind": "task",
+                "task_type": binding.task_type,
+                "task_version": binding.task_version,
+            },
+        )
+        scope = "execution.task"
+        key_digest = compute_idempotency_key_digest(idempotency_key)
+        request_digest = canonical_sha256(
+            {
+                "contract": "task-execution-request-v1",
+                "principal": principal_identity_payload(principal),
+                "binding_digest": binding.binding_digest,
+                "input_digest": stored_input.digest,
+                "correlation": normalized_correlation,
+            }
+        )
+        now = datetime.now(timezone.utc)
+        execution = ExecutionRecord(
+            execution_id=execution_id,
+            tenant_id=principal.tenant_id,
+            session_id=None,
+            parent_execution_id=None,
+            root_execution_id=execution_id,
+            source_execution_id=None,
+            base_execution_id=None,
+            lineage_kind=ExecutionLineageKind.RUN,
+            status=ExecutionStatus.PENDING_START,
+            revision=0,
+            event_sequence=0,
+            agent_run_sequence=0,
+            error_code=None,
+            safe_error_details={},
+            created_at=now,
+            updated_at=now,
+            mode=None,
+            planning=None,
+            thinking=None,
+            binding=binding,
+            principal_id=principal.principal_id,
+            principal_kind=principal.kind,
+            stored_user_input=stored_input,
+            correlation=normalized_correlation,
+        )
+        reservation = await self._state.executions.reserve_start(
+            ExecutionStartReservation(
+                execution,
+                IdempotencyRecord(
+                    tenant_id=principal.tenant_id,
+                    scope=scope,
+                    idempotency_key_digest=key_digest,
+                    request_digest=request_digest,
+                    resource_kind=ResourceKind.EXECUTION,
+                    resource_id=execution_id,
+                    status=IdempotencyStatus.RESERVED,
+                    result_digest=None,
+                    error_code=None,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            )
+        )
+        current = reservation.execution
+        if (
+            current.binding_digest != binding.binding_digest
+            or current.binding != binding
+            or current.stored_user_input.digest != stored_input.digest
+            or current.correlation != normalized_correlation
+            or current.principal_id != principal.principal_id
+            or current.principal_kind != principal.kind
+        ):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if reservation.idempotency.request_digest != request_digest:
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if current.status is ExecutionStatus.PENDING_START:
+            current = await self._state.executions.claim_start(
+                ExecutionStartClaim(
+                    current.execution_id,
+                    current.tenant_id,
+                    current.revision,
+                    current.event_sequence,
+                    scope,
+                    key_digest,
+                    request_digest,
+                    now,
+                )
+            )
+        elif current.status is ExecutionStatus.START_UNKNOWN:
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        elif current.status not in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.WAITING_RETRY,
+            ExecutionStatus.RECOVERY_REQUIRED,
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return ExecutionHandle(current.execution_id)
+
+    async def claim_task_attempt(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionView:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if not isinstance(current.binding, TaskBindingSnapshot):
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if current.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+            ExecutionStatus.RECOVERY_REQUIRED,
+        }:
+            return _execution_view(current)
+        now = datetime.now(timezone.utc)
+        if current.status is ExecutionStatus.WAITING_RETRY:
+            if (
+                current.task_next_attempt_at is None
+                or current.task_next_attempt_at > now
+            ):
+                return _execution_view(current)
+        elif current.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.task_attempt >= current.binding.max_attempts:
+            return _execution_view(current)
+        deadline = current.task_deadline_at
+        if deadline is None and current.binding.timeout_seconds is not None:
+            deadline = now + timedelta(seconds=current.binding.timeout_seconds)
+        updated = await self._state.executions.transition_task_execution(
+            execution_id,
+            tenant_id=current.tenant_id,
+            expected_revision=current.revision,
+            expected_event_sequence=current.event_sequence,
+            expected_status=current.status,
+            next_status=ExecutionStatus.STARTED,
+            task_attempt=current.task_attempt + 1,
+            task_deadline_at=deadline,
+            task_next_attempt_at=None,
+            error_code=None,
+            safe_error_details={},
+            event_type=ExecutionEventType.EXECUTION_RESUMED.value,
+            payload={"attempt": current.task_attempt + 1},
+            occurred_at=now,
+        )
+        return _execution_view(updated)
+
+    async def schedule_task_retry(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error_code: str,
+    ) -> ExecutionView:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if (
+            not isinstance(current.binding, TaskBindingSnapshot)
+            or current.status is not ExecutionStatus.STARTED
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if current.task_attempt >= current.binding.max_attempts:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        now = datetime.now(timezone.utc)
+        retry_at = now + timedelta(seconds=current.binding.retry_delay_seconds)
+        if current.task_deadline_at is not None and retry_at >= current.task_deadline_at:
+            raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT)
+        updated = await self._state.executions.transition_task_execution(
+            execution_id,
+            tenant_id=current.tenant_id,
+            expected_revision=current.revision,
+            expected_event_sequence=current.event_sequence,
+            expected_status=ExecutionStatus.STARTED,
+            next_status=ExecutionStatus.WAITING_RETRY,
+            task_attempt=current.task_attempt,
+            task_deadline_at=current.task_deadline_at,
+            task_next_attempt_at=retry_at,
+            error_code=error_code,
+            safe_error_details={},
+            event_type=ExecutionEventType.EXECUTION_RETRY_SCHEDULED.value,
+            payload={"attempt": current.task_attempt, "retry_at": retry_at.isoformat()},
+            occurred_at=now,
+        )
+        return _execution_view(updated)
+
+    async def require_task_recovery(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error_code: str,
+    ) -> ExecutionView:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if not isinstance(current.binding, TaskBindingSnapshot):
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if current.status is ExecutionStatus.RECOVERY_REQUIRED:
+            return _execution_view(current)
+        if current.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        now = datetime.now(timezone.utc)
+        updated = await self._state.executions.transition_task_execution(
+            execution_id,
+            tenant_id=current.tenant_id,
+            expected_revision=current.revision,
+            expected_event_sequence=current.event_sequence,
+            expected_status=ExecutionStatus.STARTED,
+            next_status=ExecutionStatus.RECOVERY_REQUIRED,
+            task_attempt=current.task_attempt,
+            task_deadline_at=current.task_deadline_at,
+            task_next_attempt_at=None,
+            error_code=error_code,
+            safe_error_details={"effect": "unknown"},
+            event_type=ExecutionEventType.EXECUTION_RECOVERY_REQUIRED.value,
+            payload={"error_code": error_code, "safe_error_details": {"effect": "unknown"}},
+            occurred_at=now,
+        )
+        return _execution_view(updated)
+
+    async def complete_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        output: JsonValue,
+    ) -> ExecutionResult:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if not isinstance(current.binding, TaskBindingSnapshot):
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if current.status is ExecutionStatus.SUCCEEDED:
+            return await self.result(execution_id, principal=principal)
+        if current.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        normalized = normalize_json_value(output)
+        payload = await self._store_task_output(
+            normalized,
+            tenant_id=current.tenant_id,
+        )
+        now = datetime.now(timezone.utc)
+        result = ResultRecord(
+            execution_id,
+            current.tenant_id,
+            payload,
+            StopReason.END_TURN,
+            UsageMetrics(),
+            now,
+        )
+        terminal = replace(
+            current,
+            status=ExecutionStatus.SUCCEEDED,
+            error_code=None,
+            safe_error_details={},
+            error_diagnostics=None,
+            updated_at=now,
+        )
+        idempotency = await self._task_terminal_idempotency(
+            current,
+            result,
+            next_status=IdempotencyStatus.COMPLETED,
+        )
+        await self._state.executions.commit_terminal(
+            ExecutionTerminalCommit(
+                current.revision,
+                current.event_sequence,
+                terminal,
+                result,
+                ExecutionEventType.EXECUTION_SUCCEEDED,
+                {},
+                idempotency,
+            )
+        )
+        return await self.result(execution_id, principal=principal)
+
+    async def fail_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error: AIError,
+    ) -> ExecutionResult:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if not isinstance(current.binding, TaskBindingSnapshot):
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if current.status is ExecutionStatus.FAILED:
+            return await self.result(execution_id, principal=principal)
+        if current.status not in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.WAITING_RETRY,
+        }:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        now = datetime.now(timezone.utc)
+        details = dict(error.safe_details)
+        result = ResultRecord(
+            execution_id,
+            current.tenant_id,
+            None,
+            StopReason.ERROR,
+            UsageMetrics(),
+            now,
+        )
+        terminal = replace(
+            current,
+            status=ExecutionStatus.FAILED,
+            error_code=error.code.value,
+            safe_error_details=details,
+            error_diagnostics=error.diagnostics,
+            task_next_attempt_at=None,
+            updated_at=now,
+        )
+        idempotency = await self._task_terminal_idempotency(
+            current,
+            result,
+            next_status=IdempotencyStatus.FAILED,
+            error_code=error.code.value,
+        )
+        payload = {
+            "error_code": error.code.value,
+            "safe_error_details": details,
+        }
+        if error.diagnostics is not None:
+            payload["error_diagnostics"] = {
+                "exception_type": error.diagnostics.exception_type,
+                "exception_message": error.diagnostics.exception_message,
+                "cause_digest": error.diagnostics.cause_digest,
+            }
+        await self._state.executions.commit_terminal(
+            ExecutionTerminalCommit(
+                current.revision,
+                current.event_sequence,
+                terminal,
+                result,
+                ExecutionEventType.EXECUTION_FAILED,
+                payload,
+                idempotency,
+            )
+        )
+        return await self.result(execution_id, principal=principal)
+
+    async def _store_task_output(
+        self,
+        output: JsonValue,
+        *,
+        tenant_id: str,
+    ) -> StoredPayload:
+        inline = StoredPayload.inline_json(output)
+        if self._payload_policy is None or payload_fits_inline(inline, self._payload_policy):
+            return inline
+        if self._object_key_factory is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        reference = await put_runtime_object(
+            self._object_store,
+            self._object_key_factory,
+            RuntimeDomain.EXECUTION,
+            tenant_id,
+            canonical_json_bytes(output),
+        )
+        return StoredPayload.object(reference)
+
+    async def _task_terminal_idempotency(
+        self,
+        execution: ExecutionRecord,
+        result: ResultRecord,
+        *,
+        next_status: IdempotencyStatus,
+        error_code: str | None = None,
+    ) -> IdempotencyTerminalUpdate:
+        records = await self._state.idempotency.list_by_resource(
+            ResourceKind.EXECUTION,
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+        )
+        if len(records) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        record = records[0]
+        if record.status is not IdempotencyStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return IdempotencyTerminalUpdate(
+            record.scope,
+            record.idempotency_key_digest,
+            IdempotencyStatus.STARTED,
+            next_status,
+            record.request_digest,
+            None if result.output is None else result.output.digest,
+            error_code,
+        )
 
     async def start(
         self,
@@ -1663,7 +2095,16 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._binding(execution.binding_digest, execution.binding)
+        task_binding = (
+            execution.binding
+            if isinstance(execution.binding, TaskBindingSnapshot)
+            else None
+        )
+        binding = (
+            None
+            if task_binding is not None
+            else self._binding(execution.binding_digest, execution.binding)
+        )
         try:
             if result.output.kind == "inline":
                 decoded = result.output.decode()
@@ -1685,7 +2126,11 @@ class DefaultExecutionService:
                 execution.execution_id,
                 execution.status,
                 output,
-                binding.output_fingerprint,
+                (
+                    task_binding.output_fingerprint
+                    if task_binding is not None
+                    else binding.output_fingerprint
+                ),
                 result.usage,
                 error_code,
                 safe_details,
