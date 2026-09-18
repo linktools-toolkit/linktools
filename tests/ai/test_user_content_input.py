@@ -8,7 +8,7 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ImageUrl, UploadedFile
 
 from linktools.ai.capability import WorkspaceAccess
-from linktools.ai.core import Principal
+from linktools.ai.core import Principal, PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._input import (
@@ -16,7 +16,7 @@ from linktools.ai.runtime._input import (
     decode_user_content_payload,
 )
 from linktools.ai.runtime._input_contract import validate_user_content
-from linktools.ai.workspace import SandboxResource, SandboxSession, WorkspacePolicy
+from linktools.ai.workspace import SandboxResource, SandboxSession
 
 
 class _CountingSession:
@@ -55,7 +55,7 @@ class _CountingSandbox:
 def _materializer(values: dict[str, bytes]) -> tuple[ExecutionInputMaterializer, _CountingSession]:
     session = _CountingSession(values)
     access = WorkspaceAccess(_CountingSandbox(session), root=Path(".").resolve())
-    return ExecutionInputMaterializer(access, WorkspacePolicy()), session
+    return ExecutionInputMaterializer(access, PromptLimits()), session
 
 
 def test_native_user_content_is_canonical_and_durable() -> None:

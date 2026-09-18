@@ -5,6 +5,7 @@
 from collections.abc import Sequence
 
 import pytest
+from linktools.ai.core import PromptLimits
 from linktools.ai.runtime._compaction import (
     RuntimeCompaction,
     RuntimeCompactionPolicy,
@@ -103,6 +104,7 @@ async def test_harness_summary_request_uses_runtime_journal_and_observer() -> No
 
     capability = RuntimeCompaction(
         1,
+        limits=PromptLimits(),
         journal=journal,
         observer=observer,  # type: ignore[arg-type]
         projection_sink=projection_sink,
@@ -221,6 +223,7 @@ async def test_compaction_target_does_not_rewrite_history_below_threshold() -> N
     provider_context = await _provider_context(
         RuntimeCompaction(
             1_000_000,
+            limits=PromptLimits(),
             policy=RuntimeCompactionPolicy(
                 context_dedupe_by_tool={
                     "inspect_document": "workspace_file_read_v1",
@@ -255,6 +258,7 @@ async def test_compaction_without_target_still_deduplicates_file_reads() -> None
     provider_context = await _provider_context(
         RuntimeCompaction(
             None,
+            limits=PromptLimits(),
             policy=RuntimeCompactionPolicy(
                 context_dedupe_by_tool={
                     "inspect_document": "workspace_file_read_v1",
@@ -314,6 +318,7 @@ async def test_compaction_keeps_semantic_control_results() -> None:
     provider_context = await _provider_context(
         RuntimeCompaction(
             1,
+            limits=PromptLimits(),
             policy=RuntimeCompactionPolicy(
                 keep_result_tools=frozenset({"hidden_control"}),
             ),

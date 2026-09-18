@@ -11,7 +11,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from linktools.ai.capability import WorkspaceAccess
-from linktools.ai.core import Principal
+from linktools.ai.core import Principal, PromptLimits
 from linktools.ai.capability import ToolCallRetry
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
@@ -28,7 +28,6 @@ from linktools.ai.storage import StoredPayload
 from linktools.ai.workspace import (
     SandboxResource,
     SandboxSession,
-    WorkspacePolicy,
 )
 from ._runtime_test_helpers import semantic_tool
 
@@ -114,7 +113,7 @@ def _request(*, files: tuple[str, ...] = ()) -> ExecutionRequest:
 def _materializer(session: _Session) -> ExecutionInputMaterializer:
     return ExecutionInputMaterializer(
         WorkspaceAccess(_Sandbox(session), root=Path(".")),
-        WorkspacePolicy(),
+        PromptLimits(),
     )
 
 
