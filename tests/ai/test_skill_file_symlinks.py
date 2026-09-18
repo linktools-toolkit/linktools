@@ -13,7 +13,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import CapabilityGroup, LocalSkillResourceSource
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._factory import _default_workspace_store
+from linktools.ai.capability._group import _workspace_declaration_store
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -177,7 +177,7 @@ async def test_workspace_declaration_symlinks_freeze_valid_external_declarations
     _symlink(external_skill, storage_root / "skills" / "review", directory=True)
     _symlink(storage_root / "skills", storage_root / "skills" / "loop", directory=True)
 
-    store = _default_workspace_store(workspace)
+    store = _workspace_declaration_store(workspace)
     await store.initialize()
     try:
         group: CapabilityGroup[object] = CapabilityGroup.from_store(

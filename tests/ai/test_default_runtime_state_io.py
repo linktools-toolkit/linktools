@@ -11,10 +11,8 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
-from linktools.ai.runtime._factory import _default_runtime_state
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.storage import FilesystemObjectStore, SqlObjectStore
-from linktools.ai.workspace import Workspace
 
 
 async def _chunks(value: bytes) -> AsyncIterator[bytes]:
@@ -126,35 +124,3 @@ async def test_from_root_uses_runtime_sqlite_and_filesystem_objects(
     assert objects_path.is_dir()
     assert list(objects_path.glob("*/*.bin"))
     assert list(objects_path.glob("*/*.json"))
-
-
-def test_default_runtime_state_keeps_filesystem_durable_domains(
-    tmp_path: Path,
-) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
-    state = _default_runtime_state(workspace)
-    durable = (
-        RuntimeDomain.CONVERSATION,
-        RuntimeDomain.EXECUTION,
-        RuntimeDomain.RECOVERY,
-        RuntimeDomain.TASK,
-    )
-
-    routes = tuple(state.plan.route(domain) for domain in durable)
-    assert {route.kind for route in routes} == {"filesystem"}
-    assert all(
-        route.retention is RuntimeRetentionMode.DURABLE
-        for route in routes
-    )
-    assert (
-        state.plan.route(RuntimeDomain.MEMORY).retention
-        is RuntimeRetentionMode.VOLATILE
-    )
-    assert (
-        state.plan.route(RuntimeDomain.ARTIFACT).retention
-        is RuntimeRetentionMode.VOLATILE
-    )
-    assert (
-        state.plan.route(RuntimeDomain.EVALUATION).retention
-        is RuntimeRetentionMode.VOLATILE
-    )

@@ -278,16 +278,10 @@ class Runtime(Generic[AppT]):
         limits: "PromptLimits | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
         resolved_namespace = validate_persistence_namespace(namespace)
-        if not isinstance(models, ModelRegistry):
-            raise TypeError("models must be ModelRegistry")
-        if not isinstance(state, RuntimeState):
-            raise TypeError("state must be RuntimeState")
         root_context = RuntimeContext(None) if context is None else context
         if not isinstance(root_context, RuntimeContext):
             raise TypeError("context must be RuntimeContext")
         selected_limits = PromptLimits() if limits is None else limits
-        if not isinstance(selected_limits, PromptLimits):
-            raise TypeError("limits must be PromptLimits")
         return _open_runtime(
             resolved_namespace,
             context=root_context,

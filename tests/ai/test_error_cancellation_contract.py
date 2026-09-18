@@ -14,7 +14,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
-from linktools.ai.runtime._mcp import materialize_mcp_servers
+from linktools.ai.runtime._mcp import materialize_mcp_capabilities
 from linktools.ai.runtime._planner import _AgentTaskNodeHandler
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import MCPServerSpec
@@ -41,12 +41,15 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
     execution = ResourceRef(ResourceKind.EXECUTION, "execution", "tenant")
 
     with pytest.raises(AIError) as error:
-        await materialize_mcp_servers(
+        await materialize_mcp_capabilities(
             (MCPServerSpec("server", "echo"),),
             (),
             principal=principal,
             execution=execution,
             execution_root=str(tmp_path),
+            tool_operations=None,
+            tool_metrics=None,
+            background_tasks=set(),
         )
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID

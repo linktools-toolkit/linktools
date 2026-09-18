@@ -99,8 +99,6 @@ async def compose_runtime_components(
 ) -> _RuntimeComponents:
     """Freeze declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
-    if not isinstance(models, ModelRegistry):
-        raise TypeError("models must be ModelRegistry")
     if not isinstance(state, RuntimeState):
         raise TypeError("state must be RuntimeState")
     if metrics is not None and not isinstance(metrics, Metrics):
