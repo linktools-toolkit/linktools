@@ -504,7 +504,7 @@ class _SnapshotAssetStore(AssetStore):
 
     @property
     def atomic_batch(self) -> bool:
-        return True
+        return False
 
     async def initialize(self) -> None:
         if self._closed or self._closing:
@@ -598,17 +598,34 @@ class _SnapshotAssetStore(AssetStore):
             if (kind is None or info.key.kind == kind)
             and (prefix is None or info.key.id.startswith(prefix))
         )
-        start = _snapshot_cursor_start(cursor, values)
+        start = _snapshot_cursor_start(
+            cursor,
+            self._ref.digest,
+            kind,
+            prefix,
+            len(values),
+        )
         selected = values[start : start + limit]
         next_cursor = (
-            str(start + len(selected))
+            _snapshot_cursor(
+                self._ref.digest,
+                kind,
+                prefix,
+                start + len(selected),
+            )
             if start + len(selected) < len(values)
             else None
         )
         return Page(selected, next_cursor)
 
     async def metadata_snapshot(self) -> tuple[AssetInfo, ...]:
-        return tuple((await self.list_info(limit=max(1, len(self._entries)))).items)
+        self._ensure_ready()
+        return tuple(
+            sorted(
+                self._entries.values(),
+                key=lambda item: (item.key.kind, item.key.id),
+            )
+        )
 
     async def list_info_with_owners(
         self,
@@ -673,6 +690,14 @@ class _SnapshotAssetStore(AssetStore):
     async def get_at_version(self, key: AssetKey, version: int) -> bytes | None:
         return await self.get_at_revision(key, StorageEntryRevision(version))
 
+    async def batch_result(
+        self,
+        idempotency_key: str,
+    ) -> "StorageBatchResult[AssetInfo, AssetKey] | None":
+        del idempotency_key
+        self._ensure_ready()
+        raise AIError(ErrorCode.STORAGE_READ_ONLY)
+
     async def apply_batch(self, *args: object, **kwargs: object) -> object:
         raise AIError(ErrorCode.STORAGE_READ_ONLY)
 
@@ -690,15 +715,56 @@ class _SnapshotAssetStore(AssetStore):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
-def _snapshot_cursor_start(cursor: str | None, values: Sequence[AssetInfo]) -> int:
+def _snapshot_cursor(
+    snapshot_digest: str,
+    kind: str | None,
+    prefix: str | None,
+    start: int,
+) -> str:
+    payload = json.dumps(
+        [snapshot_digest, kind, prefix, start],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _snapshot_cursor_start(
+    cursor: str | None,
+    snapshot_digest: str,
+    kind: str | None,
+    prefix: str | None,
+    size: int,
+) -> int:
     if cursor is None:
         return 0
     try:
-        start = int(cursor)
-    except ValueError as error:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-    if start < 0 or start > len(values):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(
+            base64.urlsafe_b64decode((cursor + padding).encode("ascii"))
+        )
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 4
+            or payload[0] != snapshot_digest
+            or payload[1] != kind
+            or payload[2] != prefix
+            or isinstance(payload[3], bool)
+            or not isinstance(payload[3], int)
+        ):
+            raise ValueError
+        start = payload[3]
+    except (
+        ValueError,
+        TypeError,
+        UnicodeEncodeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ):
+        raise AIError(ErrorCode.ASSET_CURSOR_INVALID) from None
+    if start < 0 or start > size:
+        raise AIError(ErrorCode.ASSET_CURSOR_INVALID)
     return start
 
 
