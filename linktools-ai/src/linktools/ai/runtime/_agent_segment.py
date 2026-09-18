@@ -95,7 +95,7 @@ class _AgentSegmentInput:
     context: AgentContext[object]
     workspace: "Workspace | None"
     limits: PromptLimits
-    mcp_cwd: str
+    mcp_cwd: "str | None"
     user_prompt: CanonicalUserInput | None
     history: list[ModelMessage]
     conversation_id: str

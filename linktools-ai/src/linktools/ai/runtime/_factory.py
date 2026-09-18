@@ -178,7 +178,6 @@ async def compose_runtime_components(
             for agent_id in sorted(agents)
         }
         catalog = AgentCatalog(definitions)
-        has_mcp = any(definition.mcp_servers for definition in definitions.values())
 
         effective_tenant_id = (
             "default" if tenant_id is None else validate_tenant_id(tenant_id)
@@ -192,7 +191,7 @@ async def compose_runtime_components(
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = None
             workspace_access = None
-            mcp_cwd = str(Path.cwd().resolve()) if has_mcp else ""
+            mcp_cwd = _capture_host_cwd()
         else:
             rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
             instruction_resolver = LocalRepositoryInstructionResolver(
@@ -387,6 +386,13 @@ def _grant_key(namespace: str) -> bytes:
     return hashlib.sha256(f"workspace:{namespace}".encode()).digest()
 
 
+def _capture_host_cwd() -> "str | None":
+    try:
+        return str(Path.cwd().resolve())
+    except (OSError, RuntimeError):
+        return None
+
+
 def _require_state_identity(
     state: RuntimeState,
     *,
@@ -407,7 +413,7 @@ async def _build_local_components(
     namespace: str,
     workspace: "Workspace | None",
     limits: PromptLimits,
-    mcp_cwd: str,
+    mcp_cwd: "str | None",
     app: AppT,
     task_handlers: Sequence[TaskNodeHandler[AppT]],
     task_expanders: Sequence[TaskExpander],

@@ -250,7 +250,7 @@ class LocalExecutionBackend:
         *,
         workspace: "Workspace | None",
         limits: PromptLimits,
-        mcp_cwd: str,
+        mcp_cwd: "str | None",
         instruction_resolver: RepositoryInstructionResolver | None = None,
         app: object,
         tenant_id: str,

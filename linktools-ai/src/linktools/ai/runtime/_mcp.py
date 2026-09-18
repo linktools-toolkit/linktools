@@ -76,7 +76,7 @@ async def materialize_mcp_capabilities(
     *,
     principal: Principal,
     execution: ResourceRef,
-    execution_root: str,
+    execution_root: "str | None",
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "_ToolMetricContext | None",
     background_tasks: set[asyncio.Task[object]],
@@ -88,9 +88,14 @@ async def materialize_mcp_capabilities(
 
     if principal.tenant_id != execution.tenant_id:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    if servers and execution_root is None:
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            safe_details={"reason": "mcp_cwd_unavailable"},
+        )
     policy = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
-    root = str(Path(execution_root).expanduser().resolve())
+    root = str(Path(cast(str, execution_root)).expanduser().resolve())
     values: list[AbstractCapability[AgentContext[object]]] = []
     seen_namespaces: set[str] = set()
     for server in servers:
