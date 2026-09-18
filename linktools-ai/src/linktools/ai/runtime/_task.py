@@ -79,12 +79,13 @@ class TaskGraphRun(Generic[AppT]):
         try:
             done, _ = await asyncio.wait(
                 (wait_task, observer_task),
-                return_when=asyncio.FIRST_EXCEPTION,
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            if observer_task in done:
-                error = observer_task.exception()
-                if error is not None:
-                    raise error
+            if wait_task in done:
+                return _public_task_result(wait_task.result())
+            error = observer_task.exception()
+            if error is not None:
+                raise error
             return _public_task_result(await wait_task)
         finally:
             for task in (observer_task, wait_task):
