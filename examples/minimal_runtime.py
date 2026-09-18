@@ -7,7 +7,7 @@ from pathlib import Path
 
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.workspace import Workspace
 
 
@@ -27,9 +27,10 @@ async def run(project: Path) -> object:
         system_prompt="You are a careful writer.",
     )
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=models,
-        capabilities=(application,),
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace), application),
     ) as runtime:
         result = await runtime.agent("writer").run("Say hello.")
         return result.output

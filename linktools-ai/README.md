@@ -3,10 +3,11 @@
 `linktools-ai` provides the Agent runtime layer for LinkTools. The public composition model is intentionally small:
 
 ```text
-Workspace
-    + CapabilityGroup(s)
+namespace
     + ModelRegistry
     + RuntimeState
+    + CapabilityGroup(s)
+        -> optional Workspace via CapabilityGroup.from_workspace(...)
         -> Runtime.open(...)
         -> frozen capability/declaration candidates
         -> AgentCompiler
@@ -18,7 +19,8 @@ Workspace
 
 The main ownership rules are:
 
-- `Workspace` owns workspace identity, paths, policy, and sandbox configuration.
+- `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
+- `Workspace` owns workspace identity, paths, policy, and sandbox configuration when installed through `CapabilityGroup.from_workspace()`.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one immutable `AssetStore` snapshot.
 - `AgentSpec` is a runtime-independent Agent declaration.
@@ -48,13 +50,20 @@ Useful options:
 ### Python
 
 ```python
-from linktools.ai import Runtime, Workspace
+from linktools.ai import CapabilityGroup, Runtime, Workspace
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime import RuntimeState
 
 workspace = Workspace.initialize("/workspace/project")
 models = ModelRegistry.openai(model="gpt-4o-mini")
+state = RuntimeState.in_memory()
 
-async with Runtime.open(workspace, models=models) as runtime:
+async with Runtime.open(
+    workspace.workspace_id,
+    models=models,
+    state=state,
+    capabilities=(CapabilityGroup.from_workspace(workspace),),
+) as runtime:
     result = await runtime.agent("default").run(
         "review this change",
         memory_scope=workspace.workspace_id,
@@ -87,9 +96,10 @@ application.agent(
 )
 
 async with Runtime.open(
-    workspace,
+    workspace.workspace_id,
     models=models,
-    capabilities=(application,),
+    state=state,
+    capabilities=(CapabilityGroup.from_workspace(workspace), application),
 ) as runtime:
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
@@ -109,7 +119,7 @@ these declarations instead of inferring behavior from Tool names.
 
 ## 3. Workspace declarations
 
-When no group named `workspace` is supplied, `Runtime.open()` creates the standard workspace source from `.linktools` and loads these built-in declaration kinds:
+Workspace behavior is opt-in. Install it with `CapabilityGroup.from_workspace(workspace)`; construction is side-effect free, and declaration discovery happens when the Runtime freezes the group. The default Workspace source loads these declaration kinds:
 
 ```text
 .linktools/
@@ -119,21 +129,21 @@ When no group named `workspace` is supplied, `Runtime.open()` creates the standa
   mcp/<id>
 ```
 
-The default workspace source is a raw `AssetStore`. `CapabilityGroup.from_store()` performs declaration discovery over one immutable store snapshot:
+For a filesystem Workspace, use the dedicated constructor:
 
 ```python
-from linktools.ai import CapabilityGroup, Runtime
-from linktools.ai.asset import AssetStore
-
-workspace_group = CapabilityGroup.from_store("workspace", my_asset_store)
+workspace_group = CapabilityGroup.from_workspace(workspace)
 
 async with Runtime.open(
-    workspace,
+    workspace.workspace_id,
     models=models,
+    state=state,
     capabilities=(workspace_group,),
 ) as runtime:
     ...
 ```
+
+For caller-owned declaration storage independent of a Workspace, `CapabilityGroup.from_store()` performs discovery over one borrowed immutable `AssetStore` snapshot.
 
 A store-backed group reads metadata, batch-loads the corresponding bytes, verifies content identity, runs its loaders, and verifies that the store revision did not change during the freeze. Conflicting identities or layouts fail closed.
 
@@ -280,7 +290,12 @@ low-cardinality metric dimensions for the Runtime lifetime:
 from linktools.ai.runtime import RuntimeContext
 
 context = RuntimeContext(app, tenant_id="tenant-a")
-async with Runtime.open(workspace, models=models, context=context) as runtime:
+async with Runtime.open(
+    "web-chat",
+    models=models,
+    state=state,
+    context=context,
+) as runtime:
     ...
 ```
 
@@ -312,7 +327,7 @@ this Runtime query surface.
 
 ## 7. Runtime state
 
-`Runtime.open()` accepts an explicit `RuntimeState` when the application owns storage selection:
+`Runtime.open()` requires an explicit `RuntimeState`; storage selection belongs to the application:
 
 ```python
 from pathlib import Path
@@ -324,7 +339,7 @@ runtime_root = Path("/var/lib/linktools/runtime")
 state = RuntimeState.sqlite(runtime_root / "runtime.db")
 
 async with Runtime.open(
-    workspace,
+    "service-runtime",
     models=models,
     state=state,
 ) as runtime:
