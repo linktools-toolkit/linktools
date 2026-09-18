@@ -124,11 +124,15 @@ class ExecutionTreeStreamer:
         *,
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]:
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return self._stream(
             execution_id,
             principal=principal,
             after_sequences=_normalize_after_sequences(after_sequences),
+            include_content=include_content,
         )
 
     async def _stream(
@@ -137,6 +141,7 @@ class ExecutionTreeStreamer:
         *,
         principal: Principal,
         after_sequences: Mapping[str, int],
+        include_content: bool,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         root = await self._executions.inspect(
             execution_id,
@@ -250,7 +255,7 @@ class ExecutionTreeStreamer:
                             view.root_execution_id,
                             view.parent_invocation_id,
                             0 if execution_key == execution_id else 1,
-                            event,
+                            _project_stream_event(event, include_content),
                         )
                         pending[execution_key] = _next_event_task(
                             streams[execution_key],
@@ -305,6 +310,20 @@ def _validate_child(root: ExecutionView, child: ExecutionView) -> None:
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
+
+
+def _project_stream_event(
+    event: ExecutionStreamEvent,
+    include_content: bool,
+) -> ExecutionStreamEvent:
+    if include_content:
+        return event
+    return ExecutionStreamEvent(
+        event.execution_id,
+        event.durable_sequence,
+        event.event_type,
+        {},
+    )
 
 def _normalize_after_sequences(
     value: Mapping[str, int] | None,
