@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Public runtime contracts and composition entry point."""
 
+from ..core import PromptLimits
 from ..task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphService
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
@@ -137,6 +138,7 @@ __all__ = [
     "ListSessionRequest",
     "LoadedSession",
     "Page",
+    "PromptLimits",
     "ReplayEvaluationRequest",
     "ResolveToolEffectRequest",
     "ResumeSessionRequest",

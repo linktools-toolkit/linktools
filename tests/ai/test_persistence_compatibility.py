@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, SemanticPin, bind_output, restore_output
-from linktools.ai.capability import workspace_capabilities, workspace_tool_contributions
+from linktools.ai.capability import CapabilityGroup, workspace_capabilities
 from linktools.ai.core import IdempotencyStatus, JsonValue, OperationStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -24,6 +24,16 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from linktools.ai.workspace import DisabledSandbox, Workspace
 from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+
+def _workspace_tool_contributions(workspace: Workspace):
+    return tuple(
+        CapabilityGroup.from_workspace(
+            workspace,
+            discover_assets=False,
+        )._contributions
+    )
+
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "persistence"
 
@@ -173,7 +183,7 @@ def test_generic_v1_envelope_round_trips_current_shape() -> None:
 
 
 def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
-    contribution = workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))[0]
+    contribution = _workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))[0]
     pin = SemanticPin(
         "tool",
         contribution.id,
@@ -190,7 +200,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
-    candidates = workspace_tool_contributions(workspace)
+    candidates = _workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",
         model="default",
@@ -228,3 +238,78 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     with pytest.raises(AIError) as raised:
         await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+def _environment_compiler(
+    workspace_ref: "Mapping[str, JsonValue] | None",
+) -> tuple[AgentCompiler, AgentSpec]:
+    spec = AgentSpec(
+        "environment",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+        allow_capabilities=(),
+    )
+    return (
+        AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+            candidates=(),
+            agents={spec.id: spec},
+            namespace="runtime",
+            workspace_ref=workspace_ref,
+        ),
+        spec,
+    )
+
+
+def test_workspace_ref_distinguishes_legacy_workspace_and_workspace_less() -> None:
+    legacy_compiler, spec = _environment_compiler(None)
+    legacy = legacy_compiler.bind(legacy_compiler.compile(spec))
+    assert legacy.snapshot.workspace_ref is None
+    assert "workspace_ref" not in legacy.snapshot.to_payload()
+    assert legacy_compiler.restore(legacy.snapshot).digest == legacy.digest
+
+    no_workspace_compiler, spec = _environment_compiler({"id": None})
+    no_workspace = no_workspace_compiler.bind(no_workspace_compiler.compile(spec))
+    assert no_workspace.snapshot.to_payload()["workspace_ref"] == {"id": None}
+    assert no_workspace_compiler.restore(no_workspace.snapshot).digest == no_workspace.digest
+
+    with pytest.raises(AIError) as missing_workspace:
+        no_workspace_compiler.restore(legacy.snapshot)
+    assert missing_workspace.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert missing_workspace.value.safe_details == {"reason": "workspace_mismatch"}
+
+    with pytest.raises(AIError) as extra_workspace:
+        legacy_compiler.restore(no_workspace.snapshot)
+    assert extra_workspace.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert extra_workspace.value.safe_details == {"reason": "workspace_mismatch"}
+
+
+def test_workspace_ref_requires_exact_stable_workspace_id() -> None:
+    project_compiler, spec = _environment_compiler({"id": "project-a"})
+    binding = project_compiler.bind(project_compiler.compile(spec))
+    assert binding.snapshot.to_payload()["workspace_ref"] == {"id": "project-a"}
+    assert project_compiler.restore(binding.snapshot).digest == binding.digest
+
+    other_compiler, _ = _environment_compiler({"id": "project-b"})
+    with pytest.raises(AIError) as mismatch:
+        other_compiler.restore(binding.snapshot)
+    assert mismatch.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert mismatch.value.safe_details == {"reason": "workspace_mismatch"}
+
+
+@pytest.mark.parametrize(
+    "workspace_ref",
+    ({}, {"id": 1}),
+)
+def test_workspace_ref_rejects_invalid_durable_shape(
+    workspace_ref: Mapping[str, object],
+) -> None:
+    payload = _binding_fixture_value().to_payload()
+    payload["workspace_ref"] = cast(JsonValue, dict(workspace_ref))
+
+    with pytest.raises(AIError) as raised:
+        AgentBindingSnapshot.from_payload(payload)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

@@ -101,14 +101,51 @@ class DefaultArtifactService:
         try:
             payload = _decode_grant(token)
             signature = str(payload.pop("hmac"))
-            expected = hmac.new(self._grant_key, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(signature, expected) or str(payload["tenant_id"]) != principal.tenant_id or str(payload["principal_id"]) != principal.principal_id or int(payload["expires_at"]) < int(time.time()):
+            expected = hmac.new(
+                self._grant_key,
+                canonical_json_bytes(payload),
+                hashlib.sha256,
+            ).hexdigest()
+            if (
+                not hmac.compare_digest(signature, expected)
+                or str(payload["tenant_id"]) != principal.tenant_id
+                or str(payload["principal_id"]) != principal.principal_id
+            ):
                 raise ValueError("invalid artifact grant")
-            operation = await self._state.operations.get(str(payload["nonce"]), tenant_id=principal.tenant_id)
-            if operation is None or operation.status is not OperationStatus.SUCCEEDED or operation.result_digest != str(payload["artifact_digest"]):
+            operation = await self._state.operations.get(
+                str(payload["nonce"]),
+                tenant_id=principal.tenant_id,
+            )
+            artifact_id = str(payload["artifact_id"])
+            artifact_digest = str(payload["artifact_digest"])
+            request_digest = canonical_sha256(
+                {
+                    "action": "artifact.download",
+                    "tenant_id": principal.tenant_id,
+                    "principal_id": principal.principal_id,
+                    "artifact_id": artifact_id,
+                    "artifact_digest": artifact_digest,
+                }
+            )
+            expires_at = min(
+                int(payload["expires_at"]),
+                int(operation.created_at.timestamp()) + 300
+                if operation is not None
+                else 0,
+            )
+            if (
+                operation is None
+                or operation.status is not OperationStatus.SUCCEEDED
+                or operation.result_digest != artifact_digest
+                or operation.request_digest != request_digest
+                or expires_at < int(time.time())
+            ):
                 raise ValueError("unknown artifact grant")
-            record = await self._state.records.get_metadata(str(payload["artifact_id"]), tenant_id=principal.tenant_id)
-            if record is None or record.digest != str(payload["artifact_digest"]):
+            record = await self._state.records.get_metadata(
+                artifact_id,
+                tenant_id=principal.tenant_id,
+            )
+            if record is None or record.digest != artifact_digest:
                 raise ValueError("artifact grant target mismatch")
             return record.object_ref.key
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:

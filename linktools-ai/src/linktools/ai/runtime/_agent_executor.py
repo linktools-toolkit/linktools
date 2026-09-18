@@ -101,6 +101,7 @@ from ..core import (
     ExecutionEventType,
     ExecutionMode,
     JsonValue,
+    PromptLimits,
     ResourceKind,
     ResourceRef,
     ThinkingValue,
@@ -111,7 +112,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
-from ..workspace import LocalSandbox, SandboxResource, SandboxSession
+from ..workspace import LocalSandbox, SandboxResource, SandboxSession, Workspace
 
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructions
@@ -121,7 +122,7 @@ from ._compaction import RuntimeCompactionPolicy
 from ._harness import HarnessStepStoreAdapter
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
-from ._mcp import materialize_mcp_servers
+from ._mcp import materialize_mcp_capabilities
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
@@ -183,6 +184,9 @@ AgentExecutionOutcome = AgentExecutionResult | DeferredToolRequests
 class _RunScope:
     binding: AgentBinding
     context: AgentContext[object]
+    workspace: "Workspace | None"
+    limits: PromptLimits
+    mcp_cwd: "str | None"
     user_prompt: CanonicalUserInput | None
     history: list[ModelMessage]
     conversation_id: str
@@ -362,7 +366,7 @@ class AgentExecutor:
                     observation_id=metric_id,
                     kind="linktools.agent.run",
                     occurred_at=datetime.now(timezone.utc),
-                    source_namespace=scope.context.workspace.workspace_id,
+                    source_namespace=scope.context.namespace,
                     tenant_id=scope.context.principal.tenant_id,
                     status=status,
                     error_code=error_code,
@@ -393,20 +397,27 @@ class AgentExecutor:
             if tool_class_from_metadata(_frozen_tool_metadata(candidate))
             in {"filesystem.read", "filesystem.write", "shell"}
         )
-        resources, resource_keys = await _skill_sandbox_resources(
-            scope.binding.definition,
-            self._skill_sources,
-        )
+        workspace = scope.workspace
+        if workspace is None:
+            resources: tuple[SandboxResource, ...] = ()
+            resource_keys: Mapping[str, str] = {}
+        else:
+            resources, resource_keys = await _skill_sandbox_resources(
+                scope.binding.definition,
+                self._skill_sources,
+            )
         if not selected and not resources:
             return await self._execute(
                 scope,
                 run_usage=run_usage,
                 usage_limits=usage_limits,
             )
-        sandbox = scope.context.workspace.sandbox
+        if workspace is None:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        sandbox = workspace.sandbox
         backend = sandbox if sandbox is not None else LocalSandbox()
         session = await backend.open(
-            root=scope.context.workspace.root,
+            root=workspace.root,
             resources=resources,
         )
         try:
@@ -470,7 +481,7 @@ class AgentExecutor:
             deferred_step_index = step_index
 
         model_journal = ModelRequestJournal(
-            source_namespace=scope.context.workspace.workspace_id,
+            source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
             step_run_id=scope.step_run_id,
@@ -691,17 +702,22 @@ async def _materialize_agent(
             skill_sources,
             resource_paths=scope.skill_resource_paths,
             preloaded_skill_ids=definition.spec.preload_skills,
-            max_preloaded_bytes=(
-                scope.context.workspace.policy.max_preloaded_skill_bytes
-            ),
+            max_preloaded_bytes=scope.limits.max_preloaded_skill_bytes,
         )
         capabilities.append(skill_capability)
 
-    workspace_capability_values = workspace_capabilities(
-        scope.context.workspace,
-        workspace_names,
-        session=scope.sandbox_session,
-        vision=definition.model.vision,
+    if workspace_names and scope.workspace is None:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    workspace_capability_values = (
+        ()
+        if scope.workspace is None
+        else workspace_capabilities(
+            scope.workspace,
+            workspace_names,
+            limits=scope.limits,
+            session=scope.sandbox_session,
+            vision=definition.model.vision,
+        )
     )
     if workspace_capability_values:
         workspace_guidance = workspace_capability_values[0].get_instructions()
@@ -742,7 +758,7 @@ async def _materialize_agent(
         if metrics is None
         else _ToolMetricContext(
             metrics,
-            source_namespace=scope.context.workspace.workspace_id,
+            source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
             session_id=scope.context.session_id,
@@ -770,7 +786,11 @@ async def _materialize_agent(
                 workspace_toolset_values,
                 workspace_descriptors,
                 id="linktools.workspace",
-                workspace_policy=scope.context.workspace.policy.tool_permissions,
+                workspace_policy=(
+                    None
+                    if scope.workspace is None
+                    else scope.workspace.policy.tool_permissions
+                ),
                 sandbox_session=scope.sandbox_session,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
@@ -779,34 +799,22 @@ async def _materialize_agent(
             )
         )
     if definition.mcp_servers:
-        mcp_toolsets = await materialize_mcp_servers(
-            definition.mcp_servers,
-            definition.mcp_selector_policy,
-            principal=scope.context.principal,
-            execution=ResourceRef(
-                ResourceKind.EXECUTION,
-                scope.context.execution_id,
-                scope.context.principal.tenant_id,
-            ),
-            execution_root=str(scope.context.workspace.root),
-        )
-        for materialized in mcp_toolsets:
-            raw_toolsets.append(
-                RuntimeToolBoundaryToolset(
-                    (
-                        cast(
-                            "AbstractToolset[AgentContext[object]]",
-                            materialized.toolset,
-                        ),
-                    ),
-                    {},
-                    id="linktools.mcp",
-                    descriptor=materialized.descriptor,
-                    tool_operations=scope.tool_operations,
-                    tool_metrics=tool_metrics,
-                    background_tasks=scope.background_tasks,
-                )
+        capabilities.extend(
+            await materialize_mcp_capabilities(
+                definition.mcp_servers,
+                definition.mcp_selector_policy,
+                principal=scope.context.principal,
+                execution=ResourceRef(
+                    ResourceKind.EXECUTION,
+                    scope.context.execution_id,
+                    scope.context.principal.tenant_id,
+                ),
+                execution_root=scope.mcp_cwd,
+                tool_operations=scope.tool_operations,
+                tool_metrics=tool_metrics,
+                background_tasks=scope.background_tasks,
             )
+        )
     if business_tools:
         raw_business = FunctionToolset(business_tools, id="linktools.business")
         raw_toolsets.insert(
@@ -822,7 +830,7 @@ async def _materialize_agent(
         )
     model_observation = RuntimeModelObservationCapability(
         metrics,
-        source_namespace=scope.context.workspace.workspace_id,
+        source_namespace=scope.context.namespace,
         tenant_id=scope.context.principal.tenant_id,
         execution_id=scope.context.execution_id,
         session_id=scope.context.session_id,
@@ -843,6 +851,7 @@ async def _materialize_agent(
         memory_store=scope.memory_store,
         ordinary_tool_policy=definition.ordinary_tool_policy,
         compaction_policy=compaction_policy,
+        limits=scope.limits,
         planning=scope.planning,
         context_target_tokens=scope.context_target_tokens,
         parent_step_run_id=scope.parent_step_run_id,

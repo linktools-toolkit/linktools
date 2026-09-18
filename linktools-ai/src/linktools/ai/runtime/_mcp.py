@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Materialize the MCP transport selected by a compiled runtime binding."""
+"""Materialize compiler-selected stdio MCP as Runtime capabilities."""
 
+import asyncio
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 from linktools.core import environ
-from pydantic_ai.toolsets import AbstractToolset, ToolsetTool, WrapperToolset
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.toolsets import (
+    AbstractToolset,
+    ToolsetTool,
+    WrapperToolset,
+)
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..capability import mcp_server_namespace, tool_semantic_metadata
+from ..capability import AgentContext, mcp_server_namespace, tool_semantic_metadata
 from ..core import Principal, ResourceRef
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, parse_mcp_tool_selector
+from ._tool import ToolOperationBridge
 from ._tool_boundary import (
-    ManagedToolDescriptor,
+    RuntimeToolBoundaryToolset,
     managed_tool_descriptor_from_metadata,
 )
+from ._tool_metrics import _ToolMetricContext
 
 _logger = environ.get_logger("ai.runtime.mcp")
 _MCP_TOOL_METADATA = tool_semantic_metadata(
     effect="non_replay_safe",
     tool_class="mcp",
 )
-
-
-@dataclass(frozen=True, slots=True)
-class MCPMaterializedToolset:
-    """Pair an MCP toolset with the descriptor supplied by its owner."""
-
-    toolset: AbstractToolset[object]
-    descriptor: ManagedToolDescriptor
 
 
 def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
@@ -56,24 +57,46 @@ class _MCPSemanticToolset(WrapperToolset[object]):
         return tools
 
 
-async def materialize_mcp_servers(
+class _MCPRuntimeCapability(AbstractCapability[AgentContext[object]]):
+    def __init__(
+        self,
+        capability_id: str,
+        toolset: AbstractToolset[AgentContext[object]],
+    ) -> None:
+        self.id = capability_id
+        self._toolset = toolset
+
+    def get_toolset(self) -> AbstractToolset[AgentContext[object]]:
+        return self._toolset
+
+
+async def materialize_mcp_capabilities(
     servers: Sequence[MCPServerSpec],
     selectors: Sequence[str],
     *,
     principal: Principal,
     execution: ResourceRef,
-    execution_root: str,
-) -> tuple[MCPMaterializedToolset, ...]:
-    """Materialize only compiler-selected stdio servers."""
+    execution_root: "str | None",
+    tool_operations: "ToolOperationBridge | None",
+    tool_metrics: "_ToolMetricContext | None",
+    background_tasks: set[asyncio.Task[object]],
+) -> tuple[AbstractCapability[AgentContext[object]], ...]:
+    """Materialize only compiler-selected stdio MCP servers."""
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
     from pydantic_ai.mcp import MCPToolset
 
     if principal.tenant_id != execution.tenant_id:
         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    if servers and execution_root is None:
+        raise AIError(
+            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+            safe_details={"reason": "mcp_cwd_unavailable"},
+        )
     policy = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
-    values: list[MCPMaterializedToolset] = []
+    root = str(Path(cast(str, execution_root)).expanduser().resolve())
+    values: list[AbstractCapability[AgentContext[object]]] = []
     seen_namespaces: set[str] = set()
     for server in servers:
         namespace = mcp_server_namespace(server.id)
@@ -87,7 +110,7 @@ async def materialize_mcp_servers(
             StdioTransport(
                 server.command,
                 list(server.args),
-                cwd=str(Path(execution_root).expanduser().resolve()),
+                cwd=root,
             )
         )
         toolset = MCPToolset(client, id=f"mcp:{server.id}")
@@ -99,13 +122,32 @@ async def materialize_mcp_servers(
         prefixed = _MCPSemanticToolset(
             toolset.prefixed(f"mcp__{namespace}__")
         )
+        boundary = RuntimeToolBoundaryToolset(
+            (
+                cast(
+                    "AbstractToolset[AgentContext[object]]",
+                    prefixed,
+                ),
+            ),
+            {},
+            id=f"linktools.mcp.{namespace}",
+            descriptor=descriptor,
+            tool_operations=tool_operations,
+            tool_metrics=tool_metrics,
+            background_tasks=background_tasks,
+        )
+        values.append(
+            _MCPRuntimeCapability(
+                f"linktools.ai.mcp.{namespace}",
+                boundary,
+            )
+        )
         _logger.debug(
             "MCP server materialized: server=%s namespace=%s selected_tools=%s",
             server.id,
             namespace,
             tuple(sorted(allowed or ("*",))),
         )
-        values.append(MCPMaterializedToolset(prefixed, descriptor))
     return tuple(values)
 
 
@@ -132,4 +174,4 @@ def _selector_policy(selectors: Sequence[str]) -> "dict[str, frozenset[str]]":
     }
 
 
-__all__ = ["MCPMaterializedToolset", "materialize_mcp_servers"]
+__all__ = []

@@ -7,10 +7,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
@@ -66,9 +67,12 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
     metrics = Metrics.from_store(store, namespace="runtime-storage-metrics")
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
 
+    workspace = _workspace(tmp_path)
     async with Runtime.open(
-        _workspace(tmp_path),
+        workspace.workspace_id,
         models=_Models(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run("hello", timeout_seconds=10)

@@ -40,11 +40,7 @@ from ._tool_semantic import (
     tool_semantic_metadata,
     validate_tool_semantic_metadata,
 )
-from ._workspace import (
-    WorkspaceAccess,
-    workspace_capabilities,
-    workspace_tool_contributions,
-)
+from ._workspace import WorkspaceAccess, workspace_capabilities
 
 __all__ = [
     "AgentContext",
@@ -78,7 +74,6 @@ __all__ = [
     "mcp_server_namespace",
     "mcp_server_selector",
     "workspace_capabilities",
-    "workspace_tool_contributions",
     "tool_class_from_metadata",
     "tool_compaction_keep_result_from_metadata",
     "tool_context_dedupe_from_metadata",

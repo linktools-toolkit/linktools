@@ -5,6 +5,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import (
@@ -17,7 +18,7 @@ from linktools.ai.observe import (
     Metrics,
     Observation,
 )
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._metrics import _RuntimeMetricBuffer
 from linktools.ai.workspace import Workspace
@@ -83,9 +84,11 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
     )
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         context=context,
         models=models,
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
         metrics=metrics,
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]

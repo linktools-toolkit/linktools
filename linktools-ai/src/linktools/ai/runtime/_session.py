@@ -13,7 +13,6 @@ from typing import Protocol, cast
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
-from ..capability import WorkspaceAccess
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -38,7 +37,7 @@ from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._handoff import HandoffGate, HandoffState
-from ._input import stored_user_input_view
+from ._input import _InputFileSource, stored_user_input_view
 from .service_api import (
     CancelExecutionRequest,
     CloseSessionRequest,
@@ -237,7 +236,7 @@ class DefaultSessionService:
         history_reader: SessionHistoryReader,
         transcript_store: "_SessionTranscriptStore | None" = None,
         release_terminal: _SessionReleaseCallback | None = None,
-        workspace_access: WorkspaceAccess | None = None,
+        workspace_access: _InputFileSource | None = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions
@@ -705,6 +704,11 @@ class DefaultSessionService:
                 session_id, request.principal, AuthorizationAction.SESSION_READ
             )
             record = await self._reconcile_terminal_admission(record)
+            if record.cwd is not None and self._workspace_access is None:
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={"field": "cwd", "reason": "workspace_required"},
+                )
             await self._authorization.authorize(
                 request.principal,
                 AuthorizationAction.EXECUTION_RUN,
@@ -754,6 +758,16 @@ class DefaultSessionService:
             )
             if source.agent_id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            target_cwd = (
+                source.cwd
+                if request.cwd is None
+                else await self._canonicalize_cwd(request.cwd)
+            )
+            if target_cwd is not None and self._workspace_access is None:
+                raise AIError(
+                    ErrorCode.REQUEST_FIELD_INVALID,
+                    safe_details={"field": "cwd", "reason": "workspace_required"},
+                )
             digest = canonical_sha256(
                 {
                     "action": "session.fork",
@@ -762,17 +776,8 @@ class DefaultSessionService:
                     "source": session_id,
                     "target": request.new_session_id,
                     "agent_id": source.agent_id,
-                    "cwd": (
-                        source.cwd
-                        if request.cwd is None
-                        else await self._canonicalize_cwd(request.cwd)
-                    ),
+                    "cwd": target_cwd,
                 }
-            )
-            target_cwd = (
-                source.cwd
-                if request.cwd is None
-                else await self._canonicalize_cwd(request.cwd)
             )
             now = datetime.now(timezone.utc)
             target_metadata = dict(source.metadata)
@@ -876,7 +881,10 @@ class DefaultSessionService:
         if value is None:
             return None
         if self._workspace_access is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"field": "cwd", "reason": "workspace_required"},
+            )
         try:
             return await self._workspace_access.canonicalize_path(value)
         except AIError:

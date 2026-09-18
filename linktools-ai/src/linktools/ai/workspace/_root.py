@@ -142,9 +142,6 @@ class WorkspacePolicy:
     )
     max_repository_instruction_documents: int = 128
     max_repository_instruction_bytes: int = 256 * 1024
-    max_preloaded_skill_bytes: int = 256 * 1024
-    max_binary_input_parts: int = 32
-    max_binary_input_bytes: int = 64 * 1024 * 1024
 
     def validate(self) -> None:
         if not isinstance(self.tool_permissions, WorkspaceToolPermissionPolicy):
@@ -152,9 +149,6 @@ class WorkspacePolicy:
         limits = (
             self.max_repository_instruction_documents,
             self.max_repository_instruction_bytes,
-            self.max_preloaded_skill_bytes,
-            self.max_binary_input_parts,
-            self.max_binary_input_bytes,
         )
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value < 1

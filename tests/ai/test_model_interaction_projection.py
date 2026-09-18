@@ -17,6 +17,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
@@ -324,9 +325,12 @@ async def _assert_public_interaction(runtime: Runtime[object]) -> None:
 @pytest.mark.asyncio
 async def test_execution_model_interactions_are_durable_and_public(tmp_path: Path) -> None:
     _write_default_agent(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     async with Runtime.open(
-        Workspace.load(tmp_path, workspace_id="workspace"),
+        workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
@@ -337,10 +341,12 @@ async def test_execution_model_interactions_support_volatile_memory_state(
     tmp_path: Path,
 ) -> None:
     _write_default_agent(tmp_path)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     async with Runtime.open(
-        Workspace.load(tmp_path, workspace_id="workspace"),
+        workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)

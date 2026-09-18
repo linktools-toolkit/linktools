@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._factory import _build_default_models
+from linktools.commands.ai._common import _local_models
 from linktools.ai.workspace import Workspace
 
 
@@ -18,7 +18,7 @@ def test_default_runtime_reads_openai_vision(
     monkeypatch.setenv("OPENAI_MODEL", "testing/vision")
     monkeypatch.setenv("OPENAI_VISION", "true")
 
-    binding = _build_default_models(
+    binding = _local_models(
         Workspace.load(tmp_path, workspace_id="workspace")
     ).snapshot().resolve("default")
 
@@ -33,7 +33,7 @@ def test_default_runtime_rejects_invalid_openai_vision(
     monkeypatch.setenv("OPENAI_VISION", "sometimes")
 
     with pytest.raises(AIError) as raised:
-        _build_default_models(Workspace.load(tmp_path, workspace_id="workspace"))
+        _local_models(Workspace.load(tmp_path, workspace_id="workspace"))
 
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.safe_details == {"provider": "openai", "field": "vision"}

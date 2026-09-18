@@ -10,11 +10,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue, Page, Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics, Observation
 from linktools.ai.observe._memory import InMemoryMetricStore
-from linktools.ai.runtime import Runtime
+from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
@@ -200,9 +201,12 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     secret = "TOP_SECRET_PROMPT_VALUE"
 
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     async with Runtime.open(
-        Workspace.load(tmp_path, workspace_id="workspace"),
+        workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run(secret, timeout_seconds=10)
@@ -247,9 +251,12 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
     _write_default_agent(tmp_path)
     metrics = Metrics.from_store(_FailingMetricStore(), namespace="runtime-fail-open")  # type: ignore[arg-type]
 
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     async with Runtime.open(
-        Workspace.load(tmp_path, workspace_id="workspace"),
+        workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run("hello", timeout_seconds=10)

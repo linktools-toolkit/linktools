@@ -28,6 +28,7 @@ from ..core import (
     SessionStatus,
     TaskStatus,
     ThinkingValue,
+    PromptLimits,
     normalize_correlation,
     normalize_execution_mode,
     normalize_thinking,
@@ -35,6 +36,7 @@ from ..core import (
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
+    validate_persistence_namespace,
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode
@@ -52,7 +54,6 @@ from ..task import (
     TaskNode,
     TaskExpanderRef,
 )
-from ..workspace import Workspace
 from ._agent import Agent, Execution, Session
 from ._task import TaskGraphRun
 from ._context import RuntimeContext
@@ -185,7 +186,7 @@ class Runtime(Generic[AppT]):
         event: EventService,
         artifact: ArtifactService,
         *,
-        workspace: Workspace,
+        namespace: str,
         context: RuntimeContext[AppT],
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
@@ -205,7 +206,6 @@ class Runtime(Generic[AppT]):
                 external,
                 event,
                 artifact,
-                workspace,
             )
         ):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -221,7 +221,7 @@ class Runtime(Generic[AppT]):
         self.external = external
         self.event = event
         self.artifact = artifact
-        self._workspace = workspace
+        self._namespace = validate_persistence_namespace(namespace)
         self._context = context
         self._default_principal = Principal(
             principal_id="runtime",
@@ -241,49 +241,55 @@ class Runtime(Generic[AppT]):
     @overload
     def open(
         cls,
-        workspace: Workspace,
+        namespace: str,
         *,
+        models: ModelRegistry,
+        state: RuntimeState,
         context: None = None,
-        models: "ModelRegistry | None" = None,
-        state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[None]]" = (),
         metrics: "Metrics | None" = None,
+        limits: "PromptLimits | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
 
     @classmethod
     @overload
     def open(
         cls,
-        workspace: Workspace,
+        namespace: str,
         *,
+        models: ModelRegistry,
+        state: RuntimeState,
         context: RuntimeContext[AppT],
-        models: "ModelRegistry | None" = None,
-        state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
         metrics: "Metrics | None" = None,
+        limits: "PromptLimits | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
 
     @classmethod
     def open(
         cls,
-        workspace: Workspace,
+        namespace: str,
         *,
+        models: ModelRegistry,
+        state: RuntimeState,
         context: "RuntimeContext[object] | None" = None,
-        models: "ModelRegistry | None" = None,
-        state: "RuntimeState | None" = None,
         capabilities: "Sequence[CapabilityGroup[object]]" = (),
         metrics: "Metrics | None" = None,
+        limits: "PromptLimits | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
+        resolved_namespace = validate_persistence_namespace(namespace)
         root_context = RuntimeContext(None) if context is None else context
         if not isinstance(root_context, RuntimeContext):
             raise TypeError("context must be RuntimeContext")
+        selected_limits = PromptLimits() if limits is None else limits
         return _open_runtime(
-            workspace,
+            resolved_namespace,
             context=root_context,
             models=models,
             state=state,
             capabilities=capabilities,
             metrics=metrics,
+            limits=selected_limits,
         )
 
     @property
@@ -295,8 +301,8 @@ class Runtime(Generic[AppT]):
         return self._default_principal
 
     @property
-    def workspace(self) -> Workspace:
-        return self._workspace
+    def namespace(self) -> str:
+        return self._namespace
 
     def _watch_execution_tree(
         self,
@@ -965,24 +971,26 @@ def _validate_memory_scope(value: "str | None") -> "str | None":
 
 @asynccontextmanager
 async def _open_runtime(
-    workspace: Workspace,
+    namespace: str,
     *,
     context: RuntimeContext[object],
-    models: "ModelRegistry | None",
-    state: "RuntimeState | None",
+    models: ModelRegistry,
+    state: RuntimeState,
     capabilities: "Sequence[CapabilityGroup[object]]",
     metrics: "Metrics | None",
+    limits: PromptLimits,
 ):
     from ._factory import compose_runtime_components
 
     components = await compose_runtime_components(
-        workspace,
+        namespace,
         app=context.app,
         tenant_id=context.tenant_id,
         models=models,
         state=state,
         capabilities=capabilities,
         metrics=metrics,
+        limits=limits,
     )
     try:
         if components.metric_control is not None:
@@ -1000,7 +1008,7 @@ async def _open_runtime(
             components.external,
             components.event,
             components.artifact,
-            workspace=workspace,
+            namespace=namespace,
             context=context,
             close_callback=components.close_callback,
             task_node_runtime=components.task_node_runtime,
@@ -1023,7 +1031,6 @@ async def _open_runtime(
         raise
     else:
         await runtime.close()
-
 
 def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
     code = error.code.value if isinstance(error, AIError) else None

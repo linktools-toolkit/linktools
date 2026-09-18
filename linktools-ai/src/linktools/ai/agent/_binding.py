@@ -6,7 +6,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, cast
 
-from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
+from ..core import (
+    ImmutableJsonMapping,
+    JsonValue,
+    canonical_sha256,
+    validate_persistence_namespace,
+)
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec, AgentSpecCodec, SubagentRef
 from ._output import OutputBinding, OutputMode
@@ -104,6 +109,7 @@ class AgentBindingSnapshot:
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
     output_schema: Mapping[str, JsonValue]
+    workspace_ref: "Mapping[str, JsonValue] | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in {"text", "structured"}:
@@ -115,6 +121,18 @@ class AgentBindingSnapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         object.__setattr__(self, "base_model", base_model)
         object.__setattr__(self, "output_schema", output_schema)
+        if self.workspace_ref is not None:
+            try:
+                workspace_ref = ImmutableJsonMapping(self.workspace_ref)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            workspace_id = workspace_ref.get("id")
+            if "id" not in workspace_ref or (
+                workspace_id is not None
+                and (not isinstance(workspace_id, str) or not workspace_id.strip())
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            object.__setattr__(self, "workspace_ref", workspace_ref)
         selected = tuple(
             (
                 *sorted(
@@ -134,6 +152,13 @@ class AgentBindingSnapshot:
     def subagent_ids(self) -> "tuple[str, ...]":
         return tuple(item.id for item in self.subagents)
 
+    def required_workspace_id(self, namespace: str) -> "str | None":
+        resolved_namespace = validate_persistence_namespace(namespace)
+        if self.workspace_ref is None:
+            return resolved_namespace
+        value = self.workspace_ref["id"]
+        return None if value is None else cast(str, value)
+
     @property
     def binding_digest(self) -> str:
         return canonical_sha256(
@@ -144,7 +169,7 @@ class AgentBindingSnapshot:
         )
 
     def to_payload(self) -> "dict[str, JsonValue]":
-        return {
+        payload: dict[str, JsonValue] = {
             "agent_spec": AgentSpecCodec().to_wire_payload(self.agent_spec),
             "base_model": dict(self.base_model),
             "selected": [item.to_payload() for item in self.selected],
@@ -152,6 +177,9 @@ class AgentBindingSnapshot:
             "output_mode": self.output_mode,
             "output_schema": dict(self.output_schema),
         }
+        if self.workspace_ref is not None:
+            payload["workspace_ref"] = dict(self.workspace_ref)
+        return payload
 
     @classmethod
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
@@ -174,6 +202,11 @@ class AgentBindingSnapshot:
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=cast(OutputMode, mode),
                 output_schema=_normalize_mapping(value["output_schema"]),
+                workspace_ref=(
+                    None
+                    if "workspace_ref" not in value
+                    else _normalize_mapping(value["workspace_ref"])
+                ),
             )
         except AIError:
             raise
@@ -202,6 +235,7 @@ class AgentBinding:
             != dict(self.snapshot.base_model)
             or _definition_selected_pins(self.definition) != self.snapshot.selected
             or self.definition.selected_subagents != self.snapshot.subagent_ids
+            or self.definition.workspace_ref != self.snapshot.workspace_ref
             or self.output_binding.mode != self.snapshot.output_mode
             or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
         ):

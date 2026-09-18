@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import pytest
 from linktools.ai.capability import workspace_capabilities
+from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._compaction import (
     RuntimeCompaction,
@@ -171,6 +172,7 @@ async def test_sandbox_worker_bounds_safe_details_independently_from_frame() -> 
 def test_runtime_compaction_uses_harness_deduplication() -> None:
     compaction = RuntimeCompaction(
         4096,
+        limits=PromptLimits(),
         policy=RuntimeCompactionPolicy(
             context_dedupe_by_tool={
                 "read_file": "workspace_file_read_v1",

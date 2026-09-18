@@ -12,7 +12,6 @@ from linktools.ai.capability import (
     ToolCallFailed,
     tool_class_from_metadata,
     workspace_capabilities,
-    workspace_tool_contributions,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import (
@@ -33,6 +32,16 @@ from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
+
+
+def _workspace_tool_contributions(workspace: Workspace):
+    return tuple(
+        CapabilityGroup.from_workspace(
+            workspace,
+            discover_assets=False,
+        )._contributions
+    )
+
 
 
 class _RecordingSession:
@@ -185,7 +194,7 @@ def _semantic_contract(tool: object) -> dict[str, object]:
 
 def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path, workspace_id="workspace")
-    contributions = workspace_tool_contributions(workspace)
+    contributions = _workspace_tool_contributions(workspace)
 
     assert tuple(item.id for item in contributions) == (
         "attach_files",
@@ -223,7 +232,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "shell",
     )
     assert tuple(item.fingerprint for item in contributions) == tuple(
-        item.fingerprint for item in workspace_tool_contributions(workspace)
+        item.fingerprint for item in _workspace_tool_contributions(workspace)
     )
 
 
@@ -235,7 +244,7 @@ def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path
         Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox()),
     )
     projected = tuple(
-        tuple((item.id, item.fingerprint, item.semantic_contract) for item in workspace_tool_contributions(workspace))
+        tuple((item.id, item.fingerprint, item.semantic_contract) for item in _workspace_tool_contributions(workspace))
         for workspace in workspaces
     )
     assert projected[0] == projected[1] == projected[2]
@@ -273,7 +282,7 @@ def test_workspace_sandbox_capability_id_is_reserved() -> None:
 async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
-    contributions = workspace_tool_contributions(workspace)
+    contributions = _workspace_tool_contributions(workspace)
     expected = {item.id: item.semantic_contract for item in contributions}
     capability = workspace_capabilities(
         workspace,
@@ -437,3 +446,31 @@ async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: 
     with pytest.raises(AIError) as raised:
         await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_workspace_group_can_disable_default_asset_discovery(
+    tmp_path: Path,
+) -> None:
+    storage = tmp_path / ".linktools"
+    agent = storage / "agents" / "broken"
+    agent.parent.mkdir(parents=True)
+    agent.write_text("not a valid agent declaration", encoding="utf-8")
+    sandbox = _RecordingSandbox()
+    workspace = Workspace.load(
+        tmp_path,
+        workspace_id="workspace",
+        sandbox=sandbox,
+    )
+
+    group = CapabilityGroup.from_workspace(
+        workspace,
+        discover_assets=False,
+    )
+    frozen = await group.freeze()
+
+    assert group.workspace is workspace
+    assert group.skill_source is None
+    assert frozen
+    assert all(item.kind == "tool" for item in frozen)
+    assert sandbox.sessions == []

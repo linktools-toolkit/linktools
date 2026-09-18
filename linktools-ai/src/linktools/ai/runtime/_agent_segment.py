@@ -12,9 +12,9 @@ from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
 
 from ..agent import AgentBinding
 from ..capability import AgentContext, SubagentDelegate
-from ..core import ExecutionMode, JsonValue, ThinkingValue, UsageMetrics
+from ..core import ExecutionMode, JsonValue, PromptLimits, ThinkingValue, UsageMetrics
 from ..errors import ErrorCode, ErrorDiagnostics
-from ..workspace import RepositoryInstructions
+from ..workspace import RepositoryInstructions, Workspace
 from ._agent_executor import (
     AgentExecutor,
     AgentExecutionResult,
@@ -93,6 +93,9 @@ class _AgentSegmentInput:
 
     binding: AgentBinding
     context: AgentContext[object]
+    workspace: "Workspace | None"
+    limits: PromptLimits
+    mcp_cwd: "str | None"
     user_prompt: CanonicalUserInput | None
     history: list[ModelMessage]
     conversation_id: str
@@ -152,6 +155,9 @@ class _AgentSegmentRunner:
         scope = _RunScope(
             binding=segment.binding,
             context=segment.context,
+            workspace=segment.workspace,
+            limits=segment.limits,
+            mcp_cwd=segment.mcp_cwd,
             user_prompt=segment.user_prompt,
             history=segment.history,
             conversation_id=segment.conversation_id,

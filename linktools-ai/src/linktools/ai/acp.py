@@ -17,6 +17,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
+from .capability import CapabilityGroup
 from .core import (
     ExecutionDeltaType,
     ExecutionEventType,
@@ -25,7 +26,8 @@ from .core import (
     validate_memory_scope,
 )
 from .errors import AIError
-from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime
+from .model import ModelRegistry
+from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime, RuntimeState
 from .workspace import Workspace
 
 _logger = environ.get_logger("ai.acp")
@@ -164,13 +166,26 @@ class ACPAgent:
 @dataclass(frozen=True, slots=True)
 class ACPApplication:
     workspace: Workspace
+    models: ModelRegistry
+    state: RuntimeState
 
     @classmethod
-    def for_workspace(cls, workspace: Workspace) -> "ACPApplication":
-        return cls(workspace)
+    def for_workspace(
+        cls,
+        workspace: Workspace,
+        *,
+        models: ModelRegistry,
+        state: RuntimeState,
+    ) -> "ACPApplication":
+        return cls(workspace, models, state)
 
     async def serve(self, *, memory_scope: str) -> None:
-        async with Runtime.open(self.workspace) as runtime:
+        async with Runtime.open(
+            self.workspace.workspace_id,
+            models=self.models,
+            state=self.state,
+            capabilities=(CapabilityGroup.from_workspace(self.workspace),),
+        ) as runtime:
             await serve_stdio(
                 ACPAgent(
                     runtime,

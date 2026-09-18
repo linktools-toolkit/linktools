@@ -18,6 +18,7 @@ from ._ids import (
     step_conversation_id,
     step_run_id,
 )
+from ._limits import PromptLimits
 from ._json import (
     ImmutableJsonMapping,
     JsonValue,
@@ -120,6 +121,7 @@ __all__ = [
     "Page",
     "Principal",
     "PrincipalKind",
+    "PromptLimits",
     "RedactedValue",
     "RedactionClass",
     "RedactionPolicy",

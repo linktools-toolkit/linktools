@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -212,11 +213,13 @@ async def test_terminal_stream_allows_immediate_runtime_close(
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
 
+    workspace = Workspace.load(workspace_root, workspace_id="workspace")
     try:
         async with Runtime.open(
-            Workspace.load(workspace_root, workspace_id="workspace"),
+            workspace.workspace_id,
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
+            capabilities=(CapabilityGroup.from_workspace(workspace),),
         ) as runtime:
             execution = await runtime.agent("default").start("hello")
             terminal_events = []
@@ -269,9 +272,10 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     )
     try:
         async with Runtime.open(
-            workspace,
+            workspace.workspace_id,
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
+            capabilities=(CapabilityGroup.from_workspace(workspace),),
         ) as runtime:
             task = asyncio.create_task(
                 _emit_result(
@@ -297,9 +301,10 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     )
     try:
         async with Runtime.open(
-            workspace,
+            workspace.workspace_id,
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=reopened,
+            capabilities=(CapabilityGroup.from_workspace(workspace),),
         ):
             pass
     finally:
@@ -327,11 +332,13 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
 
+    workspace = Workspace.load(workspace_root, workspace_id="workspace")
     try:
         async with Runtime.open(
-            Workspace.load(workspace_root, workspace_id="workspace"),
+            workspace.workspace_id,
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
+            capabilities=(CapabilityGroup.from_workspace(workspace),),
         ) as runtime:
             created = await runtime.agent("default").create_session("session")
             loaded = await runtime.session.get(

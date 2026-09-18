@@ -3,6 +3,7 @@
 """Harness Planning must preserve the intentionally narrow LinkTools surface."""
 
 import pytest
+from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime._plan import (
@@ -45,6 +46,7 @@ async def test_linktools_planning_registers_only_write_plan() -> None:
         memory_store=None,
         ordinary_tool_policy=(),
         compaction_policy=RuntimeCompactionPolicy(),
+        limits=PromptLimits(),
         planning=True,
         context_target_tokens=None,
         parent_step_run_id=None,

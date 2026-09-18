@@ -146,10 +146,12 @@ async def test_runtime_closes_owned_workspace_assets_once(
 
     monkeypatch.setattr(AssetStore, "close", close_store)
     monkeypatch.setattr(DirectoryAssetBackend, "close", close_backend)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
     components = await compose_runtime_components(
-        Workspace.load(tmp_path, workspace_id="workspace"),
+        workspace.workspace_id,
         models=ModelRegistry.openai(model="gpt-test"),
         state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     )
 
     await components.close_callback()
@@ -178,14 +180,20 @@ async def test_runtime_open_failure_closes_owned_workspace_assets(
 
     monkeypatch.setattr(AssetStore, "close", close_store)
     monkeypatch.setattr(DirectoryAssetBackend, "close", close_backend)
-    monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    workspace = Workspace.load(tmp_path, workspace_id="workspace")
 
-    with pytest.raises(AIError) as error:
-        await compose_runtime_components(Workspace.load(tmp_path, workspace_id="workspace"))
+    def fail_snapshot(_models: ModelRegistry) -> object:
+        raise RuntimeError("model snapshot failed")
 
-    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    monkeypatch.setattr(ModelRegistry, "snapshot", fail_snapshot)
+    with pytest.raises(RuntimeError, match="model snapshot failed"):
+        await compose_runtime_components(
+            workspace.workspace_id,
+            models=ModelRegistry.openai(model="gpt-test"),
+            state=RuntimeState.in_memory(),
+            capabilities=(CapabilityGroup.from_workspace(workspace),),
+        )
+
     assert closed == ["store", "backend"]
 
 
@@ -196,7 +204,7 @@ async def test_runtime_does_not_close_borrowed_workspace_store(tmp_path: Path) -
     await store.initialize()
     group = CapabilityGroup.from_store("workspace", store)
     components = await compose_runtime_components(
-        Workspace.load(tmp_path, workspace_id="workspace"),
+        "workspace",
         models=ModelRegistry.openai(model="gpt-test"),
         state=RuntimeState.in_memory(),
         capabilities=(group,),
@@ -319,9 +327,10 @@ async def test_runtime_persists_model_usage_through_history_views(
     workspace = runtime_usage_workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     ) as runtime:
         result = await runtime.agent("default").run(
             "hello",
