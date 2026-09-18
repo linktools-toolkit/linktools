@@ -53,6 +53,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
+    TaskBindingSnapshot,
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
@@ -224,7 +225,7 @@ class StoredUserInput:
     view: Mapping[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
-        if self.codec not in {"text", "user-content-v1"}:
+        if self.codec not in {"text", "user-content-v1", "task-input-v1"}:
             raise ValueError("stored user input codec is invalid")
         if not isinstance(self.payload, StoredPayload):
             raise TypeError("stored user input payload is invalid")
@@ -585,10 +586,10 @@ class ExecutionRecord:
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
-    mode: ExecutionMode
-    planning: bool
-    thinking: ThinkingValue
-    binding: AgentBindingSnapshot
+    mode: ExecutionMode | None
+    planning: bool | None
+    thinking: ThinkingValue | None
+    binding: AgentBindingSnapshot | TaskBindingSnapshot
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
@@ -599,16 +600,53 @@ class ExecutionRecord:
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
+    task_attempt: int = 0
+    task_deadline_at: datetime | None = None
+    task_next_attempt_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        mode = normalize_execution_mode(self.mode)
-        thinking = normalize_thinking(self.thinking)
-        if not isinstance(self.planning, bool):
-            raise TypeError("execution planning must be bool")
-        if mode == "plan" and not self.planning:
-            raise ValueError("plan mode requires planning")
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "thinking", thinking)
+        agent_binding = isinstance(self.binding, AgentBindingSnapshot)
+        task_binding = isinstance(self.binding, TaskBindingSnapshot)
+        if agent_binding == task_binding:
+            raise TypeError("execution binding snapshot is invalid")
+        if agent_binding:
+            mode = normalize_execution_mode(self.mode)
+            thinking = normalize_thinking(self.thinking)
+            if not isinstance(self.planning, bool):
+                raise TypeError("agent execution planning must be bool")
+            if mode == "plan" and not self.planning:
+                raise ValueError("plan mode requires planning")
+            if (
+                self.task_attempt != 0
+                or self.task_deadline_at is not None
+                or self.task_next_attempt_at is not None
+            ):
+                raise ValueError("agent execution cannot carry task attempt state")
+            object.__setattr__(self, "mode", mode)
+            object.__setattr__(self, "thinking", thinking)
+        else:
+            if self.mode is not None or self.planning is not None or self.thinking is not None:
+                raise ValueError("task execution cannot carry agent execution policy")
+            if (
+                self.session_id is not None
+                or self.memory_scope is not None
+                or self.conversation_step_run_id is not None
+                or self.parent_execution_id is not None
+                or self.parent_invocation_id is not None
+                or self.lineage_kind is not ExecutionLineageKind.RUN
+                or self.agent_run_sequence != 0
+            ):
+                raise ValueError("task execution carries agent-only state")
+            if (
+                isinstance(self.task_attempt, bool)
+                or not isinstance(self.task_attempt, int)
+                or self.task_attempt < 0
+                or self.task_attempt > self.binding.max_attempts
+            ):
+                raise ValueError("task execution attempt is invalid")
+            for value in (self.task_deadline_at, self.task_next_attempt_at):
+                if value is not None and value.tzinfo is None:
+                    raise ValueError("task execution timestamps must be timezone-aware")
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
         if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
             if (
@@ -622,8 +660,6 @@ class ExecutionRecord:
                 raise ValueError("subagent execution lineage is invalid")
         elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
             raise ValueError("non-subagent execution cannot carry parent lineage")
-        if not isinstance(self.binding, AgentBindingSnapshot):
-            raise TypeError("execution binding snapshot is invalid")
         if not isinstance(self.principal_id, str) or not self.principal_id:
             raise TypeError("execution principal id is invalid")
         if not isinstance(self.principal_kind, str) or not self.principal_kind:
@@ -645,8 +681,24 @@ class ExecutionRecord:
         return self.binding.binding_digest
 
     @property
-    def agent_id(self) -> str:
-        return self.binding.agent_spec.id
+    def binding_kind(self) -> str:
+        return "agent" if isinstance(self.binding, AgentBindingSnapshot) else "task"
+
+    @property
+    def agent_id(self) -> str | None:
+        return (
+            self.binding.agent_spec.id
+            if isinstance(self.binding, AgentBindingSnapshot)
+            else None
+        )
+
+    @property
+    def task_type(self) -> str | None:
+        return (
+            self.binding.task_type
+            if isinstance(self.binding, TaskBindingSnapshot)
+            else None
+        )
 
 
 @dataclass(frozen=True, slots=True)
