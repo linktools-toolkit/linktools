@@ -900,6 +900,87 @@ class DefaultExecutionService:
         )
         return _execution_view(updated)
 
+    async def defer_task_input(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        wait_id: str,
+    ) -> ExecutionView:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if (
+            not isinstance(current.binding, TaskBindingSnapshot)
+            or not isinstance(wait_id, str)
+            or not wait_id.strip()
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if current.status is ExecutionStatus.WAITING_DEFERRED:
+            return _execution_view(current)
+        if current.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        now = datetime.now(timezone.utc)
+        updated = await self._state.executions.transition_task_execution(
+            execution_id,
+            tenant_id=current.tenant_id,
+            expected_revision=current.revision,
+            expected_event_sequence=current.event_sequence,
+            expected_status=ExecutionStatus.STARTED,
+            next_status=ExecutionStatus.WAITING_DEFERRED,
+            task_attempt=current.task_attempt,
+            task_deadline_at=current.task_deadline_at,
+            task_next_attempt_at=None,
+            error_code=None,
+            safe_error_details={},
+            event_type=ExecutionEventType.EXTERNAL_REQUESTED.value,
+            payload={"wait_id": wait_id},
+            occurred_at=now,
+        )
+        return _execution_view(updated)
+
+    async def resume_task_not_applied(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionView:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if (
+            not isinstance(current.binding, TaskBindingSnapshot)
+            or current.status is not ExecutionStatus.RECOVERY_REQUIRED
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        now = datetime.now(timezone.utc)
+        if (
+            current.task_deadline_at is not None
+            and current.task_deadline_at <= now
+        ):
+            raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT)
+        updated = await self._state.executions.transition_task_execution(
+            execution_id,
+            tenant_id=current.tenant_id,
+            expected_revision=current.revision,
+            expected_event_sequence=current.event_sequence,
+            expected_status=ExecutionStatus.RECOVERY_REQUIRED,
+            next_status=ExecutionStatus.WAITING_RETRY,
+            task_attempt=current.task_attempt,
+            task_deadline_at=current.task_deadline_at,
+            task_next_attempt_at=now,
+            error_code=None,
+            safe_error_details={},
+            event_type=ExecutionEventType.EXECUTION_RESUMED.value,
+            payload={"reason": "task_effect_not_applied"},
+            occurred_at=now,
+        )
+        return _execution_view(updated)
+
     async def complete_task(
         self,
         execution_id: str,
@@ -916,7 +997,11 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if current.status is ExecutionStatus.SUCCEEDED:
             return await self.result(execution_id, principal=principal)
-        if current.status is not ExecutionStatus.STARTED:
+        if current.status not in {
+            ExecutionStatus.STARTED,
+            ExecutionStatus.WAITING_DEFERRED,
+            ExecutionStatus.RECOVERY_REQUIRED,
+        }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         normalized = normalize_json_value(output)
         payload = await self._store_task_output(
@@ -977,6 +1062,8 @@ class DefaultExecutionService:
         if current.status not in {
             ExecutionStatus.STARTED,
             ExecutionStatus.WAITING_RETRY,
+            ExecutionStatus.WAITING_DEFERRED,
+            ExecutionStatus.RECOVERY_REQUIRED,
         }:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         now = datetime.now(timezone.utc)
