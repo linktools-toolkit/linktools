@@ -953,6 +953,21 @@ class ExecutionService(Protocol):
         error_code: str,
     ) -> ExecutionView: ...
 
+    async def defer_task_input(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        wait_id: str,
+    ) -> ExecutionView: ...
+
+    async def resume_task_not_applied(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionView: ...
+
     async def complete_task(
         self,
         execution_id: str,
