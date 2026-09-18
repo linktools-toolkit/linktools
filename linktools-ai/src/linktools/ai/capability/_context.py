@@ -13,9 +13,8 @@ from ..core import (
     Principal,
     normalize_correlation,
     validate_memory_scope,
+    validate_persistence_namespace,
 )
-from ..workspace import Workspace
-
 AppT = TypeVar("AppT")
 
 
@@ -23,7 +22,7 @@ AppT = TypeVar("AppT")
 class AgentContext(Generic[AppT]):
     app: AppT
     principal: Principal
-    workspace: Workspace
+    namespace: str
     session_id: "str | None"
     execution_id: str
     session_metadata: Mapping[str, JsonValue]
@@ -33,8 +32,11 @@ class AgentContext(Generic[AppT]):
     def __post_init__(self) -> None:
         if not isinstance(self.principal, Principal):
             raise TypeError("principal must be Principal")
-        if not isinstance(self.workspace, Workspace):
-            raise TypeError("workspace must be Workspace")
+        object.__setattr__(
+            self,
+            "namespace",
+            validate_persistence_namespace(self.namespace),
+        )
         if self.session_id is not None and (
             not isinstance(self.session_id, str) or not self.session_id.strip()
         ):

@@ -14,9 +14,16 @@ from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import AssetKey, AssetStore
-from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
+from ..asset import (
+    AssetKey,
+    AssetPathAdapter,
+    AssetStore,
+    DirectoryAssetBackend,
+    PrefixAssetPathAdapter,
+)
+from ..core import DEFAULT_DISCOVERY_POLICY, ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
+from ..storage import StorageOverlay
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -30,9 +37,15 @@ from ..spec import (
     parse_mcp_tool_selector,
 )
 from ..task import TaskExpanderRef, TaskNodeHandler
+from ..workspace import Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
-from ._skill_source import AssetSkillResourceSource, SkillResourceSource, SkillSourceRef
+from ._skill_source import (
+    AssetSkillResourceSource,
+    LocalSkillResourceSource,
+    SkillResourceSource,
+    SkillSourceRef,
+)
 from ._task import TaskExpander
 from ._tool_semantic import (
     tool_semantic_metadata,
@@ -324,6 +337,8 @@ class CapabilityGroup(Generic[AppT]):
             raise ValueError("capability group id must be a non-empty string")
         self._id = group_id
         self._store: AssetStore | None = None
+        self._owned_store_factory: "Callable[[], AssetStore] | None" = None
+        self._workspace: Workspace | None = None
         self._skill_source: SkillResourceSource | None = None
         self._loaders: list[CapabilityLoader[AppT]] = []
         self._contributions: list[CapabilityContribution[AppT]] = []
@@ -353,9 +368,38 @@ class CapabilityGroup(Generic[AppT]):
         group._loaders.append(cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader()))
         return group
 
+    @classmethod
+    def from_workspace(
+        cls,
+        workspace: Workspace,
+        *,
+        group_id: str = "workspace",
+        discover_assets: bool = True,
+    ) -> "CapabilityGroup[AppT]":
+        if not isinstance(workspace, Workspace):
+            raise TypeError("workspace must be Workspace")
+        if not isinstance(discover_assets, bool):
+            raise TypeError("discover_assets must be bool")
+        group = cls(group_id)
+        group._workspace = workspace
+        if discover_assets:
+            group._owned_store_factory = lambda: _workspace_declaration_store(workspace)
+            group._skill_source = LocalSkillResourceSource(
+                group_id,
+                workspace.storage_root / "skills",
+            )
+            group._loaders.append(
+                cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader())
+            )
+        return group
+
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def workspace(self) -> "Workspace | None":
+        return self._workspace
 
     @property
     def skill_source(self) -> "SkillResourceSource | None":
@@ -520,25 +564,38 @@ class CapabilityGroup(Generic[AppT]):
         contributions = list(tuple(self._contributions))
         loaders = tuple(self._loaders)
         store = self._store
-        if store is not None:
-            if not store.ready:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            metadata = await store.metadata_snapshot()
-            entries = tuple(
-                CapabilityLoadEntry(
-                    info.key,
-                    info.etag,
-                    info.size,
-                    info.metadata,
+        owned_store = (
+            None if self._owned_store_factory is None else self._owned_store_factory()
+        )
+        if owned_store is not None:
+            await owned_store.initialize()
+            store = owned_store
+        try:
+            if store is not None:
+                if not store.ready:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                metadata = await store.metadata_snapshot()
+                entries = tuple(
+                    CapabilityLoadEntry(
+                        info.key,
+                        info.etag,
+                        info.size,
+                        info.metadata,
+                    )
+                    for info in metadata
                 )
-                for info in metadata
-            )
-            context = CapabilityLoadContext(self._id, store, entries)
-            for loader in loaders:
-                loaded = await loader.load(context)
-                if any(not isinstance(item, CapabilityContribution) for item in loaded):
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                contributions.extend(loaded)
+                context = CapabilityLoadContext(self._id, store, entries)
+                for loader in loaders:
+                    loaded = await loader.load(context)
+                    if any(
+                        not isinstance(item, CapabilityContribution)
+                        for item in loaded
+                    ):
+                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                    contributions.extend(loaded)
+        finally:
+            if owned_store is not None:
+                await owned_store.close()
         frozen = tuple(_freeze_contribution(item) for item in contributions)
         _validate_unique(frozen)
         generic = [item for item in frozen if item.kind == "capability"]
@@ -547,6 +604,42 @@ class CapabilityGroup(Generic[AppT]):
             key=lambda item: (item.kind, item.id, item.fingerprint),
         )
         return tuple((*declarations, *generic))
+
+
+class _WorkspaceDeclarationPathAdapter:
+    def __init__(self) -> None:
+        self._delegate = PrefixAssetPathAdapter(
+            {"agent": "agents", "skill": "skills", "mcp": "mcp"}
+        )
+
+    def validate(self, kinds: Sequence[str]) -> None:
+        self._delegate.validate(kinds)
+
+    def root_path(self, kind: str) -> str:
+        return self._delegate.root_path(kind)
+
+    def to_path(self, key: AssetKey) -> str:
+        return self._delegate.to_path(key)
+
+    def from_path(self, path: str) -> "AssetKey | None":
+        key = self._delegate.from_path(path)
+        if key is None or key.kind != "skill":
+            return key
+        if "/" not in key.id or key.id.endswith("/SKILL.md"):
+            return key
+        return None
+
+
+def _workspace_declaration_store(workspace: Workspace) -> AssetStore:
+    adapter: AssetPathAdapter = _WorkspaceDeclarationPathAdapter()
+    source = DirectoryAssetBackend(
+        str(workspace.storage_root),
+        path_adapter=adapter,
+        kinds=("agent", "skill", "mcp"),
+        follow_external_symlinks=True,
+        ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
+    )
+    return AssetStore(StorageOverlay(source))
 
 
 class _BuiltinDeclarationLoader:
