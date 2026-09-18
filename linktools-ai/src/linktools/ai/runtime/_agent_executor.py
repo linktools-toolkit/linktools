@@ -122,7 +122,7 @@ from ._compaction import RuntimeCompactionPolicy
 from ._harness import HarnessStepStoreAdapter
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
-from ._mcp import materialize_mcp_servers
+from ._mcp import materialize_mcp_capabilities
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
@@ -799,34 +799,22 @@ async def _materialize_agent(
             )
         )
     if definition.mcp_servers:
-        mcp_toolsets = await materialize_mcp_servers(
-            definition.mcp_servers,
-            definition.mcp_selector_policy,
-            principal=scope.context.principal,
-            execution=ResourceRef(
-                ResourceKind.EXECUTION,
-                scope.context.execution_id,
-                scope.context.principal.tenant_id,
-            ),
-            execution_root=scope.mcp_cwd,
-        )
-        for materialized in mcp_toolsets:
-            raw_toolsets.append(
-                RuntimeToolBoundaryToolset(
-                    (
-                        cast(
-                            "AbstractToolset[AgentContext[object]]",
-                            materialized.toolset,
-                        ),
-                    ),
-                    {},
-                    id="linktools.mcp",
-                    descriptor=materialized.descriptor,
-                    tool_operations=scope.tool_operations,
-                    tool_metrics=tool_metrics,
-                    background_tasks=scope.background_tasks,
-                )
+        capabilities.extend(
+            await materialize_mcp_capabilities(
+                definition.mcp_servers,
+                definition.mcp_selector_policy,
+                principal=scope.context.principal,
+                execution=ResourceRef(
+                    ResourceKind.EXECUTION,
+                    scope.context.execution_id,
+                    scope.context.principal.tenant_id,
+                ),
+                execution_root=scope.mcp_cwd,
+                tool_operations=scope.tool_operations,
+                tool_metrics=tool_metrics,
+                background_tasks=scope.background_tasks,
             )
+        )
     if business_tools:
         raw_business = FunctionToolset(business_tools, id="linktools.business")
         raw_toolsets.insert(
