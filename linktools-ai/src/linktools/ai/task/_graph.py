@@ -271,6 +271,7 @@ class TaskNodeView:
     error_code: "str | None"
     error_digest: "str | None"
     execution_id: "str | None" = None
+    next_attempt_at: "datetime | None" = None
 
     def __post_init__(self) -> None:
         if self.owner is not None:
@@ -284,6 +285,13 @@ class TaskNodeView:
             TaskStatus.RUNNING,
         } and self.execution_id is not None:
             raise ValueError("unbound task node state cannot carry an execution id")
+        if self.next_attempt_at is not None and (
+            self.status is not TaskStatus.READY
+            or self.next_attempt_at.tzinfo is None
+        ):
+            raise ValueError("task retry schedule is invalid")
+        if self.status is not TaskStatus.READY and self.next_attempt_at is not None:
+            raise ValueError("only ready task can carry a retry schedule")
         if self.status is TaskStatus.RECOVERY_REQUIRED and (
             self.owner is not None
             or self.lease_expires_at is not None
