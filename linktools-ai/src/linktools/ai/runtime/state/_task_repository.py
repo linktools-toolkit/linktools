@@ -1608,6 +1608,130 @@ class TaskRepositoryImpl(RepositoryBase):
                 ) from error
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
 
+    async def cancel_node(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> TaskGraphView:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if not isinstance(node_id, str) or not node_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        async def mutate(transaction: StateTransaction) -> TaskGraphView:
+            before = await self._event_state_in_transaction(transaction, graph_id)
+            if before is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            definitions = {node.node_id: node for node in before.graph.nodes}
+            definition = definitions.get(node_id)
+            current = next(
+                (node for node in before.node_states if node.node_id == node_id),
+                None,
+            )
+            if definition is None or current is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if current.execution_id != execution_id:
+                raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+            if current.status in _TERMINAL_TASK_STATUSES:
+                return before.graph
+            if current.status is TaskStatus.RECOVERY_REQUIRED:
+                return before.graph
+
+            if (
+                current.status is TaskStatus.RUNNING
+                and definition.effect == "non_replay_safe"
+            ):
+                value = replace(
+                    current,
+                    status=TaskStatus.RECOVERY_REQUIRED,
+                    owner=None,
+                    lease_expires_at=None,
+                    next_attempt_at=None,
+                    occupies_concurrency=False,
+                    result_digest=None,
+                    error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                    error_digest=canonical_sha256(
+                        {
+                            "graph_id": graph_id,
+                            "node_id": node_id,
+                            "code": ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                        }
+                    ),
+                )
+                next_nodes = tuple(
+                    value if node.node_id == node_id else node
+                    for node in before.node_states
+                )
+            else:
+                value = replace(
+                    current,
+                    status=TaskStatus.CANCELLED,
+                    owner=None,
+                    lease_expires_at=None,
+                    next_attempt_at=None,
+                    occupies_concurrency=False,
+                    result_digest=None,
+                    error_code=None,
+                    error_digest=None,
+                )
+                next_nodes = _reconciled_task_nodes(
+                    tuple(
+                        value if node.node_id == node_id else node
+                        for node in before.node_states
+                    )
+                )
+            return await self._apply_graph_transition(
+                transaction,
+                before,
+                graph_record,
+                next_nodes,
+                _isolated_graph_status(next_nodes),
+            )
+
+        try:
+            return await self._mutate_with_event_retry(mutate)
+        except AIError as error:
+            if error.code not in _COMMIT_READBACK_CODES:
+                raise
+            snapshot = await self.snapshot_graph(graph_id, tenant_id=tenant_id)
+            if snapshot is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            current = next(
+                (node for node in snapshot.node_states if node.node_id == node_id),
+                None,
+            )
+            if current is None or current.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if current.status in {
+                TaskStatus.CANCELLED,
+                TaskStatus.RECOVERY_REQUIRED,
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+            }:
+                return TaskGraphView(
+                    snapshot.graph_id,
+                    snapshot.status,
+                    snapshot.nodes,
+                )
+            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                raise AIError(
+                    ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                    safe_details={
+                        "phase": "task_node_cancel",
+                        "graph_id": graph_id,
+                        "node_id": node_id,
+                    },
+                ) from error
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)

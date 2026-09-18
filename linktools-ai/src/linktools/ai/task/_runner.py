@@ -76,6 +76,7 @@ class TaskNodeInvocation:
     principal: Principal
     correlation: CorrelationData
     dependency_results: "Mapping[str, TaskDependencyResult]"
+    execution_id: "str | None" = None
 
 
 class TaskNodeRunner(Protocol):

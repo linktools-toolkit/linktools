@@ -1077,15 +1077,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         principal = invocation.principal
         correlation = invocation.correlation
         dependency_results = invocation.dependency_results
-        task_type, task_version, body = _parse_node(node, request=False)
-        handler = self._handler(task_type, task_version, request=False)
-        dependencies = await self._dependencies(
-            node,
-            dependency_results=dependency_results,
-            principal=principal,
-            graph_id=graph_id,
-        )
-        if handler is self._agent:
+        execution_id = invocation.execution_id
+        if execution_id is None:
             snapshot = await self._task_state.snapshot_graph(
                 graph_id,
                 tenant_id=principal.tenant_id,
@@ -1102,33 +1095,57 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             )
             if state is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution_id = state.execution_id
+        if execution_id is None:
+            return
+
+        task_type, task_version, body = _parse_node(node, request=False)
+        handler = self._handler(task_type, task_version, request=False)
+        dependencies = await self._dependencies(
+            node,
+            dependency_results=dependency_results,
+            principal=principal,
+            graph_id=graph_id,
+        )
+        if handler is self._agent:
             await self._agent.cancel_node(
                 node,
                 graph_id=graph_id,
                 principal=principal,
                 correlation=correlation,
                 dependencies=dependencies,
-                durable_execution_id=state.execution_id,
+                durable_execution_id=execution_id,
             )
             return
-        task_context = TaskNodeContext(
+
+        context = TaskNodeContext(
             self._app,
             principal,
             graph_id,
             node.node_id,
-            _task_execution_id(graph_id, node.node_id, principal.tenant_id),
+            execution_id,
             body,
             dependencies,
-            _custom_idempotency_key(graph_id, node, principal, dependencies),
+            _custom_idempotency_key(
+                graph_id,
+                node,
+                principal,
+                dependencies,
+            ),
             correlation,
             artifacts=self._artifact_publisher(
                 principal,
                 graph_id,
                 node.node_id,
-                _task_execution_id(graph_id, node.node_id, principal.tenant_id),
+                execution_id,
             ),
         )
-        await handler.cancel(task_context)
+        await handler.cancel(context)
+        await self._execution.cancel_task(
+            execution_id,
+            principal=principal,
+        )
+
 
     async def get_result_record(
         self,

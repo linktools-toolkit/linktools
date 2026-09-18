@@ -945,31 +945,52 @@ class Runtime(Generic[AppT]):
         idempotency_key: str | None,
         force: bool,
     ) -> CancelExecutionResult:
-        await self.graph.cancel(
-            graph_id,
-            CancelGraphRequest(
-                principal,
-                idempotency_key or secrets.token_urlsafe(32),
-                force,
-            ),
-        )
-        snapshot = await self.graph.snapshot(graph_id, principal=principal)
-        node = next(
-            (value for value in snapshot.node_states if value.node_id == node_id),
-            None,
-        )
-        if node is None or node.execution_id != execution_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _logger.info(
-            "task execution cancel settled: graph=%s node=%s status=%s",
-            graph_id,
-            node_id,
-            node.status.value,
-        )
-        return CancelExecutionResult(
+        view = await self.execution.inspect(
             execution_id,
-            node.status is TaskStatus.CANCELLED,
+            principal=principal,
         )
+        key = idempotency_key or secrets.token_urlsafe(32)
+        try:
+            if view.binding_kind == "task":
+                cancelled = await self.execution.cancel_task(
+                    execution_id,
+                    principal=principal,
+                )
+            else:
+                cancelled = await self.execution.cancel(
+                    execution_id,
+                    CancelExecutionRequest(
+                        principal,
+                        key,
+                        force,
+                    ),
+                )
+        except AIError as error:
+            if error.code is ErrorCode.TASK_EFFECT_UNKNOWN:
+                await self.graph.cancel_node(
+                    graph_id,
+                    node_id,
+                    execution_id,
+                    CancelGraphRequest(
+                        principal,
+                        key,
+                        force,
+                    ),
+                )
+            raise
+
+        if cancelled.cancelled:
+            await self.graph.cancel_node(
+                graph_id,
+                node_id,
+                execution_id,
+                CancelGraphRequest(
+                    principal,
+                    key,
+                    force,
+                ),
+            )
+        return cancelled
 
 
     async def _admit_graph(

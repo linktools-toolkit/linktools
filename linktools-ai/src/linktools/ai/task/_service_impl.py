@@ -166,6 +166,15 @@ class _TaskRepository(Protocol):
         tenant_id: str,
     ) -> TaskGraphView: ...
 
+    async def cancel_node(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> TaskGraphView: ...
+
     async def list_nodes(
         self,
         graph_id: str,
@@ -1303,6 +1312,59 @@ class DefaultTaskGraphService(TaskGraphService):
                 ErrorCode.TASK_WAIT_TIMEOUT,
                 safe_details={"graph_id": graph_id},
             ) from error
+
+    async def cancel_node(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        request: CancelGraphRequest,
+    ) -> TaskGraphView:
+        tenant_id = request.principal.tenant_id
+        header = await self._persistence.tasks.get_header(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(
+            request.principal,
+            AuthorizationAction.TASK_CANCEL,
+            header,
+        )
+        view = await self._persistence.tasks.cancel_node(
+            graph_id,
+            node_id,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+        )
+        snapshot = await self._persistence.tasks.snapshot_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        if state is None or state.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if state.status is TaskStatus.CANCELLED and self._launcher is not None:
+            admission = await self._persistence.admissions.get(
+                graph_id,
+                tenant_id=tenant_id,
+            )
+            if admission is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._launcher.cancel_node(
+                admission.launch(),
+                node_id,
+                execution_id,
+            )
+        if _terminal(view.status):
+            await self._observe_metric_history(view, tenant_id=tenant_id)
+        return view
 
     async def cancel(
         self,

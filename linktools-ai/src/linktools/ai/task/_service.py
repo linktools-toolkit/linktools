@@ -118,6 +118,14 @@ class TaskGraphService(TaskGraphQueryService, Protocol):
         request: CancelGraphRequest,
     ) -> TaskGraphView: ...
 
+    async def cancel_node(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        request: CancelGraphRequest,
+    ) -> TaskGraphView: ...
+
     async def preflight_close(self) -> None: ...
 
 
@@ -125,6 +133,13 @@ class TaskGraphLauncher(Protocol):
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle: ...
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView: ...
+
+    async def cancel_node(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+    ) -> TaskGraphView: ...
 
 
 __all__ = [

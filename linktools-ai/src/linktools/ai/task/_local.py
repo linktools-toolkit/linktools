@@ -204,6 +204,7 @@ class _GraphRun:
     request: TaskGraphLaunch
     owner: str
     task: "asyncio.Task[None] | None" = None
+    inflight: dict[str, "_InflightNode"] = field(default_factory=dict)
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     generation: int = 0
     observation_backoff: float = 1.0
@@ -374,6 +375,66 @@ class LocalTaskGraphLauncher:
             f"local:{key[0]}:{key[1]}",
         )
 
+    async def cancel_node(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+    ) -> TaskGraphView:
+        tenant_id = launch.principal.tenant_id
+        graph_id = launch.graph_id
+        snapshot = await self._repository.snapshot_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        if (
+            node is None
+            or state is None
+            or state.execution_id != execution_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if state.status is TaskStatus.CANCELLED:
+            await self._runner.cancel(
+                TaskNodeInvocation(
+                    node,
+                    graph_id,
+                    launch.principal,
+                    launch.correlation,
+                    await self._dependency_results(
+                        graph_id,
+                        node,
+                        tenant_id=tenant_id,
+                    ),
+                    execution_id,
+                )
+            )
+        key = (tenant_id, graph_id)
+        async with self._lock:
+            run = self._graphs.get(key)
+            inflight = None if run is None else run.inflight.pop(node_id, None)
+        if inflight is not None and not inflight.task.done():
+            inflight.task.cancel()
+            await asyncio.gather(inflight.task, return_exceptions=True)
+        if run is not None:
+            await self._notify(run)
+        view = await self._repository.get_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return view
+
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         graph_id = launch.graph_id
         tenant_id = launch.principal.tenant_id
@@ -412,6 +473,7 @@ class LocalTaskGraphLauncher:
                         await self._dependency_results(
                             graph_id, node, tenant_id=tenant_id
                         ),
+                        state.execution_id,
                     )
                 )
             except asyncio.CancelledError:
@@ -532,7 +594,7 @@ class LocalTaskGraphLauncher:
     async def _run_graph(self, run: _GraphRun) -> None:
         request = run.request
         tenant_id = request.principal.tenant_id
-        inflight: dict[str, _InflightNode] = {}
+        inflight = run.inflight
         observed_fingerprint: str | None = None
         try:
             while not run.closed:
