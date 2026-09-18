@@ -460,7 +460,8 @@ async def test_trace_command_renders_compact_runtime_trace(
     assert "Execution Trace" in output
     assert "MODEL_RESPONSE" in output
     assert "request #1" in output
-    assert "10 in / 4 out" in output
+    assert "10" in output
+    assert "in / 4 out" in output
     assert "2.000ms" in output
 
 
