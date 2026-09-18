@@ -8,6 +8,7 @@ from datetime import datetime
 from linktools.core import environ
 from ...core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, JsonValue, Page, ResourceKind
 from ...errors import AIError, ErrorCode
+from ...task import TaskBindingSnapshot
 from ._contracts import ExecutionCandidate, ExecutionCandidatePage, ExecutionCancelRequestCommit, ExecutionEventAppend, ExecutionEventRecord, ExecutionHistoryHeadRecord, ExecutionHistorySealRecord, ExecutionHistoryState, ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord
 from ._plan import RuntimeDomain
 from ._store import FactQuery, RecordQuery, RecordReplacement, StateStore, StateTransaction, StoredFact, StoredRecord, operation_key, stream_digest
