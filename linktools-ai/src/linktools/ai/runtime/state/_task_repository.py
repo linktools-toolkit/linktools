@@ -53,12 +53,16 @@ from ._store import (
 )
 
 from ._task_events import (
+    _TaskEventAppendConflict,
+    _TaskEventDraft,
     _TaskEventState,
     _append_task_events,
     _decode_task_event,
     _guard_task_event_owner,
     _task_completion_event_drafts,
+    _task_event_stream,
     _task_graph_event_drafts,
+    _task_node_event_drafts,
 )
 from ._task_state import (
     _effective_graph_status,

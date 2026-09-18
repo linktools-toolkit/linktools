@@ -32,8 +32,10 @@ from ._codec import (
 )
 from ._contracts import (
     ContextProjection,
+    ConversationHistoryRepository,
     ExecutionHistoryHeadRecord,
     ExecutionHistoryState,
+    ExecutionRepository,
     ExecutionRunSealHead,
     HistoryQuality,
     InlineContextBlock,
