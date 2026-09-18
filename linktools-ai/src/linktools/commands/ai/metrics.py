@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`lt ai metrics`: inspect local Runtime metrics."""
+"""\`lt ai metrics\`: inspect local Runtime metrics."""
 
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
+
+from rich import get_console
+from rich.panel import Panel
+from rich.table import Table
 
 from linktools.ai.observe import (
     MetricPoint,
@@ -88,24 +92,35 @@ async def _query_summary(
 
 
 def _emit_summary(values: tuple[tuple[str, str, MetricQueryResult], ...]) -> None:
-    print("Last 24 hours")
-    width = max(len(label) for label, _, _ in values)
+    table = Table(title="AI Metrics · Last 24 hours", box=None)
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_column("Key", style="dim")
     for label, metric, result in values:
         point = _single_point(result)
-        print(f"{label:<{width}}  {_format_value(metric, result.unit, point.value)}")
+        table.add_row(
+            label,
+            _format_value(metric, result.unit, point.value),
+            metric,
+        )
+    get_console().print(table)
 
 
 def _emit_metric(result: MetricQueryResult) -> None:
     point = _single_point(result)
-    print(f"Metric:      {result.metric}")
-    print(f"Aggregation: {result.aggregation.value}")
-    print(f"Unit:        {result.unit}")
-    print(
-        "Window:      "
-        f"{result.window_start.isoformat()} .. {result.window_end.isoformat()}"
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Metric", result.metric)
+    table.add_row("Aggregation", result.aggregation.value)
+    table.add_row("Unit", result.unit)
+    table.add_row(
+        "Window",
+        f"{result.window_start.isoformat()} .. {result.window_end.isoformat()}",
     )
-    print(f"Value:       {_format_value(result.metric, result.unit, point.value)}")
-    print(f"Samples:     {point.sample_count}")
+    table.add_row("Value", _format_value(result.metric, result.unit, point.value))
+    table.add_row("Samples", f"{point.sample_count:,}")
+    get_console().print(Panel(table, title="AI Metric", expand=False))
 
 
 def _single_point(result: MetricQueryResult) -> MetricPoint:

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`ai run`: execute one workspace Agent through Runtime."""
+"""\`ai run\`: execute one workspace Agent through Runtime."""
 
 import asyncio
 import json
-import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from rich import get_console
+from rich.console import Console
+from rich.text import Text
 
 from linktools.cli import BaseCommand, CommandError
 from linktools.cli.argparse import ConfigAction
@@ -121,10 +124,14 @@ async def _emit_result(
 
 
 async def _stream_result(execution: "Execution[object]") -> int:
+    console = get_console()
+    event_console = Console(stderr=True)
     status = "UNKNOWN"
     error_code: object = None
     safe_details: object = {}
     succeeded = False
+    wrote_text = False
+
     async for item in execution.watch():
         if item.depth != 0:
             continue
@@ -132,14 +139,19 @@ async def _stream_result(execution: "Execution[object]") -> int:
         if event.event_type == ExecutionDeltaType.ASSISTANT_TEXT_DELTA.value:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
             if isinstance(text, str):
-                sys.stdout.write(text)
-                sys.stdout.flush()
+                console.print(Text(text), end="", soft_wrap=True)
+                wrote_text = True
         elif event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
-            _write_stderr("[thinking] " + _payload_text(event.payload))
+            _emit_event(event_console, "thinking", _payload_text(event.payload), "cyan")
         elif event.event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
-            _write_stderr("[tool] " + _payload_text(event.payload))
+            _emit_event(event_console, "tool", _tool_event_text(event.payload), "yellow")
         elif event.event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
-            _write_stderr("[tool] finished " + _payload_text(event.payload))
+            _emit_event(
+                event_console,
+                "tool",
+                _tool_event_text(event.payload, finished=True),
+                "green",
+            )
         elif event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value:
             succeeded = True
             status = ExecutionStatus.SUCCEEDED.value
@@ -151,13 +163,42 @@ async def _stream_result(execution: "Execution[object]") -> int:
             if isinstance(event.payload, dict):
                 error_code = event.payload.get("error_code")
                 safe_details = event.payload.get("safe_error_details", {})
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+
+    if wrote_text:
+        console.print()
     if not succeeded:
         raise CommandError(
             _failure_message(execution.execution_id, status, error_code, safe_details)
         )
+
+    summary = Text()
+    summary.append("✓ ", style="green")
+    summary.append("SUCCEEDED", style="bold green")
+    summary.append("  ")
+    summary.append(execution.execution_id, style="dim")
+    event_console.print(summary)
     return 0
+
+
+def _emit_event(console: Console, label: str, value: str, style: str) -> None:
+    line = Text()
+    line.append(f"{label:<8}", style=f"bold {style}")
+    line.append(value or "-", style="dim")
+    console.print(line)
+
+
+def _tool_event_text(payload: object, *, finished: bool = False) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    name = payload.get("tool_name")
+    call_id = payload.get("call_id")
+    status = payload.get("status")
+    parts = [str(name)] if isinstance(name, str) else []
+    if finished and status is not None:
+        parts.append(str(status))
+    if isinstance(call_id, str) and call_id:
+        parts.append(f"#{call_id}")
+    return " · ".join(parts)
 
 
 def _raise_for_failure(result: ExecutionResult) -> None:
@@ -226,11 +267,6 @@ def _payload_text(payload: object) -> str:
     if isinstance(payload.get("tool_name"), str):
         return payload["tool_name"]
     return ""
-
-
-def _write_stderr(value: str) -> None:
-    sys.stderr.write(value + "\n")
-    sys.stderr.flush()
 
 
 command = Command()
