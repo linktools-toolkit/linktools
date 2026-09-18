@@ -4,6 +4,7 @@
 
 import asyncio
 import secrets
+from dataclasses import replace
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, overload
@@ -56,6 +57,7 @@ from ..task import (
     TaskGraphResult,
     TaskGraphRunEvent,
     TaskGraphService,
+    TaskResultRef,
     TaskNode,
     TaskExpanderRef,
 )
@@ -366,11 +368,62 @@ class Runtime(Generic[AppT]):
             return RuntimeMetricFlushResult(True, _disabled_metric_status())
         return await control.flush(timeout_seconds=timeout_seconds)
 
-    def agent(self, agent_id: str = "default") -> "Agent[AppT]":
-        """Resolve one frozen root Agent by id."""
+    def agent(
+        self,
+        agent_id: str = "default",
+        *,
+        model: "str | None" = None,
+        system_prompt: "str | None" = None,
+        instructions: "Sequence[str] | None" = None,
+        allow_tools: "Sequence[str] | None" = None,
+        allow_skills: "Sequence[str] | None" = None,
+    ) -> "Agent[AppT]":
+        """Resolve one root Agent, optionally deriving narrower call semantics."""
         self._ensure_open()
         validate_agent_id(agent_id)
-        definition = self._catalog.root_definition(agent_id)
+        root = self._catalog.root_definition(agent_id)
+        if all(
+            value is None
+            for value in (
+                model,
+                system_prompt,
+                instructions,
+                allow_tools,
+                allow_skills,
+            )
+        ):
+            return Agent(self, root.spec.id, root.digest)
+        changes: dict[str, object] = {}
+        if model is not None:
+            changes["model"] = model
+        if system_prompt is not None:
+            changes["system_prompt"] = system_prompt
+        if instructions is not None:
+            changes["instructions"] = tuple(instructions)
+        if allow_tools is not None:
+            changes["allow_tools"] = tuple(allow_tools)
+        if allow_skills is not None:
+            changes["allow_skills"] = tuple(allow_skills)
+        try:
+            spec = replace(root.spec, **changes)
+            derived = self._compiler.compile(spec)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        root_tools = {
+            (item.kind, item.id)
+            for item in (*root.selected_tools, *root.selected_mcp)
+        }
+        derived_tools = {
+            (item.kind, item.id)
+            for item in (*derived.selected_tools, *derived.selected_mcp)
+        }
+        if not derived_tools.issubset(root_tools):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if not {
+            item.id for item in derived.selected_skills
+        }.issubset({item.id for item in root.selected_skills}):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        definition = self._catalog.register_definition(derived)
         return Agent(self, definition.spec.id, definition.digest)
 
     def _definition(self, agent_digest: str) -> AgentDefinition:
@@ -706,6 +759,10 @@ class Runtime(Generic[AppT]):
         planning: "bool | None",
         thinking: "ThinkingValue | None",
         expander: "TaskExpanderRef | None",
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
@@ -720,6 +777,10 @@ class Runtime(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
