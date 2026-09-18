@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.capability import ToolCallFailed
+from linktools.ai.capability import CapabilityGroup, ToolCallFailed
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -223,9 +223,10 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
     )
     try:
         async with Runtime.open(
-            workspace,
+            workspace.workspace_id,
             models=_DiagnosticModels(),  # type: ignore[arg-type]
             state=reopened,
+            capabilities=(CapabilityGroup.from_workspace(workspace),),
         ) as runtime:
             result = await runtime.execution.result(
                 started.execution_id,
