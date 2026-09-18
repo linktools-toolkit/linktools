@@ -295,6 +295,14 @@ class RuntimeSnapshot:
         if replace_policy == "same" and current is not None:
             if current.get("snapshot_digest") != ref.digest:
                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            inspection = await cls.inspect_target(
+                root,
+                ref,
+                object_store=object_store,
+                limits=limits,
+            )
+            if inspection.status != "matching":
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
             return _restored_runtime(root, current)
         if replace_policy == "replace" and (
             expected_generation is None or exclusive is None
