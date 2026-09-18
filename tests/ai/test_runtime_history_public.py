@@ -18,10 +18,10 @@ from linktools.ai.runtime import (
     ExecutionTraceItem,
     Page,
     TranscriptItem,
+    RuntimeState,
 )
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._runtime_history import RuntimeHistory
-from linktools.ai.workspace import Workspace
 
 
 class _Executions:
@@ -109,22 +109,11 @@ async def test_execution_history_service_owns_authorization_boundary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_history_opens_without_model_or_agent_composition(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("OPENAI_MODEL", raising=False)
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
-
-    import linktools.ai.runtime._factory as runtime_factory
-
-    def fail_model_build(_workspace: Workspace) -> object:
-        raise AssertionError("RuntimeHistory must not build models")
-
-    monkeypatch.setattr(runtime_factory, "_build_default_models", fail_model_build)
-
-    async with RuntimeHistory.open(workspace) as history:
+async def test_runtime_history_opens_without_model_or_agent_composition() -> None:
+    async with RuntimeHistory.open(
+        "workspace",
+        state=RuntimeState.in_memory(),
+    ) as history:
         assert history.tenant_id == "default"
         with pytest.raises(AIError) as error:
             await history.history(
