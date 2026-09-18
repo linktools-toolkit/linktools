@@ -14,6 +14,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from linktools.ai.agent import AssistantTextOutput
 from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import SkillSourceRegistry
+from linktools.ai.core import PromptLimits
 from linktools.ai.runtime import _agent_executor as agent_executor
 from linktools.ai.runtime._agent_executor import AgentExecutor, _RunScope
 from linktools.ai.runtime._tool_return_codec import (
@@ -118,7 +119,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         output_binding=bind_output(),
     )
     context = SimpleNamespace(
-        workspace=SimpleNamespace(workspace_id="workspace"),
+        namespace="workspace",
         principal=SimpleNamespace(tenant_id="tenant"),
         execution_id="execution",
     )
@@ -132,6 +133,9 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
     scope = _RunScope(
         binding=binding,  # type: ignore[arg-type]
         context=context,  # type: ignore[arg-type]
+        workspace=None,
+        limits=PromptLimits(),
+        mcp_cwd="",
         user_prompt=None,
         history=[],
         conversation_id="conversation",

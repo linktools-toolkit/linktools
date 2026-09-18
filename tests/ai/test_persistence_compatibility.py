@@ -9,7 +9,7 @@ from typing import cast
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, SemanticPin, bind_output, restore_output
-from linktools.ai.capability import workspace_capabilities, workspace_tool_contributions
+from linktools.ai.capability import CapabilityGroup, workspace_capabilities
 from linktools.ai.core import IdempotencyStatus, JsonValue, OperationStatus, canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -24,6 +24,16 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.task import TaskNode
 from linktools.ai.workspace import DisabledSandbox, Workspace
 from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+
+def __workspace_tool_contributions(workspace: Workspace):
+    return tuple(
+        CapabilityGroup.from_workspace(
+            workspace,
+            discover_assets=False,
+        )._contributions
+    )
+
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures" / "persistence"
 
@@ -173,7 +183,7 @@ def test_generic_v1_envelope_round_trips_current_shape() -> None:
 
 
 def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
-    contribution = workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))[0]
+    contribution = _workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))[0]
     pin = SemanticPin(
         "tool",
         contribution.id,
@@ -190,7 +200,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
-    candidates = workspace_tool_contributions(workspace)
+    candidates = _workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",
         model="default",
