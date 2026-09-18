@@ -389,45 +389,6 @@ class CapabilityGroup(Generic[AppT]):
                 cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader())
             )
 
-    @classmethod
-    def from_store(
-        cls,
-        group_id: str,
-        store: AssetStore,
-        *,
-        skill_source: "SkillResourceSource | None" = None,
-    ) -> "CapabilityGroup[AppT]":
-        if not isinstance(store, AssetStore):
-            raise TypeError("store must be AssetStore")
-        if skill_source is not None and not isinstance(skill_source, SkillResourceSource):
-            raise TypeError("skill_source must implement SkillResourceSource")
-        source = (
-            AssetSkillResourceSource(group_id, store)
-            if skill_source is None
-            else skill_source
-        )
-        if source.id != group_id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return cls(group_id, assets=store, skill_source=source)
-
-    @classmethod
-    def from_workspace(
-        cls,
-        workspace: Workspace,
-        *,
-        group_id: str = "workspace",
-        discover_assets: bool = True,
-    ) -> "CapabilityGroup[AppT]":
-        if not isinstance(workspace, Workspace):
-            raise TypeError("workspace must be Workspace")
-        if not isinstance(discover_assets, bool):
-            raise TypeError("discover_assets must be bool")
-        return cls(
-            group_id,
-            workspace=workspace,
-            discover_workspace_assets=discover_assets,
-        )
-
     @property
     def id(self) -> str:
         return self._id
