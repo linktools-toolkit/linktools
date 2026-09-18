@@ -1865,7 +1865,6 @@ class TaskRepositoryImpl(RepositoryBase):
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
-        result_payload: StoredPayload | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
@@ -1899,8 +1898,6 @@ class TaskRepositoryImpl(RepositoryBase):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if any(not isinstance(node, TaskNode) for node in expanded):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if result_payload is not None and result_payload.digest != result_digest:
-            raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
 
         async def mutate(transaction: StateTransaction) -> TaskTerminalRecord:
             graph_key = self._graph_key(target_graph_id)
@@ -1945,6 +1942,7 @@ class TaskRepositoryImpl(RepositoryBase):
                     current_result.graph_id != target_graph_id
                     or current_result.node_id != target_node_id
                     or current_result.result_digest != node.result_digest
+                    or current_result.execution_id != node.execution_id
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if node.status in _TERMINAL_TASK_STATUSES:
@@ -1968,11 +1966,6 @@ class TaskRepositoryImpl(RepositoryBase):
                             target_node_id,
                             "source_has_no_expander",
                         )
-                if result_payload is not None:
-                    if current_result is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if current_result.payload != result_payload:
-                        raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
                 return TaskTerminalRecord(
                     target_node_id,
                     None if lease is None else lease.owner,
@@ -2093,15 +2086,13 @@ class TaskRepositoryImpl(RepositoryBase):
                 )
             if current_result is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result_to_insert = (
-                None
-                if result_payload is None
-                else TaskResultRecord(
-                    target_graph_id,
-                    target_node_id,
-                    result_digest,
-                    result_payload,
-                )
+            if resolved_execution_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result_to_insert = TaskResultRecord(
+                target_graph_id,
+                target_node_id,
+                result_digest,
+                resolved_execution_id,
             )
             if added:
                 await transaction.insert_records(
@@ -2125,16 +2116,15 @@ class TaskRepositoryImpl(RepositoryBase):
                         )
                     )
                 )
-            if result_to_insert is not None:
-                await transaction.insert_record(
-                    self._stored(
-                        "task_result",
-                        [target_graph_id, target_node_id],
-                        result_to_insert,
-                        scope=self._result_scope(target_graph_id),
-                        parent=self._result_parent(target_graph_id),
-                    )
+            await transaction.insert_record(
+                self._stored(
+                    "task_result",
+                    [target_graph_id, target_node_id],
+                    result_to_insert,
+                    scope=self._result_scope(target_graph_id),
+                    parent=self._result_parent(target_graph_id),
                 )
+            )
             await self._update_node_in_transaction(
                 transaction, node, source_value, node_record
             )
@@ -2199,7 +2189,6 @@ class TaskRepositoryImpl(RepositoryBase):
                 status=TaskStatus.SUCCEEDED,
                 execution_id=execution_id,
                 result_digest=result_digest,
-                result_payload=result_payload,
                 error_code=None,
                 error_digest=None,
                 conflict=error,
@@ -2413,7 +2402,6 @@ class TaskRepositoryImpl(RepositoryBase):
                 status=TaskStatus.FAILED,
                 execution_id=execution_id,
                 result_digest=None,
-                result_payload=None,
                 error_code=error_code,
                 error_digest=error_digest,
                 conflict=error,
@@ -2427,7 +2415,6 @@ class TaskRepositoryImpl(RepositoryBase):
         status: TaskStatus,
         execution_id: str | None,
         result_digest: str | None,
-        result_payload: StoredPayload | None,
         error_code: str | None,
         error_digest: str | None,
         conflict: AIError,
@@ -2452,11 +2439,8 @@ class TaskRepositoryImpl(RepositoryBase):
                 result = results.get(lease.node_id)
                 if result is not None and result.result_digest != current.result_digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from conflict
-                if result_payload is not None:
-                    if result is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from conflict
-                    if result.payload != result_payload:
-                        raise AIError(ErrorCode.TASK_RESULT_CONFLICT) from conflict
+                if result is None or result.execution_id != current.execution_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from conflict
             return TaskTerminalRecord(
                 lease.node_id,
                 lease.owner,
