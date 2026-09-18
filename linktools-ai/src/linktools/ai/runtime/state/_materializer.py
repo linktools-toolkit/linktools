@@ -44,7 +44,7 @@ from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_materializer import build_runtime_steps
 from ._steps import RuntimeStepStore
-from ._store import StateStore
+from ._store import StateStore, state_owner_digest
 from ._task_admission_repository import TaskAdmissionRepositoryImpl
 from ._task_repository import TaskRepositoryImpl
 
@@ -214,6 +214,11 @@ async def materialize_runtime_state(
                         context=context,
                         runtime_domain=domain,
                         group=group,
+                        owner_digest=state_owner_digest(
+                            namespace,
+                            tenant_id,
+                            domain.value,
+                        ),
                     )
                     await store.initialize()
                     group_stores.append(store)

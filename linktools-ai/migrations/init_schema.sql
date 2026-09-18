@@ -3,6 +3,7 @@
 
 CREATE TABLE ai_state_records (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
+    owner_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the persisted runtime record.',
     partition_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 partition for records of the same tenant, runtime domain, and record kind.',
     scope_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Canonical SHA-256 grouping key used by the record kind''s primary list query.',
@@ -22,21 +23,25 @@ CREATE TABLE ai_state_records (
     KEY ix_scope_digest_sort_key (scope_digest, sort_key(128)),
     KEY ix_scope_digest_state_sort_key (scope_digest, state, sort_key(128)),
     KEY ix_parent_digest_sort_key (parent_digest, sort_key(128)),
+    KEY ix_owner_digest (owner_digest),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current durable state for runtime and step resources persisted as versioned records.';
 
 CREATE TABLE ai_state_aliases (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
+    owner_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.',
     alias_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of a secondary unique runtime lookup key.',
     record_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record resolved by this alias.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_alias_digest (alias_digest),
-    KEY ix_record_key_digest (record_key_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+    KEY ix_record_key_digest (record_key_digest), KEY ix_owner_digest (owner_digest),
+    KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Secondary unique lookup identities that resolve to canonical runtime records.';
 
 CREATE TABLE ai_state_facts (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
+    owner_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.',
     stream_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the append-only fact stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the fact within its stream.',
     owner_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the runtime record that owns this fact.',
@@ -48,20 +53,24 @@ CREATE TABLE ai_state_facts (
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_stream_digest_sequence (stream_digest, sequence),
     KEY ix_owner_key_digest (owner_key_digest), KEY ix_stream_digest_subject_digest_sequence (stream_digest, subject_digest, sequence),
+    KEY ix_owner_digest (owner_digest),
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable ordered runtime facts including events, snapshots, and effects.';
 
 CREATE TABLE ai_state_sequences (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
+    owner_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the monotonic sequence counter.',
     value BIGINT NOT NULL COMMENT 'Last committed value allocated by the sequence.',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
-    PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+    PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), KEY ix_owner_digest (owner_digest),
+    KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Durable monotonic counters used to allocate ordered runtime sequence numbers.';
 
 CREATE TABLE ai_state_operations (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
+    owner_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the durable operation.',
     stream_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the ordered operation stream.',
     sequence BIGINT NOT NULL COMMENT 'Strictly increasing position of the operation within its stream.',
@@ -71,7 +80,8 @@ CREATE TABLE ai_state_operations (
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
     PRIMARY KEY (id), UNIQUE KEY uk_key_digest (key_digest), UNIQUE KEY uk_stream_digest_sequence (stream_digest, sequence),
-    KEY ix_stream_digest_state_sequence (stream_digest, state, sequence), KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+    KEY ix_stream_digest_state_sequence (stream_digest, state, sequence), KEY ix_owner_digest (owner_digest),
+    KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Ordered durable operation ledger for replay, result recovery, status transition, and compaction.';
 
 CREATE TABLE ai_asset_heads (

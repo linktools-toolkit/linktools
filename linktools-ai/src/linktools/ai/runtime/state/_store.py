@@ -537,10 +537,12 @@ class StateTransaction(Protocol):
     ) -> tuple[StoredRecord, ...]: ...
     async def resolve_alias(self, alias: bytes) -> bytes | None: ...
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]: ...
     async def insert_alias(self, alias: StoredAlias) -> None: ...
     async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None: ...
     async def get_sequence(self, key: bytes) -> int: ...
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
+    async def scan_sequences(self) -> Mapping[bytes, int]: ...
     async def next_sequence(self, key: bytes) -> int: ...
     async def reserve_sequence(self, key: bytes, count: int) -> int: ...
     async def reserve_sequences(self, reservations: Mapping[bytes, int]) -> Mapping[bytes, int]: ...
@@ -615,11 +617,17 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
         return await self._transaction.resolve_aliases(aliases)
 
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
+        return await self._transaction.scan_aliases()
+
     async def get_sequence(self, key: bytes) -> int:
         return await self._transaction.get_sequence(key)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
         return await self._transaction.get_sequences(keys)
+
+    async def scan_sequences(self) -> Mapping[bytes, int]:
+        return await self._transaction.scan_sequences()
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         return await self._transaction.list_facts(query)
@@ -807,6 +815,10 @@ def partition_digest(namespace: str, tenant_id: str, runtime_domain: str, kind: 
     return _digest(["partition", namespace, tenant_id, runtime_domain, kind])
 
 
+def state_owner_digest(namespace: str, tenant_id: str, runtime_domain: str) -> bytes:
+    return _digest(["state_owner", namespace, tenant_id, runtime_domain])
+
+
 def scope_digest(
     namespace: str,
     tenant_id: str,
@@ -988,6 +1000,7 @@ __all__ = [
     "require_no_run_history_lock",
     "scope_digest",
     "sequence_key",
+    "state_owner_digest",
     "sortable_id",
     "sortable_identity",
     "sortable_timestamp",

@@ -296,6 +296,12 @@ class _MemoryTransaction:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
+        return tuple(
+            StoredAlias(alias, record_key)
+            for alias, record_key in sorted(self.aliases.items())
+        )
+
     async def insert_alias(self, alias: StoredAlias) -> None:
         await self.insert_aliases((alias,))
 
@@ -313,6 +319,9 @@ class _MemoryTransaction:
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
         return {key: self.sequences.get(key, 0) for key in keys}
+
+    async def scan_sequences(self) -> Mapping[bytes, int]:
+        return dict(sorted(self.sequences.items()))
 
     async def next_sequence(self, key: bytes) -> int:
         value = self.sequences.get(key, 0) + 1
