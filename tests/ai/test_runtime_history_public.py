@@ -8,8 +8,10 @@ import pytest
 
 from linktools.ai.core import (
     Principal,
+    PrincipalKind,
     ResourceKind,
     ResourceRef,
+    SessionStatus,
     TenantAuthorizationPolicy,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -121,3 +123,135 @@ async def test_runtime_history_opens_without_model_or_agent_composition() -> Non
                 principal=Principal("caller", "default", "service"),
             )
         assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+class _Sessions:
+    def __init__(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self.records = (
+            SimpleNamespace(
+                session_id="older",
+                agent_id="default",
+                status=SessionStatus.OPEN,
+                revision=1,
+                cwd=".",
+                active_execution_id=None,
+                history_quality="complete",
+                metadata={},
+                created_at=base,
+                updated_at=base,
+                tenant_id="tenant",
+                owner_principal_id="runtime",
+            ),
+            SimpleNamespace(
+                session_id="newer",
+                agent_id="auditor",
+                status=SessionStatus.OPEN,
+                revision=3,
+                cwd=None,
+                active_execution_id="execution",
+                history_quality="complete",
+                metadata={},
+                created_at=base + timedelta(minutes=1),
+                updated_at=base + timedelta(minutes=2),
+                tenant_id="tenant",
+                owner_principal_id="runtime",
+            ),
+        )
+
+    async def list_page(
+        self,
+        *,
+        tenant_id: str,
+        owner_principal_id: str | None,
+        cursor: str | None,
+        limit: int,
+        snapshot: int | None = None,
+    ) -> tuple[int, Page[object]]:
+        del limit
+        values = tuple(
+            record
+            for record in self.records
+            if record.tenant_id == tenant_id
+            and (
+                owner_principal_id is None
+                or record.owner_principal_id == owner_principal_id
+            )
+        )
+        start = 0 if cursor is None else int(cursor)
+        end = min(len(values), start + 1)
+        next_cursor = None if end == len(values) else str(end)
+        return (
+            1 if snapshot is None else snapshot,
+            Page(values[start:end], next_cursor),
+        )
+
+    async def get_header(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None:
+        record = next(
+            (
+                value
+                for value in self.records
+                if value.session_id == session_id and value.tenant_id == tenant_id
+            ),
+            None,
+        )
+        if record is None:
+            return None
+        return ResourceRef(
+            ResourceKind.SESSION,
+            record.session_id,
+            record.tenant_id,
+            record.owner_principal_id,
+        )
+
+    async def get(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+    ) -> object | None:
+        return next(
+            (
+                value
+                for value in self.records
+                if value.session_id == session_id and value.tenant_id == tenant_id
+            ),
+            None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_history_projects_owned_sessions_without_runtime_open() -> None:
+    sessions = _Sessions()
+    history = RuntimeHistory(
+        SimpleNamespace(),
+        tenant_id="tenant",
+        sessions=sessions,  # type: ignore[arg-type]
+        authorization=TenantAuthorizationPolicy("tenant"),
+    )
+    principal = Principal(
+        "runtime",
+        "tenant",
+        PrincipalKind.LOCAL_TRUSTED.value,
+    )
+
+    recent = await history.recent_sessions(principal=principal, limit=20)
+    selected = await history.inspect_session("newer", principal=principal)
+
+    assert [item.session_id for item in recent] == ["newer", "older"]
+    assert selected.agent_id == "auditor"
+    assert selected.active_execution_ids == ("execution",)
+
+    with pytest.raises(AIError) as denied:
+        await history.inspect_session(
+            "newer",
+            principal=Principal("other", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
+        )
+    assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED

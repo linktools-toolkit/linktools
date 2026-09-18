@@ -285,7 +285,6 @@ def _prompt_architecture_tree(interaction: ModelInteractionItem) -> Tree:
     parameters = request.get("parameters")
     parameter_map = parameters if isinstance(parameters, Mapping) else {}
 
-    standing = _sequence(request.get("instructions"))
     instruction_parts = tuple(
         item
         for item in _sequence(parameter_map.get("instruction_parts"))
@@ -313,31 +312,37 @@ def _prompt_architecture_tree(interaction: ModelInteractionItem) -> Tree:
     )
     root.add(
         _layer_text(
-            "Standing system",
-            _count_size_summary(standing),
+            "System Prompt",
+            _system_prompt_summary(messages),
         )
     )
     root.add(
         _layer_text(
-            "Fixed instruction prefix (F0/F1)",
+            "Fixed Instructions (F0/F1)",
             _instruction_parts_summary(fixed),
         )
     )
     root.add(
         _layer_text(
-            "Dynamic overlay (O)",
+            "Dynamic Instructions (O)",
             _instruction_parts_summary(dynamic),
         )
     )
     root.add(
         _layer_text(
-            "Conversation context",
-            _message_summary(messages),
+            "Conversation Context",
+            _conversation_summary(messages),
         )
     )
     root.add(
         _layer_text(
-            "Tool contract",
+            "Input Attachments",
+            _attachment_summary(messages),
+        )
+    )
+    root.add(
+        _layer_text(
+            "Tool Contract",
             (
                 f"{len(function_tools)} function · {len(native_tools)} native · "
                 f"{len(revealed)} revealed · {len(deferred)} deferred capabilities"
@@ -346,7 +351,7 @@ def _prompt_architecture_tree(interaction: ModelInteractionItem) -> Tree:
     )
     root.add(
         _layer_text(
-            "Output contract",
+            "Model Output Contract",
             _output_summary(parameter_map),
         )
     )
@@ -357,8 +362,15 @@ def _layer_text(label: str, detail: str) -> Text:
     return Text.assemble((label, "bold"), ("  "), (detail, "dim"))
 
 
-def _count_size_summary(values: Sequence[object]) -> str:
-    return f"{len(values)} item(s) · ~{_content_chars(values):,} chars"
+def _system_prompt_summary(messages: Sequence[Mapping[object, object]]) -> str:
+    parts = tuple(
+        part
+        for message in messages
+        for part in _message_parts(message)
+        if _part_kind(part) == "system-prompt"
+    )
+    chars = sum(_content_chars(part.get("content")) for part in parts)
+    return f"{len(parts)} part(s) · ~{chars:,} chars"
 
 
 def _instruction_parts_summary(values: Sequence[Mapping[object, object]]) -> str:
@@ -372,38 +384,100 @@ def _instruction_parts_summary(values: Sequence[Mapping[object, object]]) -> str
         source = " · sources: " + ", ".join(names[:6])
         if len(names) > 6:
             source += ", …"
-    return f"{len(values)} part(s) · ~{_content_chars(values):,} chars{source}"
+    chars = sum(_content_chars(item.get("content")) for item in values)
+    return f"{len(values)} part(s) · ~{chars:,} chars{source}"
 
 
-def _message_summary(messages: Sequence[Mapping[object, object]]) -> str:
-    parts = 0
+def _conversation_summary(messages: Sequence[Mapping[object, object]]) -> str:
+    message_count = 0
+    part_count = 0
     kinds: dict[str, int] = {}
     for message in messages:
-        message_parts = message.get("parts")
-        if not isinstance(message_parts, list):
+        parts = tuple(
+            part
+            for part in _message_parts(message)
+            if _part_kind(part) != "system-prompt"
+        )
+        if not parts:
             continue
-        parts += len(message_parts)
-        for part in message_parts:
-            if not isinstance(part, Mapping):
-                continue
-            kind = (
-                part.get("part_kind")
-                or part.get("kind")
-                or part.get("type")
-                or "other"
-            )
-            key = str(kind)
-            kinds[key] = kinds.get(key, 0) + 1
+        message_count += 1
+        part_count += len(parts)
+        for part in parts:
+            kind = _part_kind(part)
+            kinds[kind] = kinds.get(kind, 0) + 1
     detail = ", ".join(f"{name}={count}" for name, count in sorted(kinds.items()))
     suffix = "" if not detail else f" · {detail}"
-    return f"{len(messages)} message(s) · {parts} part(s){suffix}"
+    return f"{message_count} message(s) · {part_count} part(s){suffix}"
+
+
+def _attachment_summary(messages: Sequence[Mapping[object, object]]) -> str:
+    media_types: dict[str, int] = {}
+    for message in messages:
+        for part in _message_parts(message):
+            if _part_kind(part) != "user-prompt":
+                continue
+            _collect_binary_media_types(part.get("content"), media_types)
+    count = sum(media_types.values())
+    if count == 0:
+        return "0 attachments"
+    details = ", ".join(
+        media_type if amount == 1 else f"{media_type} ×{amount}"
+        for media_type, amount in sorted(media_types.items())
+    )
+    noun = "attachment" if count == 1 else "attachments"
+    return f"{count} {noun} · {details}"
+
+
+def _collect_binary_media_types(
+    value: object,
+    result: dict[str, int],
+) -> None:
+    if isinstance(value, Mapping):
+        media_type = value.get("media_type")
+        size = value.get("size")
+        digest = value.get("digest")
+        if (
+            isinstance(media_type, str)
+            and media_type
+            and isinstance(size, int)
+            and not isinstance(size, bool)
+            and size >= 0
+            and isinstance(digest, str)
+            and len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+        ):
+            result[media_type] = result.get(media_type, 0) + 1
+            return
+        for item in value.values():
+            _collect_binary_media_types(item, result)
+        return
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            _collect_binary_media_types(item, result)
+
+
+def _message_parts(
+    message: Mapping[object, object],
+) -> tuple[Mapping[object, object], ...]:
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return ()
+    return tuple(part for part in parts if isinstance(part, Mapping))
+
+
+def _part_kind(part: Mapping[object, object]) -> str:
+    value = part.get("part_kind") or part.get("kind") or part.get("type")
+    return str(value) if value else "other"
 
 
 def _output_summary(parameters: Mapping[object, object]) -> str:
     mode = parameters.get("output_mode")
     text = parameters.get("allow_text_output")
     image = parameters.get("allow_image_output")
-    return f"mode={mode or '-'} · text={_yes_no(text)} · image={_yes_no(image)}"
+    return (
+        f"mode={mode or '-'} · text output={_yes_no(text)} · "
+        f"image output={_yes_no(image)}"
+    )
 
 
 def _yes_no(value: object) -> str:

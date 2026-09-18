@@ -24,6 +24,7 @@ from linktools.ai.observe import MetricMeasurement, Metrics, Observation
 from linktools.ai.runtime import (
     ExecutionHistoryItem,
     ExecutionInfo,
+    ExecutionTraceItem,
     ModelInteractionItem,
     RuntimeHistory,
     TranscriptItem,
@@ -37,6 +38,9 @@ from linktools.commands.ai._common import (
 from linktools.commands.ai.history import Command as HistoryCommand, _emit_execution_detail
 from linktools.commands.ai.metrics import Command as MetricsCommand, _query_summary
 from linktools.commands.ai.run import Command as RunCommand
+from linktools.commands.ai.session import Command as SessionCommand, _emit_sessions
+from linktools.commands.ai.status import Command as StatusCommand
+from linktools.commands.ai.trace import Command as TraceCommand, _emit_trace
 
 
 def _info(
@@ -181,15 +185,26 @@ class _DetailHistory:
                     output_retry_index=None,
                     model={"name": "test"},
                     request={
-                        "instructions": ["standing system"],
+                        "instructions": ["duplicate instruction mirror"],
                         "messages": [
                             {
                                 "kind": "request",
                                 "parts": [
                                     {
+                                        "part_kind": "system-prompt",
+                                        "content": "real system prompt",
+                                    },
+                                    {
                                         "part_kind": "user-prompt",
-                                        "content": "hello",
-                                    }
+                                        "content": [
+                                            "hello",
+                                            {
+                                                "media_type": "image/png",
+                                                "size": 2048,
+                                                "digest": "a" * 64,
+                                            },
+                                        ],
+                                    },
                                 ],
                             }
                         ],
@@ -232,14 +247,29 @@ class _DetailHistory:
 def test_debug_commands_use_ai_group_and_minimal_names() -> None:
     assert HistoryCommand().name == "history"
     assert MetricsCommand().name == "metrics"
+    assert SessionCommand().name == "session"
+    assert StatusCommand().name == "status"
+    assert TraceCommand().name == "trace"
     history_actions = {
         action.dest for action in HistoryCommand().create_parser()._actions
     }
     metrics_actions = {
         action.dest for action in MetricsCommand().create_parser()._actions
     }
+    session_actions = {
+        action.dest for action in SessionCommand().create_parser()._actions
+    }
+    status_actions = {
+        action.dest for action in StatusCommand().create_parser()._actions
+    }
+    trace_actions = {
+        action.dest for action in TraceCommand().create_parser()._actions
+    }
     assert history_actions == {"help", "execution_id"}
     assert metrics_actions == {"help", "metric"}
+    assert session_actions == {"help", "session_id"}
+    assert status_actions == {"help"}
+    assert trace_actions == {"help", "execution_id"}
 
 
 def test_ai_run_no_longer_exposes_storage_selection() -> None:
@@ -350,15 +380,114 @@ async def test_history_detail_streams_pages_without_trace(
     assert '"page": 2' in output
     assert "hello" in output
     assert "Prompt Architecture" in output
-    assert "Fixed instruction prefix (F0/F1)" in output
-    assert "Dynamic overlay (O)" in output
+    assert "System Prompt" in output
+    assert "~18 chars" in output
+    assert "Fixed Instructions (F0/F1)" in output
+    assert "Dynamic Instructions (O)" in output
+    assert "Conversation Context" in output
+    assert "system-prompt=1" not in output
+    assert "Input Attachments" in output
+    assert "1 attachment" in output
+    assert "image/png" in output
     assert "workspace" in output
-    assert "standing system" not in output
+    assert "duplicate instruction mirror" not in output
+    assert "real system prompt" not in output
     assert "fixed workspace guidance" not in output
     assert "repository overlay" not in output
     assert "Model Requests" in output
     assert "Trace" not in output
     assert history.trace_called is False
+
+
+
+class _TraceHistory:
+    def __init__(self, execution: ExecutionInfo) -> None:
+        self.execution = execution
+
+    async def inspect_execution(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionInfo:
+        del principal
+        assert execution_id == self.execution.execution_id
+        return self.execution
+
+    async def trace(self, execution_id: str, **kwargs) -> Page[ExecutionTraceItem]:
+        assert execution_id == self.execution.execution_id
+        if kwargs["cursor"] is None:
+            return Page(
+                (
+                    ExecutionTraceItem(
+                        execution_id,
+                        1,
+                        {
+                            "kind": "MODEL_RESPONSE",
+                            "status": "SUCCEEDED",
+                            "step_index": 0,
+                            "segment_sequence": 1,
+                            "scope": "root",
+                            "request_sequence": 1,
+                            "purpose": "agent",
+                            "duration_ns": 2_000_000,
+                            "token_usage": {
+                                "input_tokens": 10,
+                                "output_tokens": 4,
+                                "cache_read_tokens": 0,
+                                "cache_write_tokens": 0,
+                            },
+                        },
+                    ),
+                ),
+                None,
+            )
+        raise AssertionError("unexpected trace cursor")
+
+
+@pytest.mark.asyncio
+async def test_trace_command_renders_compact_runtime_trace(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    execution = _info("exec-trace", datetime(2026, 1, 1, tzinfo=timezone.utc))
+    await _emit_trace(
+        _TraceHistory(execution),  # type: ignore[arg-type]
+        Principal("cli", "default", "service"),
+        execution.execution_id,
+    )
+
+    output = capsys.readouterr().out
+    assert "Execution Trace" in output
+    assert "MODEL_RESPONSE" in output
+    assert "request #1" in output
+    assert "10" in output
+    assert "in / 4 out" in output
+    assert "2.000ms" in output
+
+
+def test_session_command_renders_recent_sessions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from linktools.ai.runtime import SessionView
+    from linktools.ai.core import SessionStatus
+
+    value = SessionView(
+        "session",
+        "agent",
+        SessionStatus.OPEN,
+        2,
+        ".",
+        (),
+        {},
+        "complete",
+    )
+
+    _emit_sessions((value,))
+
+    output = capsys.readouterr().out
+    assert "Recent AI Sessions" in output
+    assert "session" in output
+    assert "agent" in output
 
 
 @pytest.mark.asyncio
