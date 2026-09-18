@@ -491,6 +491,7 @@ class CapabilityGroup(Generic[AppT]):
             "task_version": task_version,
             "effect": _task_effect(registered),
             "output": _task_output_contract(registered),
+            "reconcile": registered.reconcile is not None,
         }
         if any(
             value.kind == "task" and value.id == identity
