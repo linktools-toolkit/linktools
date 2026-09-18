@@ -149,8 +149,8 @@ async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed(
     v1 = TaskFunction[None]("example.echo", 1, _echo_task)
     v2 = TaskFunction[None]("example.echo", 2, _echo_task)
 
-    group.task(v1)
-    group.task(v2)
+    group.task(v1, effect="none")
+    group.task(v2, effect="none")
     frozen = await group.freeze()
 
     assert {(item.kind, item.id) for item in frozen} == {
@@ -226,7 +226,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     workspace = Workspace.load(workspace_root, workspace_id="workspace")
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler)
+    application.task(handler, effect="none")
     application.agent(
         "default",
         model="default",
@@ -283,7 +283,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     workspace = Workspace.load(workspace_root, workspace_id="workspace")
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler)
+    application.task(handler, effect="none")
     application.task_expander(_ApplicationGraphExpander(handler))
     application.task_expander(_AgentGraphExpander())
     application.agent(
@@ -593,7 +593,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.block", 1, blocking_task)
-    application.task(handler)
+    application.task(handler, effect="none")
     application.agent(
         "default",
         model="default",
