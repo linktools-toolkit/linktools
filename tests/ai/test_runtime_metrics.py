@@ -206,7 +206,7 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
         workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run(secret, timeout_seconds=10)
@@ -256,7 +256,7 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
         workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run("hello", timeout_seconds=10)
