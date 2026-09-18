@@ -180,7 +180,41 @@ class _DetailHistory:
                     step_index=0,
                     output_retry_index=None,
                     model={"name": "test"},
-                    request={"messages": []},
+                    request={
+                        "instructions": ["standing system"],
+                        "messages": [
+                            {
+                                "kind": "request",
+                                "parts": [
+                                    {
+                                        "part_kind": "user-prompt",
+                                        "content": "hello",
+                                    }
+                                ],
+                            }
+                        ],
+                        "parameters": {
+                            "instruction_parts": [
+                                {
+                                    "content": "fixed workspace guidance",
+                                    "name": "workspace",
+                                    "dynamic": False,
+                                },
+                                {
+                                    "content": "repository overlay",
+                                    "name": "repository",
+                                    "dynamic": True,
+                                },
+                            ],
+                            "function_tools": [{"name": "read_file"}],
+                            "native_tools": [],
+                            "revealed_tool_names": ["read_file"],
+                            "deferred_capability_ids": [],
+                            "output_mode": "text",
+                            "allow_text_output": True,
+                            "allow_image_output": False,
+                        },
+                    },
                     response={"text": "ok"},
                     status="SUCCEEDED",
                     error_code=None,
@@ -311,11 +345,15 @@ async def test_history_detail_streams_pages_without_trace(
     await _emit_execution_detail(history, principal, "exec-001")
 
     output = capsys.readouterr().out
-    assert '"error_code": "FAILED_CODE"' in output
+    assert "FAILED_CODE" in output
     assert '"page": 1' in output
     assert '"page": 2' in output
     assert "hello" in output
-    assert "Model interactions" in output
+    assert "Prompt Architecture" in output
+    assert "Fixed instruction prefix (F0/F1)" in output
+    assert "Dynamic overlay (O)" in output
+    assert "workspace" in output
+    assert "Model Requests" in output
     assert "Trace" not in output
     assert history.trace_called is False
 
@@ -393,3 +431,20 @@ async def test_metrics_summary_uses_one_window_and_builtin_metrics() -> None:
     assert values["linktools.model.cache_read_tokens"] == 3
     assert values["linktools.model.cache_write_tokens"] == 2
     assert values["linktools.tool.execution.count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_metrics_summary_renders_rich_table(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    metrics = Metrics.in_memory(namespace="workspace")
+    summary = await _query_summary(metrics)
+
+    from linktools.commands.ai.metrics import _emit_summary
+
+    _emit_summary(summary)
+
+    output = capsys.readouterr().out
+    assert "AI Metrics" in output
+    assert "Executions" in output
+    assert "Cache read tokens" in output
