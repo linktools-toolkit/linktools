@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
@@ -79,9 +80,10 @@ async def test_composed_runtime_ask_enters_approval_wait(
     )
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_ToolModels(),  # type: ignore[arg-type]
         state=state,
+        capabilities=(CapabilityGroup.from_workspace(workspace),),
     ) as runtime:
         execution = await runtime.agent("default").start("read a file")
         record = None

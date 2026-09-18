@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
@@ -100,9 +101,10 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     try:
         for workspace, state, label in cases:
             async with Runtime.open(
-                workspace,
+                workspace.workspace_id,
                 models=_Models(),  # type: ignore[arg-type]
                 state=state,
+                capabilities=(CapabilityGroup.from_workspace(workspace),),
                 metrics=metrics,
             ) as runtime:
                 result = await runtime.agent("default").run(

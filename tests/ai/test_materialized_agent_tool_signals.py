@@ -112,10 +112,10 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=_CompositionModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(application,),
+        capabilities=(CapabilityGroup.from_workspace(workspace), application),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run(

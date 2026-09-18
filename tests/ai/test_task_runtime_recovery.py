@@ -82,7 +82,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(
-        workspace,
+        workspace.workspace_id,
         models=ModelRegistry.openai(model="gpt-test"),
         state=reopened,
         capabilities=(capabilities,),
