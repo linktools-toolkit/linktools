@@ -48,6 +48,7 @@ class _ExecutionTreeWatcher(Protocol):
         *,
         principal: Principal,
         after_sequences: "Mapping[str, int] | None" = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -93,6 +94,7 @@ class Execution(Generic[AppT]):
             self.execution_id,
             principal=self._principal,
             after_sequences=after_sequences,
+            include_content=include_content,
         )
 
     async def cancel(
