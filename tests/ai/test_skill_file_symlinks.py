@@ -180,13 +180,9 @@ async def test_workspace_declaration_symlinks_freeze_valid_external_declarations
     store = _workspace_declaration_store(workspace)
     await store.initialize()
     try:
-        group: CapabilityGroup[object] = CapabilityGroup.from_store(
-            "workspace",
-            store,
-            skill_source=LocalSkillResourceSource(
+        group: CapabilityGroup[object] = CapabilityGroup("workspace", assets=store, skill_source=LocalSkillResourceSource(
                 "workspace",
-                storage_root / "skills",
-            ),
+                storage_root / "skills"),
         )
         frozen = await group.freeze()
         assert {(item.kind, item.id) for item in frozen} == {
