@@ -32,9 +32,11 @@ from ._repositories import (
     ExecutionRepositoryImpl,
     OperationLedgerRepository,
     ToolRepositoryImpl,
-    _append_operation,
-    _projected_record,
-    _replace_checked,
+)
+from ._repository_common import (
+    append_operation as _append_operation,
+    projected_record as _projected_record,
+    replace_checked as _replace_checked,
 )
 from ._store import StateGroupTransaction, StateStore, StoredFact, stream_digest
 

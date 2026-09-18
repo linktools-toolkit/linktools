@@ -14,15 +14,15 @@ from ._model_interaction_store import (
     ModelInteractionStateStepArchive,
 )
 from ._plan import RuntimeDomain
-from ._steps import (
+from ._step_archive import (
     CapturedExecutionProjection,
     ExecutionTerminalSealPlan,
-    RuntimeStepStore,
     _ProjectionOffset,
 )
+from ._steps import RuntimeStepStore
 
 if TYPE_CHECKING:
-    from ._steps import _RunProjectionFlight
+    from ._step_archive import _RunProjectionFlight
 
 
 class ModelInteractionRuntimeStepStore(RuntimeStepStore):

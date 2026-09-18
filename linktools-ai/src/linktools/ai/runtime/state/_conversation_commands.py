@@ -11,7 +11,7 @@ from ._contracts import (
     SessionRepository,
 )
 from ._step_contracts import ContinuableSnapshot, RunRecord
-from ._steps import StateStepArchive
+from ._step_archive import StateStepArchive
 from ._store import StateStore, StateTransaction
 
 

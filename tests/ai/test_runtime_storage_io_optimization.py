@@ -26,10 +26,8 @@ from linktools.ai.runtime.state._contracts import (
     TranscriptHeadRecord,
     TranscriptSeekDimension,
 )
-from linktools.ai.runtime.state._filesystem import (
-    FilesystemStateStore,
-    _FilesystemTransaction,
-)
+from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+from linktools.ai.runtime.state._filesystem_transaction import _FilesystemTransaction
 from linktools.ai.runtime.state._history import TranscriptRepository
 from linktools.ai.runtime.state._maintenance import (
     OfflineRuntimeStorageMaintenance,

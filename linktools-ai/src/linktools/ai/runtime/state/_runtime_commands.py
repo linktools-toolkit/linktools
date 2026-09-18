@@ -59,15 +59,15 @@ from ._durability import (
     run_durable_commit,
 )
 from ._execution_commands import _execution_history_seal
-from ._repositories import (
-    _tool_admission_matches,
+from ._recovery_repositories import (
+    tool_admission_matches as _tool_admission_matches,
 )
 from ._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
     StepEvent,
 )
-from ._steps import (
+from ._step_archive import (
     PreparedExecutionProjection,
     PreparedStepSnapshot,
     PreparedStepSnapshotBatch,

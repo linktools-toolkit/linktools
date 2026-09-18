@@ -13,7 +13,8 @@ from ._model_interaction_store import (
 )
 from ._object_router import _RuntimeObjectRouter
 from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
-from ._steps import RuntimeStepStore, StateStepArchive
+from ._step_archive import StateStepArchive
+from ._steps import RuntimeStepStore
 
 _STEP_DOMAINS = (
     RuntimeDomain.CONVERSATION,

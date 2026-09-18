@@ -22,7 +22,7 @@ from ._durability import (
     run_durable_commit,
 )
 from ._step_contracts import ContinuableSnapshot, RunRecord, StepEvent
-from ._steps import (
+from ._step_archive import (
     PreparedExecutionProjection,
     PreparedStepSnapshotBatch,
     StateStepArchive,

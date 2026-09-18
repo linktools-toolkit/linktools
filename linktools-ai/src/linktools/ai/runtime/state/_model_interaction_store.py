@@ -29,7 +29,7 @@ from ._contracts import (
     TranscriptSpanRef,
 )
 from ._step_contracts import ContinuableSnapshot, RunRecord, StepEvent
-from ._steps import (
+from ._step_archive import (
     ExecutionProjectionBatch,
     InMemoryStepArchive,
     PreparedStepSnapshot,
