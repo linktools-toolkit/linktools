@@ -981,6 +981,73 @@ class DefaultExecutionService:
         )
         return _execution_view(updated)
 
+    async def cancel_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> CancelExecutionResult:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if not isinstance(current.binding, TaskBindingSnapshot):
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        if current.status is ExecutionStatus.CANCELLED:
+            return CancelExecutionResult(execution_id, True)
+        if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED}:
+            return CancelExecutionResult(execution_id, False)
+        if current.status is ExecutionStatus.RECOVERY_REQUIRED:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if (
+            current.binding.effect == "non_replay_safe"
+            and current.task_attempt > 0
+            and current.status is ExecutionStatus.STARTED
+        ):
+            await self.require_task_recovery(
+                execution_id,
+                principal=principal,
+                error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+            )
+            raise AIError(ErrorCode.TASK_EFFECT_UNKNOWN)
+        now = datetime.now(timezone.utc)
+        result = ResultRecord(
+            execution_id,
+            current.tenant_id,
+            None,
+            StopReason.CANCELLED,
+            UsageMetrics(),
+            now,
+        )
+        terminal = replace(
+            current,
+            status=ExecutionStatus.CANCELLED,
+            error_code=ErrorCode.EXECUTION_CANCELLED.value,
+            safe_error_details={},
+            error_diagnostics=None,
+            task_next_attempt_at=None,
+            updated_at=now,
+        )
+        idempotency = await self._task_terminal_idempotency(
+            current,
+            result,
+            next_status=IdempotencyStatus.CANCELLED,
+            error_code=ErrorCode.EXECUTION_CANCELLED.value,
+        )
+        await self._state.executions.commit_terminal(
+            ExecutionTerminalCommit(
+                current.revision,
+                current.event_sequence,
+                terminal,
+                result,
+                ExecutionEventType.EXECUTION_CANCELLED,
+                {},
+                idempotency,
+            )
+        )
+        return CancelExecutionResult(execution_id, True)
+
     async def complete_task(
         self,
         execution_id: str,
