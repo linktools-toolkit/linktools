@@ -142,14 +142,24 @@ async def _stream_result(execution: "Execution[object]") -> int:
                 console.print(Text(text), end="", soft_wrap=True)
                 wrote_text = True
         elif event.event_type == ExecutionDeltaType.ASSISTANT_THINKING_DELTA.value:
-            _emit_event(event_console, "thinking", _payload_text(event.payload), "cyan")
+            _emit_event(
+                event_console,
+                "[thinking]",
+                _payload_text(event.payload),
+                "cyan",
+            )
         elif event.event_type == ExecutionEventType.TOOL_CALL_STARTED.value:
-            _emit_event(event_console, "tool", _tool_event_text(event.payload), "yellow")
+            _emit_event(
+                event_console,
+                "[tool]",
+                _tool_event_text(event.payload),
+                "yellow",
+            )
         elif event.event_type == ExecutionEventType.TOOL_CALL_FINISHED.value:
             _emit_event(
                 event_console,
-                "tool",
-                _tool_event_text(event.payload, finished=True),
+                "[tool] finished",
+                _tool_event_text(event.payload),
                 "green",
             )
         elif event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value:
@@ -182,20 +192,18 @@ async def _stream_result(execution: "Execution[object]") -> int:
 
 def _emit_event(console: Console, label: str, value: str, style: str) -> None:
     line = Text()
-    line.append(f"{label:<8}", style=f"bold {style}")
+    line.append(label, style=f"bold {style}")
+    line.append(" ")
     line.append(value or "-", style="dim")
     console.print(line)
 
 
-def _tool_event_text(payload: object, *, finished: bool = False) -> str:
+def _tool_event_text(payload: object) -> str:
     if not isinstance(payload, dict):
         return ""
     name = payload.get("tool_name")
     call_id = payload.get("call_id")
-    status = payload.get("status")
     parts = [str(name)] if isinstance(name, str) else []
-    if finished and status is not None:
-        parts.append(str(status))
     if isinstance(call_id, str) and call_id:
         parts.append(f"#{call_id}")
     return " · ".join(parts)
