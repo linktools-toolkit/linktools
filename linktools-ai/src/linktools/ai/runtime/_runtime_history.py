@@ -21,6 +21,7 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    SessionStatus,
     TenantAuthorizationPolicy,
     validate_page_limit,
     validate_persistence_namespace,
@@ -40,7 +41,12 @@ from .service_api import (
     TranscriptItem,
 )
 from .state import RuntimeDomain, RuntimeState
-from .state._contracts import ExecutionRecord, ExecutionRepository
+from .state._contracts import (
+    ExecutionRecord,
+    ExecutionRepository,
+    SessionRecord,
+    SessionRepository,
+)
 
 _logger = environ.get_logger("ai.runtime.history")
 
@@ -65,6 +71,35 @@ class ExecutionInfo:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
+
+
+@dataclass(frozen=True, slots=True)
+class SessionInfo:
+    """Session metadata required by local diagnostics."""
+
+    session_id: str
+    agent_id: str
+    status: SessionStatus
+    revision: int
+    cwd: str | None
+    active_execution_id: str | None
+    history_quality: str
+    created_at: datetime
+    updated_at: datetime
+
+
+def _project_session_info(record: SessionRecord) -> SessionInfo:
+    return SessionInfo(
+        session_id=record.session_id,
+        agent_id=record.agent_id,
+        status=record.status,
+        revision=record.revision,
+        cwd=record.cwd,
+        active_execution_id=record.active_execution_id,
+        history_quality=record.history_quality,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
 
 
 def _project_execution_info(record: ExecutionRecord) -> ExecutionInfo:
@@ -94,11 +129,13 @@ class RuntimeHistory:
         *,
         tenant_id: str,
         executions: "ExecutionRepository | None" = None,
+        sessions: "SessionRepository | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
         self._executions = executions
+        self._sessions = sessions
         self._authorization = authorization
 
     @property
@@ -168,6 +205,69 @@ class RuntimeHistory:
         self, request: ListExecutionRequest
     ) -> Page[ExecutionView]:
         return await self._service.list(request)
+
+    async def recent_sessions(
+        self,
+        *,
+        principal: Principal,
+        limit: int = 20,
+    ) -> tuple[SessionInfo, ...]:
+        validate_page_limit(limit)
+        sessions, authorization = self._require_session_reader()
+        records = await sessions.list(
+            tenant_id=principal.tenant_id,
+            owner_principal_id=principal.principal_id,
+        )
+        allowed: list[SessionInfo] = []
+        for record in records:
+            resource = ResourceRef(
+                ResourceKind.SESSION,
+                record.session_id,
+                record.tenant_id,
+                record.owner_principal_id,
+            )
+            try:
+                await authorization.authorize(
+                    principal,
+                    AuthorizationAction.SESSION_READ,
+                    resource,
+                )
+            except AIError as error:
+                if error.code is ErrorCode.AUTHORIZATION_DENIED:
+                    continue
+                raise
+            allowed.append(_project_session_info(record))
+        allowed.sort(
+            key=lambda value: (value.updated_at, value.session_id),
+            reverse=True,
+        )
+        return tuple(allowed[:limit])
+
+    async def inspect_session(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+    ) -> SessionInfo:
+        sessions, authorization = self._require_session_reader()
+        header = await sessions.get_header(
+            session_id,
+            tenant_id=principal.tenant_id,
+        )
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await authorization.authorize(
+            principal,
+            AuthorizationAction.SESSION_READ,
+            header,
+        )
+        record = await sessions.get(
+            session_id,
+            tenant_id=principal.tenant_id,
+        )
+        if record is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        return _project_session_info(record)
 
     @classmethod
     def open(
@@ -244,6 +344,13 @@ class RuntimeHistory:
             cursor=cursor,
             limit=limit,
         )
+
+    def _require_session_reader(
+        self,
+    ) -> tuple[SessionRepository, AuthorizationPolicy]:
+        if self._sessions is None or self._authorization is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._sessions, self._authorization
 
     def _require_direct_reader(
         self,
@@ -330,6 +437,7 @@ async def _open_runtime_history(
             service,
             tenant_id=effective_tenant_id,
             executions=selected_state.execution.executions,
+            sessions=selected_state.conversation.sessions,
             authorization=effective_authorization,
         )
     except BaseException as error:
@@ -355,4 +463,4 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
     )
 
 
-__all__ = ["ExecutionInfo", "RuntimeHistory"]
+__all__ = ["ExecutionInfo", "RuntimeHistory", "SessionInfo"]
