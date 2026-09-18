@@ -280,6 +280,7 @@ class TaskNodeView:
     error_digest: "str | None"
     execution_id: "str | None" = None
     next_attempt_at: "datetime | None" = None
+    occupies_concurrency: bool = False
 
     def __post_init__(self) -> None:
         if self.owner is not None:
@@ -289,6 +290,10 @@ class TaskNodeView:
                 raise ValueError("task node lease owner is invalid") from error
         if self.status is TaskStatus.PENDING and self.execution_id is not None:
             raise ValueError("pending task node cannot carry an execution id")
+        if not isinstance(self.occupies_concurrency, bool):
+            raise TypeError("task concurrency projection must be bool")
+        if self.occupies_concurrency and self.status is not TaskStatus.WAITING:
+            raise ValueError("only waiting task can retain concurrency capacity")
         if self.next_attempt_at is not None and (
             self.status is not TaskStatus.READY
             or self.execution_id is None
