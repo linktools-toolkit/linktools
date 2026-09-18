@@ -555,7 +555,11 @@ class LocalTaskGraphLauncher:
                     )
                     inflight[node.node_id] = _InflightNode(task, None)
                     await self._notify(run)
-                used = persisted | waiting | set(inflight)
+                used = persisted | {
+                    node_id
+                    for node_id, value in inflight.items()
+                    if value.lease_state is not None
+                }
                 capacity = max(
                     0,
                     request.limits.max_concurrency - len(used),
