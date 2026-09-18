@@ -144,7 +144,9 @@ class ExecutionHandle:
 
 class _ExecutionViewSource(Protocol):
     execution_id: str
-    agent_id: str
+    binding_kind: str
+    agent_id: str | None
+    task_type: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
@@ -156,7 +158,9 @@ class _ExecutionViewSource(Protocol):
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
-    agent_id: str
+    binding_kind: str
+    agent_id: str | None
+    task_type: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
@@ -170,7 +174,9 @@ def project_execution_view(source: object) -> ExecutionView:
     value = cast(_ExecutionViewSource, source)
     return ExecutionView(
         value.execution_id,
+        value.binding_kind,
         value.agent_id,
+        value.task_type,
         value.status,
         value.lineage_kind,
         value.parent_execution_id,
@@ -748,7 +754,7 @@ class ExecutionStreamEvent:
 @dataclass(frozen=True, slots=True)
 class ExecutionTreeEvent:
     execution_id: str
-    agent_id: str
+    agent_id: str | None
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
     root_execution_id: str
@@ -757,9 +763,15 @@ class ExecutionTreeEvent:
     event: ExecutionStreamEvent
 
     def __post_init__(self) -> None:
-        if not all(
-            isinstance(value, str) and value
-            for value in (self.execution_id, self.agent_id, self.root_execution_id)
+        if (
+            not isinstance(self.execution_id, str)
+            or not self.execution_id
+            or not isinstance(self.root_execution_id, str)
+            or not self.root_execution_id
+            or (
+                self.agent_id is not None
+                and (not isinstance(self.agent_id, str) or not self.agent_id)
+            )
         ):
             raise ValueError("execution tree event identity is invalid")
         if not isinstance(self.lineage_kind, ExecutionLineageKind):
