@@ -39,6 +39,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..task import (
+    TaskBindingSnapshot,
     TaskDependency,
     TaskDependencyResult,
     TaskGraph,
@@ -513,22 +514,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
-            tenant_id=principal.tenant_id,
+            principal=principal,
             graph_id=graph_id,
         )
-        execution_id: str | None = None
-        if handler is self._deferred_input:
-            wait_id = _wait_execution_id(
-                graph_id,
-                node.node_id,
-                principal.tenant_id,
-            )
-            await control.handoff_execution(wait_id)
-            return TaskNodeRunResult(
-                canonical_sha256({"wait_id": wait_id}),
-                wait_id,
-                deferred=True,
-            )
         if handler is self._agent:
             output, execution_id = await self._agent.run_node(
                 node,
@@ -538,123 +526,406 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 dependencies=dependencies,
                 control=control,
             )
-        else:
-            execution_id = _task_execution_id(
-                graph_id,
-                node.node_id,
-                principal.tenant_id,
-            )
-            idempotency_key = _custom_idempotency_key(
-                graph_id,
+            return await self._complete_output(
                 node,
-                principal,
-                dependencies,
+                output,
+                execution_id=execution_id,
+                principal=principal,
+                graph_id=graph_id,
             )
-            task_context = TaskNodeContext(
-                self._app,
+
+        binding = _task_binding(node, handler, task_type, task_version)
+        idempotency_key = _custom_idempotency_key(
+            graph_id,
+            node,
+            principal,
+            dependencies,
+        )
+        handle = await self._execution.start_task(
+            binding,
+            principal=principal,
+            input=body,
+            idempotency_key=idempotency_key,
+            correlation=correlation,
+        )
+        execution_id = handle.execution_id
+        if control.execution_id is None:
+            await control.bind_execution(execution_id)
+        elif control.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if handler is self._deferred_input:
+            view = await self._execution.inspect(execution_id, principal=principal)
+            if view.status is ExecutionStatus.SUCCEEDED:
+                result = await self._execution.result(
+                    execution_id,
+                    principal=principal,
+                )
+                if result.output is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return await self._complete_output(
+                    node,
+                    result.output,
+                    execution_id=execution_id,
+                    principal=principal,
+                    graph_id=graph_id,
+                )
+            if view.status is ExecutionStatus.STARTED:
+                await self._execution.defer_task_input(
+                    execution_id,
+                    principal=principal,
+                    wait_id=execution_id,
+                )
+            elif view.status is not ExecutionStatus.WAITING_DEFERRED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await control.handoff_execution(
+                execution_id,
+                occupies_concurrency=False,
+            )
+            return TaskNodeRunResult(
+                canonical_sha256({"wait_id": execution_id}),
+                execution_id,
+                deferred=True,
+            )
+
+        return await self._run_custom_execution(
+            node,
+            handler,
+            body,
+            dependencies,
+            principal=principal,
+            correlation=correlation,
+            graph_id=graph_id,
+            execution_id=execution_id,
+        )
+
+    async def _run_custom_execution(
+        self,
+        node: TaskNode,
+        handler: TaskNodeHandler[AppT],
+        body: Mapping[str, JsonValue],
+        dependencies: Mapping[str, TaskDependency],
+        *,
+        principal: Principal,
+        correlation: Mapping[str, str | int],
+        graph_id: str,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        view = await self._execution.inspect(execution_id, principal=principal)
+        if view.status is ExecutionStatus.SUCCEEDED:
+            result = await self._execution.result(execution_id, principal=principal)
+            if result.output is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return await self._complete_output(
+                node,
+                result.output,
+                execution_id=execution_id,
+                principal=principal,
+                graph_id=graph_id,
+            )
+        if view.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            result = await self._execution.result(execution_id, principal=principal)
+            raise TaskNodeRunError(
+                ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
+                execution_id,
+                safe_details=result.safe_error_details,
+            )
+        if view.status is ExecutionStatus.RECOVERY_REQUIRED:
+            return await self._reconcile_custom_execution(
+                node,
+                handler,
+                body,
+                dependencies,
+                principal=principal,
+                correlation=correlation,
+                graph_id=graph_id,
+                execution_id=execution_id,
+            )
+        if view.status is ExecutionStatus.WAITING_RETRY:
+            if view.task_next_attempt_at is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return TaskNodeRunResult(
+                canonical_sha256(
+                    {
+                        "execution_id": execution_id,
+                        "retry_at": view.task_next_attempt_at.isoformat(),
+                    }
+                ),
+                execution_id,
+                retry_at=view.task_next_attempt_at,
+            )
+        if view.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if view.task_attempt > 0 and node.effect == "non_replay_safe":
+            await self._execution.require_task_recovery(
+                execution_id,
+                principal=principal,
+                error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+            )
+            raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
+
+        claimed = await self._execution.claim_task_attempt(
+            execution_id,
+            principal=principal,
+        )
+        if claimed.status is ExecutionStatus.WAITING_RETRY:
+            if claimed.task_next_attempt_at is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return TaskNodeRunResult(
+                canonical_sha256(
+                    {
+                        "execution_id": execution_id,
+                        "retry_at": claimed.task_next_attempt_at.isoformat(),
+                    }
+                ),
+                execution_id,
+                retry_at=claimed.task_next_attempt_at,
+            )
+        if claimed.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if claimed.task_attempt <= view.task_attempt:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        context = TaskNodeContext(
+            self._app,
+            principal,
+            graph_id,
+            node.node_id,
+            execution_id,
+            body,
+            dependencies,
+            _custom_idempotency_key(graph_id, node, principal, dependencies),
+            correlation,
+            artifacts=self._artifact_publisher(
                 principal,
                 graph_id,
                 node.node_id,
                 execution_id,
-                body,
-                dependencies,
-                idempotency_key,
-                correlation,
-                artifacts=self._artifact_publisher(
-                    principal,
-                    graph_id,
-                    node.node_id,
-                    execution_id,
-                ),
+            ),
+        )
+        try:
+            timeout = None
+            if claimed.task_deadline_at is not None:
+                timeout = (
+                    claimed.task_deadline_at - datetime.now(timezone.utc)
+                ).total_seconds()
+                if timeout <= 0:
+                    raise asyncio.TimeoutError
+            raw_output = (
+                await handler.run(context)
+                if timeout is None
+                else await asyncio.wait_for(handler.run(context), timeout=timeout)
             )
-            raw_output = await self._run_custom_handler(
-                handler,
-                task_context,
-                node=node,
-                execution_id=execution_id,
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError as error:
+            return await self._settle_custom_failure(
+                node,
+                execution_id,
+                principal,
+                AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT),
+                unknown_effect=node.effect == "non_replay_safe",
+                cause=error,
             )
-            try:
-                output = normalize_json_value(raw_output)
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+        except AIError as error:
+            return await self._settle_custom_failure(
+                node,
+                execution_id,
+                principal,
+                error,
+                unknown_effect=node.effect == "non_replay_safe",
+            )
+        except Exception as error:  # noqa: BLE001
+            return await self._settle_custom_failure(
+                node,
+                execution_id,
+                principal,
+                AIError(ErrorCode.TASK_NODE_FAILED),
+                unknown_effect=node.effect == "non_replay_safe",
+                cause=error,
+            )
+
+        try:
+            output = normalize_json_value(raw_output)
+            _validate_task_output(node, output)
+        except (AIError, TypeError, ValueError) as error:
+            failure = (
+                error
+                if isinstance(error, AIError)
+                else AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            )
+            await self._execution.fail_task(
+                execution_id,
+                principal=principal,
+                error=failure,
+            )
+            raise TaskNodeRunError(
+                failure.code,
+                execution_id,
+                safe_details=failure.safe_details,
+            ) from error
+
+        result = await self._execution.complete_task(
+            execution_id,
+            principal=principal,
+            output=output,
+        )
+        if result.status is not ExecutionStatus.SUCCEEDED or result.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._complete_output(
             node,
-            output,
+            result.output,
             execution_id=execution_id,
             principal=principal,
             graph_id=graph_id,
         )
 
-    def _artifact_publisher(
+    async def _settle_custom_failure(
         self,
-        principal: Principal,
-        graph_id: str,
-        node_id: str,
-        execution_id: str,
-    ) -> "_TaskArtifactPublisher | None":
-        if self._artifact_state is None or self._artifact_objects is None:
-            return None
-        return _TaskArtifactPublisher(
-            self._artifact_state,
-            self._artifact_objects,
-            self._object_key_factory,
-            principal=principal,
-            graph_id=graph_id,
-            node_id=node_id,
-            execution_id=execution_id,
-        )
-
-    async def _run_custom_handler(
-        self,
-        handler: TaskNodeHandler[AppT],
-        context: TaskNodeContext[AppT],
-        *,
         node: TaskNode,
         execution_id: str,
-    ) -> JsonValue:
-        attempts = 0
-        effect = node.effect
-        while True:
-            attempts += 1
-            try:
-                if node.timeout_seconds is None:
-                    return await handler.run(context)
-                return await asyncio.wait_for(
-                    handler.run(context),
-                    timeout=node.timeout_seconds,
-                )
-            except asyncio.CancelledError:
-                raise
-            except asyncio.TimeoutError as error:
-                if effect == "non_replay_safe":
-                    raise TaskNodeRunError(
-                        ErrorCode.TASK_EFFECT_UNKNOWN,
-                        execution_id,
-                    ) from error
-                if attempts >= node.max_attempts:
-                    raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT) from error
-            except AIError as error:
-                retryable = bool(error.retryable)
-                if (
-                    attempts >= node.max_attempts
-                    or not retryable
-                    or effect == "non_replay_safe"
-                ):
-                    if effect == "non_replay_safe":
-                        raise TaskNodeRunError(
-                            ErrorCode.TASK_EFFECT_UNKNOWN,
-                            execution_id,
-                        ) from error
-                    raise
-            except Exception as error:  # noqa: BLE001
-                if effect == "non_replay_safe":
-                    raise TaskNodeRunError(
-                        ErrorCode.TASK_EFFECT_UNKNOWN,
-                        execution_id,
-                    ) from error
-                raise AIError(ErrorCode.TASK_NODE_FAILED) from error
-            if node.retry_delay_seconds:
-                await asyncio.sleep(node.retry_delay_seconds)
+        principal: Principal,
+        error: AIError,
+        *,
+        unknown_effect: bool,
+        cause: BaseException | None = None,
+    ) -> TaskNodeRunResult:
+        if unknown_effect:
+            await self._execution.require_task_recovery(
+                execution_id,
+                principal=principal,
+                error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+            )
+            raised = TaskNodeRunError(
+                ErrorCode.TASK_EFFECT_UNKNOWN,
+                execution_id,
+            )
+            if cause is not None:
+                raise raised from cause
+            raise raised from error
+
+        view = await self._execution.inspect(execution_id, principal=principal)
+        retryable = (
+            error.retryable
+            and view.task_attempt < node.max_attempts
+            and error.code is not ErrorCode.EXECUTION_WAIT_TIMEOUT
+        )
+        if retryable:
+            retry = await self._execution.schedule_task_retry(
+                execution_id,
+                principal=principal,
+                error_code=error.code.value,
+            )
+            if retry.task_next_attempt_at is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return TaskNodeRunResult(
+                canonical_sha256(
+                    {
+                        "execution_id": execution_id,
+                        "retry_at": retry.task_next_attempt_at.isoformat(),
+                    }
+                ),
+                execution_id,
+                retry_at=retry.task_next_attempt_at,
+            )
+        await self._execution.fail_task(
+            execution_id,
+            principal=principal,
+            error=error,
+        )
+        raised = TaskNodeRunError(
+            error.code,
+            execution_id,
+            safe_details=error.safe_details,
+        )
+        if cause is not None:
+            raise raised from cause
+        raise raised from error
+
+    async def _reconcile_custom_execution(
+        self,
+        node: TaskNode,
+        handler: TaskNodeHandler[AppT],
+        body: Mapping[str, JsonValue],
+        dependencies: Mapping[str, TaskDependency],
+        *,
+        principal: Principal,
+        correlation: Mapping[str, str | int],
+        graph_id: str,
+        execution_id: str,
+    ) -> TaskNodeRunResult:
+        reconcile = getattr(handler, "reconcile", None)
+        if reconcile is None:
+            raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
+        context = TaskNodeContext(
+            self._app,
+            principal,
+            graph_id,
+            node.node_id,
+            execution_id,
+            body,
+            dependencies,
+            _custom_idempotency_key(graph_id, node, principal, dependencies),
+            correlation,
+            artifacts=None,
+        )
+        resolution = await reconcile(context)
+        if not isinstance(resolution, TaskEffectResolution):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if resolution.kind == "unknown":
+            raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
+        if resolution.kind == "not_applied":
+            retry = await self._execution.resume_task_not_applied(
+                execution_id,
+                principal=principal,
+            )
+            if retry.task_next_attempt_at is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return TaskNodeRunResult(
+                canonical_sha256(
+                    {
+                        "execution_id": execution_id,
+                        "retry_at": retry.task_next_attempt_at.isoformat(),
+                    }
+                ),
+                execution_id,
+                retry_at=retry.task_next_attempt_at,
+            )
+
+        output = normalize_json_value(resolution.value)
+        try:
+            _validate_task_output(node, output)
+        except (AIError, TypeError, ValueError) as error:
+            failure = (
+                error
+                if isinstance(error, AIError)
+                else AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            )
+            await self._execution.fail_task(
+                execution_id,
+                principal=principal,
+                error=failure,
+            )
+            raise TaskNodeRunError(
+                failure.code,
+                execution_id,
+                safe_details=failure.safe_details,
+            ) from error
+        result = await self._execution.complete_task(
+            execution_id,
+            principal=principal,
+            output=output,
+        )
+        if result.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._complete_output(
+            node,
+            result.output,
+            execution_id=execution_id,
+            principal=principal,
+            graph_id=graph_id,
+        )
 
     async def wait_bound(
         self,
