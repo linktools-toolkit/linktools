@@ -39,6 +39,12 @@ from ..storage import (
 )
 from ._domain import AssetInfo, AssetKey, AssetRoot
 from ._object import AssetObjectKeyFactory
+from ._receipt import (
+    batch_receipt_key_digest,
+    decode_asset_batch_receipt,
+    encode_asset_batch_receipt,
+    validate_batch_receipt_identity,
+)
 
 _logger = environ.get_logger("ai.asset.filesystem")
 _GENERATION = 1
@@ -65,6 +71,7 @@ class FilesystemAssetBackend:
         self._head_path = self._directory / "head.json"
         self._entries_path = self._directory / "entries"
         self._history_path = self._directory / "history"
+        self._receipts_path = self._directory / "receipts"
         self._lock_path = self._directory / "asset.lock"
         self._journal = FilesystemJournal(
             self._directory,
@@ -77,6 +84,7 @@ class FilesystemAssetBackend:
         self._object_keys = AssetObjectKeyFactory(resolved.locator)
         self._entries: dict[AssetKey, AssetInfo] = {}
         self._versions: dict[AssetKey, list[AssetInfo]] = {}
+        self._receipts: dict[str, Mapping[str, object]] = {}
         self._revision = 0
         self._process_lock = asyncio.Lock()
         self._ready = False
@@ -221,73 +229,103 @@ class FilesystemAssetBackend:
         changes: Sequence[StorageChange[AssetKey, bytes]],
         *,
         expected_revision: StorageRevision | None = None,
+        idempotency_key: str | None = None,
+        request_digest: str | None = None,
     ) -> StorageBatchResult[AssetInfo, AssetKey]:
+        validate_batch_receipt_identity(idempotency_key, request_digest)
         await self._ensure_ready()
+        receipt_digest = (
+            None
+            if idempotency_key is None
+            else batch_receipt_key_digest(idempotency_key)
+        )
         async with self._process_lock:
             await self._reload()
             self._require_writable()
-            if expected_revision is not None and expected_revision != StorageRevision(str(self._revision)):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            self._validate_batch(changes)
-            prepared = {
-                change.key: bytes(change.value or b"") for change in changes if change.operation is StorageOperation.PUT
-            }
-            previous = {change.key: self._entries.get(change.key) for change in changes}
-            for change in changes:
-                _check_entry_revision(previous[change.key], change.expected_revision)
-            mutates = tuple(
-                _mutates(change.operation, previous[change.key], prepared.get(change.key, b"")) for change in changes
-            )
-            if not any(mutates):
-                results = tuple(
-                    _result(
-                        change.operation,
-                        change.key,
-                        previous[change.key],
-                        StorageRevision(str(self._revision)),
-                        changed=False,
-                    )
-                    for change in changes
-                )
-                return StorageBatchResult(StorageRevision(str(self._revision)), True, results)
-            async with FilesystemMutationLock(self._lock_path):
-                self._provision()
-                await self._recover()
-                await self._load_state()
-                self._require_writable()
+            if idempotency_key is None:
                 if (
                     expected_revision is not None
                     and expected_revision != StorageRevision(str(self._revision))
                 ):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                self._validate_batch(changes)
+                previous = {change.key: self._entries.get(change.key) for change in changes}
+                for change in changes:
+                    _check_entry_revision(previous[change.key], change.expected_revision)
+                if not any(
+                    _mutates(
+                        change.operation,
+                        previous[change.key],
+                        bytes(change.value or b""),
+                    )
+                    for change in changes
+                ):
+                    revision = StorageRevision(str(self._revision))
+                    return StorageBatchResult(
+                        revision,
+                        True,
+                        tuple(
+                            _result(
+                                change.operation,
+                                change.key,
+                                previous[change.key],
+                                revision,
+                                changed=False,
+                            )
+                            for change in changes
+                        ),
+                    )
+            async with FilesystemMutationLock(self._lock_path):
+                self._provision()
+                await self._recover()
+                await self._load_state()
+                self._require_writable()
+                if receipt_digest is not None:
+                    previous_payload = self._receipts.get(receipt_digest)
+                    if previous_payload is not None:
+                        previous_receipt = decode_asset_batch_receipt(
+                            previous_payload,
+                            idempotency_key=idempotency_key,
+                            expected_key_digest=receipt_digest,
+                        )
+                        if previous_receipt.request_digest != request_digest:
+                            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                        return previous_receipt
+                if (
+                    expected_revision is not None
+                    and expected_revision != StorageRevision(str(self._revision))
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                self._validate_batch(changes)
+                prepared = {
+                    change.key: bytes(change.value or b"")
+                    for change in changes
+                    if change.operation is StorageOperation.PUT
+                }
                 previous = {change.key: self._entries.get(change.key) for change in changes}
                 for change in changes:
                     _check_entry_revision(previous[change.key], change.expected_revision)
                 mutates = tuple(
-                    _mutates(change.operation, previous[change.key], prepared.get(change.key, b""))
-                    for change in changes
-                )
-                if not any(mutates):
-                    results = tuple(
-                        _result(
-                            change.operation,
-                            change.key,
-                            previous[change.key],
-                            StorageRevision(str(self._revision)),
-                            changed=False,
-                        )
-                        for change in changes
+                    _mutates(
+                        change.operation,
+                        previous[change.key],
+                        prepared.get(change.key, b""),
                     )
-                    return StorageBatchResult(StorageRevision(str(self._revision)), True, results)
-                put_changes = (
-                    (change, prepared[change.key])
                     for change in changes
-                    if change.operation is StorageOperation.PUT
                 )
-                for change, value in put_changes:
-                    if _mutates(change.operation, previous[change.key], value):
-                        await self._put_content(value)
-                next_revision = self._revision + 1
+                next_revision = self._revision + 1 if any(mutates) else self._revision
+                revision = StorageRevision(str(next_revision))
+                if any(mutates):
+                    for change in changes:
+                        if (
+                            change.operation is StorageOperation.PUT
+                            and _mutates(
+                                change.operation,
+                                previous[change.key],
+                                prepared[change.key],
+                            )
+                        ):
+                            await self._put_content(prepared[change.key])
                 before = self._snapshot()
                 results: list[
                     StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]
@@ -300,7 +338,7 @@ class FilesystemAssetBackend:
                                 change.operation,
                                 change.key,
                                 current,
-                                StorageRevision(str(next_revision)),
+                                revision,
                                 changed=False,
                             )
                         )
@@ -320,23 +358,56 @@ class FilesystemAssetBackend:
                             change.operation,
                             change.key,
                             info,
-                            StorageRevision(str(next_revision)),
+                            revision,
                             changed=True,
                         )
                     )
-                self._revision = next_revision
-                try:
-                    await self._write_state()
-                except BaseException as error:  # noqa: BLE001
-                    self._restore(before)
-                    _raise_filesystem_error(error)
+                result = StorageBatchResult(
+                    revision,
+                    True,
+                    tuple(results),
+                    request_digest,
+                    idempotency_key,
+                )
+                if receipt_digest is not None:
+                    self._receipts[receipt_digest] = encode_asset_batch_receipt(result)
+                if any(mutates):
+                    self._revision = next_revision
+                    try:
+                        await self._write_state()
+                    except BaseException as error:  # noqa: BLE001
+                        self._restore(before)
+                        _raise_filesystem_error(error)
+                elif receipt_digest is not None:
+                    try:
+                        self._write_receipt(receipt_digest)
+                    except BaseException as error:  # noqa: BLE001
+                        self._restore(before)
+                        _raise_filesystem_error(error)
                 _logger.debug(
                     "filesystem Asset batch committed: root=%s revision=%s changes=%s",
                     self._directory,
                     self._revision,
                     len(changes),
                 )
-                return StorageBatchResult(StorageRevision(str(self._revision)), True, tuple(results))
+                return result
+
+    async def batch_result(
+        self,
+        idempotency_key: str,
+    ) -> StorageBatchResult[AssetInfo, AssetKey] | None:
+        await self._ensure_ready()
+        digest = batch_receipt_key_digest(idempotency_key)
+        async with self._process_lock:
+            await self._reload()
+            payload = self._receipts.get(digest)
+            if payload is None:
+                return None
+            return decode_asset_batch_receipt(
+                payload,
+                idempotency_key=idempotency_key,
+                expected_key_digest=digest,
+            )
 
     async def list_versions(self, key: AssetKey) -> tuple[VersionSummary, ...]:
         await self._ensure_ready()
@@ -526,13 +597,30 @@ class FilesystemAssetBackend:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         if loaded_entries and max(int(info.store_revision.value) for info in loaded_entries.values()) > revision:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        loaded_receipts: dict[str, Mapping[str, object]] = {}
+        for path in self._receipts_path.glob("*/*.json"):
+            payload = await _read_asset_json(path)
+            digest = path.stem
+            if path != self._receipt_file(digest):
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            try:
+                decode_asset_batch_receipt(
+                    payload,
+                    expected_key_digest=digest,
+                )
+            except AIError as error:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            if digest in loaded_receipts:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            loaded_receipts[digest] = payload
         self._revision = revision
         self._entries = loaded_entries
         self._versions = loaded_versions
+        self._receipts = loaded_receipts
         expected_files = set(self._serialized_state())
         actual_files = {
             path.relative_to(self._directory).as_posix()
-            for directory in (self._entries_path, self._history_path)
+            for directory in (self._entries_path, self._history_path, self._receipts_path)
             for path in directory.rglob("*")
             if path.is_file()
         }
@@ -589,6 +677,7 @@ class FilesystemAssetBackend:
         self._revision = 0
         self._entries.clear()
         self._versions.clear()
+        self._receipts.clear()
 
     def _expected_manifest(self) -> dict[str, object]:
         return {
@@ -640,11 +729,31 @@ class FilesystemAssetBackend:
         self._entries[info.key] = info
         self._versions.setdefault(info.key, []).append(info)
 
-    def _snapshot(self) -> tuple[int, dict[AssetKey, AssetInfo], dict[AssetKey, list[AssetInfo]]]:
-        return self._revision, dict(self._entries), {key: list(values) for key, values in self._versions.items()}
+    def _snapshot(
+        self,
+    ) -> tuple[
+        int,
+        dict[AssetKey, AssetInfo],
+        dict[AssetKey, list[AssetInfo]],
+        dict[str, Mapping[str, object]],
+    ]:
+        return (
+            self._revision,
+            dict(self._entries),
+            {key: list(values) for key, values in self._versions.items()},
+            dict(self._receipts),
+        )
 
-    def _restore(self, snapshot: tuple[int, dict[AssetKey, AssetInfo], dict[AssetKey, list[AssetInfo]]]) -> None:
-        self._revision, self._entries, self._versions = snapshot
+    def _restore(
+        self,
+        snapshot: tuple[
+            int,
+            dict[AssetKey, AssetInfo],
+            dict[AssetKey, list[AssetInfo]],
+            dict[str, Mapping[str, object]],
+        ],
+    ) -> None:
+        self._revision, self._entries, self._versions, self._receipts = snapshot
 
     def _asset_key_digest(self, key: AssetKey) -> str:
         return hashlib.sha256(
@@ -664,6 +773,11 @@ class FilesystemAssetBackend:
         digest = self._asset_key_digest(info.key)
         return self._history_path / digest[:2] / digest / f"{info.revision.value:020d}.json"
 
+    def _receipt_file(self, digest: str) -> Path:
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        return self._receipts_path / digest[:2] / f"{digest}.json"
+
     def _serialized_state(self) -> dict[str, bytes]:
         values = {
             "head.json": _json_bytes({"store_revision": self._revision}),
@@ -677,14 +791,28 @@ class FilesystemAssetBackend:
                 values[self._history_file(info).relative_to(self._directory).as_posix()] = _json_bytes(
                     self._info_to_json(info)
                 )
+        for digest, payload in self._receipts.items():
+            values[self._receipt_file(digest).relative_to(self._directory).as_posix()] = _json_bytes(payload)
         return values
 
     def _existing_state(self) -> dict[str, bytes]:
         values: dict[str, bytes] = {}
-        for path in (self._head_path, *self._entries_path.glob("*/*.json"), *self._history_path.glob("*/*/*.json")):
+        for path in (
+            self._head_path,
+            *self._entries_path.glob("*/*.json"),
+            *self._history_path.glob("*/*/*.json"),
+            *self._receipts_path.glob("*/*.json"),
+        ):
             if path.is_file():
                 values[path.relative_to(self._directory).as_posix()] = path.read_bytes()
         return values
+
+    def _write_receipt(self, digest: str) -> None:
+        payload = self._receipts[digest]
+        path = self._receipt_file(digest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(path, payload, fsync=True)
+        sync_directory(path.parent)
 
     async def _recover(self) -> None:
         self._journal.recover(

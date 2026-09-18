@@ -769,8 +769,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         changes: 'Sequence[StorageChange[KeyT, ValueT]]',
         *,
         expected_revision: 'StorageRevision | None' = None,
+        idempotency_key: 'str | None' = None,
+        request_digest: 'str | None' = None,
     ) -> 'StorageBatchResult[InfoT, KeyT]':
         self._validate_batch(changes)
+        if (idempotency_key is None) != (request_digest is None):
+            raise ValueError("idempotency_key and request_digest must be provided together")
         writer = self._require_writer()
         if isinstance(writer, BatchStorageWriter):
             writer_expected_revision = None
@@ -784,6 +788,8 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             result = await writer.apply_batch(
                 changes,
                 expected_revision=writer_expected_revision,
+                idempotency_key=idempotency_key,
+                request_digest=request_digest,
             )
             self._validate_writer_batch_result(changes, result)
             for change in changes:
@@ -809,6 +815,8 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             ):
                 await self._notify_revision(result.store_revision)
             return result
+        if idempotency_key is not None:
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
         if expected_revision is not None:
             current = await self.current_revision()
             if current != expected_revision:
@@ -856,6 +864,15 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         if revision is None:
             revision = await self.current_revision()
         return StorageBatchResult(revision, False, tuple(results))
+
+    async def batch_result(
+        self,
+        idempotency_key: str,
+    ) -> 'StorageBatchResult[InfoT, KeyT] | None':
+        writer = self._require_writer()
+        if not isinstance(writer, BatchStorageWriter):
+            raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
+        return await writer.batch_result(idempotency_key)
 
     def _validate_writer_batch_result(
         self,

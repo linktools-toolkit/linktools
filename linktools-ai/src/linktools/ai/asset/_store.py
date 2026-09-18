@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Raw file AssetStore backed by StorageOverlay."""
 
-import asyncio
 import base64
 import binascii
 import hashlib
@@ -77,8 +76,6 @@ class AssetStore:
         self._ready = False
         self._closing = False
         self._closed = False
-        self._batch_receipts: dict[str, StorageBatchResult[AssetInfo, AssetKey]] = {}
-        self._batch_lock = asyncio.Lock()
 
     @property
     def ready(self) -> bool:
@@ -213,44 +210,35 @@ class AssetStore:
         expected_revision: "StorageRevision | None" = None,
         idempotency_key: "str | None" = None,
     ) -> "StorageBatchResult[AssetInfo, AssetKey]":
-        """Apply file changes using the writer backend's batch guarantees."""
+        """Apply one atomic Asset batch, optionally with durable idempotency."""
         self._ensure_ready()
         if not self.atomic_batch:
             raise AIError(ErrorCode.STORAGE_ATOMIC_BATCH_UNSUPPORTED)
-        request_digest = _batch_request_digest(changes, expected_revision)
+        request_digest = None
         if idempotency_key is not None:
             validate_idempotency_key(idempotency_key)
-        async with self._batch_lock:
-            if idempotency_key is not None:
-                previous = self._batch_receipts.get(idempotency_key)
-                if previous is not None:
-                    if previous.request_digest != request_digest:
-                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                    return previous
-            result = await self._storage.apply_batch(
-                changes,
-                expected_revision=expected_revision,
-            )
-            receipt = StorageBatchResult(
-                result.store_revision,
-                result.atomic,
-                result.results,
-                request_digest,
-                idempotency_key,
-            )
-            if idempotency_key is not None:
-                self._batch_receipts[idempotency_key] = receipt
-            return receipt
+            request_digest = _batch_request_digest(changes, expected_revision)
+        result = await self._storage.apply_batch(
+            changes,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            request_digest=request_digest,
+        )
+        if idempotency_key is not None and (
+            result.idempotency_key != idempotency_key
+            or result.request_digest != request_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result
 
     async def batch_result(
         self,
         idempotency_key: str,
     ) -> "StorageBatchResult[AssetInfo, AssetKey] | None":
-        """Read a previously committed batch receipt without changing state."""
+        """Read a writer-owned committed batch receipt."""
         self._ensure_ready()
         validate_idempotency_key(idempotency_key)
-        async with self._batch_lock:
-            return self._batch_receipts.get(idempotency_key)
+        return await self._storage.batch_result(idempotency_key)
 
     async def write_states(
         self,

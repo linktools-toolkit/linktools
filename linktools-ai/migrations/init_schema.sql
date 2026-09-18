@@ -110,6 +110,20 @@ CREATE TABLE ai_asset_changes (
     KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Immutable AssetStore history containing every committed per-asset revision.';
 
+CREATE TABLE ai_asset_batch_receipts (
+    id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
+    namespace_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the AssetStore namespace.',
+    idempotency_key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'SHA-256 digest of the caller batch idempotency key.',
+    request_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 digest of the original batch request.',
+    store_revision BIGINT NOT NULL COMMENT 'AssetStore revision committed by the original batch.',
+    payload_json JSON NOT NULL COMMENT 'Versioned committed Asset batch receipt without input file bytes.',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
+    PRIMARY KEY (id), UNIQUE KEY uk_namespace_digest_idempotency_key_digest (namespace_digest, idempotency_key_digest),
+    KEY ix_namespace_digest_store_revision (namespace_digest, store_revision),
+    KEY ix_updated_at (updated_at), KEY ix_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Durable idempotency receipts for committed atomic AssetStore batches.';
+
 CREATE TABLE ai_objects (
     id BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Surrogate row identifier used only by the SQL backend.',
     key_digest CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Canonical SHA-256 identity of the ObjectStore store identifier and object key.',
