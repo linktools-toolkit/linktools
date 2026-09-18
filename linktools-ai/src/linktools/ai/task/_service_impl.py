@@ -626,20 +626,12 @@ class DefaultTaskGraphService(TaskGraphService):
         if state is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if state.status is TaskStatus.SUCCEEDED:
-            view = await self._persistence.tasks.get_graph(
-                graph_id,
-                tenant_id=tenant_id,
-            )
-            if view is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            settled = await self._record_success(
+            await self._record_failure(
                 operation,
                 tenant_id,
-                view,
+                ErrorCode.IDEMPOTENCY_CONFLICT.value,
             )
-            if settled.status is not OperationStatus.SUCCEEDED:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return await self._result(view, tenant_id)
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if state.status is not TaskStatus.WAITING:
             raise AIError(ErrorCode.TASK_NOT_READY)
         if state.execution_id != request.wait_id:
