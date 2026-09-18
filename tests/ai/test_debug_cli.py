@@ -24,6 +24,7 @@ from linktools.ai.observe import MetricMeasurement, Metrics, Observation
 from linktools.ai.runtime import (
     ExecutionHistoryItem,
     ExecutionInfo,
+    ExecutionTraceItem,
     ModelInteractionItem,
     RuntimeHistory,
     TranscriptItem,
