@@ -32,7 +32,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskEvent
+from ..task import TaskBindingSnapshot, TaskEvent
 from ._input_contract import validate_user_input
 from ._snapshot_contract import RunSnapshot
 from .recovery import (
@@ -919,6 +919,55 @@ class ExecutionService(Protocol):
         *,
         dependency_hold_id: "str | None" = None,
     ) -> ExecutionHandle: ...
+    async def start_task(
+        self,
+        binding: TaskBindingSnapshot,
+        *,
+        principal: Principal,
+        input: Mapping[str, JsonValue],
+        idempotency_key: str,
+        correlation: Mapping[str, str | int],
+    ) -> ExecutionHandle: ...
+
+    async def claim_task_attempt(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionView: ...
+
+    async def schedule_task_retry(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error_code: str,
+    ) -> ExecutionView: ...
+
+    async def complete_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        output: JsonValue,
+    ) -> ExecutionResult: ...
+
+    async def fail_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error: AIError,
+    ) -> ExecutionResult: ...
+
+    async def require_task_recovery(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error_code: str,
+    ) -> ExecutionView: ...
+
     async def resolve_existing(
         self,
         binding_digest: str,
