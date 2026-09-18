@@ -368,7 +368,7 @@ class SqlStateStore:
                 self.context,
                 self._owner_digest,
             )
-            from sqlalchemy import select
+            from sqlalchemy import and_, select
 
             records = transaction._table("ai_state_records")
             aliases = transaction._table("ai_state_aliases")
@@ -377,7 +377,9 @@ class SqlStateStore:
             sequence_rows = (
                 (
                     await session.execute(
-                        select(sequences.c.key_digest, sequences.c.value)
+                        select(sequences.c.key_digest, sequences.c.value).where(
+                            sequences.c.owner_digest == transaction._owner_hex
+                        )
                     )
                 )
                 .mappings()
@@ -389,7 +391,9 @@ class SqlStateStore:
             alias_rows = (
                 (
                     await session.execute(
-                        select(aliases.c.alias_digest, aliases.c.record_key_digest)
+                        select(aliases.c.alias_digest, aliases.c.record_key_digest).where(
+                            aliases.c.owner_digest == transaction._owner_hex
+                        )
                     )
                 )
                 .mappings()
@@ -403,10 +407,16 @@ class SqlStateStore:
                 .select_from(
                     aliases.outerjoin(
                         records,
-                        aliases.c.record_key_digest == records.c.key_digest,
+                        and_(
+                            aliases.c.record_key_digest == records.c.key_digest,
+                            records.c.owner_digest == transaction._owner_hex,
+                        ),
                     )
                 )
-                .where(records.c.id.is_(None))
+                .where(
+                    aliases.c.owner_digest == transaction._owner_hex,
+                    records.c.id.is_(None),
+                )
                 .limit(1)
             )
             orphan_fact = await session.scalar(
@@ -414,10 +424,16 @@ class SqlStateStore:
                 .select_from(
                     facts.outerjoin(
                         records,
-                        facts.c.owner_key_digest == records.c.key_digest,
+                        and_(
+                            facts.c.owner_key_digest == records.c.key_digest,
+                            records.c.owner_digest == transaction._owner_hex,
+                        ),
                     )
                 )
-                .where(records.c.id.is_(None))
+                .where(
+                    facts.c.owner_digest == transaction._owner_hex,
+                    records.c.id.is_(None),
+                )
                 .limit(1)
             )
             if orphan_alias is not None or orphan_fact is not None:
