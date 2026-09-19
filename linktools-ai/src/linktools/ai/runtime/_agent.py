@@ -3,7 +3,7 @@
 """Runtime-bound Agent, Session, and Execution behavior objects."""
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -12,6 +12,10 @@ from pydantic_ai.messages import UserContent
 from ..core import JsonValue, Page, Principal, ThinkingValue
 from ..errors import AIError, ErrorCode
 from ._input import validate_user_input
+from ._watch_cursor import (
+    decode_execution_watch_cursor,
+    encode_execution_watch_cursor,
+)
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -83,19 +87,52 @@ class Execution(Generic[AppT]):
         if not isinstance(include_content, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if cursor is not None:
-            if (
-                not isinstance(cursor, str)
-                or not cursor.isdecimal()
-                or after_sequences is not None
-            ):
+            if after_sequences is not None:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            after_sequences = {self.execution_id: int(cursor)}
-        return self._watch_tree(
+            after_sequences = decode_execution_watch_cursor(
+                self._runtime.namespace,
+                self._principal.tenant_id,
+                self.execution_id,
+                cursor,
+                include_content=include_content,
+            )
+        stream = self._watch_tree(
             self.execution_id,
             principal=self._principal,
             after_sequences=after_sequences,
             include_content=include_content,
         )
+        return self._watch_with_cursor(
+            stream,
+            after_sequences=after_sequences,
+            include_content=include_content,
+        )
+
+    async def _watch_with_cursor(
+        self,
+        stream: AsyncIterator[ExecutionTreeEvent],
+        *,
+        after_sequences: "Mapping[str, int] | None",
+        include_content: bool,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        sequences = dict(after_sequences or {})
+        async for event in stream:
+            durable_sequence = event.event.durable_sequence
+            if durable_sequence is not None:
+                previous = sequences.get(event.execution_id, 0)
+                if durable_sequence <= previous:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                sequences[event.execution_id] = durable_sequence
+            yield replace(
+                event,
+                cursor=encode_execution_watch_cursor(
+                    self._runtime.namespace,
+                    self._principal.tenant_id,
+                    self.execution_id,
+                    include_content=include_content,
+                    sequences=sequences,
+                ),
+            )
 
     async def cancel(
         self,
