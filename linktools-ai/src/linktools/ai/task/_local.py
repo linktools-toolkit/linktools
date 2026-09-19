@@ -13,6 +13,7 @@ from linktools.core import environ
 from ..core import (
     JsonValue,
     Page,
+    Principal,
     TaskStatus,
     canonical_sha256,
     validate_lease_owner,
