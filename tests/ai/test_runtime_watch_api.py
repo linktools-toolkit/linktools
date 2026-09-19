@@ -378,6 +378,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
         "ReplayRuntime",
         (),
         {
+            "namespace": "watch-test",
             "graph": ReplayGraphService(),
             "execution": ReplayExecutionService(),
             "event": ReplayEventService(),
