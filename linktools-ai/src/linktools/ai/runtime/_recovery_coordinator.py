@@ -1046,6 +1046,8 @@ class _RecoveryCoordinator:
                 except AIError as error:
                     if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
                         raise
+                    if error.safe_details.get("reason") == "workspace_mismatch":
+                        raise
                     _logger.warning(
                         "recovery reconciliation deferred: execution=%s",
                         checkpoint.execution_id,
