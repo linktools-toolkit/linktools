@@ -1478,10 +1478,12 @@ class DefaultExecutionService:
         self,
         binding_digest: str,
         request: ExecutionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> "ExecutionHandle | None":
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = self._binding(binding_digest)
+        binding = self._binding(binding_digest, binding_snapshot)
         context = await self._canonicalize_request(request)
         request = context.request
         scope = "execution.run"
