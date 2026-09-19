@@ -129,6 +129,7 @@ def _backend() -> LocalExecutionBackend:
     backend._execution = _ExecutionState(record)
     binding = _binding()
     backend._catalog = SimpleNamespace(binding=lambda digest: binding)
+    backend._restore_binding = None
     backend._accepting = True
     backend._recovery_enabled = False
     backend._tenant_id = "tenant"
