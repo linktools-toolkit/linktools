@@ -545,18 +545,12 @@ class DefaultExecutionService:
         binding_digest: str,
         snapshot: "AgentBindingSnapshot | None" = None,
     ) -> AgentBinding:
-        try:
-            binding = self._catalog.binding(binding_digest)
-        except AIError as error:
-            if (
-                error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-                or snapshot is None
-            ):
-                raise
-            if snapshot.binding_digest != binding_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            binding = self._compiler.restore(snapshot)
-        if snapshot is not None and binding.snapshot != snapshot:
+        if snapshot is None:
+            return self._catalog.binding(binding_digest)
+        if snapshot.binding_digest != binding_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        binding = self._compiler.restore(snapshot)
+        if binding.digest != binding_digest or binding.snapshot != snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 
