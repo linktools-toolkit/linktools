@@ -555,6 +555,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             revision=current.revision + 1,
             event_sequence=current.event_sequence + 1,
             updated_at=now,
+            started_at=current.started_at or now,
         )
         execution_replacement = RecordReplacement(
             _projected_record(self, execution_record, next_execution),
