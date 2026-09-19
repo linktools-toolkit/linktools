@@ -10,9 +10,11 @@ from typing import cast
 import pytest
 
 from linktools.ai.core import (
+    AuthorizationAction,
     HmacCursorSigner,
     JsonValue,
     Principal,
+    ResourceKind,
     TenantAuthorizationPolicy,
     canonical_json_bytes,
 )
@@ -40,6 +42,59 @@ def _resign(payload: dict[str, str | int]) -> str:
         hashlib.sha256,
     ).hexdigest()
     return _encode_grant({**current, "hmac": signature})
+
+
+class _RecordingAuthorization:
+    def __init__(self) -> None:
+        self.calls: list[tuple[AuthorizationAction, object]] = []
+
+    async def authorize(
+        self,
+        principal: Principal,
+        action: AuthorizationAction,
+        resource: object,
+    ) -> None:
+        del principal
+        self.calls.append((action, resource))
+
+
+@pytest.mark.asyncio
+async def test_artifact_list_authorizes_the_execution_identity() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="artifact-list", tenant_id="tenant")
+    try:
+        await state.artifact.records.put_metadata(
+            ArtifactRecord(
+                artifact_id="artifact",
+                execution_id="execution",
+                tenant_id="tenant",
+                producer="tool",
+                media_type="text/plain",
+                object_ref=ObjectRef("runtime", "artifact/key", "a" * 64, 7),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        authorization = _RecordingAuthorization()
+        service = DefaultArtifactService(
+            state.artifact,
+            authorization,  # type: ignore[arg-type]
+            grant_key=_GRANT_KEY,
+            cursor_signer=HmacCursorSigner("artifact", _GRANT_KEY),
+        )
+
+        page = await service.list(
+            "execution",
+            principal=Principal("caller", "tenant", "service"),
+        )
+
+        assert [item.artifact_id for item in page.items] == ["artifact"]
+        assert len(authorization.calls) == 1
+        action, resource = authorization.calls[0]
+        assert action is AuthorizationAction.EXECUTION_READ
+        assert resource.kind is ResourceKind.EXECUTION  # type: ignore[attr-defined]
+        assert resource.resource_id == "execution"  # type: ignore[attr-defined]
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
