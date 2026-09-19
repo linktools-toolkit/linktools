@@ -44,6 +44,12 @@ class _Candidates:
             root_execution_id="exec-1",
             parent_invocation_id=None,
             session_id=None,
+            binding_kind="agent",
+            task_type=None,
+            task_attempt=0,
+            task_deadline_at=None,
+            task_next_attempt_at=None,
+            event_sequence=1,
         )
         return ExecutionCandidatePage(
             (ExecutionCandidate(record, "cursor-1"),),  # type: ignore[arg-type]
