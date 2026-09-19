@@ -819,10 +819,11 @@ async def _restore_recovery_bindings(
                     )
                     continue
                 raise
-            if binding.digest != execution.binding_digest:
+            if (
+                binding.digest != execution.binding_digest
+                or binding.snapshot != execution.binding
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            catalog.register_definition(binding.definition)
-            catalog.register_binding(binding)
         if page.next_cursor is None:
             return
         cursor = page.next_cursor
