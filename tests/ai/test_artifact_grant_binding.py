@@ -15,6 +15,7 @@ from linktools.ai.core import (
     JsonValue,
     Principal,
     ResourceKind,
+    ResourceRef,
     TenantAuthorizationPolicy,
     canonical_json_bytes,
 )
@@ -46,13 +47,13 @@ def _resign(payload: dict[str, str | int]) -> str:
 
 class _RecordingAuthorization:
     def __init__(self) -> None:
-        self.calls: list[tuple[AuthorizationAction, object]] = []
+        self.calls: list[tuple[AuthorizationAction, ResourceRef]] = []
 
     async def authorize(
         self,
         principal: Principal,
         action: AuthorizationAction,
-        resource: object,
+        resource: ResourceRef,
     ) -> None:
         del principal
         self.calls.append((action, resource))
@@ -91,8 +92,8 @@ async def test_artifact_list_authorizes_the_execution_identity() -> None:
         assert len(authorization.calls) == 1
         action, resource = authorization.calls[0]
         assert action is AuthorizationAction.EXECUTION_READ
-        assert resource.kind is ResourceKind.EXECUTION  # type: ignore[attr-defined]
-        assert resource.resource_id == "execution"  # type: ignore[attr-defined]
+        assert resource.kind is ResourceKind.EXECUTION
+        assert resource.id == "execution"
     finally:
         await state.close()
 
