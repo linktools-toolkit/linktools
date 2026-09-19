@@ -101,6 +101,7 @@ async def _emit_execution_detail(
         execution_id,
         principal=principal,
         cursor=None,
+        include_content=True,
         limit=_PAGE_LIMIT,
     )
     representative = next(
@@ -164,6 +165,7 @@ async def _emit_history_rows(
             execution_id,
             principal=principal,
             cursor=cursor,
+            include_content=True,
             limit=_PAGE_LIMIT,
         )
         if page.items:
@@ -207,6 +209,7 @@ async def _emit_transcript_rows(
             execution_id,
             principal=principal,
             cursor=cursor,
+            include_content=True,
             limit=_PAGE_LIMIT,
         )
         if page.items:
@@ -274,6 +277,7 @@ async def _emit_model_interactions(
             execution_id,
             principal=principal,
             cursor=cursor,
+            include_content=True,
             limit=_PAGE_LIMIT,
         )
     if not emitted:
