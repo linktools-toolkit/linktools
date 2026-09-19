@@ -1398,5 +1398,7 @@ __all__ = [
     "TaskGraphRunEvent",
     "TranscriptItem",
     "UpdateSessionRequest",
+    "UsageReadCutoff",
+    "UsageSummary",
     "project_execution_view",
 ]

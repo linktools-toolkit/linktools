@@ -89,6 +89,8 @@ from .service_api import (
     TaskGraphRunEvent,
     TranscriptItem,
     UpdateSessionRequest,
+    UsageReadCutoff,
+    UsageSummary,
 )
 from .state import (
     RuntimeDomain,
@@ -188,4 +190,6 @@ __all__ = [
     "ToolEffectResolutionResult",
     "TranscriptItem",
     "UpdateSessionRequest",
+    "UsageReadCutoff",
+    "UsageSummary",
 ]

@@ -22,6 +22,7 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    TaskStatus,
     TenantAuthorizationPolicy,
     canonical_sha256,
     validate_page_limit,
@@ -45,6 +46,7 @@ from .service_api import (
     ModelInteractionItem,
     SessionView,
     TranscriptItem,
+    UsageSummary,
 )
 from .state import RuntimeDomain, RuntimeState
 from .state._contracts import (
@@ -81,6 +83,53 @@ class ExecutionInfo:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
+
+
+def _merge_usage_summaries(
+    values: "list[UsageSummary]",
+    *,
+    unrecorded_executions: int = 0,
+) -> UsageSummary:
+    transport_retries: int | None = 0
+    cutoffs = []
+    totals = {
+        "logical_requests": 0,
+        "succeeded_requests": 0,
+        "failed_requests": 0,
+        "cancelled_requests": 0,
+        "output_correction_retries": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "model_duration_ns": 0,
+        "unknown_usage_requests": 0,
+    }
+    for value in values:
+        totals["logical_requests"] += value.logical_requests
+        totals["succeeded_requests"] += value.succeeded_requests
+        totals["failed_requests"] += value.failed_requests
+        totals["cancelled_requests"] += value.cancelled_requests
+        totals["output_correction_retries"] += value.output_correction_retries
+        totals["input_tokens"] += value.input_tokens
+        totals["output_tokens"] += value.output_tokens
+        totals["cache_read_tokens"] += value.cache_read_tokens
+        totals["cache_write_tokens"] += value.cache_write_tokens
+        totals["model_duration_ns"] += value.model_duration_ns
+        totals["unknown_usage_requests"] += value.unknown_usage_requests
+        cutoffs.extend(value.cutoffs)
+        if transport_retries is not None:
+            if value.transport_retries is None:
+                transport_retries = None
+            else:
+                transport_retries += value.transport_retries
+        unrecorded_executions += value.unrecorded_executions
+    return UsageSummary(
+        **totals,
+        transport_retries=transport_retries,
+        unrecorded_executions=unrecorded_executions,
+        cutoffs=tuple(cutoffs),
+    )
 
 
 def _project_session_view(record: SessionRecord) -> SessionView:
@@ -361,6 +410,78 @@ class RuntimeHistory:
             )
         )
         return Page(tuple(projected), next_cursor)
+
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> UsageSummary:
+        return await self._service.usage(
+            execution_id,
+            principal=principal,
+        )
+
+    async def graph_usage(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> UsageSummary:
+        graph = await self.task_graph(
+            graph_id,
+            principal=principal,
+        )
+        executions, _authorization = self._require_direct_reader()
+        roots = tuple(sorted({
+            state.execution_id
+            for state in graph.node_states
+            if state.execution_id is not None
+        }))
+        unrecorded = sum(
+            1
+            for state in graph.node_states
+            if state.execution_id is None
+            and state.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}
+        )
+
+        pending = list(roots)
+        seen: set[str] = set()
+        values: list[UsageSummary] = []
+        while pending:
+            execution_id = pending.pop(0)
+            if execution_id in seen:
+                continue
+            record = await executions.get(
+                execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            seen.add(execution_id)
+            values.append(
+                await self._service.usage(
+                    execution_id,
+                    principal=principal,
+                )
+            )
+            children = await executions.list_children(
+                execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            for child in children:
+                if (
+                    child.parent_execution_id != execution_id
+                    or child.tenant_id != principal.tenant_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if child.execution_id not in seen:
+                    pending.append(child.execution_id)
+
+        return _merge_usage_summaries(
+            values,
+            unrecorded_executions=unrecorded,
+        )
 
     async def recent_sessions(
         self,
