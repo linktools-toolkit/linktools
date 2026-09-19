@@ -304,7 +304,19 @@ class ExecutionTraceItem:
 class TranscriptItem:
     execution_id: str
     sequence: int
-    text: str
+    text: "str | None"
+    content_included: bool = True
+
+    def __post_init__(self) -> None:
+        if self.sequence < 0:
+            raise ValueError("transcript sequence must be non-negative")
+        if not isinstance(self.content_included, bool):
+            raise TypeError("transcript content flag must be bool")
+        if self.content_included:
+            if not isinstance(self.text, str):
+                raise ValueError("included transcript content must be text")
+        elif self.text is not None:
+            raise ValueError("omitted transcript content must be None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,10 +327,15 @@ class ExecutionHistoryItem:
     content: JsonValue
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
+    content_included: bool = True
 
     def __post_init__(self) -> None:
         if self.sequence < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("execution history item is invalid")
+        if not isinstance(self.content_included, bool):
+            raise TypeError("history content flag must be bool")
+        if not self.content_included and self.content is not None:
+            raise ValueError("omitted history content must be None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +354,7 @@ class ModelInteractionItem:
     error_code: str | None
     duration_ns: int
     usage: UsageMetrics | None
+    content_included: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -349,6 +367,10 @@ class ModelInteractionItem:
             or self.duration_ns < 0
         ):
             raise ValueError("model interaction item is invalid")
+        if not isinstance(self.content_included, bool):
+            raise TypeError("model interaction content flag must be bool")
+        if not self.content_included and (self.request or self.response is not None):
+            raise ValueError("omitted model interaction content must be empty")
         object.__setattr__(self, "model", dict(self.model))
         object.__setattr__(self, "request", dict(self.request))
 
@@ -869,6 +891,7 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]": ...
 
@@ -878,6 +901,7 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[TranscriptItem]: ...
 
@@ -887,6 +911,7 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]": ...
 
@@ -896,6 +921,7 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]": ...
 
@@ -1068,6 +1094,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]": ...
     async def transcript(
@@ -1076,6 +1103,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[TranscriptItem]": ...
     async def history(
@@ -1084,6 +1112,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]": ...
 
@@ -1093,6 +1122,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]": ...
 
