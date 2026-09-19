@@ -169,7 +169,7 @@ async def test_task_expansion_commits_topology_and_events_atomically() -> None:
         await repository.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-root",
             result_digest="a" * 64,
             expanded_nodes=expanded,
         )
@@ -210,7 +210,7 @@ async def test_task_expansion_commits_topology_and_events_atomically() -> None:
         await repository.complete(
             None,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-root",
             result_digest="a" * 64,
             graph_id=graph.graph_id,
             node_id="root",
@@ -262,7 +262,7 @@ async def test_task_expansion_rejects_node_id_collisions(
             await state.task.tasks.complete(
                 lease,
                 tenant_id="tenant",
-                execution_id=None,
+                execution_id="execution-root",
                 result_digest="b" * 64,
                 expanded_nodes=expanded_nodes,
             )
@@ -306,14 +306,14 @@ async def test_concurrent_task_expansions_retry_graph_header_cas() -> None:
             repository.complete(
                 leases[0],
                 tenant_id="tenant",
-                execution_id=None,
+                execution_id="execution-a",
                 result_digest="c" * 64,
                 expanded_nodes=(TaskNode("child-a"),),
             ),
             repository.complete(
                 leases[1],
                 tenant_id="tenant",
-                execution_id=None,
+                execution_id="execution-b",
                 result_digest="d" * 64,
                 expanded_nodes=(TaskNode("child-b"),),
             ),
@@ -540,7 +540,7 @@ async def test_idempotent_admission_projection_repair_emits_graph_change() -> No
         await repository.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-node",
             result_digest="f" * 64,
         )
         before = await repository.list_events(
