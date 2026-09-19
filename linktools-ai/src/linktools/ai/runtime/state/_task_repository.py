@@ -1484,6 +1484,8 @@ class TaskRepositoryImpl(RepositoryBase):
         *,
         tenant_id: str,
         expected_fence: int,
+        execution_id: "str | None" = None,
+        next_attempt_at: "datetime | None" = None,
     ) -> TaskGraphView:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
@@ -1491,6 +1493,17 @@ class TaskRepositoryImpl(RepositoryBase):
             isinstance(expected_fence, bool)
             or not isinstance(expected_fence, int)
             or expected_fence < 1
+            or (
+                execution_id is not None
+                and (not isinstance(execution_id, str) or not execution_id.strip())
+            )
+            or (
+                next_attempt_at is not None
+                and (
+                    not isinstance(next_attempt_at, datetime)
+                    or next_attempt_at.tzinfo is None
+                )
+            )
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
@@ -1511,6 +1524,10 @@ class TaskRepositoryImpl(RepositoryBase):
                 selected.status is not TaskStatus.RECOVERY_REQUIRED
                 or selected.fence != expected_fence
                 or selected.execution_id is None
+                or (
+                    execution_id is not None
+                    and selected.execution_id != execution_id
+                )
             ):
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             next_nodes = tuple(
@@ -1519,10 +1536,12 @@ class TaskRepositoryImpl(RepositoryBase):
                     status=TaskStatus.READY,
                     owner=None,
                     lease_expires_at=None,
-                    execution_id=None,
+                    execution_id=selected.execution_id,
                     result_digest=None,
                     error_code=None,
                     error_digest=None,
+                    next_attempt_at=next_attempt_at,
+                    occupies_concurrency=False,
                 )
                 if value.node_id == node_id
                 else value
@@ -1558,7 +1577,12 @@ class TaskRepositoryImpl(RepositoryBase):
                     ),
                     None,
                 )
-                if current is not None and current.status is TaskStatus.READY:
+                if (
+                    current is not None
+                    and current.status is TaskStatus.READY
+                    and current.execution_id == selected.execution_id
+                    and current.next_attempt_at == next_attempt_at
+                ):
                     return view
             if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise AIError(
@@ -2135,6 +2159,8 @@ class TaskRepositoryImpl(RepositoryBase):
             if node.status in _TERMINAL_TASK_STATUSES:
                 if lease is not None and node.fence != lease.fence:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
+                if expected_fence is not None and node.fence != expected_fence:
+                    raise AIError(ErrorCode.TASK_FENCE_STALE)
                 if node.status is not TaskStatus.SUCCEEDED:
                     raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
                 if node.result_digest != result_digest or (
@@ -2398,9 +2424,16 @@ class TaskRepositoryImpl(RepositoryBase):
         execution_id: str | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if expected_fence is not None and (
+            isinstance(expected_fence, bool)
+            or not isinstance(expected_fence, int)
+            or expected_fence < 1
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if lease is None:
             if (
                 not isinstance(graph_id, str)
@@ -2449,6 +2482,8 @@ class TaskRepositoryImpl(RepositoryBase):
             if node.status in _TERMINAL_TASK_STATUSES:
                 if lease is not None and node.fence != lease.fence:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
+                if expected_fence is not None and node.fence != expected_fence:
+                    raise AIError(ErrorCode.TASK_FENCE_STALE)
                 if node.status is not TaskStatus.FAILED:
                     raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
                 if (
@@ -2469,12 +2504,20 @@ class TaskRepositoryImpl(RepositoryBase):
                 )
             now = await transaction.now()
             if lease is None:
-                if (
-                    node.status is not TaskStatus.WAITING
+                if expected_fence is None:
+                    if (
+                        node.status is not TaskStatus.WAITING
+                        or node.execution_id is None
+                        or execution_id != node.execution_id
+                        or node.owner is not None
+                        or node.lease_expires_at is not None
+                    ):
+                        raise AIError(ErrorCode.TASK_FENCE_STALE)
+                elif (
+                    node.status is not TaskStatus.RECOVERY_REQUIRED
+                    or node.fence != expected_fence
                     or node.execution_id is None
                     or execution_id != node.execution_id
-                    or node.owner is not None
-                    or node.lease_expires_at is not None
                 ):
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
                 resolved_execution_id = node.execution_id
@@ -2489,9 +2532,7 @@ class TaskRepositoryImpl(RepositoryBase):
                 status=TaskStatus.FAILED,
                 owner=None,
                 lease_expires_at=None,
-                            next_attempt_at=None,
-                            occupies_concurrency=False,
-                            result_digest=None,
+                result_digest=None,
                 error_code=error_code,
                 error_digest=error_digest,
                 execution_id=resolved_execution_id,
@@ -2569,6 +2610,10 @@ class TaskRepositoryImpl(RepositoryBase):
                     and current.execution_id == execution_id
                     and current.error_code == error_code
                     and current.error_digest == error_digest
+                    and (
+                        expected_fence is None
+                        or current.fence == expected_fence
+                    )
                 ):
                     return TaskTerminalRecord(
                         target_node_id,

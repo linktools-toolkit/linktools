@@ -141,6 +141,15 @@ class TaskGraphLauncher(Protocol):
         execution_id: str,
     ) -> TaskGraphView: ...
 
+    async def resolve_effect(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+        expected_fence: int,
+        resolution: TaskEffectResolution,
+    ) -> TaskGraphView: ...
+
 
 __all__ = [
     "TaskEffectResolutionRequest",

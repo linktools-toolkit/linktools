@@ -2105,6 +2105,8 @@ class TaskRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         expected_fence: int,
+        execution_id: "str | None" = None,
+        next_attempt_at: "datetime | None" = None,
     ) -> TaskGraphView: ...
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def claim(
@@ -2144,6 +2146,7 @@ class TaskRepository(RuntimeRepository, Protocol):
         execution_id: str | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord: ...
     async def list_nodes(
         self, graph_id: str, *, tenant_id: str
