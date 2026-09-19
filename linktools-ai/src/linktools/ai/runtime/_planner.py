@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
 from ..agent import (
+    AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
     AgentDefinition,
@@ -49,6 +50,7 @@ from ..task import (
     TaskEffectResolution,
     TaskDependencyResult,
     TaskGraph,
+    TaskGraphAdmission,
     TaskGraphSnapshot,
     TaskNode,
     TaskExpanderRef,
