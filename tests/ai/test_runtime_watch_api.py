@@ -247,6 +247,7 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
         == ExecutionEventType.EXECUTION_SUCCEEDED.value
     )
     assert all(item.cursor is not None for item in values)
+    assert all(item.event.cursor is not None for item in execution)
     assert values[-1].cursor is not None
     assert [item async for item in run.watch(cursor=values[-1].cursor)] == []
     with pytest.raises(AIError) as raised:
