@@ -60,21 +60,22 @@ def test_bound_active_task_states_preserve_execution_id(
     )
     assert state.execution_id == "execution"
 
-def test_running_event_rejects_execution_id() -> None:
-    with pytest.raises(ValueError, match="running task event state is invalid"):
-        TaskEvent(
-            1,
-            "graph",
-            1,
-            TaskEventType.NODE_CHANGED,
-            datetime.now(timezone.utc),
-            TaskStatus.RUNNING,
-            TaskStatus.READY,
-            "node",
-            "worker",
-            1,
-            "execution",
-        )
+def test_running_event_preserves_bound_execution_id() -> None:
+    event = TaskEvent(
+        1,
+        "graph",
+        1,
+        TaskEventType.NODE_CHANGED,
+        datetime.now(timezone.utc),
+        TaskStatus.RUNNING,
+        TaskStatus.READY,
+        "node",
+        "worker",
+        1,
+        "execution",
+    )
+
+    assert event.execution_id == "execution"
 
 
 def test_waiting_is_the_only_nonterminal_bound_execution_state() -> None:
