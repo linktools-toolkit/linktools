@@ -357,7 +357,7 @@ async def test_runtime_history_returns_exact_recent_executions_and_errors() -> N
     assert repository.calls == 3
     assert inspected.error_code == "FAILED_CODE"
     assert inspected.safe_error_details == {"stage": "runtime"}
-    assert inspected.error_diagnostics is not None
+    assert inspected.error_diagnostics is None
 
 
 @pytest.mark.asyncio
