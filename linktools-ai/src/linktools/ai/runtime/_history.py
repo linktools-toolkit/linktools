@@ -458,6 +458,7 @@ class StepExecutionHistoryReader:
         )
         offset = 0 if cursor_state is None else cursor_state[0]
         fixed_cutoffs = None if cursor_state is None else dict(cursor_state[1])
+        target = offset + limit + 1
 
         facts: list[AttachmentFact] = []
         accepted_ids: set[str] = set()
@@ -495,18 +496,8 @@ class StepExecutionHistoryReader:
                     execution_id=record.execution_id,
                     segment_sequence=segment_sequence,
                 )
-                values = await self._store.list_model_interactions(run_id=run_id)
-                interactions: list[ModelInteractionRecord] = []
-                for value in values:
-                    if (
-                        not isinstance(value, ModelInteractionRecord)
-                        or value.run_id != run_id
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    interactions.append(value)
-                current_high_water = max(
-                    (value.request_sequence for value in interactions),
-                    default=0,
+                current_high_water = await self._store.model_interaction_count(
+                    run_id=run_id,
                 )
                 high_water = (
                     current_high_water
@@ -516,22 +507,45 @@ class StepExecutionHistoryReader:
                 if high_water > current_high_water:
                     raise AIError(ErrorCode.CURSOR_INVALID)
                 cutoffs.append((segment_sequence, high_water))
-                for interaction in interactions:
-                    if interaction.request_sequence > high_water:
-                        continue
-                    for raw in interaction.attachments:
-                        fact = _project_attachment_fact(
-                            record.execution_id,
-                            raw,
-                            segment_sequence=segment_sequence,
-                            request_sequence=interaction.request_sequence,
-                            step_index=interaction.step_index,
-                        )
-                        if fact.fact == "accepted":
-                            if fact.attachment_id in accepted_ids:
-                                continue
-                            accepted_ids.add(fact.attachment_id)
-                        facts.append(fact)
+
+                after_sequence = 0
+                while after_sequence < high_water and len(facts) < target:
+                    batch_limit = min(256, high_water - after_sequence)
+                    values = await self._store.list_model_interactions(
+                        run_id=run_id,
+                        after_request_sequence=after_sequence,
+                        limit=batch_limit,
+                    )
+                    if len(values) != batch_limit:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    for value in values:
+                        if (
+                            not isinstance(value, ModelInteractionRecord)
+                            or value.run_id != run_id
+                            or value.request_sequence != after_sequence + 1
+                        ):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        after_sequence = value.request_sequence
+                        for raw in value.attachments:
+                            fact = _project_attachment_fact(
+                                record.execution_id,
+                                raw,
+                                segment_sequence=segment_sequence,
+                                request_sequence=value.request_sequence,
+                                step_index=value.step_index,
+                            )
+                            if fact.fact == "accepted":
+                                if fact.attachment_id in accepted_ids:
+                                    continue
+                                accepted_ids.add(fact.attachment_id)
+                            facts.append(fact)
+                            if len(facts) >= target:
+                                break
+                        if len(facts) >= target:
+                            break
+
+                if len(facts) >= target:
+                    break
 
         if offset > len(facts):
             raise AIError(ErrorCode.CURSOR_INVALID)
