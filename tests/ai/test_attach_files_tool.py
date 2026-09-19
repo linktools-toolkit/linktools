@@ -155,6 +155,7 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
     assert result.content is not None
     binary = [item for item in result.content if isinstance(item, BinaryContent)]
     assert len(binary) == 2
+    assert binary[0].identifier != binary[1].identifier
     assert session.canonicalized == ["evidence.png", "evidence.png"]
     assert session.reads == ["evidence.png", "evidence.png"]
     assert repository.path_fields == ("paths",)
