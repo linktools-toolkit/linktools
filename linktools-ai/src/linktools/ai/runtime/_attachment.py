@@ -16,6 +16,7 @@ from pydantic_ai.messages import (
     ImageUrl,
     ModelMessage,
     ModelRequest,
+    ToolReturn,
     UploadedFile,
     UserContent,
     UserPromptPart,
@@ -80,6 +81,54 @@ def input_attachment_views(
     return tuple(result)
 
 
+def bind_tool_return_attachments(
+    tool_name: str,
+    call_id: str,
+    result: object,
+) -> object:
+    """Bind attach_files content to stable occurrence ids before it enters history."""
+    if tool_name != "attach_files" or not isinstance(result, ToolReturn):
+        return result
+    occurrences = _attach_file_occurrences(result.return_value, call_id=call_id)
+    if not occurrences:
+        return result
+    content = result.content
+    if content is None or isinstance(content, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    values = tuple(content)
+    binaries = tuple(item for item in values if isinstance(item, BinaryContent))
+    if len(binaries) != len(occurrences):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    occurrence_index = 0
+    bound: list[UserContent] = []
+    for item in values:
+        if not isinstance(item, BinaryContent):
+            bound.append(item)
+            continue
+        occurrence = occurrences[occurrence_index]
+        occurrence_index += 1
+        descriptor = _content_descriptor(item)
+        if descriptor is None or not _same_attachment(occurrence, descriptor):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        bound.append(
+            BinaryContent.narrow_type(
+                BinaryContent(
+                    item.data,
+                    media_type=item.media_type,
+                    identifier=_require_string(occurrence.get("attachment_id")),
+                    vendor_metadata=item.vendor_metadata,
+                )
+            )
+        )
+    return ToolReturn(
+        return_value=result.return_value,
+        content=bound,
+        metadata=result.metadata,
+        tools=result.tools,
+    )
+
+
 def request_attachment_facts(
     messages: Sequence[ModelMessage],
     initial: Sequence[Mapping[str, JsonValue]],
@@ -87,15 +136,14 @@ def request_attachment_facts(
     accepted_attachment_ids: set[str],
 ) -> tuple[dict[str, JsonValue], ...]:
     """Record attachment facts from the exact request handed to the model adapter."""
-    user_candidates: list[dict[str, JsonValue]] = []
+    tool_occurrences: dict[str, dict[str, JsonValue]] = {}
     tool_facts: list[dict[str, JsonValue]] = []
-    pending_tool: list[dict[str, JsonValue]] = []
+    user_candidates: list[dict[str, JsonValue]] = []
     request_position = 0
 
     for message in messages:
         if not isinstance(message, ModelRequest):
             continue
-        pending_tool = []
         for part in message.parts:
             if (
                 isinstance(part, BaseToolReturnPart)
@@ -103,94 +151,63 @@ def request_attachment_facts(
                 and isinstance(part.tool_call_id, str)
                 and part.tool_call_id
             ):
-                call_id = part.tool_call_id
-                pending_tool = list(
-                    _attach_file_occurrences(part.content, call_id=call_id)
-                )
-                direct = [
-                    descriptor
-                    for item in _iter_multimodal(part.content)
-                    if (descriptor := _content_descriptor(item)) is not None
-                ]
-                if not pending_tool:
-                    pending_tool = [
-                        _tool_occurrence(
-                            descriptor,
-                            call_id=call_id,
-                            call_position=position,
-                        )
-                        for position, descriptor in enumerate(direct)
-                    ]
-
-                for occurrence in pending_tool:
+                for occurrence in _attach_file_occurrences(
+                    part.content,
+                    call_id=part.tool_call_id,
+                ):
                     attachment_id = _require_string(
                         occurrence.get("attachment_id")
                     )
-                    if attachment_id not in accepted_attachment_ids:
-                        tool_facts.append(
-                            _request_fact(
-                                occurrence,
-                                fact="accepted",
-                                request_position=_require_non_negative_int(
-                                    occurrence.get("call_position")
-                                ),
-                                call_id=call_id,
-                            )
-                        )
-                        accepted_attachment_ids.add(attachment_id)
-
-                if direct:
-                    remaining = list(pending_tool)
-                    for descriptor in direct:
-                        occurrence = _take_matching_occurrence(
-                            remaining,
-                            descriptor,
-                        )
-                        if occurrence is None:
-                            continue
-                        tool_facts.append(
-                            _request_fact(
-                                occurrence,
-                                fact="included_in_request",
-                                request_position=request_position,
-                                call_id=call_id,
-                            )
-                        )
-                        request_position += 1
-                    pending_tool = remaining
-                continue
-
-            if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
-                remaining = list(pending_tool)
-                for item in part.content:
-                    descriptor = _content_descriptor(item)
-                    if descriptor is None:
+                    previous = tool_occurrences.get(attachment_id)
+                    if previous is not None and previous != occurrence:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    tool_occurrences[attachment_id] = occurrence
+                    if attachment_id in accepted_attachment_ids:
                         continue
-                    occurrence = _take_matching_occurrence(remaining, descriptor)
-                    if occurrence is not None:
-                        call_id = _require_string(occurrence.get("call_id"))
-                        tool_facts.append(
-                            _request_fact(
-                                occurrence,
-                                fact="included_in_request",
-                                request_position=request_position,
-                                call_id=call_id,
-                            )
+                    tool_facts.append(
+                        _request_fact(
+                            occurrence,
+                            fact="accepted",
+                            request_position=_require_non_negative_int(
+                                occurrence.get("call_position")
+                            ),
+                            call_id=part.tool_call_id,
                         )
-                    else:
-                        candidate = dict(descriptor)
-                        candidate["request_position"] = request_position
-                        user_candidates.append(candidate)
-                    request_position += 1
-                pending_tool = []
+                    )
+                    accepted_attachment_ids.add(attachment_id)
                 continue
 
-            if pending_tool:
-                pending_tool = []
+            if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+                continue
+            for item in part.content:
+                descriptor = _content_descriptor(item)
+                if descriptor is None:
+                    continue
+                occurrence = (
+                    tool_occurrences.get(item.identifier)
+                    if isinstance(item, BinaryContent)
+                    else None
+                )
+                if occurrence is not None and _same_attachment(
+                    occurrence,
+                    descriptor,
+                ):
+                    tool_facts.append(
+                        _request_fact(
+                            occurrence,
+                            fact="included_in_request",
+                            request_position=request_position,
+                            call_id=_require_string(occurrence.get("call_id")),
+                        )
+                    )
+                else:
+                    candidate = dict(descriptor)
+                    candidate["request_position"] = request_position
+                    user_candidates.append(candidate)
+                request_position += 1
 
     initial_facts: list[dict[str, JsonValue]] = []
-    matched = _match_initial_occurrences(initial, user_candidates)
-    for expected, candidate in matched:
+    for expected, candidate in _match_initial_occurrences(initial, user_candidates):
         initial_facts.append(
             _request_fact(
                 expected,
@@ -230,54 +247,25 @@ def _attach_file_occurrences(
             or not _is_digest(digest)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        content_key = cast(str, digest)
         result.append(
-            _tool_occurrence(
-                {
-                    "source": "attach_files",
-                    "media_type": media_type,
-                    "size": size,
-                    "digest": cast(str, digest),
-                    "content_key": cast(str, digest),
-                },
-                call_id=call_id,
-                call_position=position,
-            )
+            {
+                "attachment_id": _attachment_id(
+                    "attach_files",
+                    position,
+                    content_key,
+                    call_id=call_id,
+                ),
+                "source": "attach_files",
+                "media_type": media_type,
+                "size": size,
+                "digest": content_key,
+                "content_key": content_key,
+                "call_id": call_id,
+                "call_position": position,
+            }
         )
     return tuple(result)
-
-
-def _tool_occurrence(
-    descriptor: Mapping[str, JsonValue],
-    *,
-    call_id: str,
-    call_position: int,
-) -> dict[str, JsonValue]:
-    content_key = _require_string(descriptor.get("content_key"))
-    return {
-        "attachment_id": _attachment_id(
-            "attach_files",
-            call_position,
-            content_key,
-            call_id=call_id,
-        ),
-        "source": "attach_files",
-        "media_type": descriptor.get("media_type"),
-        "size": descriptor.get("size"),
-        "digest": descriptor.get("digest"),
-        "content_key": content_key,
-        "call_id": call_id,
-        "call_position": call_position,
-    }
-
-
-def _take_matching_occurrence(
-    values: list[dict[str, JsonValue]],
-    descriptor: Mapping[str, JsonValue],
-) -> dict[str, JsonValue] | None:
-    for index, value in enumerate(values):
-        if _same_attachment(value, descriptor):
-            return values.pop(index)
-    return None
 
 
 def _accepted_occurrence(
@@ -359,11 +347,9 @@ def _same_attachment(
 ) -> bool:
     source = expected.get("source")
     candidate_source = candidate.get("source")
-    if source == "workspace":
+    if source in {"workspace", "attach_files"}:
         if candidate_source != "binary":
             return False
-    elif source == "attach_files":
-        pass
     elif source != candidate_source:
         return False
     return (
@@ -472,4 +458,8 @@ def _is_digest(value: object) -> bool:
     )
 
 
-__all__ = ["input_attachment_views", "request_attachment_facts"]
+__all__ = [
+    "bind_tool_return_attachments",
+    "input_attachment_views",
+    "request_attachment_facts",
+]
