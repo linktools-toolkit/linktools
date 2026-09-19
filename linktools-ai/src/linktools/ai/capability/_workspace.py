@@ -333,15 +333,15 @@ class _WorkspaceToolSurface:
     async def _attach_files(self, paths: list[str]) -> ToolReturn:
         if not paths:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        unique_paths = tuple(dict.fromkeys(paths))
-        if len(unique_paths) > self._limits.max_binary_input_parts:
+        attachment_paths = tuple(paths)
+        if len(attachment_paths) > self._limits.max_binary_input_parts:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         session = self._require_session()
         total_bytes = 0
         metadata: list[dict[str, object]] = []
         content: list[UserContent] = []
-        for path in unique_paths:
+        for path in attachment_paths:
             media_type, _ = self._mime.guess_type(path, strict=False)
             if not media_type:
                 raise AIError(
