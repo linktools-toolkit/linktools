@@ -122,7 +122,7 @@ async def test_usage_reads_only_captured_model_interaction_prefix() -> None:
         run_id,
         conversation_id,
         agent_name="agent",
-        metadata={"segment_sequence": "1"},
+        metadata={"segment_sequence": "1", "agent_name": "agent"},
     )
     interactions = (
         _interaction(
