@@ -156,6 +156,7 @@ class _ExecutionViewSource(Protocol):
     task_attempt: int
     task_deadline_at: datetime | None
     task_next_attempt_at: datetime | None
+    event_sequence: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +174,7 @@ class ExecutionView:
     task_attempt: int = 0
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
+    event_sequence: int = 0
 
 
 def project_execution_view(source: object) -> ExecutionView:
@@ -192,6 +194,7 @@ def project_execution_view(source: object) -> ExecutionView:
         task_attempt=value.task_attempt,
         task_deadline_at=value.task_deadline_at,
         task_next_attempt_at=value.task_next_attempt_at,
+        event_sequence=value.event_sequence,
     )
 
 
@@ -1010,6 +1013,12 @@ class ExecutionService(Protocol):
     async def list(
         self, request: ListExecutionRequest
     ) -> "Page[ExecutionView]": ...
+    async def list_children(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> "tuple[ExecutionView, ...]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...

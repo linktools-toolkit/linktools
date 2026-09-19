@@ -28,7 +28,12 @@ from ..task import (
     TaskResultRef,
     TaskInputSupplyRequest,
 )
-from .service_api import ExecutionTreeEvent, TaskGraphRunEvent
+from .service_api import (
+    ExecutionStreamEvent,
+    ExecutionTreeEvent,
+    ExecutionView,
+    TaskGraphRunEvent,
+)
 
 if TYPE_CHECKING:
     from ._agent import Execution
@@ -223,7 +228,7 @@ class TaskGraphRun(Generic[AppT]):
             ),
         )
         if observer is not None:
-            events = await self._capture_replay_events()
+            events = await self._capture_replay_events(snapshot)
             for event in events:
                 value = observer(event)
                 if inspect.isawaitable(value):
@@ -432,25 +437,130 @@ class TaskGraphRun(Generic[AppT]):
 
     async def _capture_replay_events(
         self,
+        snapshot: TaskGraphSnapshot,
     ) -> tuple[TaskGraphRunEvent, ...]:
+        latest = await self._runtime.graph.latest_event(
+            self.graph_id,
+            principal=self._principal,
+        )
+        graph_cutoff = 0 if latest is None else latest.sequence
+
+        captured: dict[str, tuple[str, ExecutionView, int]] = {}
+        for state in snapshot.node_states:
+            execution_id = state.execution_id
+            if execution_id is None:
+                continue
+            try:
+                root = await self._runtime.execution.inspect(
+                    execution_id,
+                    principal=self._principal,
+                )
+            except AIError as error:
+                if (
+                    execution_id.startswith("wait:")
+                    or execution_id.startswith("task-execution-")
+                ) and error.code in {
+                    ErrorCode.AUTHORIZATION_DENIED,
+                    ErrorCode.STORAGE_NOT_FOUND,
+                }:
+                    continue
+                raise
+            captured[root.execution_id] = (
+                state.node_id,
+                root,
+                root.event_sequence,
+            )
+            for child in await self._runtime.execution.list_children(
+                root.execution_id,
+                principal=self._principal,
+            ):
+                if (
+                    child.parent_execution_id != root.execution_id
+                    or child.root_execution_id != root.root_execution_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                captured[child.execution_id] = (
+                    state.node_id,
+                    child,
+                    child.event_sequence,
+                )
+
         events: list[TaskGraphRunEvent] = []
         after_sequence = 0
-        while True:
+        while after_sequence < graph_cutoff:
             page = await self._runtime.graph.list_events(
                 self.graph_id,
                 principal=self._principal,
                 after_sequence=after_sequence,
-                limit=200,
+                limit=min(200, graph_cutoff - after_sequence),
             )
             if not page.items:
-                break
-            events.extend(
-                TaskGraphRunEvent(self.graph_id, event.node_id, event)
-                for event in page.items
-            )
-            after_sequence = page.items[-1].sequence
-            if page.next_cursor is None:
-                break
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for event in page.items:
+                if event.sequence > graph_cutoff:
+                    break
+                events.append(
+                    TaskGraphRunEvent(
+                        self.graph_id,
+                        event.node_id,
+                        event,
+                    )
+                )
+                after_sequence = event.sequence
+
+        for execution_id in sorted(
+            captured,
+            key=lambda value: (
+                captured[value][0],
+                captured[value][1].depth
+                if hasattr(captured[value][1], "depth")
+                else (
+                    0
+                    if captured[value][1].parent_execution_id is None
+                    else 1
+                ),
+                value,
+            ),
+        ):
+            node_id, view, cutoff = captured[execution_id]
+            sequence = 0
+            depth = 0 if view.parent_execution_id is None else 1
+            while sequence < cutoff:
+                page = await self._runtime.event.list(
+                    execution_id,
+                    principal=self._principal,
+                    after_sequence=sequence,
+                    limit=min(200, cutoff - sequence),
+                )
+                if not page.items:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for event in page.items:
+                    if event.sequence > cutoff:
+                        break
+                    stream = ExecutionStreamEvent(
+                        execution_id,
+                        event.sequence,
+                        event.event_type,
+                        {},
+                    )
+                    tree = ExecutionTreeEvent(
+                        execution_id,
+                        view.agent_id,
+                        view.lineage_kind,
+                        view.parent_execution_id,
+                        view.root_execution_id,
+                        view.parent_invocation_id,
+                        depth,
+                        stream,
+                    )
+                    events.append(
+                        TaskGraphRunEvent(
+                            self.graph_id,
+                            node_id,
+                            tree,
+                        )
+                    )
+                    sequence = event.sequence
         return tuple(events)
 
 

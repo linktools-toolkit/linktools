@@ -65,6 +65,13 @@ class TaskGraphQueryService(Protocol):
         limit: int = 100,
     ) -> Page[TaskEvent]: ...
 
+    async def latest_event(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+    ) -> "TaskEvent | None": ...
+
     def stream_events(
         self,
         graph_id: str,
