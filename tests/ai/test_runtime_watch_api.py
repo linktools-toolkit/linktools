@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -13,6 +14,7 @@ from linktools.ai.core import (
     Principal,
     TaskStatus,
 )
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
 from linktools.ai.runtime.service_api import (
     ExecutionEvent,
@@ -20,7 +22,7 @@ from linktools.ai.runtime.service_api import (
     ExecutionTreeEvent,
     ExecutionView,
 )
-from linktools.ai.task import TaskEvent, TaskEventType
+from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphResult
 
 
 class _ExecutionService:
@@ -360,6 +362,180 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
     ]
     assert [event.durable_sequence for event in execution_events] == [1, 2]
     assert all(event.payload == {} for event in execution_events)
+
+
+
+class _WaitGraphService:
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.wait_started = asyncio.Event()
+        self.wait_cancelled = asyncio.Event()
+        self.stream_release = asyncio.Event()
+
+    async def snapshot(self, graph_id: str, *, principal: Principal):
+        del principal
+        assert graph_id == "graph"
+        return type("Snapshot", (), {"node_states": ()})()
+
+    def stream_events(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ):
+        del principal, after_sequence
+
+        async def values():
+            if self.mode == "observer_error":
+                yield TaskEvent(
+                    1,
+                    graph_id,
+                    1,
+                    TaskEventType.GRAPH_ADMITTED,
+                    datetime.now(timezone.utc),
+                    TaskStatus.PENDING,
+                )
+            await self.stream_release.wait()
+            if False:
+                yield None
+
+        return values()
+
+    async def wait(
+        self,
+        graph_id: str,
+        *,
+        principal: Principal,
+        timeout_seconds: float | None = None,
+    ) -> TaskGraphResult:
+        del principal, timeout_seconds
+        assert graph_id == "graph"
+        self.wait_started.set()
+        if self.mode == "waiting":
+            return TaskGraphResult(graph_id, TaskStatus.WAITING, (), ())
+        if self.mode == "timeout":
+            raise AIError(
+                ErrorCode.TASK_WAIT_TIMEOUT,
+                safe_details={"graph_id": graph_id},
+            )
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.wait_cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+
+def _wait_runtime(service: _WaitGraphService):
+    return type(
+        "WaitRuntime",
+        (),
+        {
+            "namespace": "watch-test",
+            "graph": service,
+            "execution": _ExecutionService(),
+        },
+    )()
+
+
+async def _assert_no_graph_observer_tasks() -> None:
+    await asyncio.sleep(0)
+    names = {
+        task.get_name()
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task() and not task.done()
+    }
+    assert "task-graph-wait-graph" not in names
+    assert "task-graph-observer-graph" not in names
+    assert "task-run-graph-graph" not in names
+
+
+@pytest.mark.asyncio
+async def test_task_graph_wait_cleans_observer_on_stable_waiting() -> None:
+    service = _WaitGraphService("waiting")
+    run = TaskGraphRun(
+        _wait_runtime(service),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    async def observer(_event: TaskGraphRunEvent) -> None:
+        raise AssertionError("idle observer should be cancelled before an event")
+
+    result = await run.wait(observer=observer)
+
+    assert result.status is TaskStatus.WAITING
+    await _assert_no_graph_observer_tasks()
+
+
+@pytest.mark.asyncio
+async def test_task_graph_wait_cleans_observer_on_timeout() -> None:
+    service = _WaitGraphService("timeout")
+    run = TaskGraphRun(
+        _wait_runtime(service),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    async def observer(_event: TaskGraphRunEvent) -> None:
+        return None
+
+    with pytest.raises(AIError) as raised:
+        await run.wait(observer=observer)
+
+    assert raised.value.code is ErrorCode.TASK_WAIT_TIMEOUT
+    await _assert_no_graph_observer_tasks()
+
+
+@pytest.mark.asyncio
+async def test_task_graph_observer_error_cleans_waiter_without_cancelling_graph() -> None:
+    service = _WaitGraphService("observer_error")
+    run = TaskGraphRun(
+        _wait_runtime(service),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    async def observer(_event: TaskGraphRunEvent) -> None:
+        raise RuntimeError("observer failed")
+
+    with pytest.raises(RuntimeError, match="observer failed"):
+        await run.wait(observer=observer)
+
+    await asyncio.wait_for(service.wait_cancelled.wait(), 1)
+    await _assert_no_graph_observer_tasks()
+
+
+@pytest.mark.asyncio
+async def test_task_graph_wait_outer_cancel_cleans_waiter_and_observer() -> None:
+    service = _WaitGraphService("block")
+    run = TaskGraphRun(
+        _wait_runtime(service),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    async def observer(_event: TaskGraphRunEvent) -> None:
+        return None
+
+    task = asyncio.create_task(
+        run.wait(observer=observer),
+        name="test-task-graph-wait-cancel",
+    )
+    await service.wait_started.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.wait_for(service.wait_cancelled.wait(), 1)
+    await _assert_no_graph_observer_tasks()
 
 
 def test_runtime_does_not_expose_stream_tree() -> None:
