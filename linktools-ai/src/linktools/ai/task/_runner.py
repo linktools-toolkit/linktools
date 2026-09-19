@@ -10,7 +10,7 @@ from typing import Protocol, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
-from ._graph import TaskDependencyResult, TaskNode
+from ._graph import TaskDependencyResult, TaskGraphSnapshot, TaskNode
 from ._handler import TaskEffectResolution
 
 
@@ -81,6 +81,21 @@ class TaskNodeInvocation:
 
 
 class TaskNodeRunner(Protocol):
+    async def prepare_node(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+        principal: Principal,
+    ) -> None: ...
+
+    async def release_graph_dependencies(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        tenant_id: str,
+    ) -> None: ...
+
     async def run(
         self,
         invocation: TaskNodeInvocation,
