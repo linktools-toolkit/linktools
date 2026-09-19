@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Read-only Runtime composition for persisted execution history."""
 
+import json
 import heapq
 from collections.abc import AsyncIterator, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -10,6 +11,7 @@ from datetime import datetime
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot, restore_output
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -25,21 +27,33 @@ from ..core import (
     TaskStatus,
     TenantAuthorizationPolicy,
     canonical_sha256,
+    normalize_json_value,
     validate_page_limit,
     validate_persistence_namespace,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskEvent, TaskGraphInfo
+from ..storage import ObjectStore, StoredPayload, read_object
+from ..task import (
+    TaskBindingSnapshot,
+    TaskEvent,
+    TaskGraphInfo,
+    TaskResultRecord,
+    TaskResultRef,
+)
+from ._artifact import DefaultArtifactService
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._runtime_identity import grant_key
 from .service_api import (
+    ArtifactService,
+    ArtifactView,
     ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionHistoryService,
+    ExecutionResult,
     ExecutionTraceItem,
     ExecutionView,
     ListExecutionRequest,
@@ -181,6 +195,10 @@ class RuntimeHistory:
         tasks: "TaskRepository | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
         cursor_signer: "CursorSigner | None" = None,
+        namespace: "str | None" = None,
+        execution_objects: "ObjectStore | None" = None,
+        task_objects: "ObjectStore | None" = None,
+        artifacts: "ArtifactService | None" = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
@@ -190,6 +208,12 @@ class RuntimeHistory:
         self._tasks = tasks
         self._authorization = authorization
         self._cursor_signer = cursor_signer
+        self._namespace = (
+            None if namespace is None else validate_persistence_namespace(namespace)
+        )
+        self._execution_objects = execution_objects
+        self._task_objects = task_objects
+        self._artifacts = artifacts
 
     @property
     def tenant_id(self) -> str:
@@ -200,6 +224,132 @@ class RuntimeHistory:
     ) -> ExecutionInfo:
         return _project_execution_info(
             await self._authorized_record(execution_id, principal)
+        )
+
+    async def result(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionResult:
+        record = await self._authorized_record(execution_id, principal)
+        if record.status is ExecutionStatus.RECOVERY_REQUIRED:
+            if record.error_code is None or record.error_diagnostics is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                code = ErrorCode(record.error_code)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            raise AIError(code, safe_details=record.safe_error_details)
+        if record.status not in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            raise AIError(ErrorCode.EXECUTION_NOT_READY)
+
+        executions, _authorization = self._require_direct_reader()
+        stored = await executions.get_result(
+            execution_id,
+            tenant_id=principal.tenant_id,
+        )
+        if stored is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if record.status is not ExecutionStatus.SUCCEEDED:
+            if stored.output is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            error_code = _terminal_error_code(record)
+            return ExecutionResult(
+                record.execution_id,
+                record.status,
+                None,
+                None,
+                stored.usage,
+                error_code,
+                record.safe_error_details,
+                None,
+            )
+
+        if stored.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        output = await self._read_payload(
+            stored.output,
+            self._execution_objects,
+        )
+        return ExecutionResult(
+            record.execution_id,
+            record.status,
+            output,
+            _output_fingerprint(record),
+            stored.usage,
+        )
+
+    async def task_result_ref(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        principal: Principal,
+    ) -> TaskResultRef:
+        record = await self._task_result_record(
+            graph_id,
+            node_id,
+            principal=principal,
+        )
+        if self._namespace is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return TaskResultRef(
+            self._namespace,
+            principal.tenant_id,
+            graph_id,
+            node_id,
+            record.result_digest,
+        )
+
+    async def task_result(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        principal: Principal,
+    ) -> JsonValue:
+        record = await self._task_result_record(
+            graph_id,
+            node_id,
+            principal=principal,
+        )
+        if record.execution_id is not None:
+            execution = await self.result(
+                record.execution_id,
+                principal=principal,
+            )
+            if execution.status is not ExecutionStatus.SUCCEEDED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            output = execution.output
+        elif record.payload is not None:
+            output = await self._read_payload(record.payload, self._task_objects)
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if canonical_sha256(output) != record.result_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return output
+
+    async def artifacts(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> Page[ArtifactView]:
+        if self._artifacts is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._artifacts.list(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            limit=limit,
         )
 
     async def recent_executions(
@@ -669,6 +819,78 @@ class RuntimeHistory:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._tasks, self._authorization
 
+    async def _task_result_record(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        principal: Principal,
+    ) -> TaskResultRecord:
+        graph = await self.task_graph(graph_id, principal=principal)
+        state = next(
+            (value for value in graph.node_states if value.node_id == node_id),
+            None,
+        )
+        if state is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if state.status in {
+            TaskStatus.PENDING,
+            TaskStatus.READY,
+            TaskStatus.RUNNING,
+            TaskStatus.WAITING,
+            TaskStatus.RECOVERY_REQUIRED,
+        }:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        if state.status in {
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }:
+            details: dict[str, JsonValue] = {
+                "graph_id": graph_id,
+                "node_id": node_id,
+                "status": state.status.value,
+            }
+            if state.error_code is not None:
+                details["error_code"] = state.error_code
+            raise AIError(ErrorCode.TASK_NODE_FAILED, safe_details=details)
+        if state.status is not TaskStatus.SUCCEEDED or state.result_digest is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        tasks, _authorization = self._require_task_reader()
+        records = await tasks.get_results(
+            graph_id,
+            (node_id,),
+            tenant_id=principal.tenant_id,
+        )
+        record = records.get(node_id)
+        if record is None or record.result_digest != state.result_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return record
+
+    async def _read_payload(
+        self,
+        payload: StoredPayload,
+        objects: "ObjectStore | None",
+    ) -> JsonValue:
+        try:
+            if payload.kind == "inline":
+                value = payload.decode()
+            else:
+                if objects is None or payload.ref is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                raw = await read_object(
+                    objects,
+                    payload.ref.key,
+                    expected_digest=payload.ref.digest,
+                    expected_size=payload.ref.size,
+                )
+                value = json.loads(raw.decode("utf-8"))
+            return normalize_json_value(value)
+        except AIError:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
     async def _authorized_record(
         self,
         execution_id: str,
@@ -744,6 +966,12 @@ async def _open_runtime_history(
             reader,
             cursor_signer=HmacCursorSigner("execution", grant_key(resolved_namespace)),
         )
+        artifacts = DefaultArtifactService(
+            selected_state.artifact,
+            effective_authorization,
+            grant_key=grant_key(resolved_namespace),
+            cursor_signer=HmacCursorSigner("artifact", grant_key(resolved_namespace)),
+        )
         yield RuntimeHistory(
             service,
             tenant_id=effective_tenant_id,
@@ -752,6 +980,10 @@ async def _open_runtime_history(
             sessions=selected_state.conversation.sessions,
             tasks=selected_state.task.tasks,
             authorization=effective_authorization,
+            namespace=resolved_namespace,
+            execution_objects=selected_state.object_store(RuntimeDomain.EXECUTION),
+            task_objects=selected_state.object_store(RuntimeDomain.TASK),
+            artifacts=artifacts,
             cursor_signer=HmacCursorSigner(
                 "runtime-history",
                 grant_key(resolved_namespace),
@@ -778,6 +1010,31 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
         code,
         type(error).__name__,
     )
+
+
+def _output_fingerprint(record: ExecutionRecord) -> str:
+    binding = record.binding
+    if isinstance(binding, TaskBindingSnapshot):
+        return binding.output_fingerprint
+    if isinstance(binding, AgentBindingSnapshot):
+        return restore_output(binding.output_mode, binding.output_schema).fingerprint
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _terminal_error_code(record: ExecutionRecord) -> str:
+    if record.status is ExecutionStatus.CANCELLED:
+        if record.error_code != ErrorCode.EXECUTION_CANCELLED.value:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return record.error_code
+    if record.status is not ExecutionStatus.FAILED or record.error_code is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        code = ErrorCode(record.error_code)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if code is ErrorCode.EXECUTION_CANCELLED:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return code.value
 
 
 __all__ = ["ExecutionInfo", "RuntimeHistory"]
