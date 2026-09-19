@@ -12,6 +12,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolReturn,
     ToolReturnPart,
     UserPromptPart,
 )
@@ -23,7 +24,10 @@ from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.runtime._attachment import input_attachment_views
+from linktools.ai.runtime._attachment import (
+    bind_tool_return_attachments,
+    input_attachment_views,
+)
 from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._model_interaction import (
@@ -214,23 +218,34 @@ async def test_model_request_records_attach_files_call_identity() -> None:
     await store.initialize()
     await store.register_run(RunRecord("run"))
     adapter = HarnessStepStoreAdapter(store, execution_id="execution", step_run_id="run")
+    return_value = {
+        "files": [
+            {
+                "path": "evidence.png",
+                "media_type": "image/png",
+                "size": len(body),
+                "sha256": digest,
+            }
+        ]
+    }
+    result = bind_tool_return_attachments(
+        "attach_files",
+        "call-1",
+        ToolReturn(
+            return_value=return_value,
+            content=[BinaryContent(body, media_type="image/png")],
+        ),
+    )
+    assert isinstance(result, ToolReturn)
+    assert result.content is not None and not isinstance(result.content, str)
     message = ModelRequest(
         parts=[
             ToolReturnPart(
                 "attach_files",
-                {
-                    "files": [
-                        {
-                            "path": "evidence.png",
-                            "media_type": "image/png",
-                            "size": len(body),
-                            "sha256": digest,
-                        }
-                    ]
-                },
+                return_value,
                 tool_call_id="call-1",
             ),
-            UserPromptPart([BinaryContent(body, media_type="image/png")]),
+            UserPromptPart(result.content),
         ]
     )
     journal = _journal()
