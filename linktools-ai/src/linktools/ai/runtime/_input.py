@@ -455,20 +455,27 @@ def _input_view(
     return normalized
 
 
-def execution_input_attachment_views(
-    value: CanonicalUserInput,
+def stored_input_attachment_views(
+    value: "StoredUserInput",
 ) -> tuple[Mapping[str, JsonValue], ...]:
-    if isinstance(value, _MaterializedUserContent):
-        raw = value.view.get("attachments", [])
-        if not isinstance(raw, list):
+    from .state._contracts import StoredUserInput
+
+    if not isinstance(value, StoredUserInput):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    view = value.view
+    if view is None:
+        return ()
+    raw = view.get("attachments")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result: list[Mapping[str, JsonValue]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result: list[Mapping[str, JsonValue]] = []
-        for item in raw:
-            if not isinstance(item, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result.append(dict(item))
-        return tuple(result)
-    return tuple(input_attachment_views(value))
+        result.append(dict(item))
+    return tuple(result)
 
 
 def stored_user_input_view(value: "StoredUserInput") -> dict[str, JsonValue]:
@@ -669,7 +676,7 @@ __all__ = [
     "ExecutionInputMaterializer",
     "InputIntent",
     "decode_user_content_payload",
-    "execution_input_attachment_views",
+    "stored_input_attachment_views",
     "input_intent",
     "stored_user_input_view",
     "task_prompt_draft",
