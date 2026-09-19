@@ -1435,8 +1435,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         files: Sequence[str] = (),
         session_id: str | None = None,
         memory_scope: str | None = None,
+        definition: AgentDefinition | None = None,
     ) -> TaskNode:
-        definition = self._root_definition(agent_digest)
+        if definition is None:
+            definition = self._root_definition(agent_digest)
+        elif definition.digest != agent_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if planning is not None and not isinstance(planning, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         resolved_planning = (
@@ -1447,9 +1451,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if thinking is None
             else normalize_thinking(thinking)
         )
-        binding = self._catalog.register_binding(
-            self._compiler.bind(definition, output=output)
-        )
+        binding = self._compiler.bind(definition, output=output)
         return TaskNode(
             node_id,
             dependencies,
@@ -1511,9 +1513,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         )
         if not _binding_matches_frozen_root(binding, root):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        self._catalog.register_binding(
-            self._compiler.restore(binding)
-        )
         resolved_planning = (
             definition.spec.planning if planning is None else planning
         )
@@ -1595,6 +1594,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
+            definition=definition,
         )
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
