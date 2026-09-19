@@ -439,11 +439,9 @@ class TaskGraphRun(Generic[AppT]):
         self,
         snapshot: TaskGraphSnapshot,
     ) -> tuple[TaskGraphRunEvent, ...]:
-        latest = await self._runtime.graph.latest_event(
-            self.graph_id,
-            principal=self._principal,
-        )
-        graph_cutoff = 0 if latest is None else latest.sequence
+        graph_cutoff = snapshot.event_sequence
+        if graph_cutoff < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         captured: dict[str, tuple[str, ExecutionView, int]] = {}
         for state in snapshot.node_states:
@@ -512,13 +510,9 @@ class TaskGraphRun(Generic[AppT]):
             captured,
             key=lambda value: (
                 captured[value][0],
-                captured[value][1].depth
-                if hasattr(captured[value][1], "depth")
-                else (
-                    0
-                    if captured[value][1].parent_execution_id is None
-                    else 1
-                ),
+                0
+                if captured[value][1].parent_execution_id is None
+                else 1,
                 value,
             ),
         ):

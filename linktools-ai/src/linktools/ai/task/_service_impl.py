@@ -1103,32 +1103,6 @@ class DefaultTaskGraphService(TaskGraphService):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return page
 
-    async def latest_event(
-        self,
-        graph_id: str,
-        *,
-        principal: Principal,
-    ) -> TaskEvent | None:
-        tenant_id = principal.tenant_id
-        header = await self._persistence.tasks.get_header(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(
-            principal,
-            AuthorizationAction.TASK_READ,
-            header,
-        )
-        event = await self._persistence.tasks.latest_event(
-            graph_id,
-            tenant_id=tenant_id,
-        )
-        if event is not None and event.graph_id != graph_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return event
-
     def stream_events(
         self,
         graph_id: str,

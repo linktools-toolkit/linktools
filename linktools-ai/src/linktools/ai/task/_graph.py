@@ -706,6 +706,7 @@ class TaskGraphInfo:
     status: TaskStatus
     nodes: tuple[TaskNodeInfo, ...]
     node_states: tuple[TaskNodeView, ...]
+    event_sequence: int = 0
 
     @classmethod
     def from_snapshot(cls, snapshot: "TaskGraphSnapshot") -> "TaskGraphInfo":
@@ -714,6 +715,7 @@ class TaskGraphInfo:
             snapshot.status,
             tuple(TaskNodeInfo.from_node(node) for node in snapshot.nodes),
             snapshot.node_states,
+            snapshot.event_sequence,
         )
 
 
@@ -723,10 +725,17 @@ class TaskGraphSnapshot:
     status: TaskStatus
     nodes: "tuple[TaskNode, ...]"
     node_states: "tuple[TaskNodeView, ...]"
+    event_sequence: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
             raise ValueError("task graph snapshot id is required")
+        if (
+            isinstance(self.event_sequence, bool)
+            or not isinstance(self.event_sequence, int)
+            or self.event_sequence < 0
+        ):
+            raise ValueError("task graph snapshot event sequence is invalid")
         nodes = tuple(self.nodes)
         states = tuple(self.node_states)
         node_ids = tuple(node.node_id for node in nodes)

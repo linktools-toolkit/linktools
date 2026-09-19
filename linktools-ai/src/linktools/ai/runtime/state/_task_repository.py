@@ -706,11 +706,34 @@ class TaskRepositoryImpl(RepositoryBase):
         state = await self._event_state_in_transaction(transaction, graph_id)
         if state is None:
             return None
+        stream = _task_event_stream(
+            self._namespace,
+            self._tenant_id,
+            self._domain.value,
+            graph_id,
+        )
+        owner = self._graph_key(graph_id)
+        facts = await transaction.list_facts(
+            FactQuery(stream, latest=True, limit=1)
+        )
+        if not facts:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        latest = facts[0]
+        if (
+            latest.stream_digest != stream
+            or latest.owner_key_digest != owner
+            or latest.subject_digest is not None
+            or latest.state is not None
+            or latest.sequence < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _decode_task_event(graph_id, latest)
         return TaskGraphSnapshot(
             state.graph.graph_id,
             _effective_graph_status(state.graph, state.node_states),
             state.graph.nodes,
             state.node_states,
+            latest.sequence,
         )
 
     async def _node_in_transaction(
