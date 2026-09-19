@@ -658,6 +658,7 @@ class ExecutionRecord:
     task_next_attempt_at: datetime | None = None
     dependency_hold_ids: tuple[str, ...] = ()
     retention_closed: bool = False
+    started_at: datetime | None = None
 
     def __post_init__(self) -> None:
         agent_binding = isinstance(self.binding, AgentBindingSnapshot)
@@ -711,6 +712,8 @@ class ExecutionRecord:
             raise ValueError("execution dependency holds must be sorted and unique")
         if not isinstance(self.retention_closed, bool):
             raise TypeError("execution retention_closed must be bool")
+        if self.started_at is not None and self.started_at.tzinfo is None:
+            raise ValueError("execution started_at must be timezone-aware")
         object.__setattr__(self, "dependency_hold_ids", holds)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
         if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
