@@ -15,7 +15,7 @@ from linktools.ai.runtime import (
     ExecutionRequest,
     ResumeSessionRequest,
 )
-from linktools.ai.runtime._factory import _restore_recovery_bindings
+from linktools.ai.runtime._factory import _preflight_recovery_bindings
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec
@@ -201,7 +201,7 @@ async def test_missing_recovery_execution_fails_closed() -> None:
     )
     compiler = SimpleNamespace(restore=lambda value: value)
     with pytest.raises(AIError) as error:
-        await _restore_recovery_bindings(
+        await _preflight_recovery_bindings(
             compiler,
             state,
             tenant_id="tenant",
@@ -268,7 +268,7 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
     )
     compiler = SimpleNamespace(restore=_restore)
 
-    await _restore_recovery_bindings(
+    await _preflight_recovery_bindings(
         compiler,
         state,
         tenant_id="tenant",
@@ -310,7 +310,7 @@ async def test_workspace_mismatch_blocks_startup_recovery() -> None:
     )
 
     with pytest.raises(AIError) as raised:
-        await _restore_recovery_bindings(
+        await _preflight_recovery_bindings(
             SimpleNamespace(restore=_restore),
             state,
             tenant_id="tenant",
