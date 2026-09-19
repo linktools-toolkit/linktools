@@ -42,6 +42,7 @@ from ._store import (
     StoredAlias,
 )
 from ._snapshot import SnapshotLimits
+from ._snapshot_validation import validate_snapshot_domain
 from ._codec import (
     decode_fact,
     decode_operation,
@@ -672,13 +673,23 @@ class RuntimeState:
                 domain = RuntimeDomain(domain_name)
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if not isinstance(raw_domain, Mapping):
+            expected_domain_fields = {
+                "records",
+                "aliases",
+                "facts",
+                "operations",
+                "sequences",
+            }
+            if (
+                not isinstance(raw_domain, Mapping)
+                or set(raw_domain) != expected_domain_fields
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            raw_records = raw_domain.get("records", [])
-            raw_aliases = raw_domain.get("aliases", [])
-            raw_facts = raw_domain.get("facts", [])
-            raw_operations = raw_domain.get("operations", [])
-            raw_sequences = raw_domain.get("sequences", [])
+            raw_records = raw_domain["records"]
+            raw_aliases = raw_domain["aliases"]
+            raw_facts = raw_domain["facts"]
+            raw_operations = raw_domain["operations"]
+            raw_sequences = raw_domain["sequences"]
             if not all(
                 isinstance(value, list)
                 for value in (
@@ -708,6 +719,16 @@ class RuntimeState:
             facts = tuple(decode_fact(value) for value in raw_facts)
             operations = tuple(decode_operation(value) for value in raw_operations)
             sequences = _decode_snapshot_sequences(raw_sequences)
+            validate_snapshot_domain(
+                namespace=namespace,
+                tenant_id=tenant_id,
+                domain=domain,
+                records=records,
+                aliases=aliases,
+                facts=facts,
+                operations=operations,
+                sequences=sequences,
+            )
             decoded_domains[domain] = (
                 records,
                 aliases,
@@ -835,16 +856,33 @@ def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
 
 
 def _object_ref_from_payload(value: object) -> ObjectRef:
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping) or set(value) != {
+        "store_id",
+        "key",
+        "digest",
+        "size",
+    }:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    store_id = value["store_id"]
+    key = value["key"]
+    digest = value["digest"]
+    size = value["size"]
+    if (
+        not isinstance(store_id, str)
+        or not store_id
+        or not isinstance(key, str)
+        or not key
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
-        return ObjectRef(
-            str(value["store_id"]),
-            str(value["key"]),
-            str(value["digest"]),
-            int(value["size"]),
-        )
-    except (KeyError, TypeError, ValueError) as error:
+        return ObjectRef(store_id, key, digest, size)
+    except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
