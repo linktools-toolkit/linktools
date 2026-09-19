@@ -69,7 +69,7 @@ class _AgentTaskNodeHandler:
     ) -> None:
         self._execution = execution
         self._session = session
-        self._catalog = catalog
+        del catalog
         self._compiler = compiler
         self._release_dependency_hold = (
             _noop_async_callback
@@ -150,7 +150,7 @@ class _AgentTaskNodeHandler:
             resolved_mode = normalize_execution_mode(mode)
             resolved_thinking = normalize_thinking(thinking)
             snapshot = AgentBindingSnapshot.from_payload(input.get("binding"))
-            binding = self._catalog.register_binding(self._compiler.restore(snapshot))
+            binding = self._compiler.restore(snapshot)
         except (AIError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if resolved_mode != "run":
@@ -223,6 +223,7 @@ class _AgentTaskNodeHandler:
         binding_digest, request = prepared[:2]
         agent_id = prepared[2] if len(prepared) > 2 else ""
         session_id = prepared[3] if len(prepared) > 3 else None
+        binding_snapshot = prepared[4] if len(prepared) > 4 else None
         key = (principal.tenant_id, graph_id, node.node_id)
         hold_id = f"task:{graph_id}:{node.node_id}"
         if session_id is None or self._session is None:
@@ -230,6 +231,7 @@ class _AgentTaskNodeHandler:
                 binding_digest,
                 request,
                 dependency_hold_id=hold_id,
+                binding_snapshot=binding_snapshot,
             )
         else:
             launch = self._session.resume(
@@ -247,6 +249,7 @@ class _AgentTaskNodeHandler:
                     request.correlation,
                     request.files,
                 ),
+                binding_snapshot=binding_snapshot,
             )
         launch_task = asyncio.create_task(
             launch,
@@ -432,7 +435,7 @@ class _AgentTaskNodeHandler:
         if normalized != body:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         snapshot = AgentBindingSnapshot.from_payload(normalized["binding"])
-        binding = self._catalog.register_binding(self._compiler.restore(snapshot))
+        binding = self._compiler.restore(snapshot)
         raw_user_prompt = cast(Mapping[str, JsonValue], normalized["user_prompt"])
         if raw_user_prompt.get("kind") == "text":
             base_user_prompt: str | tuple[object, ...] = cast(
@@ -496,6 +499,7 @@ class _AgentTaskNodeHandler:
             request,
             binding.definition.spec.id,
             cast("str | None", normalized["session_id"]),
+            binding.snapshot,
         )
 
     async def _handoff_execution(
