@@ -749,6 +749,7 @@ async def _build_local_components(
             tenant_id=tenant_id,
             state=state,
             authorization=authorization,
+            artifact=artifact,
         ),
     )
 
@@ -759,6 +760,7 @@ def _borrowed_runtime_history(
     tenant_id: str,
     state: RuntimeState,
     authorization: object,
+    artifact: DefaultArtifactService,
 ) -> "RuntimeHistory":
     return RuntimeHistory(
         service,
@@ -768,6 +770,10 @@ def _borrowed_runtime_history(
         sessions=state.conversation.sessions,
         tasks=state.task.tasks,
         authorization=authorization,
+        namespace=state.namespace,
+        execution_objects=state.object_store(RuntimeDomain.EXECUTION),
+        task_objects=state.object_store(RuntimeDomain.TASK),
+        artifacts=artifact,
         cursor_signer=HmacCursorSigner(
             "runtime-history",
             grant_key(state.namespace),
