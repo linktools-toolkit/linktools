@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Public read-only Runtime history composition coverage."""
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.core import (
+    ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
     Principal,
@@ -27,9 +29,11 @@ from linktools.ai.runtime import (
     Page,
     TranscriptItem,
     RuntimeState,
+    UsageSummary,
 )
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._runtime_history import RuntimeHistory
+from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import (
     TaskBindingSnapshot,
@@ -454,18 +458,42 @@ class _ResultExecutions:
             1,
             0,
         )
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        started_at = created_at + timedelta(seconds=1)
+        terminal_at = created_at + timedelta(seconds=2)
+        stored_input = StoredUserInput(
+            "task-input-v1",
+            StoredPayload.inline_json({"value": 1}),
+            {"version": 1, "kind": "task"},
+        )
+        output = StoredPayload.inline_json(None)
+        self.result = SimpleNamespace(
+            output=output,
+            usage=UsageMetrics(),
+            created_at=terminal_at,
+        )
         self.record = SimpleNamespace(
             execution_id="execution",
             tenant_id="tenant",
+            binding_kind="task",
+            agent_id=None,
+            task_type="handler",
             status=ExecutionStatus.SUCCEEDED,
+            lineage_kind=ExecutionLineageKind.RUN,
+            parent_execution_id=None,
+            root_execution_id="execution",
+            parent_invocation_id=None,
+            session_id=None,
+            created_at=created_at,
+            updated_at=terminal_at + timedelta(seconds=10),
+            started_at=started_at,
             binding=self.binding,
+            binding_digest=self.binding.binding_digest,
+            stored_user_input=stored_input,
+            result=self.result,
             error_code=None,
             safe_error_details={},
             error_diagnostics=None,
-        )
-        self.result = SimpleNamespace(
-            output=StoredPayload.inline_json(None),
-            usage=UsageMetrics(),
         )
 
     async def get_header(
@@ -497,6 +525,55 @@ class _ResultExecutions:
         if execution_id == "execution" and tenant_id == "tenant":
             return self.result
         return None
+
+
+class _InspectionService:
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> UsageSummary:
+        assert execution_id == "execution"
+        assert principal.tenant_id == "tenant"
+        return UsageSummary(
+            logical_requests=1,
+            succeeded_requests=1,
+            input_tokens=2,
+            output_tokens=3,
+            model_duration_ns=4,
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_history_inspection_uses_safe_durable_summaries() -> None:
+    executions = _ResultExecutions()
+    history = RuntimeHistory(
+        _InspectionService(),  # type: ignore[arg-type]
+        tenant_id="tenant",
+        executions=executions,  # type: ignore[arg-type]
+        authorization=TenantAuthorizationPolicy("tenant"),
+    )
+    info = await history.inspect_execution(
+        "execution",
+        principal=Principal("caller", "tenant", "service"),
+    )
+
+    assert info.started_at == executions.record.started_at
+    assert info.terminal_at == executions.result.created_at
+    assert info.terminal_at != executions.record.updated_at
+    assert info.binding_digest == executions.binding.binding_digest
+    assert info.input_digest == executions.record.stored_user_input.digest
+    assert info.output_digest == executions.result.output.digest
+    assert info.output_fingerprint == executions.binding.output_fingerprint
+    assert info.usage == UsageSummary(
+        logical_requests=1,
+        succeeded_requests=1,
+        input_tokens=2,
+        output_tokens=3,
+        model_duration_ns=4,
+    )
+    assert info.error_diagnostics is None
 
 
 class _TaskResults:
