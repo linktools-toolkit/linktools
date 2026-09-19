@@ -23,7 +23,7 @@ from pydantic_ai.tools import (
     DeferredToolRequests,
 )
 
-from ..agent import AgentBinding, AgentCatalog, SubagentRef
+from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
 from ..workspace import (
     RepositoryInstructionResolver,
