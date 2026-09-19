@@ -208,15 +208,11 @@ class SubagentDispatcher:
             return child
         if frozen_binding is None:
             definition = self._catalog.root_definition(ref.id)
-            child_binding = self._catalog.register_binding(
-                self._compiler.bind_subagent(definition)
-            )
+            child_binding = self._compiler.bind_subagent(definition)
         else:
             if frozen_binding.agent_spec.id != ref.id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            child_binding = self._catalog.register_binding(
-                self._compiler.restore(frozen_binding)
-            )
+            child_binding = self._compiler.restore(frozen_binding)
             definition = child_binding.definition
         child_planning = True if child_mode == "plan" else definition.spec.planning
         request = ExecutionRequest(
@@ -236,6 +232,7 @@ class SubagentDispatcher:
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 parent_invocation_id=invocation_id,
+                binding_snapshot=child_binding.snapshot,
             )
         except AIError as error:
             if error.code is not ErrorCode.IDEMPOTENCY_CONFLICT:
