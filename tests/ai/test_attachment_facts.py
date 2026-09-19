@@ -91,9 +91,14 @@ class _Store:
     def __init__(self, run: RunRecord, interactions: list[ModelInteractionRecord]) -> None:
         self.run = run
         self.interactions = interactions
+        self.interaction_reads: list[tuple[int | None, int | None]] = []
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         return self.run if run_id == self.run.run_id else None
+
+    async def model_interaction_count(self, *, run_id: str) -> int:
+        assert run_id == self.run.run_id
+        return len(self.interactions)
 
     async def list_model_interactions(
         self,
@@ -103,6 +108,7 @@ class _Store:
         limit: int | None = None,
     ) -> list[object]:
         assert run_id == self.run.run_id
+        self.interaction_reads.append((after_request_sequence, limit))
         values = [
             value
             for value in self.interactions
@@ -110,6 +116,81 @@ class _Store:
             or value.request_sequence > after_request_sequence
         ]
         return values if limit is None else values[:limit]
+
+
+@pytest.mark.asyncio
+async def test_attachment_fact_page_does_not_scan_interaction_tail() -> None:
+    namespace = "attachment-page"
+    tenant_id = "tenant"
+    execution_id = "execution"
+    run_id = step_run_id(
+        namespace=namespace,
+        tenant_id=tenant_id,
+        execution_id=execution_id,
+        segment_sequence=1,
+    )
+    stored_input = StoredUserInput(
+        "user-content-v1",
+        StoredPayload.inline_json({"items": []}),
+        {
+            "version": 1,
+            "prompt": {"kind": "items", "items": []},
+            "files": [],
+            "attachments": [],
+        },
+    )
+    record = SimpleNamespace(
+        execution_id=execution_id,
+        status=ExecutionStatus.STARTED,
+        binding_kind="agent",
+        agent_run_sequence=1,
+        stored_user_input=stored_input,
+    )
+    run = RunRecord(
+        run_id=run_id,
+        conversation_id=step_conversation_id(
+            namespace=namespace,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+        ),
+        metadata={"segment_sequence": "1", "agent_name": "default"},
+    )
+    interactions = [
+        _interaction(
+            run_id,
+            sequence,
+            (
+                _fact(
+                    fact="included_in_request",
+                    attachment_id=f"{sequence:064x}",
+                    digest=f"{sequence + 1000:064x}",
+                    position=sequence - 1,
+                ),
+            ),
+        )
+        for sequence in range(1, 601)
+    ]
+    store = _Store(run, interactions)
+    reader = StepExecutionHistoryReader(
+        namespace=namespace,
+        executions=_Executions(record),  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+        cursor_signer=HmacCursorSigner(
+            "attachment-page",
+            b"attachment-page-key",
+        ),
+    )
+
+    page = await reader.attachment_facts(
+        execution_id,
+        tenant_id=tenant_id,
+        cursor=None,
+        limit=1,
+    )
+
+    assert len(page.items) == 1
+    assert page.next_cursor is not None
+    assert store.interaction_reads == [(0, 256)]
 
 
 @pytest.mark.asyncio
