@@ -151,6 +151,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         scope,
         run_usage=RunUsage(),
         usage_limits=UsageLimits(),
+        skill_sources=SkillSourceRegistry(),
     )
 
     success = captured["results"].calls["success"]
