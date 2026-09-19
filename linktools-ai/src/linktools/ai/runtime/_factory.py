@@ -776,7 +776,7 @@ def _borrowed_runtime_history(
         artifacts=artifact,
         cursor_signer=HmacCursorSigner(
             "runtime-history",
-            grant_key(state.namespace),
+            runtime_grant_key(state.namespace),
         ),
     )
 
