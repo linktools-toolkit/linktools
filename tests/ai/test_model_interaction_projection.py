@@ -12,6 +12,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestParameters
@@ -22,6 +23,7 @@ from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime._attachment import input_attachment_views
 from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._model_interaction import (
@@ -200,6 +202,114 @@ async def test_staging_interaction_identity_is_idempotent() -> None:
             )
         )
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_model_request_records_attach_files_call_identity() -> None:
+    import hashlib
+
+    body = b"image"
+    digest = hashlib.sha256(body).hexdigest()
+    store = ModelInteractionStagingStepStore()
+    await store.initialize()
+    await store.register_run(RunRecord("run"))
+    adapter = HarnessStepStoreAdapter(store, execution_id="execution", step_run_id="run")
+    message = ModelRequest(
+        parts=[
+            ToolReturnPart(
+                "attach_files",
+                {
+                    "files": [
+                        {
+                            "path": "evidence.png",
+                            "media_type": "image/png",
+                            "size": len(body),
+                            "sha256": digest,
+                        }
+                    ]
+                },
+                tool_call_id="call-1",
+            ),
+            UserPromptPart([BinaryContent(body, media_type="image/png")]),
+        ]
+    )
+    journal = _journal()
+    fact = journal.begin(1)
+    adapter.begin_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    adapter.finish_model_interaction(
+        finished,
+        model=TestModel(),
+        response=ModelResponse(parts=[TextPart("done")]),
+        status="SUCCEEDED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+    )
+
+    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    assert [value["fact"] for value in interaction.attachments] == [
+        "accepted",
+        "included_in_request",
+    ]
+    assert interaction.attachments[0]["attachment_id"] == (
+        interaction.attachments[1]["attachment_id"]
+    )
+    assert all(value["call_id"] == "call-1" for value in interaction.attachments)
+    assert interaction.attachments[1]["digest"] == digest
+
+
+@pytest.mark.asyncio
+async def test_model_request_preserves_duplicate_initial_attachment_identity() -> None:
+    body = BinaryContent(b"same", media_type="image/png")
+    accepted = input_attachment_views((body, body))
+    store = ModelInteractionStagingStepStore()
+    await store.initialize()
+    await store.register_run(RunRecord("run"))
+    adapter = HarnessStepStoreAdapter(
+        store,
+        execution_id="execution",
+        step_run_id="run",
+        initial_attachments=accepted,
+    )
+    message = ModelRequest(parts=[UserPromptPart([body, body])])
+    journal = _journal()
+    fact = journal.begin(1)
+    adapter.begin_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    adapter.finish_model_interaction(
+        finished,
+        model=TestModel(),
+        response=ModelResponse(parts=[TextPart("done")]),
+        status="SUCCEEDED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+    )
+
+    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    included = interaction.attachments
+    assert len(included) == 2
+    assert all(value["fact"] == "included_in_request" for value in included)
+    assert [value["attachment_id"] for value in included] == [
+        accepted[0]["attachment_id"],
+        accepted[1]["attachment_id"],
+    ]
+    assert included[0]["attachment_id"] != included[1]["attachment_id"]
 
 
 @pytest.mark.asyncio
