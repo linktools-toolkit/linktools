@@ -24,6 +24,7 @@ from .service_api import (
     ListExecutionRequest,
     ModelInteractionItem,
     TranscriptItem,
+    UsageSummary,
     project_execution_view,
 )
 from .state._contracts import ExecutionRecord, ExecutionRepository
@@ -316,6 +317,18 @@ class DefaultExecutionHistoryService:
                 query_kind="model_interactions",
                 include_content=include_content,
             ),
+        )
+
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> UsageSummary:
+        record = await self._authorize(execution_id, principal)
+        return await self._reader.usage(
+            execution_id,
+            tenant_id=record.tenant_id,
         )
 
     def _content_filter_digest(

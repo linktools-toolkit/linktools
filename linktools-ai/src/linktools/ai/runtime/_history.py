@@ -45,6 +45,8 @@ from .service_api import (
     ExecutionTraceItem,
     ModelInteractionItem,
     SessionHistoryItem,
+    UsageReadCutoff,
+    UsageSummary,
     TranscriptItem,
 )
 from .state._contracts import (
@@ -432,6 +434,111 @@ class StepExecutionHistoryReader:
             len(selected),
         )
         return Page(selected, next_cursor)
+
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> UsageSummary:
+        record = await self._executions.get(
+            execution_id,
+            tenant_id=tenant_id,
+        )
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if record.binding_kind == "task":
+            return UsageSummary()
+
+        logical_requests = 0
+        succeeded_requests = 0
+        failed_requests = 0
+        cancelled_requests = 0
+        output_correction_retries = 0
+        input_tokens = 0
+        output_tokens = 0
+        cache_read_tokens = 0
+        cache_write_tokens = 0
+        model_duration_ns = 0
+        unknown_usage_requests = 0
+        cutoffs: list[UsageReadCutoff] = []
+
+        for segment_sequence in await self._segment_sequences(
+            record,
+            tenant_id,
+        ):
+            run_id = step_run_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=record.execution_id,
+                segment_sequence=segment_sequence,
+            )
+            high_water = await self._store.model_interaction_count(
+                run_id=run_id,
+            )
+            cutoffs.append(
+                UsageReadCutoff(
+                    record.execution_id,
+                    segment_sequence,
+                    high_water,
+                )
+            )
+            after_sequence = 0
+            while after_sequence < high_water:
+                limit = min(500, high_water - after_sequence)
+                values = await self._store.list_model_interactions(
+                    run_id=run_id,
+                    after_request_sequence=after_sequence,
+                    limit=limit,
+                )
+                if len(values) != limit:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for raw in values:
+                    if not isinstance(raw, ModelInteractionRecord):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    expected = after_sequence + 1
+                    if (
+                        raw.run_id != run_id
+                        or raw.request_sequence != expected
+                        or raw.status
+                        not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    after_sequence = raw.request_sequence
+                    logical_requests += 1
+                    model_duration_ns += raw.duration_ns
+                    if raw.status == "SUCCEEDED":
+                        succeeded_requests += 1
+                    elif raw.status == "FAILED":
+                        failed_requests += 1
+                    else:
+                        cancelled_requests += 1
+                    if raw.output_retry_index is not None:
+                        output_correction_retries += 1
+                    usage = raw.usage
+                    if usage is None:
+                        unknown_usage_requests += 1
+                    else:
+                        input_tokens += usage.input_tokens
+                        output_tokens += usage.output_tokens
+                        cache_read_tokens += usage.cache_read_tokens
+                        cache_write_tokens += usage.cache_write_tokens
+
+        return UsageSummary(
+            logical_requests=logical_requests,
+            succeeded_requests=succeeded_requests,
+            failed_requests=failed_requests,
+            cancelled_requests=cancelled_requests,
+            output_correction_retries=output_correction_retries,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            model_duration_ns=model_duration_ns,
+            unknown_usage_requests=unknown_usage_requests,
+            transport_retries=None,
+            cutoffs=tuple(cutoffs),
+        )
 
     def _project_model_interaction(
         self,

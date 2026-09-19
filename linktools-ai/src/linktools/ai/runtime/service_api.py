@@ -376,6 +376,98 @@ class ModelInteractionItem:
 
 
 @dataclass(frozen=True, slots=True)
+class UsageReadCutoff:
+    execution_id: str
+    segment_sequence: int
+    request_sequence: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.execution_id, str)
+            or not self.execution_id
+            or isinstance(self.segment_sequence, bool)
+            or not isinstance(self.segment_sequence, int)
+            or self.segment_sequence < 1
+            or isinstance(self.request_sequence, bool)
+            or not isinstance(self.request_sequence, int)
+            or self.request_sequence < 0
+        ):
+            raise ValueError("usage read cutoff is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class UsageSummary:
+    logical_requests: int = 0
+    succeeded_requests: int = 0
+    failed_requests: int = 0
+    cancelled_requests: int = 0
+    output_correction_retries: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    model_duration_ns: int = 0
+    unknown_usage_requests: int = 0
+    transport_retries: "int | None" = None
+    unrecorded_executions: int = 0
+    cutoffs: "tuple[UsageReadCutoff, ...]" = ()
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.logical_requests,
+            self.succeeded_requests,
+            self.failed_requests,
+            self.cancelled_requests,
+            self.output_correction_retries,
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
+            self.model_duration_ns,
+            self.unknown_usage_requests,
+            self.unrecorded_executions,
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in counts
+        ):
+            raise ValueError("usage summary counts must be non-negative integers")
+        if (
+            self.succeeded_requests
+            + self.failed_requests
+            + self.cancelled_requests
+            != self.logical_requests
+            or self.output_correction_retries > self.logical_requests
+            or self.unknown_usage_requests > self.logical_requests
+        ):
+            raise ValueError("usage summary request counts are inconsistent")
+        if self.transport_retries is not None and (
+            isinstance(self.transport_retries, bool)
+            or not isinstance(self.transport_retries, int)
+            or self.transport_retries < 0
+        ):
+            raise ValueError("usage transport retries must be non-negative")
+        cutoffs = tuple(sorted(
+            self.cutoffs,
+            key=lambda value: (
+                value.execution_id,
+                value.segment_sequence,
+            ),
+        ))
+        if (
+            any(not isinstance(value, UsageReadCutoff) for value in cutoffs)
+            or len({
+                (value.execution_id, value.segment_sequence)
+                for value in cutoffs
+            }) != len(cutoffs)
+        ):
+            raise ValueError("usage read cutoffs are invalid")
+        object.__setattr__(self, "cutoffs", cutoffs)
+
+
+@dataclass(frozen=True, slots=True)
 class SessionHistoryItem:
     sequence: int
     item_kind: str
@@ -453,6 +545,13 @@ class ExecutionHistoryReader(Protocol):
         cursor: "str | None",
         limit: int,
     ) -> Page[ModelInteractionItem]: ...
+
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> UsageSummary: ...
 
 
 class SessionHistoryReader(Protocol):
@@ -924,6 +1023,13 @@ class ExecutionHistoryService(Protocol):
         include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]": ...
+
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> UsageSummary: ...
 
 
 class ExecutionService(Protocol):
