@@ -638,7 +638,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 graph_id=graph_id,
                 execution_id=execution_id,
             )
-        promoted_from_retry = False
         if view.status is ExecutionStatus.WAITING_RETRY:
             claimed = await self._execution.claim_task_attempt(
                 execution_id,
@@ -662,7 +661,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 or claimed.task_attempt <= view.task_attempt
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            promoted_from_retry = True
         else:
             if view.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -682,12 +680,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if claimed.task_attempt <= view.task_attempt:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        if (
-            node.effect == "non_replay_safe"
-            and claimed.task_attempt > 1
-            and not promoted_from_retry
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         context = TaskNodeContext(
             self._app,
