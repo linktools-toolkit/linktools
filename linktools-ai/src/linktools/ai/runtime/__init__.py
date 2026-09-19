@@ -33,6 +33,7 @@ from .recovery import (
 )
 from .service_api import (
     ApprovalDecisionRequest,
+    AttachmentFact,
     ApprovalDecisionResult,
     ApprovalService,
     ApprovalView,
@@ -106,6 +107,7 @@ __all__ = [
     "Session",
     "Runtime",
     "ApprovalDecisionRequest",
+    "AttachmentFact",
     "ApprovalDecisionResult",
     "ApprovalService",
     "ApprovalView",
