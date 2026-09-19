@@ -130,7 +130,7 @@ def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_attach_files_uses_boundary_paths_and_deduplicates_reads(tmp_path: Path) -> None:
+async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path, workspace_id="workspace")
     session = _AttachmentSession({"evidence.png": b"png"})
     repository = _RepositoryBoundary()
@@ -145,21 +145,18 @@ async def test_attach_files_uses_boundary_paths_and_deduplicates_reads(tmp_path:
     )
 
     assert isinstance(result, ToolReturn)
-    assert result.return_value == {
-        "files": [
-            {
-                "path": "evidence.png",
-                "media_type": "image/png",
-                "size": 3,
-                "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
-            }
-        ]
+    expected = {
+        "path": "evidence.png",
+        "media_type": "image/png",
+        "size": 3,
+        "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
     }
+    assert result.return_value == {"files": [expected, expected]}
     assert result.content is not None
     binary = [item for item in result.content if isinstance(item, BinaryContent)]
-    assert len(binary) == 1
+    assert len(binary) == 2
     assert session.canonicalized == ["evidence.png", "evidence.png"]
-    assert session.reads == ["evidence.png"]
+    assert session.reads == ["evidence.png", "evidence.png"]
     assert repository.path_fields == ("paths",)
 
 
