@@ -42,7 +42,7 @@ def _load_json(name: str) -> object:
 def _binding_fixture_value() -> AgentBindingSnapshot:
     output = bind_output()
     return AgentBindingSnapshot(
-        agent_spec=AgentSpec("runtime-persistence-v1", tool_retries=10000),
+        agent_spec=AgentSpec("runtime-persistence-v2", tool_retries=10000),
         base_model={"route_id": "default", "model_identity": "fixture:model"},
         selected=(),
         subagents=(),
@@ -51,8 +51,8 @@ def _binding_fixture_value() -> AgentBindingSnapshot:
     )
 
 
-def test_agent_binding_fixture_matches_current_contract() -> None:
-    value = _load_json("runtime_agent_binding_snapshot_v1.json")
+def test_agent_binding_v2_fixture_matches_current_contract() -> None:
+    value = _load_json("runtime_agent_binding_snapshot_v2.json")
     expected = _binding_fixture_value()
     assert value == expected.to_payload()
     decoded = AgentBindingSnapshot.from_payload(value)
@@ -61,7 +61,7 @@ def test_agent_binding_fixture_matches_current_contract() -> None:
 
 
 def test_agent_binding_ignores_unknown_fields() -> None:
-    value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v1.json"))
+    value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v2.json"))
     value["future_metadata"] = {"future": True}
 
     decoded = AgentBindingSnapshot.from_payload(value)
@@ -69,6 +69,14 @@ def test_agent_binding_ignores_unknown_fields() -> None:
     assert decoded == _binding_fixture_value()
     assert "future_metadata" not in decoded.to_payload()
 
+
+
+
+def test_agent_binding_v1_fixture_is_rejected() -> None:
+    value = _load_json("runtime_agent_binding_snapshot_v1.json")
+    with pytest.raises(AIError) as raised:
+        AgentBindingSnapshot.from_payload(value)
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 def test_output_binding_round_trips_from_durable_semantics() -> None:
     binding = bind_output()

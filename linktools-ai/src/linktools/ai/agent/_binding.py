@@ -16,8 +16,10 @@ if TYPE_CHECKING:
 
 _PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
 _PIN_FIELDS = frozenset({"kind", "id", "contract"})
+_BINDING_VERSION = 2
 _BINDING_FIELDS = frozenset(
     {
+        "version",
         "agent_spec",
         "base_model",
         "selected",
@@ -159,7 +161,7 @@ class AgentBindingSnapshot:
             "_binding_digest",
             canonical_sha256(
                 {
-                    "contract": "agent-binding-v1",
+                    "contract": "agent-binding-v2",
                     "snapshot": self.to_payload(),
                 }
             ),
@@ -184,6 +186,7 @@ class AgentBindingSnapshot:
 
     def to_payload(self) -> "dict[str, JsonValue]":
         payload: dict[str, JsonValue] = {
+            "version": _BINDING_VERSION,
             "agent_spec": AgentSpecCodec().to_wire_payload(self.agent_spec),
             "base_model": dict(self.base_model),
             "selected": [item.to_payload() for item in self.selected],
@@ -202,6 +205,15 @@ class AgentBindingSnapshot:
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
         if not isinstance(value, Mapping) or not _BINDING_FIELDS.issubset(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        version = value["version"]
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if version != _BINDING_VERSION:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         selected = value["selected"]
         subagents = value["subagents"]
         mode = value["output_mode"]
