@@ -97,6 +97,7 @@ from .state import RuntimeDomain
 from .state._contracts import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
+    ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
     ExecutionState,
