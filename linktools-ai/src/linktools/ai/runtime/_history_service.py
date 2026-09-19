@@ -17,6 +17,7 @@ from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from .service_api import (
+    AttachmentFact,
     ExecutionHistoryItem,
     ExecutionHistoryReader,
     ExecutionTraceItem,
@@ -326,7 +327,7 @@ class DefaultExecutionHistoryService:
         principal: Principal,
         cursor: "str | None" = None,
         limit: int = 100,
-    ):
+    ) -> Page[AttachmentFact]:
         record = await self._authorize(execution_id, principal)
         return await self._reader.attachment_facts(
             execution_id,
