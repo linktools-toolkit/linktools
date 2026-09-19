@@ -82,15 +82,21 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
 
 @pytest.mark.asyncio
 async def test_asset_sql_apply_preserves_cancellation(monkeypatch) -> None:
-    async def cancelled(self, changes, expected_revision):
-        del self, changes, expected_revision
+    async def cancelled(
+        self,
+        changes,
+        expected_revision,
+        idempotency_key,
+        request_digest,
+    ):
+        del self, changes, expected_revision, idempotency_key, request_digest
         raise asyncio.CancelledError
 
     monkeypatch.setattr(SqlAssetBackend, "_apply_once_transaction", cancelled)
     backend = object.__new__(SqlAssetBackend)
 
     with pytest.raises(asyncio.CancelledError):
-        await backend._apply_once((), None)
+        await backend._apply_once((), None, None, None)
 
 
 @pytest.mark.asyncio
@@ -113,6 +119,33 @@ async def test_handoff_gate_recovers_after_cancelled_cleanup() -> None:
 async def test_immediate_terminal_execution_waits_for_task_dependency_hold() -> None:
     service = object.__new__(DefaultExecutionService)
     service._handoff = HandoffGate()
+
+    class Executions:
+        async def acquire_dependency_hold(
+            self,
+            execution_id: str,
+            *,
+            tenant_id: str,
+            hold_id: str,
+        ) -> bool:
+            del execution_id, tenant_id, hold_id
+            return True
+
+        async def release_dependency_hold(
+            self,
+            execution_id: str,
+            *,
+            tenant_id: str,
+            hold_id: str,
+        ) -> bool:
+            del execution_id, tenant_id, hold_id
+            return True
+
+        async def get(self, execution_id: str, *, tenant_id: str):
+            del execution_id, tenant_id
+            return None
+
+    service._state = SimpleNamespace(executions=Executions())
     release_started = asyncio.Event()
     release_finished = asyncio.Event()
 
