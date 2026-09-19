@@ -361,12 +361,16 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         binding = AgentBindingSnapshot.from_payload(agent_child.input["binding"])
         assert binding.agent_spec.id == "worker"
         assert snapshot.node_states[-1].status is TaskStatus.SUCCEEDED
+        child_a_state = next(
+            state for state in snapshot.node_states if state.node_id == "child-a"
+        )
+        assert child_a_state.execution_id is not None
         assert await runtime.read_task_result(
             graph.graph_id,
             "grandchild",
         ) == {
             "upstream": await runtime.read_task_result(graph.graph_id, "child-a"),
-            "execution_id": None,
+            "execution_id": child_a_state.execution_id,
         }
         events = await state.task.tasks.list_events(
             graph.graph_id,
