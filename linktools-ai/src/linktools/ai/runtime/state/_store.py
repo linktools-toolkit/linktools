@@ -843,8 +843,8 @@ def partition_digest(namespace: str, tenant_id: str, runtime_domain: str, kind: 
     return _digest(["partition", namespace, tenant_id, runtime_domain, kind])
 
 
-def state_owner_digest(namespace: str, tenant_id: str, runtime_domain: str) -> bytes:
-    return _digest(["state_owner", namespace, tenant_id, runtime_domain])
+def state_store_digest(namespace: str, tenant_id: str, runtime_domain: str) -> bytes:
+    return _digest(["state_store", namespace, tenant_id, runtime_domain])
 
 
 def scope_digest(
@@ -1028,7 +1028,7 @@ __all__ = [
     "require_no_run_history_lock",
     "scope_digest",
     "sequence_key",
-    "state_owner_digest",
+    "state_store_digest",
     "sortable_id",
     "sortable_identity",
     "sortable_timestamp",

@@ -3,7 +3,6 @@
 """Runtime-owned interpretation of generic TaskNodes."""
 
 import asyncio
-import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
@@ -43,7 +42,7 @@ from ..core import (
     validate_agent_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, StoredPayload
+from ..storage import ObjectRef, ObjectStore
 from ..task import (
     TaskBindingSnapshot,
     TaskDependency,
@@ -65,7 +64,7 @@ from ..task import (
 )
 from ._agent_task import _AgentTaskNodeHandler, _execution_failure
 from ._input import CanonicalUserInput, task_prompt_draft, validate_user_input
-from ._object import RuntimeObjectKeyFactory, read_runtime_object
+from ._object import RuntimeObjectKeyFactory
 from ._task_capability_snapshot import (
     FrozenTaskCapabilities,
     TaskCapabilitySnapshotStore,
@@ -1704,49 +1703,18 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         principal: "Principal | None" = None,
     ) -> JsonValue:
-        if record.execution_id is not None:
-            if principal is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result = await self._execution.result(
-                record.execution_id,
-                principal=principal,
-            )
-            if result.status is not ExecutionStatus.SUCCEEDED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            output = result.output
-        elif record.payload is not None:
-            output = await self._read_payload(record.payload)
-        else:
+        if principal is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result = await self._execution.result(
+            record.execution_id,
+            principal=principal,
+        )
+        if result.status is not ExecutionStatus.SUCCEEDED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        output = result.output
         if canonical_sha256(output) != record.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return output
-
-    async def _read_payload(self, payload: StoredPayload) -> JsonValue:
-        try:
-            if payload.kind == "inline":
-                value = payload.decode()
-            else:
-                if payload.ref is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                data = await read_runtime_object(
-                    self._task_objects,
-                    payload.ref,
-                )
-                value = json.loads(data.decode("utf-8"))
-            normalized = normalize_json_value(value)
-        except AIError:
-            raise
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-            TypeError,
-            ValueError,
-        ) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if canonical_sha256(normalized) != payload.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return normalized
 
     async def _complete_output(
         self,
@@ -2153,7 +2121,6 @@ def _binding_matches_frozen_root(
         and dict(binding.base_model) == dict(root.base_model)
         and binding.selected == root.selected
         and binding.subagents == root.subagents
-        and binding.workspace_ref == root.workspace_ref
         and binding.subagent_bindings == root.subagent_bindings
     )
 

@@ -1613,7 +1613,6 @@ class StateStepArchive(StepStore):
             head, _record = history_head_guard
             if (
                 head.execution_id != execution_id
-                or head.tenant_id != self._tenant_id
                 or head.state is not ExecutionHistoryState.OPEN
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)

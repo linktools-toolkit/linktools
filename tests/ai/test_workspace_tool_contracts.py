@@ -33,7 +33,7 @@ def _golden_contract() -> dict[str, object]:
 
 
 def test_workspace_tool_semantics_match_frozen_golden(tmp_path: Path) -> None:
-    contributions = _workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))
+    contributions = _workspace_tool_contributions(Workspace.load(tmp_path))
     actual = {item.id: item.semantic_contract for item in contributions}
     assert actual == _golden_contract()
 
@@ -57,7 +57,7 @@ def test_local_semantic_validation_is_not_limited_by_ipc_frame() -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -75,7 +75,7 @@ async def test_workspace_missing_read_is_model_retry(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_workspace_invalid_read_window_explains_correction(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("line\n", encoding="utf-8")
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -96,7 +96,7 @@ async def test_workspace_invalid_read_window_explains_correction(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path) -> None:
     (tmp_path / "binary.txt").write_bytes(b"\xff")
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -118,7 +118,7 @@ async def test_workspace_invalid_utf8_edit_explains_text_boundary(tmp_path: Path
 @pytest.mark.asyncio
 async def test_workspace_edit_miss_explains_unique_match_requirement(tmp_path: Path) -> None:
     (tmp_path / "note.txt").write_text("before\n", encoding="utf-8")
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -139,7 +139,7 @@ async def test_workspace_edit_miss_explains_unique_match_requirement(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_workspace_unknown_attachment_type_explains_alternative(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -158,7 +158,7 @@ async def test_workspace_unknown_attachment_type_explains_alternative(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_workspace_unknown_command_id_explains_source(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -177,7 +177,7 @@ async def test_workspace_unknown_command_id_explains_source(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(
@@ -198,7 +198,7 @@ async def test_workspace_pre_effect_write_failure_is_model_retry(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_workspace_denied_shell_command_is_model_retry(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         capability = workspace_capabilities(

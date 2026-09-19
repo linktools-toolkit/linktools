@@ -16,7 +16,7 @@ from linktools.ai.runtime import (
 )
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.spec import AgentSpec
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 def test_top_level_public_surface_is_exact() -> None:
@@ -155,7 +155,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
         "b" * 64,
         "session",
         ResumeSessionRequest(
-            principal=trusted_workspace_principal("tenant"),
+            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
             user_prompt="prompt",
             idempotency_key="resume-modes",
             memory_scope=None,

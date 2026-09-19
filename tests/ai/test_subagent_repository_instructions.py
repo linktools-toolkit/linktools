@@ -80,7 +80,7 @@ class _Launcher:
         started = replace(execution, status=ExecutionStatus.STARTED)
         await self._repository.compare_and_swap(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._repository.tenant_id,
             expected_revision=execution.revision,
             next_record=started,
         )
@@ -137,7 +137,6 @@ def _parent(pin: RuntimePayloadRef | None) -> ExecutionRecord:
     binding = _binding()
     return ExecutionRecord(
         execution_id="parent",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="parent",

@@ -48,7 +48,6 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
     record = ArtifactRecord(
         artifact_id="artifact",
         execution_id="execution",
-        tenant_id="tenant",
         producer="tool",
         media_type="text/plain",
         object_ref=reference,
@@ -60,7 +59,6 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
     assert set(payload["fields"]) == {
         "artifact_id",
         "execution_id",
-        "tenant_id",
         "producer",
         "media_type",
         "object_ref",
@@ -71,7 +69,7 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
 
 
 def test_session_fork_receipt_is_not_a_durable_wire_type() -> None:
-    assert "session_fork_result" not in runtime_codec._V1_DOMAIN_TYPES
+    assert "session_fork_result" not in runtime_codec._V2_DOMAIN_TYPES
 
 
 def test_transcript_head_uses_stored_record_as_its_only_revision_owner() -> None:

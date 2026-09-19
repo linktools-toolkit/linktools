@@ -41,7 +41,7 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 class _AllowAuthorization:
@@ -78,7 +78,6 @@ class _Checkpoints:
     def __init__(self, pending: PendingDeferredCall, *, approvals: bool) -> None:
         self.record = RecoveryCheckpoint(
             execution_id="execution",
-            tenant_id="tenant",
             step_run_id="step",
             state=RecoveryCheckpointState.WAITING,
             revision=0,
@@ -105,6 +104,7 @@ class _Checkpoints:
 class _ExternalCalls:
     def __init__(self, record: ExternalCallRecord) -> None:
         self.record = record
+        self.tenant_id = "tenant"
 
     async def get(
         self,
@@ -112,7 +112,7 @@ class _ExternalCalls:
         *,
         tenant_id: str,
     ) -> ExternalCallRecord | None:
-        if call_id != self.record.call_id or tenant_id != self.record.tenant_id:
+        if call_id != self.record.call_id or tenant_id != self.tenant_id:
             return None
         return self.record
 
@@ -122,7 +122,7 @@ class _ExternalCalls:
         *,
         tenant_id: str,
     ) -> ResourceRef | None:
-        if call_id != self.record.call_id or tenant_id != self.record.tenant_id:
+        if call_id != self.record.call_id or tenant_id != self.tenant_id:
             return None
         return ResourceRef(ResourceKind.EXTERNAL_CALL, call_id, tenant_id)
 
@@ -140,7 +140,7 @@ class _ExternalCalls:
     ) -> ExternalCallRecord:
         if (
             call_id != self.record.call_id
-            or tenant_id != self.record.tenant_id
+            or tenant_id != self.tenant_id
             or self.record.status is not expected_status
         ):
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
@@ -159,6 +159,7 @@ class _ExternalCalls:
 class _Approvals:
     def __init__(self, record: ApprovalRecord) -> None:
         self.record = record
+        self.tenant_id = "tenant"
 
     async def get(
         self,
@@ -166,7 +167,7 @@ class _Approvals:
         *,
         tenant_id: str,
     ) -> ApprovalRecord | None:
-        if approval_id != self.record.approval_id or tenant_id != self.record.tenant_id:
+        if approval_id != self.record.approval_id or tenant_id != self.tenant_id:
             return None
         return self.record
 
@@ -176,7 +177,7 @@ class _Approvals:
         *,
         tenant_id: str,
     ) -> ResourceRef | None:
-        if approval_id != self.record.approval_id or tenant_id != self.record.tenant_id:
+        if approval_id != self.record.approval_id or tenant_id != self.tenant_id:
             return None
         return ResourceRef(ResourceKind.APPROVAL, approval_id, tenant_id)
 
@@ -188,7 +189,7 @@ class _Approvals:
     ) -> tuple[ApprovalRecord, ...]:
         if (
             execution_id == self.record.execution_id
-            and tenant_id == self.record.tenant_id
+            and tenant_id == self.tenant_id
             and self.record.status is ApprovalStatus.PENDING
         ):
             return (self.record,)
@@ -210,7 +211,7 @@ class _Approvals:
     ) -> ApprovalRecord:
         if (
             approval_id != self.record.approval_id
-            or tenant_id != self.record.tenant_id
+            or tenant_id != self.tenant_id
             or self.record.status is not expected_status
         ):
             raise AIError(ErrorCode.APPROVAL_CONFLICT)
@@ -236,7 +237,7 @@ class _Approvals:
 
 @pytest.mark.asyncio
 async def test_external_supply_exact_replay_uses_durable_result() -> None:
-    principal = trusted_workspace_principal("tenant")
+    principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
     now = datetime.now(timezone.utc)
     pending = PendingDeferredCall(
         "tool-call",
@@ -248,7 +249,6 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
         ExternalCallRecord(
             call_id=call_id,
             execution_id="execution",
-            tenant_id="tenant",
             status=ExternalCallStatus.PENDING,
             idempotency_key_digest=None,
             created_at=now,
@@ -308,7 +308,6 @@ async def test_approval_exact_replay_requires_same_actor() -> None:
         ApprovalRecord(
             approval_id=approval_id,
             execution_id="execution",
-            tenant_id="tenant",
             status=ApprovalStatus.PENDING,
             idempotency_key_digest=None,
             decision=None,

@@ -47,7 +47,6 @@ def _precomposition_session_data() -> dict[str, object]:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     session = SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         agent_id="agent",
         status=SessionStatus.OPEN,
@@ -175,7 +174,6 @@ def test_maintenance_accepts_lease_projected_records() -> None:
     now = datetime.now(timezone.utc)
     tool_operation = ToolOperationRecord(
         "operation",
-        "tenant",
         "execution",
         "step",
         "call",

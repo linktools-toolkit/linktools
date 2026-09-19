@@ -24,7 +24,7 @@ from linktools.ai.task import (
     TaskGraphLimits,
 )
 from linktools.ai.task._local import LocalTaskGraphLauncher
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 async def _no_dependency_body(_dependency: object) -> object:
@@ -221,7 +221,7 @@ async def test_task_runner_cancellation_does_not_business_cancel_running_executi
         handler.run_node(
             SimpleNamespace(node_id="node"),
             graph_id="graph",
-            principal=trusted_workspace_principal("tenant"),
+            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
             correlation={},
             dependencies={},
             dependency_reader=_no_dependency_body,
@@ -283,7 +283,7 @@ async def test_task_runner_binds_execution_that_finishes_launch_after_caller_can
         handler.run_node(
             SimpleNamespace(node_id="node"),
             graph_id="graph",
-            principal=trusted_workspace_principal("tenant"),
+            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
             correlation={},
             dependencies={},
             dependency_reader=_no_dependency_body,
@@ -338,7 +338,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
         handler.run_node(
             SimpleNamespace(node_id="node"),
             graph_id="graph",
-            principal=trusted_workspace_principal("tenant"),
+            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
             correlation={},
             dependencies={},
             dependency_reader=_no_dependency_body,
@@ -387,7 +387,7 @@ async def test_task_scheduler_arm_cancellation_detaches_pending_launcher() -> No
     service = DefaultTaskGraphService(SimpleNamespace(), SimpleNamespace(), launcher)
     launch = TaskGraphLaunch(
         "graph",
-        trusted_workspace_principal("tenant"),
+        Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
         TaskGraphLimits(),
     )
     task = asyncio.create_task(service._arm_graph(launch))
@@ -542,7 +542,7 @@ async def test_task_heartbeat_loss_waits_for_cancellation_resistant_runner(
     run = SimpleNamespace(
         request=TaskGraphLaunch(
             "graph",
-            trusted_workspace_principal("tenant"),
+            Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
             TaskGraphLimits(),
             correlation={},
         ),
@@ -594,7 +594,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
         dispatcher.cancel_child(
             "execution",
             parent_execution_id="parent",
-            principal=trusted_workspace_principal("tenant"),
+            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
         )
     )
     await execution.cancel_started.wait()
@@ -639,7 +639,7 @@ async def test_subagent_child_cleanup_failure_does_not_replace_cancellation() ->
     await dispatcher.cancel_child(
         "execution",
         parent_execution_id="parent",
-        principal=trusted_workspace_principal("tenant"),
+        principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
     )
     assert dispatcher.background_failure is None
     await backend.close()

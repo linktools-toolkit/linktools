@@ -115,7 +115,6 @@ async def test_memory_repository_projects_logical_path_as_sort_key() -> None:
     now = datetime.now(timezone.utc)
     value = MemoryRecord(
         "memory-id",
-        "tenant",
         "scope-digest",
         StoredPayload.inline_text("content"),
         {"path": "memory/z.md"},
@@ -139,7 +138,6 @@ async def test_memory_repository_accepts_full_harness_path_length() -> None:
     logical_path = "memory/" + "x" * 197 + ".md"
     value = MemoryRecord(
         "memory-id",
-        "tenant",
         "scope-digest",
         StoredPayload.inline_text("content"),
         {"path": logical_path},
@@ -167,7 +165,6 @@ async def test_memory_repository_applies_prefix_before_limit() -> None:
         values = tuple(
             MemoryRecord(
                 memory_id,
-                "tenant",
                 "scope-digest",
                 StoredPayload.inline_text("content"),
                 {"path": path},
@@ -234,7 +231,6 @@ async def test_filesystem_memory_listing_reads_only_requested_record_page(
     values = tuple(
         MemoryRecord(
             f"memory-{index}",
-            "tenant",
             "scope-digest",
             StoredPayload.inline_text("content"),
             {"path": f"memory/{index:03d}.md"},
@@ -315,7 +311,6 @@ async def test_filesystem_rebuilds_missing_record_index_before_bounded_query(
     values = tuple(
         MemoryRecord(
             f"memory-{index}",
-            "tenant",
             "scope-digest",
             StoredPayload.inline_text("content"),
             {"path": f"memory/{index:03d}.md"},
@@ -423,7 +418,6 @@ async def test_filesystem_empty_prefix_query_does_not_enumerate_scope_index(
     values = tuple(
         MemoryRecord(
             f"memory-{index}",
-            "tenant",
             "scope-digest",
             StoredPayload.inline_text("content"),
             {"path": f"memory/{index:03d}.md"},

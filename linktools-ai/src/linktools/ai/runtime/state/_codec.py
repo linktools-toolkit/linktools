@@ -143,11 +143,11 @@ from ._store import (
     validate_record_identity,
 )
 
-CURRENT_DATA_VERSION = 1
+CURRENT_DATA_VERSION = 2
 DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
-_V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
+_V2_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("approval_record", ApprovalRecord),
     ("agent_attempt_claim", AgentAttemptClaim),
     ("artifact_record", ArtifactRecord),
@@ -224,14 +224,14 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("run_record", RunRecord),
     ("step_event", StepEvent),
 )
-_V1_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
+_V2_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V2_WIRE_TYPES}
 )
-_V1_DOMAIN_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
+_V2_DOMAIN_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V2_WIRE_TYPES}
 )
 
-_V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
+_V2_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("approval_decision", ApprovalDecision),
     ("approval_status", ApprovalStatus),
     ("evaluation_status", EvaluationStatus),
@@ -257,11 +257,11 @@ _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("transcript_owner_domain", TranscriptOwnerDomain),
     ("transcript_seek_dimension", TranscriptSeekDimension),
 )
-_V1_ENUM_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V1_ENUM_WIRE_TYPES}
+_V2_ENUM_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V2_ENUM_WIRE_TYPES}
 )
-_V1_ENUM_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V1_ENUM_WIRE_TYPES}
+_V2_ENUM_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V2_ENUM_WIRE_TYPES}
 )
 
 DataclassEncoder = Callable[
@@ -286,13 +286,13 @@ class _VersionCodec:
     external_schema_types: Mapping[type[object], JsonValue]
 
 
-def _encode_v1_task_node(
+def _encode_v2_task_node(
     value: object,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNode):
-        raise TypeError("V1 task_node encoder received the wrong type")
+        raise TypeError("V2 task_node encoder received the wrong type")
     fields: dict[str, JsonValue] = {
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
         "dependencies": _encode_domain(
@@ -331,7 +331,7 @@ def _encode_v1_task_node(
     return fields
 
 
-def _decode_v1_task_node(
+def _decode_v2_task_node(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
@@ -417,13 +417,13 @@ def _decode_v1_task_node(
     )
 
 
-def _encode_v1_task_graph_view(
+def _encode_v2_task_graph_view(
     value: object,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskGraphView):
-        raise TypeError("V1 task_graph_view encoder received the wrong type")
+        raise TypeError("V2 task_graph_view encoder received the wrong type")
     fields: dict[str, JsonValue] = {
         "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
         "status": _encode_domain(value.status, codec, persisted=persisted),
@@ -433,7 +433,7 @@ def _encode_v1_task_graph_view(
     return fields
 
 
-def _decode_v1_task_graph_view(
+def _decode_v2_task_graph_view(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
@@ -455,13 +455,13 @@ def _decode_v1_task_graph_view(
     )
 
 
-def _encode_v1_task_node_view(
+def _encode_v2_task_node_view(
     value: object,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNodeView):
-        raise TypeError("V1 task_node_view encoder received the wrong type")
+        raise TypeError("V2 task_node_view encoder received the wrong type")
     fields: dict[str, JsonValue] = {
         "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
@@ -495,7 +495,7 @@ def _encode_v1_task_node_view(
     return fields
 
 
-def _decode_v1_task_node_view(
+def _decode_v2_task_node_view(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
@@ -595,13 +595,13 @@ def _decode_v1_task_node_view(
     )
 
 
-def _encode_v1_task_result(
+def _encode_v2_task_result(
     value: object,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskResultRecord):
-        raise TypeError("V1 task_result encoder received the wrong type")
+        raise TypeError("V2 task_result encoder received the wrong type")
     encoded: dict[str, JsonValue] = {
         "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
@@ -611,60 +611,31 @@ def _encode_v1_task_result(
             persisted=persisted,
         ),
     }
-    if value.execution_id is not None:
-        encoded["execution_id"] = _encode_domain(
-            value.execution_id,
-            codec,
-            persisted=persisted,
-        )
-    if value.payload is not None:
-        encoded["payload"] = _encode_domain(
-            value.payload,
-            codec,
-            persisted=persisted,
-        )
+    encoded["execution_id"] = _encode_domain(
+        value.execution_id,
+        codec,
+        persisted=persisted,
+    )
     return encoded
 
 
-def _decode_v1_task_result(
+def _decode_v2_task_result(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskResultRecord:
     keys = frozenset(raw_fields)
     base = frozenset({"graph_id", "node_id", "result_digest"})
-    supported = {
-        base | {"payload"},
-        base | {"execution_id"},
-        base | {"execution_id", "payload"},
-    }
-    if keys not in supported:
+    if keys != base | {"execution_id"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    execution_id = (
-        None
-        if "execution_id" not in raw_fields
-        else cast(
+    execution_id = cast(
+        str,
+        _decode_domain(
+            raw_fields["execution_id"],
             str,
-            _decode_domain(
-                raw_fields["execution_id"],
-                str,
-                codec,
-                persisted=persisted,
-            ),
-        )
-    )
-    payload = (
-        None
-        if "payload" not in raw_fields
-        else cast(
-            StoredPayload,
-            _decode_domain(
-                raw_fields["payload"],
-                StoredPayload,
-                codec,
-                persisted=persisted,
-            ),
-        )
+            codec,
+            persisted=persisted,
+        ),
     )
     return TaskResultRecord(
         cast(
@@ -695,20 +666,19 @@ def _decode_v1_task_result(
             ),
         ),
         execution_id,
-        payload,
     )
 
 
 _RUNTIME_OBJECT_STORE_ID = "runtime"
 
 
-def _encode_v1_object_ref(
+def _encode_v2_object_ref(
     value: object,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, ObjectRef):
-        raise TypeError("V1 object_ref encoder received the wrong type")
+        raise TypeError("V2 object_ref encoder received the wrong type")
     encoded: dict[str, JsonValue] = {
         "key": _encode_domain(value.key, codec, persisted=persisted),
         "digest": _encode_domain(value.digest, codec, persisted=persisted),
@@ -721,7 +691,7 @@ def _encode_v1_object_ref(
     return encoded
 
 
-def _decode_v1_object_ref(
+def _decode_v2_object_ref(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
@@ -754,13 +724,13 @@ def _decode_v1_object_ref(
 
 
 
-def _encode_v1_stored_user_input(
+def _encode_v2_stored_user_input(
     value: object,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, StoredUserInput):
-        raise TypeError("V1 stored_user_input encoder received the wrong type")
+        raise TypeError("V2 stored_user_input encoder received the wrong type")
     encoded: dict[str, JsonValue] = {
         "codec": _encode_domain(value.codec, codec, persisted=persisted),
         "payload": _encode_domain(value.payload, codec, persisted=persisted),
@@ -770,7 +740,7 @@ def _encode_v1_stored_user_input(
     return encoded
 
 
-def _decode_v1_stored_user_input(
+def _decode_v2_stored_user_input(
     raw_fields: Mapping[str, object],
     codec: "_VersionCodec",
     persisted: bool,
@@ -811,28 +781,28 @@ def _decode_v1_stored_user_input(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
+_V2_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
-        "object_ref": _encode_v1_object_ref,
-        "stored_user_input": _encode_v1_stored_user_input,
-        "task_graph_view": _encode_v1_task_graph_view,
-        "task_node": _encode_v1_task_node,
-        "task_node_view": _encode_v1_task_node_view,
-        "task_result": _encode_v1_task_result,
+        "object_ref": _encode_v2_object_ref,
+        "stored_user_input": _encode_v2_stored_user_input,
+        "task_graph_view": _encode_v2_task_graph_view,
+        "task_node": _encode_v2_task_node,
+        "task_node_view": _encode_v2_task_node_view,
+        "task_result": _encode_v2_task_result,
     }
 )
-_V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
+_V2_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
-        "object_ref": _decode_v1_object_ref,
-        "stored_user_input": _decode_v1_stored_user_input,
-        "task_graph_view": _decode_v1_task_graph_view,
-        "task_node": _decode_v1_task_node,
-        "task_node_view": _decode_v1_task_node_view,
-        "task_result": _decode_v1_task_result,
+        "object_ref": _decode_v2_object_ref,
+        "stored_user_input": _decode_v2_stored_user_input,
+        "task_graph_view": _decode_v2_task_graph_view,
+        "task_node": _decode_v2_task_node,
+        "task_node_view": _decode_v2_task_node_view,
+        "task_result": _decode_v2_task_result,
     }
 )
 
-_V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
+_V2_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
     {
         IdempotencyTerminalUpdate: (
             "linktools.ai.runtime.state.IdempotencyTerminalUpdate"
@@ -846,17 +816,17 @@ _V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
     }
 )
 
-_V1_CODEC = _VersionCodec(
-    version=1,
-    wire_ids=_V1_WIRE_IDS,
-    domain_types=_V1_DOMAIN_TYPES,
-    enum_wire_ids=_V1_ENUM_WIRE_IDS,
-    enum_types=_V1_ENUM_TYPES,
-    dataclass_encoders=_V1_DATACLASS_ENCODERS,
-    dataclass_decoders=_V1_DATACLASS_DECODERS,
-    external_schema_types=_V1_EXTERNAL_SCHEMA_TYPES,
+_V2_CODEC = _VersionCodec(
+    version=2,
+    wire_ids=_V2_WIRE_IDS,
+    domain_types=_V2_DOMAIN_TYPES,
+    enum_wire_ids=_V2_ENUM_WIRE_IDS,
+    enum_types=_V2_ENUM_TYPES,
+    dataclass_encoders=_V2_DATACLASS_ENCODERS,
+    dataclass_decoders=_V2_DATACLASS_DECODERS,
+    external_schema_types=_V2_EXTERNAL_SCHEMA_TYPES,
 )
-_VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType({1: _V1_CODEC})
+_VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType({2: _V2_CODEC})
 _CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
 _JSON_VALUE_FORWARD_REF = ForwardRef("JsonValue")
 
@@ -2122,13 +2092,13 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     return _decode_domain(payload, target, codec, persisted=True)
 
 
-def _validate_v1_codec_definition() -> None:
-    if CURRENT_DATA_VERSION != 1 or set(_VERSION_CODECS) != {1}:
-        raise RuntimeError("Runtime v1 codec registry is invalid")
-    if _CURRENT_CODEC is not _VERSION_CODECS[1]:
-        raise RuntimeError("Runtime v1 current codec is invalid")
-    wire_ids = tuple(wire_id for wire_id, _target in _V1_WIRE_TYPES)
-    enum_wire_ids = tuple(wire_id for wire_id, _target in _V1_ENUM_WIRE_TYPES)
+def _validate_v2_codec_definition() -> None:
+    if CURRENT_DATA_VERSION != 2 or set(_VERSION_CODECS) != {2}:
+        raise RuntimeError("Runtime v2 codec registry is invalid")
+    if _CURRENT_CODEC is not _VERSION_CODECS[2]:
+        raise RuntimeError("Runtime v2 current codec is invalid")
+    wire_ids = tuple(wire_id for wire_id, _target in _V2_WIRE_TYPES)
+    enum_wire_ids = tuple(wire_id for wire_id, _target in _V2_ENUM_WIRE_TYPES)
     if len(wire_ids) != len(set(wire_ids)):
         raise RuntimeError("Runtime v1 wire ids are not unique")
     if len(enum_wire_ids) != len(set(enum_wire_ids)):
@@ -2157,15 +2127,15 @@ def _validate_v1_codec_definition() -> None:
         "task_node_view",
         "task_result",
     }
-    if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
+    if set(_V2_DATACLASS_ENCODERS) != custom_encoders:
         raise RuntimeError("Runtime v1 dataclass encoder mapping is invalid")
-    if set(_V1_DATACLASS_DECODERS) != custom_decoders:
+    if set(_V2_DATACLASS_DECODERS) != custom_decoders:
         raise RuntimeError("Runtime v1 dataclass decoder mapping is invalid")
-    if not set(_V1_DATACLASS_ENCODERS).issubset(set(wire_ids)):
+    if not set(_V2_DATACLASS_ENCODERS).issubset(set(wire_ids)):
         raise RuntimeError(
             "Runtime v1 dataclass encoder mapping contains an unknown type"
         )
-    if not set(_V1_DATACLASS_DECODERS).issubset(set(wire_ids)):
+    if not set(_V2_DATACLASS_DECODERS).issubset(set(wire_ids)):
         raise RuntimeError(
             "Runtime v1 dataclass decoder mapping contains an unknown type"
         )
@@ -2187,7 +2157,7 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 task_node source contract changed")
 
 
-_validate_v1_codec_definition()
+_validate_v2_codec_definition()
 
 
 __all__ = [

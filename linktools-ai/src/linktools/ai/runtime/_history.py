@@ -955,8 +955,6 @@ class StepExecutionHistoryReader:
     async def _history_tree(
         self, selected: ExecutionRecord, tenant_id: str
     ) -> list[tuple[ExecutionRecord, int]]:
-        if selected.tenant_id != tenant_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if selected.lineage_kind.value == "SUBAGENT":
             if (
                 selected.parent_execution_id is None
@@ -978,7 +976,6 @@ class StepExecutionHistoryReader:
         ):
             if (
                 child.execution_id in visited
-                or child.tenant_id != tenant_id
                 or child.lineage_kind.value != "SUBAGENT"
                 or child.parent_execution_id != selected.execution_id
                 or child.root_execution_id != selected.root_execution_id

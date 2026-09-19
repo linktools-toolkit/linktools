@@ -19,7 +19,6 @@ def _session() -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         agent_id="agent",
         status=SessionStatus.OPEN,
@@ -80,7 +79,7 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
             with pytest.raises(AIError) as identity_error:
                 await state.conversation.sessions.compare_and_swap(
                     admitted.session_id,
-                    tenant_id=admitted.tenant_id,
+                    tenant_id="tenant",
                     expected_revision=admitted.revision,
                     next_record=replace(
                         admitted,
@@ -90,20 +89,6 @@ async def _assert_admission_contract(state: RuntimeState) -> None:
                     ),
                 )
             assert identity_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-        with pytest.raises(AIError) as tenant_error:
-            await state.conversation.sessions.compare_and_swap(
-                admitted.session_id,
-                tenant_id=admitted.tenant_id,
-                expected_revision=admitted.revision,
-                next_record=replace(
-                    admitted,
-                    tenant_id="different-tenant",
-                    revision=admitted.revision + 1,
-                    updated_at=datetime.now(timezone.utc),
-                ),
-            )
-        assert tenant_error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
 
         updated = await state.conversation.sessions.compare_and_swap(
             "session",

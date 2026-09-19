@@ -92,7 +92,7 @@ def _workspace(root: Path) -> Workspace:
     agent_path.write_bytes(
         AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
     )
-    return Workspace.load(root, workspace_id="workspace")
+    return Workspace.load(root)
 
 
 async def _provision_sqlite(path: Path) -> None:
@@ -143,7 +143,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
@@ -229,7 +229,7 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
@@ -294,7 +294,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
     workspace = _workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),

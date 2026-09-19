@@ -88,7 +88,7 @@ def _workspace(root: Path) -> Workspace:
             AgentSpec("default", model="default", allow_tools=())
         )
     )
-    return Workspace.load(root, workspace_id="workspace")
+    return Workspace.load(root)
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -106,7 +106,6 @@ def _started_execution(now: datetime) -> ExecutionRecord:
     binding = _binding_snapshot()
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="default",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -146,8 +145,6 @@ def _failed_terminal(
         updated_at=now,
     )
     result = ResultRecord(
-        execution_id=started.execution_id,
-        tenant_id=started.tenant_id,
         output=None,
         stop_reason=StopReason.ERROR,
         usage=UsageMetrics(),
@@ -206,7 +203,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
     now = datetime.now(timezone.utc)
     started, _result, commit = _failed_terminal(now, diagnostics)
     state, durable_path = await _durable_state(tmp_path, backend)
-    await state.initialize(namespace=workspace.workspace_id, tenant_id="default")
+    await state.initialize(namespace="default", tenant_id="default")
     try:
         await state.execution.executions.create(started)
         await state.execution.executions.commit_terminal(commit)
@@ -223,7 +220,7 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
     )
     try:
         async with Runtime.open(
-            workspace.workspace_id,
+            "default",
             models=_DiagnosticModels(),  # type: ignore[arg-type]
             state=reopened,
             capabilities=(CapabilityGroup("workspace", workspace=workspace),),
@@ -346,7 +343,6 @@ def _failed_tool_record(
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
         tool_operation_id="operation",
-        tenant_id="tenant",
         execution_id="execution",
         step_run_id="run",
         tool_call_id="call",

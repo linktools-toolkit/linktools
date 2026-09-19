@@ -69,7 +69,7 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    workspace = Workspace.load(project, workspace_id="workspace")
+    workspace = Workspace.load(project)
     state_root = tmp_path / "runtime"
 
     async with Runtime.open(

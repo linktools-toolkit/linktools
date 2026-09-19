@@ -144,13 +144,13 @@ class DefaultExecutionHistoryService:
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             query_kind="trace",
             include_content=include_content,
         )
         page = await self._reader.trace(
             execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
         )
@@ -159,7 +159,7 @@ class DefaultExecutionHistoryService:
             self._encode_content_cursor(
                 page.next_cursor,
                 execution_id=execution_id,
-                tenant_id=record.tenant_id,
+                tenant_id=self._executions.tenant_id,
                 query_kind="trace",
                 include_content=include_content,
             ),
@@ -178,13 +178,13 @@ class DefaultExecutionHistoryService:
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             query_kind="transcript",
             include_content=include_content,
         )
         page = await self._reader.transcript(
             execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
         )
@@ -206,7 +206,7 @@ class DefaultExecutionHistoryService:
             self._encode_content_cursor(
                 page.next_cursor,
                 execution_id=execution_id,
-                tenant_id=record.tenant_id,
+                tenant_id=self._executions.tenant_id,
                 query_kind="transcript",
                 include_content=include_content,
             ),
@@ -225,13 +225,13 @@ class DefaultExecutionHistoryService:
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             query_kind="history",
             include_content=include_content,
         )
         page = await self._reader.history(
             execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
         )
@@ -256,7 +256,7 @@ class DefaultExecutionHistoryService:
             self._encode_content_cursor(
                 page.next_cursor,
                 execution_id=execution_id,
-                tenant_id=record.tenant_id,
+                tenant_id=self._executions.tenant_id,
                 query_kind="history",
                 include_content=include_content,
             ),
@@ -275,13 +275,13 @@ class DefaultExecutionHistoryService:
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             query_kind="model_interactions",
             include_content=include_content,
         )
         page = await self._reader.model_interactions(
             execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
         )
@@ -314,7 +314,7 @@ class DefaultExecutionHistoryService:
             self._encode_content_cursor(
                 page.next_cursor,
                 execution_id=execution_id,
-                tenant_id=record.tenant_id,
+                tenant_id=self._executions.tenant_id,
                 query_kind="model_interactions",
                 include_content=include_content,
             ),
@@ -331,7 +331,7 @@ class DefaultExecutionHistoryService:
         record = await self._authorize(execution_id, principal)
         return await self._reader.attachment_facts(
             execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
             cursor=cursor,
             limit=limit,
         )
@@ -345,7 +345,7 @@ class DefaultExecutionHistoryService:
         record = await self._authorize(execution_id, principal)
         return await self._reader.usage(
             execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._executions.tenant_id,
         )
 
     def _content_filter_digest(

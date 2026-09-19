@@ -44,7 +44,7 @@ from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStorageGroup, SqlStateStore
 from ._step_materializer import build_runtime_steps
 from ._steps import RuntimeStepStore
-from ._store import StateStore, state_owner_digest
+from ._store import StateStore, state_store_digest
 from ._task_admission_repository import TaskAdmissionRepositoryImpl
 from ._task_repository import TaskRepositoryImpl
 
@@ -126,14 +126,19 @@ async def materialize_runtime_state(
         for group_root, domains in filesystem_domains.items():
             route = filesystem_routes[group_root]
             member_roots = {
-                domain: _route_domain_path(plan.route(domain), namespace, tenant_id)
+                domain: _route_domain_path(
+                    plan,
+                    domain,
+                    namespace,
+                    tenant_id,
+                )
                 for domain in domains
             }
             if read_only and any(
                 not path.is_dir() for path in member_roots.values()
             ):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            standalone = route.transaction_root is None
+            standalone = route.transaction_root is None and len(domains) == 1
             scope = _filesystem_group_scope(
                 namespace, tenant_id, group_root, member_roots
             )
@@ -214,7 +219,7 @@ async def materialize_runtime_state(
                         context=context,
                         runtime_domain=domain,
                         group=group,
-                        owner_digest=state_owner_digest(
+                        store_digest=state_store_digest(
                             namespace,
                             tenant_id,
                             domain.value,
@@ -299,10 +304,6 @@ async def materialize_runtime_state(
         retention = RuntimeRetentionController(
             conversation=states.conversation,
             execution=states.execution,
-            memory=states.memory,
-            artifact=states.artifact,
-            evaluation=states.evaluation,
-            recovery=states.recovery,
             objects=objects,
             steps=steps,
             plan=plan,
@@ -416,11 +417,13 @@ def _tenant_scope_digest(tenant_id: str) -> str:
 
 
 def _route_domain_path(
-    route: RuntimeStateRoute, namespace: str, tenant_id: str
+    plan: RuntimeStatePlan,
+    domain: RuntimeDomain,
+    namespace: str,
+    tenant_id: str,
 ) -> Path:
-    if route.path is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return route.path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)
+    path = plan.filesystem_path(domain)
+    return path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)
 
 
 def _filesystem_group_scope(

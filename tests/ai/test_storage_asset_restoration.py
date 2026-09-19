@@ -142,7 +142,7 @@ def test_asset_path_adapter_and_config_are_available() -> None:
 @pytest.mark.asyncio
 async def test_local_directory_asset_backend_maps_single_files(tmp_path: Path) -> None:
     backend = DirectoryAssetBackend(
-        AssetRoot("file:directory", "file", str(tmp_path), "directory"),
+        AssetRoot("file", str(tmp_path), "directory"),
         path_adapter=_MappedPathAdapter(),
     )
     await backend.initialize()
@@ -165,9 +165,9 @@ async def test_local_directory_asset_layer_stat_has_integer_revision(tmp_path: P
     path = tmp_path / "mapped" / "mcp" / "one.json"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"one")
-    primary = InMemoryAssetBackend(AssetRoot("memory:primary", "memory", "primary", "primary"))
+    primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
     builtin = DirectoryAssetBackend(
-        AssetRoot("file:directory", "file", str(tmp_path), "directory"),
+        AssetRoot("file", str(tmp_path), "directory"),
         path_adapter=_MappedPathAdapter(),
     )
     store = AssetStore(

@@ -68,7 +68,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
     )
     workspace = Workspace.load(
         tmp_path,
-        workspace_id="workspace",
+
         policy=WorkspacePolicy(
             tool_permissions=WorkspaceToolPermissionPolicy(default="ask")
         ),
@@ -80,7 +80,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
     )
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_ToolModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),

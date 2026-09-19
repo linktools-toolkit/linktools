@@ -77,7 +77,6 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -144,7 +143,6 @@ async def test_history_head_requires_open_for_mutations() -> None:
             )
             sealed = ExecutionHistoryHeadRecord(
                 "execution",
-                "tenant",
                 ExecutionHistoryState.SEALED,
                 open_head.revision + 1,
                 "d" * 64,
@@ -199,7 +197,6 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                 record,
                 ExecutionHistoryHeadRecord(
                     head.execution_id,
-                    head.tenant_id,
                     ExecutionHistoryState.SEALED,
                     head.revision + 1,
                     "s" * 64,
@@ -346,7 +343,6 @@ async def test_conversation_head_replacement_preserves_physical_identity(
             ConversationHistoryRecord(
                 history_id="history",
                 session_id="session",
-                tenant_id="tenant",
                 parent_history_id=None,
                 prefix_index_head_id=None,
                 inherited_message_count=0,
@@ -523,7 +519,6 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
                 transaction,
                 ExecutionHistoryHeadRecord(
                     "execution",
-                    "tenant",
                     ExecutionHistoryState.OPEN,
                     0,
                     None,
@@ -610,7 +605,6 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
     )
     seal = ExecutionHistorySealRecord(
                execution_id="execution",
-               tenant_id="tenant",
                run_heads=(
             ExecutionRunSealHead(
                 run_id,

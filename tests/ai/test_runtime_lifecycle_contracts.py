@@ -65,7 +65,7 @@ async def _compose_with_successful_close(
 
 
 def _workspace(tmp_path: Path) -> Workspace:
-    return Workspace.load(tmp_path, workspace_id="lifecycle")
+    return Workspace.load(tmp_path)
 
 
 @pytest.mark.asyncio

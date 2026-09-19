@@ -112,7 +112,7 @@ class RuntimeRecoveryCommands:
         async def operation() -> ExecutionRecord:
             return await self._execution.compare_and_swap(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._execution.tenant_id,
                 expected_revision=execution.revision,
                 next_record=target,
             )
@@ -121,7 +121,7 @@ class RuntimeRecoveryCommands:
             try:
                 current = await self._execution.get(
                     execution.execution_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._execution.tenant_id,
                 )
                 if current is None:
                     return _partial()
@@ -153,7 +153,6 @@ class RuntimeRecoveryCommands:
     ) -> OperationLedgerRecord:
         if (
             execution.status is not ExecutionStatus.RECOVERY_REQUIRED
-            or operation.tenant_id != execution.tenant_id
             or operation.resource_kind is not ResourceKind.EXECUTION
             or operation.resource_id != execution.execution_id
             or operation.execution_id != execution.execution_id
@@ -172,7 +171,7 @@ class RuntimeRecoveryCommands:
         key = self._execution._key("execution", execution.execution_id)
         stream = stream_digest(
             self._execution._namespace,
-            execution.tenant_id,
+            self._execution.tenant_id,
             self._execution._domain.value,
             "execution",
             execution.execution_id,
@@ -244,7 +243,7 @@ class RuntimeRecoveryCommands:
                 )
                 current_execution = await self._execution.get(
                     execution.execution_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._execution.tenant_id,
                 )
                 if current_operation is not None:
                     if not _same_operation_identity(current_operation, operation):
@@ -295,7 +294,7 @@ class RuntimeRecoveryCommands:
         key = self._execution._key("execution", execution.execution_id)
         stream = stream_digest(
             self._execution._namespace,
-            execution.tenant_id,
+            self._execution.tenant_id,
             self._execution._domain.value,
             "execution",
             execution.execution_id,
@@ -351,13 +350,13 @@ class RuntimeRecoveryCommands:
             try:
                 current = await self._execution.get(
                     execution.execution_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._execution.tenant_id,
                 )
                 if current is None:
                     return _partial()
                 page = await self._events.list(
                     execution.execution_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._execution.tenant_id,
                     after_sequence=execution.event_sequence,
                     limit=event_count + 1,
                 )
@@ -578,7 +577,6 @@ def _same_operation_identity(
 ) -> bool:
     return (
         current.operation_id == candidate.operation_id
-        and current.tenant_id == candidate.tenant_id
         and current.resource_kind is candidate.resource_kind
         and current.resource_id == candidate.resource_id
         and current.execution_id == candidate.execution_id

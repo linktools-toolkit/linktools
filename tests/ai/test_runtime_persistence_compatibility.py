@@ -31,7 +31,6 @@ def _session() -> SessionRecord:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         agent_id="agent",
         status=SessionStatus.OPEN,
@@ -47,14 +46,14 @@ def _session() -> SessionRecord:
 
 
 def _envelope(payload: object, *, wire_id: str = "session_record") -> dict[str, object]:
-    return {"v": 1, "value": {"type": wire_id, "payload": payload}}
+    return {"v": 2, "value": {"type": wire_id, "payload": payload}}
 
 
 def test_persisted_session_round_trips() -> None:
     session = _session()
     payload = _encode_persisted_domain(session)
 
-    assert payload["schema"] == 1
+    assert payload["schema"] == 2
     assert _decode_enveloped_domain(_envelope(payload), SessionRecord) == session
 
 
@@ -95,8 +94,8 @@ def test_persisted_session_rejects_malformed_known_field() -> None:
 @pytest.mark.parametrize(
     ("schema", "expected"),
     (
-        (0, ErrorCode.STORAGE_INTEGRITY_ERROR),
-        (2, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (1, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (3, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
     ),
 )
 def test_persisted_schema_version_boundaries(schema: object, expected: ErrorCode) -> None:
@@ -122,7 +121,7 @@ def test_persisted_payload_requires_schema() -> None:
 def test_unknown_outer_version_and_wire_type_are_unsupported() -> None:
     payload = _encode_persisted_domain(_session())
     future_version = _envelope(payload)
-    future_version["v"] = 2
+    future_version["v"] = 3
     with pytest.raises(AIError) as version_error:
         _decode_enveloped_domain(future_version, SessionRecord)
     assert version_error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
@@ -222,7 +221,7 @@ def test_step_persistence_reads_current_payload() -> None:
 
     current = _decode_step_envelope(
         {
-            "v": 1,
+            "v": 2,
             "value": {
                 "type": wire_type_id(run),
                 "payload": _encode_persisted_domain(run),

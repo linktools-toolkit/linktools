@@ -68,7 +68,6 @@ async def test_artifact_list_authorizes_the_execution_identity() -> None:
             ArtifactRecord(
                 artifact_id="artifact",
                 execution_id="execution",
-                tenant_id="tenant",
                 producer="tool",
                 media_type="text/plain",
                 object_ref=ObjectRef("runtime", "artifact/key", "a" * 64, 7),
@@ -115,7 +114,6 @@ async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
             ArtifactRecord(
                 artifact_id="artifact",
                 execution_id="execution",
-                tenant_id="tenant",
                 producer="tool",
                 media_type="text/plain",
                 object_ref=reference,

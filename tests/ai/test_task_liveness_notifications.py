@@ -22,7 +22,7 @@ from linktools.ai.task import (
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 class _AllowAuthorization:
@@ -95,7 +95,7 @@ async def test_scheduler_retries_transient_reconcile_conflict(
         await launcher.start(
             TaskGraphLaunch(
                 graph.graph_id,
-                trusted_workspace_principal("tenant"),
+                Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
                 TaskGraphLimits(),
             )
         )
@@ -170,7 +170,7 @@ async def test_scheduler_timeout_boundary_does_not_lose_completion_activity(
         await launcher.start(
             TaskGraphLaunch(
                 graph.graph_id,
-                trusted_workspace_principal("tenant"),
+                Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
                 TaskGraphLimits(max_concurrency=2),
             )
         )
@@ -217,7 +217,7 @@ async def test_local_event_stream_observers_do_not_poll_durable_snapshots_when_i
         repository = state.task.tasks
         graph = TaskGraph("observer-idle", (TaskNode("local"),))
         await admit_graph(state, graph)
-        principal = trusted_workspace_principal("tenant")
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
         runner = _BlockingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(
@@ -307,7 +307,7 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
             owner="remote-worker",
             lease_seconds=30,
         )
-        principal = trusted_workspace_principal("tenant")
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
         runner = _BlockingRunner()
         launcher = LocalTaskGraphLauncher(repository, runner, owner="local-worker")
         await launcher.start(

@@ -22,7 +22,13 @@ def test_runtime_state_plan_allows_sqlite_without_an_explicit_object_store(
     tmp_path,
 ) -> None:
     route = RuntimeStateRoute.sqlite(tmp_path / "runtime.db")
-    plan = RuntimeStatePlan(**{domain.value: route for domain in RuntimeDomain})
+    plan = RuntimeStatePlan(
+        **{
+            domain.value: route
+            for domain in RuntimeDomain
+            if domain is not RuntimeDomain.RECOVERY
+        }
+    )
 
     assert RuntimeState.from_plan(plan).plan == plan
 

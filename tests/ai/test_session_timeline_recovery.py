@@ -32,7 +32,6 @@ def _session() -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         status=SessionStatus.OPEN,
         revision=0,
@@ -93,6 +92,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
                 await archive.materialize_snapshot(run, snapshot)
 
         backend = object.__new__(LocalExecutionBackend)
+        backend._tenant_id = "tenant"
         backend._conversation = state.conversation
         backend._conversation_durable = True
         backend._step_reads = {RuntimeDomain.CONVERSATION: archive}

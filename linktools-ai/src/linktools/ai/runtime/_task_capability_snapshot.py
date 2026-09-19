@@ -24,7 +24,7 @@ from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
 
 _KIND = "task-capability-snapshot"
-_VERSION = 1
+_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,14 +384,14 @@ class TaskCapabilitySnapshotStore:
     def _key(self, admission: TaskGraphAdmission) -> str:
         digest = canonical_sha256(
             {
-                "version": 1,
+                "version": _VERSION,
                 "namespace": self._namespace,
                 "tenant_id": admission.principal.tenant_id,
                 "graph_id": admission.graph_id,
                 "request_digest": admission.initial_request_digest,
             }
         )
-        return f"v1/task-capability-snapshot/{digest}"
+        return f"v2/task-capability-snapshot/{digest}"
 
 
 __all__ = [

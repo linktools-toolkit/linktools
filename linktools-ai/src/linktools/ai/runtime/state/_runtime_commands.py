@@ -128,6 +128,7 @@ class RuntimeStateCommands:
     ) -> None:
         self._execution = execution
         self._namespace = namespace
+        self._tenant_id = execution.tenant_id
         self._events = events
         self._operations = operations
         self._approvals = approvals
@@ -204,14 +205,14 @@ class RuntimeStateCommands:
             raise ValueError("external records do not match continuation")
         if any(
             record.execution_id != execution_id
-            or record.tenant_id != tenant_id
+            or self._tenant_id != tenant_id
             or record.status is not ApprovalStatus.PENDING
             for record in approval_values
         ):
             raise ValueError("approval record identity is invalid")
         if any(
             record.execution_id != execution_id
-            or record.tenant_id != tenant_id
+            or self._tenant_id != tenant_id
             or record.status is not ExternalCallStatus.PENDING
             for record in external_values
         ):
@@ -394,7 +395,7 @@ class RuntimeStateCommands:
         approval_ids = tuple(
             _deferred_resource_id(
                 "approval-v1",
-                commit.tenant_id,
+                self._tenant_id,
                 commit.execution_id,
                 expected_pending_tools.source_step_run_id,
                 item.tool_call_id,
@@ -404,7 +405,7 @@ class RuntimeStateCommands:
         call_ids = tuple(
             _deferred_resource_id(
                 "external-call-v1",
-                commit.tenant_id,
+                self._tenant_id,
                 commit.execution_id,
                 expected_pending_tools.source_step_run_id,
                 item.tool_call_id,
@@ -419,12 +420,12 @@ class RuntimeStateCommands:
                 execution = await self._execution.get_in_transaction(
                     execution_tx,
                     commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 checkpoint = await self._recovery.get_in_transaction(
                     recovery_tx,
                     commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if (
                     execution is None
@@ -441,14 +442,14 @@ class RuntimeStateCommands:
                     recovery_tx,
                     approval_ids,
                     execution_id=commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                     decided_at=commit.requested_at,
                 )
                 await external_calls.cancel_pending_in_transaction(
                     recovery_tx,
                     call_ids,
                     execution_id=commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                     cancelled_at=commit.requested_at,
                 )
                 updated = await self._execution.request_cancel_in_transaction(
@@ -459,7 +460,7 @@ class RuntimeStateCommands:
                 await self._recovery.compare_and_swap_in_transaction(
                     recovery_tx,
                     commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                     expected_revision=expected_recovery_revision,
                     next_record=replace(
                         checkpoint,
@@ -476,11 +477,11 @@ class RuntimeStateCommands:
         async def readback() -> CommitObservation[ExecutionRecord]:
             execution = await self._execution.get(
                 commit.execution_id,
-                tenant_id=commit.tenant_id,
+                tenant_id=self._tenant_id,
             )
             checkpoint = await self._recovery.get(
                 commit.execution_id,
-                tenant_id=commit.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if execution is None or checkpoint is None:
                 return CommitObservation(
@@ -490,7 +491,7 @@ class RuntimeStateCommands:
             for approval_id in approval_ids:
                 record = await approvals.get(
                     approval_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if (
                     record is None
@@ -504,7 +505,7 @@ class RuntimeStateCommands:
             for call_id in call_ids:
                 record = await external_calls.get(
                     call_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if (
                     record is None
@@ -712,13 +713,12 @@ class RuntimeStateCommands:
         history = await self._conversation_history.get_in_transaction(
             transaction,
             history_id,
-            tenant_id=session.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if history is None:
             history = ConversationHistoryRecord(
                 history_id=history_id,
                 session_id=session.session_id,
-                tenant_id=session.tenant_id,
                 parent_history_id=None,
                 prefix_index_head_id=None,
                 inherited_message_count=0,
@@ -755,7 +755,7 @@ class RuntimeStateCommands:
             try:
                 execution = await self._execution.get(
                     commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if execution is None:
                     return CommitObservation(
@@ -764,7 +764,7 @@ class RuntimeStateCommands:
                     )
                 page = await self._events.list(
                     commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                     after_sequence=commit.expected_event_sequence,
                     limit=len(expected_events) + 1,
                 )
@@ -904,17 +904,16 @@ class RuntimeStateCommands:
                     session = await self._conversation.get_in_transaction(
                         session_transaction,
                         session_id,
-                        tenant_id=claim.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if session.active_execution_id not in {None, claim.execution_id}:
                         owner = await self._execution.get_in_transaction(
                             transaction,
                             session.active_execution_id,
-                            tenant_id=claim.tenant_id,
+                            tenant_id=self._tenant_id,
                         )
                         if (
                             owner is None
-                            or owner.tenant_id != claim.tenant_id
                             or owner.session_id != session_id
                             or owner.parent_execution_id is not None
                         ):
@@ -930,13 +929,13 @@ class RuntimeStateCommands:
                         await self._conversation.release_execution_in_transaction(
                             session_transaction,
                             session_id,
-                            tenant_id=claim.tenant_id,
+                            tenant_id=self._tenant_id,
                             execution_id=owner.execution_id,
                         )
                     await self._conversation.admit_execution_in_transaction(
                         session_transaction,
                         session_id,
-                        tenant_id=claim.tenant_id,
+                        tenant_id=self._tenant_id,
                         execution_id=claim.execution_id,
                         expected=expected_cursor,
                     )
@@ -971,7 +970,7 @@ class RuntimeStateCommands:
                         raise
                     actual = await self._recovery.get(
                         recovery_checkpoint.execution_id,
-                        tenant_id=recovery_checkpoint.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if actual == recovery_checkpoint:
                         break
@@ -980,7 +979,7 @@ class RuntimeStateCommands:
                 try:
                     await self._admit_split_start(
                         session_id,
-                        tenant_id=claim.tenant_id,
+                        tenant_id=self._tenant_id,
                         execution_id=claim.execution_id,
                         expected=expected_cursor,
                     )
@@ -990,7 +989,7 @@ class RuntimeStateCommands:
                         raise
                     session = await self._conversation.get(
                         session_id,
-                        tenant_id=claim.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if (
                         session is not None
@@ -1012,7 +1011,7 @@ class RuntimeStateCommands:
         next_sequence = claim.expected_agent_run_sequence + 1
         next_run_id = step_run_id(
             namespace=self._namespace,
-            tenant_id=claim.tenant_id,
+            tenant_id=self._tenant_id,
             execution_id=claim.execution_id,
             segment_sequence=next_sequence,
         )
@@ -1025,14 +1024,14 @@ class RuntimeStateCommands:
             current_execution = await self._execution.get_in_transaction(
                 execution_transaction,
                 claim.execution_id,
-                tenant_id=claim.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current_execution is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current_recovery = await self._recovery.get_in_transaction(
                 recovery_transaction,
                 claim.execution_id,
-                tenant_id=claim.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current_recovery is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -1049,7 +1048,7 @@ class RuntimeStateCommands:
             updated_execution = await self._execution.claim_next_agent_run_in_transaction(
                 execution_transaction,
                 claim.execution_id,
-                tenant_id=claim.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=claim.expected_execution_revision,
                 expected_agent_run_sequence=claim.expected_agent_run_sequence,
             )
@@ -1063,7 +1062,7 @@ class RuntimeStateCommands:
             updated_recovery = await self._recovery.compare_and_swap_in_transaction(
                 recovery_transaction,
                 claim.execution_id,
-                tenant_id=claim.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=claim.expected_recovery_revision,
                 next_record=updated_recovery,
             )
@@ -1081,11 +1080,11 @@ class RuntimeStateCommands:
                 raise
             execution = await self._execution.get(
                 claim.execution_id,
-                tenant_id=claim.tenant_id,
+                tenant_id=self._tenant_id,
             )
             recovery = await self._recovery.get(
                 claim.execution_id,
-                tenant_id=claim.tenant_id,
+                tenant_id=self._tenant_id,
             )
             execution_target = (
                 execution is not None
@@ -1361,7 +1360,7 @@ class RuntimeStateCommands:
                     raise
                 observed = await self._tools.get_operation(
                     request.tool_operation_id,
-                    tenant_id=request.tenant_id,
+                    tenant_id=self._tools.tenant_id,
                 )
                 if observed is None:
                     return await stores[0].storage_group.mutate(stores, callback)
@@ -1390,7 +1389,7 @@ class RuntimeStateCommands:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
                 observed = await tools.get_operation(
                     request.tool_operation_id,
-                    tenant_id=request.tenant_id,
+                    tenant_id=tools.tenant_id,
                 )
                 if observed is None:
                     await asyncio.sleep(0)
@@ -1472,12 +1471,11 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             timeline_history = await self._conversation_history.get(
                 next_cursor.history_id,
-                tenant_id=commit.execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if (
                 timeline_history is None
                 or timeline_history.session_id != session_id
-                or timeline_history.tenant_id != commit.execution.tenant_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             timeline_range = _timeline_turn_message_range(
@@ -1559,7 +1557,7 @@ class RuntimeStateCommands:
                         await self._conversation.release_execution_in_transaction(
                             conversation_transaction,
                             session_id,
-                            tenant_id=commit.execution.tenant_id,
+                            tenant_id=self._tenant_id,
                             execution_id=commit.execution.execution_id,
                         )
                     else:
@@ -1573,7 +1571,7 @@ class RuntimeStateCommands:
                         session = await self._conversation.get_in_transaction(
                             conversation_transaction,
                             session_id,
-                            tenant_id=commit.execution.tenant_id,
+                            tenant_id=self._tenant_id,
                         )
                         await self._promote_history_in_transaction(
                             conversation_transaction,
@@ -1583,7 +1581,7 @@ class RuntimeStateCommands:
                         await self._conversation.complete_execution_in_transaction(
                             conversation_transaction,
                             session_id,
-                            tenant_id=commit.execution.tenant_id,
+                            tenant_id=self._tenant_id,
                             execution_id=commit.execution.execution_id,
                             expected=expected_cursor,
                             next_cursor=next_cursor,
@@ -1594,7 +1592,7 @@ class RuntimeStateCommands:
                         await self._conversation.commit_timeline_turn_in_transaction(
                             conversation_transaction,
                             session_id,
-                            tenant_id=commit.execution.tenant_id,
+                            tenant_id=self._tenant_id,
                             execution_id=commit.execution.execution_id,
                             start_message_index=timeline_range[0],
                             end_message_index=timeline_range[1],
@@ -1611,7 +1609,7 @@ class RuntimeStateCommands:
                     await self._recovery.compare_and_swap_in_transaction(
                         group.transaction(self._recovery.state_store),
                         recovery_checkpoint.execution_id,
-                        tenant_id=recovery_checkpoint.tenant_id,
+                        tenant_id=self._tenant_id,
                         expected_revision=recovery_checkpoint.revision - 1,
                         next_record=recovery_checkpoint,
                     )
@@ -1688,7 +1686,7 @@ class RuntimeStateCommands:
                         return CommitObservation(DurableCommitState.NOT_COMMITTED)
                     execution = await self._execution.get(
                         commit.execution.execution_id,
-                        tenant_id=commit.execution.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if execution is None:
                         return CommitObservation(
@@ -1738,7 +1736,7 @@ class RuntimeStateCommands:
         if recovery_checkpoint is not None:
             actual_recovery = await self._recovery.get(
                 recovery_checkpoint.execution_id,
-                tenant_id=recovery_checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if actual_recovery is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1762,7 +1760,7 @@ class RuntimeStateCommands:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 execution = await self._execution.get(
                     commit.execution.execution_id,
-                    tenant_id=commit.execution.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if execution is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1791,7 +1789,7 @@ class RuntimeStateCommands:
                 session = await self._conversation.get_in_transaction(
                     conversation_transaction,
                     session_id,
-                    tenant_id=commit.execution.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 await self._promote_history_in_transaction(
                     conversation_transaction,
@@ -1801,7 +1799,7 @@ class RuntimeStateCommands:
                 await self._conversation.advance_continuation_in_transaction(
                     group.transaction(self._conversation.state_store),
                     session_id,
-                    tenant_id=commit.execution.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=commit.execution.execution_id,
                     expected=expected_cursor,
                     next_cursor=next_cursor,
@@ -1813,7 +1811,7 @@ class RuntimeStateCommands:
                 await self._conversation.commit_timeline_turn_in_transaction(
                     conversation_transaction,
                     session_id,
-                    tenant_id=commit.execution.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=commit.execution.execution_id,
                     start_message_index=timeline_range[0],
                     end_message_index=timeline_range[1],
@@ -1832,7 +1830,7 @@ class RuntimeStateCommands:
                             raise
                         if await self._conversation_target_visible(
                             session_id,
-                            tenant_id=commit.execution.tenant_id,
+                            tenant_id=self._tenant_id,
                             execution_id=commit.execution.execution_id,
                             next_cursor=next_cursor,
                             run=conversation_run,
@@ -1852,7 +1850,7 @@ class RuntimeStateCommands:
                     session = await self._conversation.get_in_transaction(
                         transaction,
                         session_id,
-                        tenant_id=commit.execution.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     await self._promote_history_in_transaction(
                         transaction,
@@ -1862,7 +1860,7 @@ class RuntimeStateCommands:
                     await self._conversation.advance_continuation_in_transaction(
                         transaction,
                         session_id,
-                        tenant_id=commit.execution.tenant_id,
+                        tenant_id=self._tenant_id,
                         execution_id=commit.execution.execution_id,
                         expected=expected_cursor,
                         next_cursor=next_cursor,
@@ -1874,7 +1872,7 @@ class RuntimeStateCommands:
                     await self._conversation.commit_timeline_turn_in_transaction(
                         transaction,
                         session_id,
-                        tenant_id=commit.execution.tenant_id,
+                        tenant_id=self._tenant_id,
                         execution_id=commit.execution.execution_id,
                         start_message_index=timeline_range[0],
                         end_message_index=timeline_range[1],
@@ -1891,7 +1889,7 @@ class RuntimeStateCommands:
                             raise
                         session = await self._conversation.get(
                             session_id,
-                            tenant_id=commit.execution.tenant_id,
+                            tenant_id=self._tenant_id,
                         )
                         if session is not None and session.continuation == next_cursor:
                             break
@@ -1990,7 +1988,7 @@ class RuntimeStateCommands:
                 await self._recovery.compare_and_swap_in_transaction(
                     group.transaction(self._recovery.state_store),
                     recovery_checkpoint.execution_id,
-                    tenant_id=recovery_checkpoint.tenant_id,
+                    tenant_id=self._tenant_id,
                     expected_revision=recovery_checkpoint.revision - 1,
                     next_record=recovery_checkpoint,
                 )
@@ -2031,7 +2029,7 @@ class RuntimeStateCommands:
                         )
                     execution = await self._execution.get(
                         commit.execution.execution_id,
-                        tenant_id=commit.execution.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if execution is None:
                         return CommitObservation(
@@ -2084,7 +2082,7 @@ class RuntimeStateCommands:
         if await execution_target_visible():
             execution = await self._execution.get(
                 commit.execution.execution_id,
-                tenant_id=commit.execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if execution is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2116,7 +2114,7 @@ class RuntimeStateCommands:
         if recovery_state_merged and recovery_checkpoint is not None:
             actual_recovery = await self._recovery.get(
                 recovery_checkpoint.execution_id,
-                tenant_id=recovery_checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if actual_recovery == recovery_checkpoint:
                 recovery_pending = False
@@ -2130,7 +2128,7 @@ class RuntimeStateCommands:
                 try:
                     await self._conversation.release_execution(
                         session_id,
-                        tenant_id=commit.execution.tenant_id,
+                        tenant_id=self._tenant_id,
                         execution_id=commit.execution.execution_id,
                     )
                     break
@@ -2139,7 +2137,7 @@ class RuntimeStateCommands:
                         raise
                     session = await self._conversation.get(
                         session_id,
-                        tenant_id=commit.execution.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if session is not None and session.active_execution_id is None:
                         break
@@ -2471,7 +2469,7 @@ class RuntimeStateCommands:
         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from result.error
 
     async def _complete_recovery_checkpoint(self, target: RecoveryCheckpoint) -> None:
-        current = await self._recovery.get(target.execution_id, tenant_id=target.tenant_id)
+        current = await self._recovery.get(target.execution_id, tenant_id=self._tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current == target:
@@ -2482,7 +2480,7 @@ class RuntimeStateCommands:
             try:
                 await self._recovery.compare_and_swap(
                     target.execution_id,
-                    tenant_id=target.tenant_id,
+                    tenant_id=self._tenant_id,
                     expected_revision=current.revision,
                     next_record=target,
                 )
@@ -2493,7 +2491,7 @@ class RuntimeStateCommands:
                     ErrorCode.STORAGE_CONFLICT,
                 }:
                     raise
-                observed = await self._recovery.get(target.execution_id, tenant_id=target.tenant_id)
+                observed = await self._recovery.get(target.execution_id, tenant_id=self._tenant_id)
                 if observed == target:
                     return
                 if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN or observed is None:
@@ -2536,7 +2534,7 @@ class RuntimeStateCommands:
     ) -> ExecutionRecord | None:
         execution = await self._execution.get(
             claim.execution_id,
-            tenant_id=claim.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2557,7 +2555,7 @@ class RuntimeStateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         started_events = await self._events.list(
             claim.execution_id,
-            tenant_id=claim.tenant_id,
+            tenant_id=self._tenant_id,
             after_sequence=claim.expected_event_sequence,
             limit=1,
         )
@@ -2571,19 +2569,18 @@ class RuntimeStateCommands:
         if recovery_checkpoint is not None:
             actual = await self._recovery.get(
                 recovery_checkpoint.execution_id,
-                tenant_id=recovery_checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if (
                 actual is None
                 or actual.execution_id != recovery_checkpoint.execution_id
-                or actual.tenant_id != recovery_checkpoint.tenant_id
                 or actual.step_run_id is not None
                 or actual.state is not RecoveryCheckpointState.ADMITTED
                 or actual.handoff_phase is not RecoveryHandoffPhase.NONE
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session_id is not None:
-            session = await self._conversation.get(session_id, tenant_id=claim.tenant_id)
+            session = await self._conversation.get(session_id, tenant_id=self._tenant_id)
             if (
                 session is None
                 or session.status is not SessionStatus.OPEN
@@ -2615,7 +2612,7 @@ class RuntimeStateCommands:
     ) -> bool:
         execution = await self._execution.get(
             commit.execution.execution_id,
-            tenant_id=commit.execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2635,13 +2632,13 @@ class RuntimeStateCommands:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history_seal = await self._execution.get_history_seal(
             commit.execution.execution_id,
-            tenant_id=commit.execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if history_seal is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         history_head = await self._execution.get_history_head(
             commit.execution.execution_id,
-            tenant_id=commit.execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if (
             history_head is None
@@ -2670,7 +2667,7 @@ class RuntimeStateCommands:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         idempotency = await self._execution.get_terminal_idempotency(
             commit.execution.execution_id,
-            tenant_id=commit.execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if idempotency is not None:
             expected_status = (
@@ -2692,7 +2689,7 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             operation = await self._operations.get(
                 commit.operation.operation_id,
-                tenant_id=commit.execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if (
                 operation is None
@@ -2704,7 +2701,7 @@ class RuntimeStateCommands:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         events = await self._events.list(
             commit.execution.execution_id,
-            tenant_id=commit.execution.tenant_id,
+            tenant_id=self._tenant_id,
             after_sequence=commit.expected_event_sequence,
             limit=pending_event_count + 1,
         )
@@ -2723,7 +2720,7 @@ class RuntimeStateCommands:
         if session_id is not None:
             session = await self._conversation.get(
                 session_id,
-                tenant_id=commit.execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if session is None or require_session_release and session.active_execution_id is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2734,7 +2731,7 @@ class RuntimeStateCommands:
         if recovery_checkpoint is not None and require_recovery:
             actual = await self._recovery.get(
                 recovery_checkpoint.execution_id,
-                tenant_id=recovery_checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if actual != recovery_checkpoint:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2800,7 +2797,6 @@ class RuntimeStateCommands:
             owner = await self._execution.get(owner_id, tenant_id=tenant_id)
             if (
                 owner is None
-                or owner.tenant_id != tenant_id
                 or owner.session_id != session_id
                 or owner.parent_execution_id is not None
             ):

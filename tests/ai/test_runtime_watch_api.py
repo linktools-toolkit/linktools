@@ -467,7 +467,7 @@ class _WaitGraphService:
         assert graph_id == "graph"
         self.wait_started.set()
         if self.mode == "waiting":
-            return TaskGraphResult(graph_id, TaskStatus.WAITING, (), ())
+            return TaskGraphResult(graph_id, TaskStatus.WAITING, ())
         if self.mode == "timeout":
             raise AIError(
                 ErrorCode.TASK_WAIT_TIMEOUT,

@@ -156,7 +156,6 @@ class RuntimeMemoryStore:
         now = datetime.now(timezone.utc)
         next_record = MemoryRecord(
             _memory_id(self._memory_scope_digest, logical_path),
-            self._tenant_id,
             self._memory_scope_digest,
             stored_content,
             {
@@ -302,7 +301,6 @@ class RuntimeMemoryStore:
             )
         if (
             record.operation_id != operation_id
-            or record.tenant_id != self._tenant_id
             or record.resource_kind is not ResourceKind.MEMORY
             or record.status is not OperationStatus.SUCCEEDED
             or record.result_ref is None
@@ -363,7 +361,6 @@ class RuntimeMemoryStore:
                 record,
                 logical_path,
                 self._memory_scope_digest,
-                self._tenant_id,
             )
         return record
 
@@ -479,11 +476,9 @@ def _validate_record(
     record: MemoryRecord,
     logical_path: str,
     scope_digest: str,
-    tenant_id: str,
 ) -> None:
     if (
-        record.tenant_id != tenant_id
-        or record.memory_id != _memory_id(scope_digest, logical_path)
+        record.memory_id != _memory_id(scope_digest, logical_path)
         or record.memory_scope_digest != scope_digest
         or not isinstance(record.revision, int)
         or isinstance(record.revision, bool)

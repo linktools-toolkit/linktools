@@ -107,7 +107,7 @@ class RuntimeStateRoute:
                 and self._engine is None
                 and (
                     self._transaction_root is None
-                    or self._transaction_root != self._path
+                    or isinstance(self._transaction_root, Path)
                 )
             )
             or (
@@ -195,53 +195,29 @@ class RuntimeStatePlan:
     artifact: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
     task: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
     evaluation: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
-    recovery: RuntimeStateRoute = field(default_factory=RuntimeStateRoute.memory)
 
     def __post_init__(self) -> None:
         routes = tuple(self.route(domain) for domain in RuntimeDomain)
         if any(not isinstance(route, RuntimeStateRoute) for route in routes):
             raise ValueError("RuntimeStatePlan contains an invalid route")
-        execution = self.execution
-        recovery = self.recovery
-        if execution.retention is not recovery.retention:
-            raise ValueError("execution and recovery retention must match")
-        if execution.kind != recovery.kind:
-            raise ValueError("execution and recovery backends must match")
-        if execution.kind == _RuntimeStateBackendKind.FILESYSTEM.value:
-            if (
-                execution.transaction_root is None
-                or recovery.transaction_root is None
-                or execution.transaction_root != recovery.transaction_root
-            ):
-                raise ValueError(
-                    "execution and recovery filesystem routes must share a transaction_root"
-                )
-        elif execution.kind == _RuntimeStateBackendKind.SQLITE.value:
-            if execution.path != recovery.path:
-                raise ValueError(
-                    "execution and recovery SQLite routes must share a path"
-                )
-        elif execution.kind == _RuntimeStateBackendKind.SQL.value:
-            if execution.engine is not recovery.engine:
-                raise ValueError(
-                    "execution and recovery SQL routes must share an engine"
-                )
-        filesystem_roots = [route.path for route in routes if route.kind == _RuntimeStateBackendKind.FILESYSTEM.value]
-        if len(filesystem_roots) != len({path for path in filesystem_roots}):
-            raise ValueError("filesystem RuntimeStateRoute path must be unique across RuntimeDomain values")
         grouped: dict[Path, list[Path]] = {}
-        for route in routes:
-            if route.kind != _RuntimeStateBackendKind.FILESYSTEM.value or route.transaction_root is None:
+        for domain, route in zip(RuntimeDomain, routes):
+            if (
+                route.kind != _RuntimeStateBackendKind.FILESYSTEM.value
+                or route.transaction_root is None
+            ):
                 continue
-            if route.path is None:
-                raise ValueError("filesystem route path is required")
+            member_path = self.filesystem_path(domain)
             try:
-                relative = route.path.relative_to(route.transaction_root)
+                relative = member_path.relative_to(route.transaction_root)
             except ValueError as error:
                 raise ValueError("filesystem route must be under transaction_root") from error
-            if not relative.parts or relative.parts[0] in {".state-groups"} or relative.parts[0].startswith(".txn-"):
+            if relative.parts and (
+                relative.parts[0] in {".state-groups"}
+                or relative.parts[0].startswith(".txn-")
+            ):
                 raise ValueError("filesystem route points at a reserved transaction path")
-            grouped.setdefault(route.transaction_root, []).append(route.path)
+            grouped.setdefault(route.transaction_root, []).append(member_path)
         for paths in grouped.values():
             for index, left in enumerate(sorted(paths)):
                 for right in sorted(paths)[index + 1 :]:
@@ -258,8 +234,17 @@ class RuntimeStatePlan:
             RuntimeDomain.ARTIFACT: self.artifact,
             RuntimeDomain.TASK: self.task,
             RuntimeDomain.EVALUATION: self.evaluation,
-            RuntimeDomain.RECOVERY: self.recovery,
+            RuntimeDomain.RECOVERY: self.execution,
         }[domain]
+
+    def filesystem_path(self, domain: RuntimeDomain) -> Path:
+        """Return the physical member root for one filesystem domain."""
+        route = self.route(domain)
+        if route.path is None:
+            raise ValueError("filesystem route path is required")
+        if domain in {RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}:
+            return route.path / domain.value
+        return route.path
 
     @property
     def durable_domains(self) -> frozenset[RuntimeDomain]:

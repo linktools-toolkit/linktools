@@ -48,7 +48,6 @@ from ...core import (
     validate_agent_id,
     validate_lease_owner,
     validate_resource_id,
-    validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
@@ -546,7 +545,6 @@ class ConversationHistoryRecord:
 
     history_id: str
     session_id: str
-    tenant_id: str
     parent_history_id: str | None
     prefix_index_head_id: str | None
     inherited_message_count: int
@@ -554,7 +552,7 @@ class ConversationHistoryRecord:
     def __post_init__(self) -> None:
         if self.inherited_message_count < 0:
             raise ValueError("inherited message count cannot be negative")
-        if not self.history_id or not self.session_id or not self.tenant_id:
+        if not self.history_id or not self.session_id:
             raise ValueError("history descriptor identity cannot be empty")
         if self.parent_history_id is None:
             if (
@@ -569,7 +567,6 @@ class ConversationHistoryRecord:
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     session_id: str
-    tenant_id: str
     owner_principal_id: str
     status: SessionStatus
     revision: int
@@ -624,7 +621,6 @@ class SessionRecord:
 @dataclass(frozen=True, slots=True)
 class ExecutionRecord:
     execution_id: str
-    tenant_id: str
     session_id: str | None
     parent_execution_id: str | None
     root_execution_id: str
@@ -808,14 +804,13 @@ class ExecutionRunSealHead:
 @dataclass(frozen=True, slots=True)
 class ExecutionHistorySealRecord:
     execution_id: str
-    tenant_id: str
     run_heads: tuple[ExecutionRunSealHead, ...]
     execution_event_high_water: int
 
     def __post_init__(self) -> None:
         if self.execution_event_high_water < 0:
             raise ValueError("execution history seal values are invalid")
-        if not self.execution_id or not self.tenant_id:
+        if not self.execution_id:
             raise ValueError("execution history seal identity cannot be empty")
         run_ids = tuple(head.run_id for head in self.run_heads)
         if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
@@ -826,7 +821,6 @@ class ExecutionHistorySealRecord:
         return canonical_sha256(
             {
                 "execution_id": self.execution_id,
-                "tenant_id": self.tenant_id,
                 "run_heads": [
                     {
                         "run_id": head.run_id,
@@ -859,7 +853,6 @@ class ExecutionHistoryHeadRecord:
     """
 
     execution_id: str
-    tenant_id: str
     state: ExecutionHistoryState
     revision: int
     seal_digest: str | None
@@ -867,7 +860,7 @@ class ExecutionHistoryHeadRecord:
     def __post_init__(self) -> None:
         if self.revision < 0:
             raise ValueError("execution history head revision cannot be negative")
-        if not self.execution_id or not self.tenant_id:
+        if not self.execution_id:
             raise ValueError("execution history head identity cannot be empty")
         if self.state is ExecutionHistoryState.SEALED and not self.seal_digest:
             raise ValueError("sealed history head requires a seal digest")
@@ -878,7 +871,6 @@ class ExecutionHistoryHeadRecord:
 @dataclass(frozen=True, slots=True)
 class ExecutionStartClaim:
     execution_id: str
-    tenant_id: str
     expected_revision: int
     expected_event_sequence: int
     scope: str
@@ -890,7 +882,6 @@ class ExecutionStartClaim:
 @dataclass(frozen=True, slots=True)
 class ExecutionStartUnknownCommit:
     execution_id: str
-    tenant_id: str
     expected_revision: int
     expected_event_sequence: int
     scope: str
@@ -902,7 +893,6 @@ class ExecutionStartUnknownCommit:
 @dataclass(frozen=True, slots=True)
 class ExecutionCancelRequestCommit:
     execution_id: str
-    tenant_id: str
     expected_revision: int
     expected_event_sequence: int
     operation_id: str
@@ -925,7 +915,6 @@ class ExecutionStartReservationResult:
 @dataclass(frozen=True, slots=True)
 class AgentAttemptClaim:
     execution_id: str
-    tenant_id: str
     expected_execution_revision: int
     expected_agent_run_sequence: int
     expected_recovery_revision: int
@@ -934,7 +923,6 @@ class AgentAttemptClaim:
 
 @dataclass(frozen=True, slots=True)
 class IdempotencyRecord:
-    tenant_id: str
     scope: str
     idempotency_key_digest: str
     request_digest: str
@@ -953,8 +941,6 @@ class IdempotencyRecord:
 
 @dataclass(frozen=True, slots=True)
 class ResultRecord:
-    execution_id: str
-    tenant_id: str
     output: StoredPayload | None
     stop_reason: StopReason
     usage: UsageMetrics
@@ -968,7 +954,6 @@ class ResultRecord:
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
     memory_id: str
-    tenant_id: str
     memory_scope_digest: str
     content: StoredPayload
     metadata: Mapping[str, JsonValue]
@@ -982,7 +967,6 @@ class ToolOperationRecord:
     """Durable authority for one accepted model tool call."""
 
     tool_operation_id: str
-    tenant_id: str
     execution_id: str
     step_run_id: str
     tool_call_id: str
@@ -1045,7 +1029,6 @@ class ToolOperationRecord:
         else:
             raise ValueError("tool operation status is invalid")
         try:
-            validate_tenant_id(self.tenant_id)
             validate_resource_id(self.execution_id)
             if self.owner is not None:
                 validate_lease_owner(self.owner)
@@ -1056,7 +1039,6 @@ class ToolOperationRecord:
 @dataclass(frozen=True, slots=True)
 class EvaluationRecord:
     evaluation_id: str
-    tenant_id: str
     execution_id: str
     dataset_id: str
     dataset_revision: int
@@ -1075,7 +1057,6 @@ class EvaluationRecord:
 class ArtifactRecord:
     artifact_id: str
     execution_id: str
-    tenant_id: str
     producer: str
     media_type: str
     object_ref: ObjectRef
@@ -1109,11 +1090,6 @@ class ExecutionTerminalCommit:
             ExecutionStatus.CANCELLED,
         }:
             raise ValueError("terminal commit requires a terminal Execution")
-        if (
-            self.result.execution_id != self.execution.execution_id
-            or self.result.tenant_id != self.execution.tenant_id
-        ):
-            raise ValueError("terminal result identity mismatch")
         if status is ExecutionStatus.SUCCEEDED and self.result.output is None:
             raise ValueError("successful terminal result requires output")
         if status is not ExecutionStatus.SUCCEEDED and self.result.output is not None:
@@ -1176,7 +1152,6 @@ class ExecutionTerminalCommitResult:
 class ApprovalRecord:
     approval_id: str
     execution_id: str
-    tenant_id: str
     status: ApprovalStatus
     idempotency_key_digest: str | None
     decision: ApprovalDecision | None
@@ -1206,7 +1181,6 @@ class ApprovalRecord:
 class ExternalCallRecord:
     call_id: str
     execution_id: str
-    tenant_id: str
     status: ExternalCallStatus
     idempotency_key_digest: str | None
     created_at: datetime
@@ -1313,7 +1287,6 @@ class RecoveryHandoffPhase(str, Enum):
 @dataclass(frozen=True, slots=True)
 class RecoveryCheckpoint:
     execution_id: str
-    tenant_id: str
     step_run_id: str | None
     state: RecoveryCheckpointState
     revision: int
@@ -1465,6 +1438,10 @@ class RuntimeRepository(Protocol):
     async def close(self) -> None: ...
     @property
     def state_store(self) -> StateStore: ...
+    @property
+    def tenant_id(self) -> str: ...
+    @property
+    def namespace(self) -> str: ...
 
 
 class SessionRepository(RuntimeRepository, Protocol):
@@ -1936,7 +1913,6 @@ class ExecutionEventAppend:
 
 @dataclass(frozen=True, slots=True)
 class ToolOperationAdmission:
-    tenant_id: str
     execution_id: str
     tool_operation_id: str
     step_run_id: str
@@ -1962,7 +1938,6 @@ class ToolOperationAdmission:
 @dataclass(frozen=True, slots=True)
 class ExecutionEventRecord:
     execution_id: str
-    tenant_id: str
     sequence: int
     event_type: str
     payload: JsonValue

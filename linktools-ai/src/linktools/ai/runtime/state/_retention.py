@@ -29,16 +29,11 @@ class RuntimeRetentionController:
         *,
         conversation: ConversationState,
         execution: ExecutionState,
-        memory: object,
-        artifact: object,
-        evaluation: object,
-        recovery: object,
         objects: _RuntimeObjectRouter,
         steps: RuntimeStepStore,
         plan: RuntimeStatePlan,
         namespace: str,
     ) -> None:
-        del memory, artifact, evaluation, recovery
         self._conversation = conversation
         self._execution = execution
         self._namespace = namespace

@@ -48,7 +48,6 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="child" if subagent else "root",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id="root" if subagent else None,
         root_execution_id="root",

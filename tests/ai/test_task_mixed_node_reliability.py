@@ -9,7 +9,13 @@ import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import CapabilityGroup, TaskExpansionContext
-from linktools.ai.core import JsonValue, TaskStatus, canonical_sha256
+from linktools.ai.core import (
+    JsonValue,
+    Principal,
+    PrincipalKind,
+    TaskStatus,
+    canonical_sha256,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.storage import StoredPayload
@@ -30,7 +36,7 @@ from linktools.ai.task import (
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
-from linktools.ai.workspace import Workspace, trusted_workspace_principal
+from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 
@@ -216,7 +222,6 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
             tenant_id="tenant",
         )
         assert results["node"].execution_id == "execution"
-        assert results["node"].payload is None
     finally:
         await state.close()
 
@@ -227,7 +232,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler, effect="none")
@@ -241,7 +246,7 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     state = RuntimeState.in_memory()
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -284,7 +289,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
     application.task(handler, effect="none")
@@ -309,7 +314,7 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     state = RuntimeState.in_memory()
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -406,7 +411,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.effect-applied", 1, _invalid_effect_output)
     application.task(
@@ -424,7 +429,7 @@ async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
     state = RuntimeState.in_memory()
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -476,7 +481,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.effect-invalid", 1, _invalid_effect_output)
     application.task(
@@ -493,7 +498,7 @@ async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
     )
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -536,7 +541,7 @@ async def test_not_applied_retries_same_execution_once(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     calls = 0
 
     async def flaky_effect(context: TaskNodeContext[None]) -> JsonValue:
@@ -559,7 +564,7 @@ async def test_not_applied_retries_same_execution_once(
     )
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -609,7 +614,7 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     application.agent(
         "default",
@@ -620,7 +625,7 @@ async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
     )
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -703,7 +708,7 @@ async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal()
     try:
         graph = TaskGraph("observation-graph", (TaskNode("node"),))
         repository = state.task.tasks
-        principal = trusted_workspace_principal("tenant")
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
         request = TaskGraphRequest(
             graph,
             principal,
@@ -752,7 +757,7 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
     calls: list[str] = []
     try:
         graph = TaskGraph("waiting-hold", (TaskNode("node"),))
-        principal = trusted_workspace_principal("tenant")
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
         request = TaskGraphRequest(
             graph,
             principal,
@@ -866,7 +871,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     state_root = tmp_path / "state"
     entered = asyncio.Event()
     cancelled = asyncio.Event()
@@ -894,7 +899,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
     graph = TaskGraph("shutdown-graph", (handler.node("node"),))
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -912,7 +917,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     assert cancelled.is_set()
     probe = RuntimeState.filesystem(state_root)
-    await probe.initialize(namespace=workspace.workspace_id, tenant_id="default")
+    await probe.initialize(namespace="default", tenant_id="default")
     try:
         snapshot = await probe.task.tasks.snapshot_graph(
             graph.graph_id,

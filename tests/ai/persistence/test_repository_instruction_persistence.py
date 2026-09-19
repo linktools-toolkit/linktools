@@ -55,7 +55,6 @@ def _execution(repository_instructions: RuntimePayloadRef | None) -> ExecutionRe
     binding = _binding()
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -103,7 +102,6 @@ def _checkpoint(pending_tools: PendingToolContinuation | None) -> RecoveryCheckp
     waiting = pending_tools is not None
     return RecoveryCheckpoint(
         execution_id="execution",
-        tenant_id="tenant",
         step_run_id="step-1" if waiting else None,
         state=(
             RecoveryCheckpointState.WAITING

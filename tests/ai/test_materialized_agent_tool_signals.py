@@ -103,7 +103,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     metrics = Metrics.from_store(metric_store, namespace="composition")
     workspace = Workspace.load(
         tmp_path,
-        workspace_id="workspace",
+
         policy=WorkspacePolicy(
             tool_permissions=WorkspaceToolPermissionPolicy(default="deny")
         ),
@@ -112,7 +112,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
     started = datetime.now(timezone.utc) - timedelta(seconds=1)
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_CompositionModels(),  # type: ignore[arg-type]
         state=state,
         capabilities=(CapabilityGroup("workspace", workspace=workspace), application),

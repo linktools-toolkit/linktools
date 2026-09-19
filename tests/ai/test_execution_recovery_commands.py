@@ -42,7 +42,6 @@ def _binding() -> AgentBindingSnapshot:
 def _execution(now: datetime) -> ExecutionRecord:
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -68,7 +67,6 @@ def _execution(now: datetime) -> ExecutionRecord:
 def _tool(now: datetime, *, operation_id: str = "tool-operation") -> ToolOperationRecord:
     return ToolOperationRecord(
         tool_operation_id=operation_id,
-        tenant_id="tenant",
         execution_id="execution",
         step_run_id="step-run",
         tool_call_id=f"call:{operation_id}",
@@ -125,7 +123,7 @@ async def test_recovery_status_and_resume_are_durable_nonterminal_events() -> No
 
         events = await state.execution.events.list(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=state.execution.events.tenant_id,
             after_sequence=0,
             limit=10,
         )

@@ -214,11 +214,6 @@ class TaskGraphRun(Generic[AppT]):
             snapshot.graph_id,
             _public_task_status(snapshot.status, snapshot.node_states),
             tuple(
-                state.execution_id
-                for state in snapshot.node_states
-                if state.execution_id is not None
-            ),
-            tuple(
                 TaskNodeResult(
                     state.node_id,
                     state.status,
@@ -740,7 +735,6 @@ def _public_task_result(result: TaskGraphResult) -> TaskGraphResult:
         return TaskGraphResult(
             result.graph_id,
             TaskStatus.WAITING,
-            result.execution_ids,
             result.node_results,
         )
     return result

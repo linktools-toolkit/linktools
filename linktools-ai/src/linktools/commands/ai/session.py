@@ -37,7 +37,7 @@ class Command(BaseCommand):
 
         async def execute() -> int:
             async with RuntimeHistory.open(
-                workspace.workspace_id,
+                "default",
                 state=_local_runtime_state(workspace),
             ) as history:
                 principal = Principal(
@@ -82,13 +82,13 @@ def _emit_sessions(sessions: tuple[SessionView, ...]) -> None:
     table.add_column("Active")
     table.add_column("History")
     for session in sessions:
-        table.add_row(
+            table.add_row(
             session.session_id,
             _status(session.status.value),
             session.agent_id,
             str(session.revision),
             session.cwd or "-",
-            ", ".join(session.active_execution_ids) or "-",
+            session.active_execution_id or "-",
             session.history_quality,
         )
     console.print(table)
@@ -103,7 +103,7 @@ def _emit_session(session: SessionView) -> None:
     table.add_row("Agent", session.agent_id)
     table.add_row("Revision", str(session.revision))
     table.add_row("CWD", session.cwd or "-")
-    table.add_row("Active", ", ".join(session.active_execution_ids) or "-")
+    table.add_row("Active", session.active_execution_id or "-")
     table.add_row("History", session.history_quality)
     get_console().print(Panel(table, title="Session", expand=False))
 

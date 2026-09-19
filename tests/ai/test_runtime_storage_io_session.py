@@ -31,7 +31,6 @@ def _session(
 ) -> SessionRecord:
     return SessionRecord(
         session_id=session_id,
-        tenant_id="tenant",
         owner_principal_id="owner",
         agent_id="agent",
         status=SessionStatus.OPEN,

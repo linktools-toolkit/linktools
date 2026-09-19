@@ -49,7 +49,7 @@ def encode_asset_batch_receipt(
         raise ValueError("persisted batch receipt requires idempotency identity")
     validate_batch_receipt_identity(result.idempotency_key, result.request_digest)
     return {
-        "version": 1,
+        "version": 2,
         "idempotency_key_digest": batch_receipt_key_digest(result.idempotency_key),
         "request_digest": result.request_digest,
         "store_revision": result.store_revision.value,
@@ -63,7 +63,7 @@ def decode_asset_batch_receipt(
     idempotency_key: str | None = None,
     expected_key_digest: str | None = None,
 ) -> StorageBatchResult[AssetInfo, AssetKey]:
-    if not isinstance(payload, Mapping) or payload.get("version") != 1:
+    if not isinstance(payload, Mapping) or payload.get("version") != 2:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     key_digest = _sha256(payload.get("idempotency_key_digest"))
     if expected_key_digest is not None and key_digest != expected_key_digest:
@@ -174,7 +174,6 @@ def _encode_info(info: AssetInfo) -> dict[str, JsonValue]:
         "etag": info.etag,
         "size": info.size,
         "status": info.status.value,
-        "root_id": info.root_id,
         "root_digest": info.root_digest,
         "modified_at": info.modified_at.isoformat(),
         "metadata": dict(info.metadata),
@@ -197,7 +196,6 @@ def _decode_info(payload: object) -> AssetInfo:
             _sha256(payload.get("etag")),
             _integer(payload.get("size"), minimum=0),
             StorageEntryStatus(_string(payload.get("status"))),
-            _string(payload.get("root_id")),
             _string(payload.get("root_digest")),
             datetime.fromisoformat(_string(payload.get("modified_at"))),
             dict(metadata),

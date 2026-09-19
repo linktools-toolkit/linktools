@@ -68,7 +68,7 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            existing = await super().get(identity, tenant_id=record.tenant_id)
+            existing = await super().get(identity, tenant_id=self._tenant_id)
             if existing is not None and _same_idempotency(existing, record):
                 return existing
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
@@ -180,10 +180,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 if record is None:
                     continue
                 value = await self._decode(record, ExecutionRecord)
-                if (
-                    value.execution_id != execution_id
-                    or value.tenant_id != self._tenant_id
-                ):
+                if value.execution_id != execution_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[execution_id] = value
             return values
@@ -227,7 +224,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         head = ExecutionHistoryHeadRecord(
             execution.execution_id,
-            execution.tenant_id,
             ExecutionHistoryState.OPEN,
             0,
             None,
@@ -356,7 +352,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         return await self._idempotency.get(
             claim.scope,
             claim.idempotency_key_digest,
-            tenant_id=claim.tenant_id,
+            tenant_id=self._tenant_id,
         )
 
     async def get_terminal_idempotency(
@@ -439,7 +435,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             head = ExecutionHistoryHeadRecord(
                 reservation.execution.execution_id,
-                reservation.execution.tenant_id,
                 ExecutionHistoryState.OPEN,
                 0,
                 None,
@@ -481,7 +476,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         transaction: StateTransaction,
         claim: ExecutionStartClaim,
     ) -> ExecutionRecord:
-        _require_repository_tenant(claim.tenant_id, self._tenant_id)
         execution_key = self._key("execution", claim.execution_id)
         identity = self._idempotency._identity_key(
             claim.scope,
@@ -503,7 +497,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         idempotency_created = idempotency_record is None
         if idempotency_record is None:
             idempotency = IdempotencyRecord(
-                tenant_id=claim.tenant_id,
                 scope=claim.scope,
                 idempotency_key_digest=claim.idempotency_key_digest,
                 request_digest=claim.request_digest,
@@ -532,7 +525,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 not _same_idempotency(
                     idempotency,
                     IdempotencyRecord(
-                        tenant_id=claim.tenant_id,
                         scope=claim.scope,
                         idempotency_key_digest=claim.idempotency_key_digest,
                         request_digest=claim.request_digest,
@@ -806,7 +798,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionRecord:
         return await self._transition_execution(
             commit.execution_id,
-            tenant_id=commit.tenant_id,
+            tenant_id=self._tenant_id,
             expected_revision=commit.expected_revision,
             expected_event_sequence=commit.expected_event_sequence,
             next_status=ExecutionStatus.START_UNKNOWN,
@@ -840,7 +832,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ExecutionRecord:
         return await self._transition_execution(
             commit.execution_id,
-            tenant_id=commit.tenant_id,
+            tenant_id=self._tenant_id,
             expected_revision=commit.expected_revision,
             expected_event_sequence=commit.expected_event_sequence,
             expected_status=expected_status,
@@ -1033,7 +1025,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         pending_events: Sequence[ExecutionEventAppend] = (),
         transaction: StateTransaction | None = None,
     ) -> ExecutionTerminalCommitResult:
-        _require_repository_tenant(commit.execution.tenant_id, self._tenant_id)
         key = self._key("execution", commit.execution.execution_id)
         stream = stream_digest(
             self._namespace,
@@ -1362,7 +1353,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if record.kind != "execution_history_seal":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = await self._decode(record, ExecutionHistorySealRecord)
-        if value.execution_id != execution_id or value.tenant_id != self._tenant_id:
+        if value.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
 
@@ -1400,7 +1391,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if record.kind != "execution_history_head":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value = await self._decode(record, ExecutionHistoryHeadRecord)
-        if value.execution_id != execution_id or value.tenant_id != self._tenant_id:
+        if value.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value
 
@@ -1419,7 +1410,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         if record.kind != "execution_history_head":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         head = await self._decode(record, ExecutionHistoryHeadRecord)
-        if head.execution_id != execution_id or head.tenant_id != self._tenant_id:
+        if head.execution_id != execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if head.state is not ExecutionHistoryState.OPEN:
             _logger.info(
@@ -1468,7 +1459,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         transaction: StateTransaction,
         head: ExecutionHistoryHeadRecord,
     ) -> ExecutionHistoryHeadRecord:
-        _require_repository_tenant(head.tenant_id, self._tenant_id)
         key = self._key("execution_history_head", head.execution_id)
         if await transaction.get_record(key) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -1488,7 +1478,6 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         transaction: StateTransaction,
         seal: ExecutionHistorySealRecord,
     ) -> ExecutionHistorySealRecord:
-        _require_repository_tenant(seal.tenant_id, self._tenant_id)
         key = self._key("execution_history_seal", seal.execution_id)
         current = await transaction.get_record(key)
         if current is not None:
@@ -1613,7 +1602,6 @@ class EventRepositoryImpl(_RepositoryBase):
         return tuple(
             ExecutionEventRecord(
                 execution_id,
-                tenant_id,
                 first_sequence + index,
                 event.event_type,
                 event.payload,
@@ -1708,7 +1696,6 @@ class EventRepositoryImpl(_RepositoryBase):
         items = tuple(
             ExecutionEventRecord(
                 execution_id,
-                tenant_id,
                 value.sequence,
                 value.kind,
                 value.data,
@@ -1738,8 +1725,7 @@ def _same_idempotency_identity(
 ) -> bool:
     """Compare only the immutable request identity, never a candidate resource id."""
     return (
-        left.tenant_id == right.tenant_id
-        and left.scope == right.scope
+        left.scope == right.scope
         and left.idempotency_key_digest == right.idempotency_key_digest
         and left.request_digest == right.request_digest
         and left.resource_kind is right.resource_kind
@@ -1749,7 +1735,6 @@ def _same_idempotency_identity(
 def _execution_replay_matches(left: ExecutionRecord, right: ExecutionRecord) -> bool:
     return (
         left.execution_id == right.execution_id
-        and left.tenant_id == right.tenant_id
         and left.session_id == right.session_id
         and left.binding_digest == right.binding_digest
         and left.parent_execution_id == right.parent_execution_id

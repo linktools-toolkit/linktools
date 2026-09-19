@@ -313,18 +313,18 @@ def test_ai_run_no_longer_exposes_storage_selection() -> None:
     assert "storage" not in {action.dest for action in parser._actions}
 
 
-def test_workspace_discovery_walks_up_from_nested_directory(
+def test_workspace_discovery_does_not_walk_up_without_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
+    Workspace.initialize(tmp_path)
     nested = tmp_path / "src" / "package"
     nested.mkdir(parents=True)
     monkeypatch.chdir(nested)
 
     loaded = _load_workspace()
 
-    assert loaded.root == workspace.root
+    assert loaded.root == nested
     assert not (nested / ".linktools").exists()
 
 
@@ -332,7 +332,7 @@ def test_workspace_discovery_walks_up_from_nested_directory(
 async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
+    workspace = Workspace.initialize(tmp_path)
     state = _local_runtime_state(workspace)
     metrics = await _local_metrics(workspace)
     runtime_root = workspace.storage_root / "runtime"
@@ -341,7 +341,7 @@ async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
         state.plan.route(domain).path == (runtime_root / "runtime.db").resolve()
         for domain in state.plan.durable_domains
     )
-    assert metrics.namespace == workspace.workspace_id
+    assert metrics.namespace == "default"
     assert (runtime_root / "metrics.db").is_file()
     assert not (runtime_root / "runtime.db").exists()
 
@@ -350,7 +350,7 @@ async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
 async def test_existing_invalid_metrics_database_fails_before_runtime_use(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
+    workspace = Workspace.initialize(tmp_path)
     runtime_root = workspace.storage_root / "runtime"
     runtime_root.mkdir(parents=True)
     database = runtime_root / "metrics.db"

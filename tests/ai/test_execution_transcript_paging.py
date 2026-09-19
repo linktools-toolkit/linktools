@@ -39,7 +39,6 @@ def _execution() -> ExecutionRecord:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -65,6 +64,7 @@ def _execution() -> ExecutionRecord:
 class _Executions:
     def __init__(self, record: ExecutionRecord) -> None:
         self._record = record
+        self.tenant_id = "tenant"
 
     async def get(
         self,
@@ -74,7 +74,7 @@ class _Executions:
     ) -> ExecutionRecord | None:
         if (
             execution_id != self._record.execution_id
-            or tenant_id != self._record.tenant_id
+            or tenant_id != self.tenant_id
         ):
             return None
         return self._record
@@ -86,7 +86,7 @@ class _Executions:
         tenant_id: str,
     ) -> tuple[ExecutionRecord, ...]:
         assert execution_id == self._record.execution_id
-        assert tenant_id == self._record.tenant_id
+        assert tenant_id == self.tenant_id
         return ()
 
 
@@ -127,7 +127,7 @@ async def test_execution_transcript_cursor_resumes_from_message_range() -> None:
     record = _execution()
     run_id = step_run_id(
         namespace="history",
-        tenant_id=record.tenant_id,
+        tenant_id="tenant",
         execution_id=record.execution_id,
         segment_sequence=1,
     )
@@ -141,7 +141,7 @@ async def test_execution_transcript_cursor_resumes_from_message_range() -> None:
 
     first = await reader.transcript(
         record.execution_id,
-        tenant_id=record.tenant_id,
+        tenant_id="tenant",
         cursor=None,
         limit=2,
     )
@@ -150,7 +150,7 @@ async def test_execution_transcript_cursor_resumes_from_message_range() -> None:
 
     second = await reader.transcript(
         record.execution_id,
-        tenant_id=record.tenant_id,
+        tenant_id="tenant",
         cursor=first.next_cursor,
         limit=2,
     )

@@ -135,15 +135,15 @@ class ExecutionStateCommands:
             try:
                 execution = await self._executions.get(
                     commit.execution.execution_id,
-                    tenant_id=commit.execution.tenant_id,
+                    tenant_id=self._executions.tenant_id,
                 )
                 head = await self._executions.get_history_head(
                     commit.execution.execution_id,
-                    tenant_id=commit.execution.tenant_id,
+                    tenant_id=self._executions.tenant_id,
                 )
                 seal = await self._executions.get_history_seal(
                     commit.execution.execution_id,
-                    tenant_id=commit.execution.tenant_id,
+                    tenant_id=self._executions.tenant_id,
                 )
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
@@ -248,7 +248,6 @@ def _execution_history_seal(
     )
     return ExecutionHistorySealRecord(
         execution_id=commit.execution.execution_id,
-        tenant_id=commit.execution.tenant_id,
         run_heads=ordered_heads,
         execution_event_high_water=execution_event_high_water,
     )

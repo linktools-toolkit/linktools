@@ -179,7 +179,6 @@ class DefaultEvaluationService:
             now = datetime.now(timezone.utc)
             await self._state.idempotency.reserve(
                 IdempotencyRecord(
-                    tenant_id=request.principal.tenant_id,
                     scope="evaluation.run",
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
@@ -271,7 +270,6 @@ class DefaultEvaluationService:
                 tenant_id=request.principal.tenant_id,
                 expected_status=IdempotencyStatus.RESERVED,
                 next_record=IdempotencyRecord(
-                    tenant_id=request.principal.tenant_id,
                     scope="evaluation.run",
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
@@ -509,16 +507,16 @@ class DefaultEvaluationService:
         while True:
             if current.status in terminal_statuses:
                 await self._request_execution_handoff(
-                    current.execution_id, tenant_id=current.tenant_id
+                    current.execution_id, tenant_id=self._state.records.tenant_id
                 )
                 await self._release_execution_hold(
-                    current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id
+                    current.execution_id, tenant_id=self._state.records.tenant_id, hold_id=hold_id
                 )
                 return current
             execution = await self._execution_record(current)
             if execution is None:
                 await self._release_execution_hold(
-                    current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id
+                    current.execution_id, tenant_id=self._state.records.tenant_id, hold_id=hold_id
                 )
                 _logger.warning(
                     "evaluation dependency missing: evaluation=%s execution=%s dependency_missing=True",
@@ -536,7 +534,7 @@ class DefaultEvaluationService:
                     principal=principal,
                 )
             await self._acquire_execution_hold(
-                current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id
+                current.execution_id, tenant_id=self._state.records.tenant_id, hold_id=hold_id
             )
             target_status = execution_status_map.get(execution.status)
             if (
@@ -553,7 +551,7 @@ class DefaultEvaluationService:
             try:
                 result = await self._state.records.compare_and_swap(
                     current.evaluation_id,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._state.records.tenant_id,
                     expected_revision=current.revision,
                     next_record=updated,
                 )
@@ -561,7 +559,7 @@ class DefaultEvaluationService:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
                 result = await self._state.records.get(
-                    current.evaluation_id, tenant_id=current.tenant_id
+                    current.evaluation_id, tenant_id=self._state.records.tenant_id
                 )
                 if result is None or result.revision <= current.revision:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -569,10 +567,10 @@ class DefaultEvaluationService:
                 continue
             if result.status in terminal_statuses:
                 await self._request_execution_handoff(
-                    result.execution_id, tenant_id=result.tenant_id
+                    result.execution_id, tenant_id=self._state.records.tenant_id
                 )
                 await self._release_execution_hold(
-                    result.execution_id, tenant_id=result.tenant_id, hold_id=hold_id
+                    result.execution_id, tenant_id=self._state.records.tenant_id, hold_id=hold_id
                 )
             return result
 
@@ -628,7 +626,7 @@ class DefaultEvaluationService:
 
     async def _execution_record(self, record: EvaluationRecord):
         return await self._executions.get(
-            record.execution_id, tenant_id=record.tenant_id
+            record.execution_id, tenant_id=self._state.records.tenant_id
         )
 
     async def _authorized(

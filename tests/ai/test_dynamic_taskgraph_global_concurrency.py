@@ -16,7 +16,7 @@ from linktools.ai.task import (
     TaskLease,
     TaskNode,
 )
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 @pytest.mark.asyncio
@@ -27,7 +27,7 @@ async def test_concurrent_claims_cannot_exceed_graph_capacity() -> None:
         graph = TaskGraph("global-capacity", (TaskNode("a"), TaskNode("b")))
         request = TaskGraphRequest(
             graph,
-            trusted_workspace_principal("tenant"),
+            Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
             idempotency_key="global-capacity-submit-0001",
             limits=TaskGraphLimits(max_concurrency=1),
         )

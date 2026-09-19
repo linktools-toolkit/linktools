@@ -45,7 +45,7 @@ class _Session:
 
 @pytest.mark.asyncio
 async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _Session()
     toolset = workspace_capabilities(
         workspace,
@@ -84,7 +84,7 @@ async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path
     deps = AgentContext(
         app=None,
         principal=Principal("user", "tenant", "local_trusted"),
-        namespace=workspace.workspace_id,
+        namespace="default",
         session_id=None,
         execution_id="execution",
         session_metadata={},
@@ -110,7 +110,7 @@ async def test_attach_files_is_visible_for_one_model_request_only(tmp_path: Path
 async def test_sequential_attach_files_do_not_accumulate_binary_context(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _Session()
     toolset = workspace_capabilities(
         workspace,
@@ -149,7 +149,7 @@ async def test_sequential_attach_files_do_not_accumulate_binary_context(
     deps = AgentContext(
         app=None,
         principal=Principal("user", "tenant", "local_trusted"),
-        namespace=workspace.workspace_id,
+        namespace="default",
         session_id=None,
         execution_id="execution",
         session_metadata={},

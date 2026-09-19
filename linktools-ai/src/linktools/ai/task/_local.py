@@ -399,7 +399,6 @@ class LocalTaskGraphLauncher:
                     raise _copy_ai_error(existing.failure)
                 return TaskGraphHandle(
                     request.graph_id,
-                    f"local:{key[0]}:{key[1]}",
                 )
             run = _GraphRun(request, self._owner)
             self._graphs[key] = run
@@ -412,7 +411,6 @@ class LocalTaskGraphLauncher:
             )
         return TaskGraphHandle(
             request.graph_id,
-            f"local:{key[0]}:{key[1]}",
         )
 
     async def supply_input(

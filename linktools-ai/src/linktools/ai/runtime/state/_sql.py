@@ -132,7 +132,7 @@ class SqlStateStorageGroup:
                 session,
                 self._metadata,
                 self._context,
-                store.owner_digest,
+                store.store_digest,
             )
             token = bind_state_scope(
                 self,
@@ -169,7 +169,7 @@ class SqlStateStorageGroup:
                     session,
                     self._metadata,
                     self._context,
-                    store.owner_digest,
+                    store.store_digest,
                 )
                 for store in members
             }
@@ -273,7 +273,7 @@ class SqlStateStore:
         context: "SqlStorageContext | None" = None,
         runtime_domain: RuntimeDomain = RuntimeDomain.CONVERSATION,
         group: SqlStateStorageGroup | None = None,
-        owner_digest: bytes | None = None,
+        store_digest: bytes | None = None,
     ) -> None:
         resolved_context = context or create_sql_storage_context(engine)
         self._metadata = (
@@ -282,15 +282,15 @@ class SqlStateStore:
             else build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
         )
         self._runtime_domain = runtime_domain
-        self._owner_digest = (
+        self._store_digest = (
             hashlib.sha256(
                 f"standalone:{runtime_domain.value}".encode("utf-8")
             ).digest()
-            if owner_digest is None
-            else bytes(owner_digest)
+            if store_digest is None
+            else bytes(store_digest)
         )
-        if len(self._owner_digest) != 32:
-            raise ValueError("owner_digest must be a 32-byte digest")
+        if len(self._store_digest) != 32:
+            raise ValueError("store_digest must be a 32-byte digest")
         self._owns_group = group is None
         self._storage_group = group or SqlStateStorageGroup(
             resolved_context,
@@ -313,8 +313,8 @@ class SqlStateStore:
         return self._runtime_domain
 
     @property
-    def owner_digest(self) -> bytes:
-        return self._owner_digest
+    def store_digest(self) -> bytes:
+        return self._store_digest
 
     async def initialize(self) -> None:
         if self._closed:
@@ -366,7 +366,7 @@ class SqlStateStore:
                 session,
                 self._metadata,
                 self.context,
-                self._owner_digest,
+                self._store_digest,
             )
             from sqlalchemy import and_, select
 
@@ -378,7 +378,7 @@ class SqlStateStore:
                 (
                     await session.execute(
                         select(sequences.c.key_digest, sequences.c.value).where(
-                            sequences.c.owner_digest == transaction._owner_hex
+                            sequences.c.store_digest == transaction._store_hex
                         )
                     )
                 )
@@ -392,7 +392,7 @@ class SqlStateStore:
                 (
                     await session.execute(
                         select(aliases.c.alias_digest, aliases.c.record_key_digest).where(
-                            aliases.c.owner_digest == transaction._owner_hex
+                            aliases.c.store_digest == transaction._store_hex
                         )
                     )
                 )
@@ -409,12 +409,12 @@ class SqlStateStore:
                         records,
                         and_(
                             aliases.c.record_key_digest == records.c.key_digest,
-                            records.c.owner_digest == transaction._owner_hex,
+                            records.c.store_digest == transaction._store_hex,
                         ),
                     )
                 )
                 .where(
-                    aliases.c.owner_digest == transaction._owner_hex,
+                    aliases.c.store_digest == transaction._store_hex,
                     records.c.id.is_(None),
                 )
                 .limit(1)
@@ -426,12 +426,12 @@ class SqlStateStore:
                         records,
                         and_(
                             facts.c.owner_key_digest == records.c.key_digest,
-                            records.c.owner_digest == transaction._owner_hex,
+                            records.c.store_digest == transaction._store_hex,
                         ),
                     )
                 )
                 .where(
-                    facts.c.owner_digest == transaction._owner_hex,
+                    facts.c.store_digest == transaction._store_hex,
                     records.c.id.is_(None),
                 )
                 .limit(1)
@@ -494,15 +494,15 @@ class _SqlTransaction:
         session: "AsyncSession",
         metadata: "MetaData",
         context: SqlStorageContext,
-        owner_digest: bytes,
+        store_digest: bytes,
     ) -> None:
-        if not isinstance(owner_digest, bytes) or len(owner_digest) != 32:
-            raise ValueError("owner_digest must be a 32-byte digest")
+        if not isinstance(store_digest, bytes) or len(store_digest) != 32:
+            raise ValueError("store_digest must be a 32-byte digest")
         self._session = session
         self._metadata = metadata
         self._context = context
-        self._owner_digest = owner_digest
-        self._owner_hex = owner_digest.hex()
+        self._store_digest = store_digest
+        self._store_hex = store_digest.hex()
         self._guarded_record_keys: set[bytes] = set()
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._alias_cache: dict[bytes, bytes | None] = {}
@@ -586,7 +586,7 @@ class _SqlTransaction:
                 [
                     {
                         **_record_values(record),
-                        "owner_digest": self._owner_hex,
+                        "store_digest": self._store_hex,
                     }
                     for record in sorted(values, key=lambda value: value.key_digest)
                 ]
@@ -854,7 +854,7 @@ class _SqlTransaction:
         table = self._table("ai_state_records")
         rows = (
             await self._session.execute(
-                select(table).where(table.c.owner_digest == self._owner_hex)
+                select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
         return tuple(_record_from_row(row) for row in rows)
@@ -869,7 +869,7 @@ class _SqlTransaction:
         from sqlalchemy import and_, or_, select
 
         table = self._table("ai_state_records")
-        conditions = [table.c.owner_digest == self._owner_hex]
+        conditions = [table.c.store_digest == self._store_hex]
         if after is not None:
             conditions.append(
                 or_(
@@ -951,7 +951,7 @@ class _SqlTransaction:
         rows = (
             await self._session.execute(
                 select(table)
-                .where(table.c.owner_digest == self._owner_hex)
+                .where(table.c.store_digest == self._store_hex)
                 .order_by(table.c.alias_digest)
             )
         ).mappings().all()
@@ -973,7 +973,7 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_aliases")
-        statement = select(table).where(table.c.owner_digest == self._owner_hex)
+        statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
             statement = statement.where(table.c.alias_digest > _hex(after))
         rows = (
@@ -1021,7 +1021,7 @@ class _SqlTransaction:
                 continue
             rows.append(
                 {
-                    "owner_digest": self._owner_hex,
+                    "store_digest": self._store_hex,
                     "alias_digest": _hex(alias.alias_digest),
                     "record_key_digest": _hex(alias.record_key_digest),
                 }
@@ -1079,7 +1079,7 @@ class _SqlTransaction:
         rows = (
             await self._session.execute(
                 select(table)
-                .where(table.c.owner_digest == self._owner_hex)
+                .where(table.c.store_digest == self._store_hex)
                 .order_by(table.c.key_digest)
             )
         ).mappings().all()
@@ -1098,7 +1098,7 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_sequences")
-        statement = select(table).where(table.c.owner_digest == self._owner_hex)
+        statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
             statement = statement.where(table.c.key_digest > _hex(after))
         rows = (
@@ -1130,7 +1130,7 @@ class _SqlTransaction:
         table = self._table("ai_state_sequences")
         rows = [
             {
-                "owner_digest": self._owner_hex,
+                    "store_digest": self._store_hex,
                 "key_digest": _hex(key),
                 "value": requests[key],
             }
@@ -1200,7 +1200,7 @@ class _SqlTransaction:
         await self._session.execute(
             insert(self._table("ai_state_facts")).values(
                 [
-                    {**_fact_values(fact), "owner_digest": self._owner_hex}
+                    {**_fact_values(fact), "store_digest": self._store_hex}
                     for fact in facts
                 ]
             )
@@ -1250,7 +1250,7 @@ class _SqlTransaction:
         table = self._table("ai_state_facts")
         rows = (
             await self._session.execute(
-                select(table).where(table.c.owner_digest == self._owner_hex)
+                select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
         return tuple(_fact_from_row(row) for row in rows)
@@ -1265,7 +1265,7 @@ class _SqlTransaction:
         from sqlalchemy import and_, or_, select
 
         table = self._table("ai_state_facts")
-        conditions = [table.c.owner_digest == self._owner_hex]
+        conditions = [table.c.store_digest == self._store_hex]
         if after is not None:
             conditions.append(
                 or_(
@@ -1299,7 +1299,7 @@ class _SqlTransaction:
 
         await self._session.execute(
             insert(self._table("ai_state_operations")).values(
-                {**_operation_values(value), "owner_digest": self._owner_hex}
+                {**_operation_values(value), "store_digest": self._store_hex}
             )
         )
 
@@ -1369,7 +1369,7 @@ class _SqlTransaction:
         table = self._table("ai_state_operations")
         rows = (
             await self._session.execute(
-                select(table).where(table.c.owner_digest == self._owner_hex)
+                select(table).where(table.c.store_digest == self._store_hex)
             )
         ).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
@@ -1384,7 +1384,7 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_operations")
-        statement = select(table).where(table.c.owner_digest == self._owner_hex)
+        statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
             statement = statement.where(table.c.key_digest > _hex(after.key_digest))
         statement = statement.order_by(table.c.key_digest).limit(limit)

@@ -121,10 +121,11 @@ class RuntimeState:
             RuntimeStatePlan(
                 **{
                     domain.value: RuntimeStateRoute.filesystem(
-                        base / domain.value,
+                        base if domain is RuntimeDomain.EXECUTION else base / domain.value,
                         transaction_root=base,
                     )
                     for domain in RuntimeDomain
+                    if domain is not RuntimeDomain.RECOVERY
                 }
             ),
             object_store=object_store,
@@ -140,7 +141,11 @@ class RuntimeState:
         route = RuntimeStateRoute.sqlite(path)
         return cls(
             RuntimeStatePlan(
-                **{domain.value: route for domain in RuntimeDomain}
+                **{
+                    domain.value: route
+                    for domain in RuntimeDomain
+                    if domain is not RuntimeDomain.RECOVERY
+                }
             ),
             object_store=object_store,
         )
@@ -163,7 +168,11 @@ class RuntimeState:
         route = RuntimeStateRoute.sql(engine)
         return cls(
             RuntimeStatePlan(
-                **{domain.value: route for domain in RuntimeDomain}
+                **{
+                    domain.value: route
+                    for domain in RuntimeDomain
+                    if domain is not RuntimeDomain.RECOVERY
+                }
             ),
             object_store=object_store,
         )
@@ -443,7 +452,7 @@ class RuntimeState:
                 ):
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 key = (
-                    "v1/runtime-state-object/"
+                    "v2/runtime-state-object/"
                     f"{source_domain.value}/{reference.digest}"
                 )
                 await object_store.put(
@@ -579,7 +588,7 @@ class RuntimeState:
 
         manifest = {
             "kind": "runtime-state-snapshot",
-            "format_version": 1,
+            "format_version": 2,
             "namespace": self.namespace,
             "tenant_id": self.tenant_id,
             "domains": domains,
@@ -589,7 +598,7 @@ class RuntimeState:
         if len(payload) + object_bytes > limits.max_bytes:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         digest = hashlib.sha256(payload).hexdigest()
-        key = f"v1/runtime-state-snapshot/{digest}"
+        key = f"v2/runtime-state-snapshot/{digest}"
         await _put_snapshot_object(object_store, key, payload)
         return ObjectRef(object_store.store_id, key, digest, len(payload))
 
@@ -620,7 +629,7 @@ class RuntimeState:
         if (
             not isinstance(manifest, dict)
             or manifest.get("kind") != "runtime-state-snapshot"
-            or manifest.get("format_version") != 1
+            or manifest.get("format_version") != 2
             or not isinstance(manifest.get("domains"), dict)
         ):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)

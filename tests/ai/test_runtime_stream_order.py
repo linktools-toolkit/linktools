@@ -63,7 +63,6 @@ def _execution(
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -227,7 +226,7 @@ async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path:
             ),
         )
         committed = await state.execution.executions.request_cancel(
-            ExecutionCancelRequestCommit("execution", "tenant", 0, 0, "cancel-op", now),
+            ExecutionCancelRequestCommit("execution", 0, 0, "cancel-op", now),
             pending_events=pending,
         )
         after = int(generation.read_text(encoding="utf-8"))
@@ -256,6 +255,8 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
     terminal = _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_sequence=1)
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -296,7 +297,6 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
                 "execution",
-                "tenant",
                 0,
                 0,
                 "cancel-op",
@@ -344,6 +344,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._tenant_id = "tenant"
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
@@ -354,7 +355,6 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     backend._metric_recorder = None
     commit = ExecutionCancelRequestCommit(
         "execution",
-        "tenant",
         0,
         0,
         "cancel-op",
@@ -407,8 +407,6 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
         safe_error_details={},
     )
     result = ResultRecord(
-        execution_id="execution",
-        tenant_id="tenant",
         output=None,
         stop_reason=StopReason.ERROR,
         usage=UsageMetrics(),
@@ -449,6 +447,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._tenant_id = "tenant"
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
@@ -724,6 +723,8 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
     )
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -769,7 +770,6 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
                 "execution",
-                "tenant",
                 0,
                 0,
                 "our-cancel",
@@ -789,6 +789,8 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
     )
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -824,7 +826,6 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
                 "execution",
-                "tenant",
                 0,
                 0,
                 "cancel-op",
@@ -844,6 +845,8 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
     )
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -888,7 +891,6 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
     committed = await commands.commit_cancel_checkpoint(
         ExecutionCancelRequestCommit(
             "execution",
-            "tenant",
             0,
             0,
             "cancel-op",

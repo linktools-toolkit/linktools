@@ -669,7 +669,6 @@ class FilesystemAssetBackend:
             "etag": info.etag,
             "size": info.size,
             "status": info.status.value,
-            "root_id": info.root_id,
             "root_digest": info.root_digest,
             "modified_at": info.modified_at.astimezone(timezone.utc).isoformat(),
             "object_store_id": self._object_store.store_id if normal else None,
@@ -687,7 +686,6 @@ class FilesystemAssetBackend:
         return {
             "format": "linktools-ai-asset",
             "generation": _GENERATION,
-            "root_id": self._root.root_id,
             "root_digest": self._root.digest,
         }
 
@@ -726,7 +724,7 @@ class FilesystemAssetBackend:
             or value.get("generation") != _GENERATION
         ):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if value.get("root_id") != self._root.root_id or value.get("root_digest") != self._root.digest:
+        if value.get("root_digest") != self._root.digest:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def _record(self, info: AssetInfo) -> None:
@@ -927,7 +925,6 @@ def _next_info(
         _etag(content),
         len(content),
         status,
-        root.root_id,
         root.digest,
         datetime.now(timezone.utc),
         normalize_storage_metadata(metadata),
@@ -950,7 +947,7 @@ def _info_from_json(raw: object, root: AssetRoot, store_id: str) -> AssetInfo:
     if not isinstance(raw, Mapping):
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
     try:
-        if raw.get("root_id") != root.root_id or raw.get("root_digest") != root.digest:
+        if raw.get("root_digest") != root.digest:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         persisted_store_id = raw.get("object_store_id")
         persisted_object_key = raw.get("object_key")
@@ -971,7 +968,6 @@ def _info_from_json(raw: object, root: AssetRoot, store_id: str) -> AssetInfo:
             str(raw["etag"]),
             int(raw["size"]),
             StorageEntryStatus(str(raw["status"])),
-            root.root_id,
             root.digest,
             _utc(raw["modified_at"]),
             normalize_storage_metadata(raw.get("metadata")),
@@ -1005,7 +1001,7 @@ def _raise_filesystem_error(error: BaseException) -> None:
 def filesystem_root(locator: str) -> AssetRoot:
     path = Path(locator).expanduser().resolve()
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
-    return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
+    return AssetRoot("file", str(path), digest)
 
 
 __all__ = ["FilesystemAssetBackend", "filesystem_root"]

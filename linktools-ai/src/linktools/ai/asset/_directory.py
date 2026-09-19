@@ -347,7 +347,6 @@ class DirectoryAssetBackend:
             entry.digest,
             entry.size,
             StorageEntryStatus.NORMAL,
-            self._root.root_id,
             self._root.digest,
             entry.modified_at,
         )
@@ -378,7 +377,7 @@ def directory_root(locator: str) -> AssetRoot:
     except (OSError, RuntimeError) as error:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
-    return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
+    return AssetRoot("file", str(path), digest)
 
 
 def _store_revision(entries: "Sequence[_DirectoryEntry]") -> StorageRevision:

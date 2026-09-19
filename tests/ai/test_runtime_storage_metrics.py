@@ -58,7 +58,7 @@ def _workspace(path: Path) -> Workspace:
     agent_path.write_bytes(
         AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
     )
-    return Workspace.load(path, workspace_id="workspace")
+    return Workspace.load(path)
 
 
 @pytest.mark.asyncio
@@ -69,7 +69,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
 
     workspace = _workspace(tmp_path)
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_Models(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),

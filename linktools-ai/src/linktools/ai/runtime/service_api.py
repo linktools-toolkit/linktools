@@ -739,15 +739,9 @@ class SessionView:
     status: SessionStatus
     revision: int = 0
     cwd: "str | None" = None
-    active_execution_ids: "tuple[str, ...]" = ()
+    active_execution_id: "str | None" = None
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
     history_quality: str = "complete"
-
-
-@dataclass(frozen=True, slots=True)
-class LoadedSession:
-    view: SessionView
-    active_execution_ids: "tuple[str, ...]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1363,7 +1357,7 @@ class SessionService(Protocol):
         cursor: "str | None" = None,
         limit: int = 100,
     ) -> "Page[SessionTurn]": ...
-    async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
+    async def load(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def resume(
         self,
         agent_id: str,
@@ -1502,7 +1496,6 @@ __all__ = [
     "ForkSessionRequest",
     "ListExecutionRequest",
     "ListSessionRequest",
-    "LoadedSession",
     "ModelInteractionItem",
     "Page",
     "ReplayEvaluationRequest",

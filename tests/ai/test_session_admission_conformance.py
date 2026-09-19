@@ -37,7 +37,6 @@ def _session() -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         agent_id="agent",
         status=SessionStatus.OPEN,
@@ -282,7 +281,7 @@ class _RejectingBackend:
         if repository is not None:
             await repository.compare_and_swap(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id="tenant",
                 expected_revision=commit.expected_revision,
                 next_record=execution,
             )
@@ -292,13 +291,13 @@ class _RejectingBackend:
             current = await idempotency.get(
                 update.scope,
                 update.idempotency_key_digest,
-                tenant_id=execution.tenant_id,
+                tenant_id="tenant",
             )
             assert current is not None
             await idempotency.compare_and_swap(
                 update.scope,
                 update.idempotency_key_digest,
-                tenant_id=execution.tenant_id,
+                tenant_id="tenant",
                 expected_status=update.expected_status,
                 next_record=replace(
                     current,

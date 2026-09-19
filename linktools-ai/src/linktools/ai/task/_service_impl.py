@@ -2140,13 +2140,7 @@ def _node_result(
         )
         for node in nodes
     )
-    execution_ids = tuple(
-        item.execution_id
-        for item in results
-        if item.status in {TaskStatus.SUCCEEDED, TaskStatus.RECOVERY_REQUIRED}
-        and item.execution_id is not None
-    )
-    return TaskGraphResult(graph_id, status, execution_ids, results)
+    return TaskGraphResult(graph_id, status, results)
 
 
 def _stable_operation_error(error_code: "str | None") -> AIError:

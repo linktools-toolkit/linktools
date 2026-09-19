@@ -47,7 +47,6 @@ def _record(
     subagent = parent_execution_id is not None
     return ExecutionRecord(
         execution_id=execution_id,
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=parent_execution_id,
         root_execution_id=root_execution_id or execution_id,

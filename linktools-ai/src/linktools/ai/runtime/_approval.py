@@ -140,7 +140,11 @@ class DefaultApprovalService:
             execution_id,
             tenant_id=request.principal.tenant_id,
         )
-        pending = _pending_approval(checkpoint, request.approval_id)
+        pending = _pending_approval(
+            checkpoint,
+            request.approval_id,
+            tenant_id=request.principal.tenant_id,
+        )
         if pending is None:
             raise AIError(ErrorCode.APPROVAL_CONFLICT)
         record = await self._approvals.get(
@@ -261,12 +265,14 @@ def approval_id_for_call(
 def _pending_approval(
     checkpoint: RecoveryCheckpoint | None,
     approval_id: str,
+    *,
+    tenant_id: str,
 ) -> PendingDeferredCall | None:
     if checkpoint is None or checkpoint.pending_tools is None:
         return None
     for pending in checkpoint.pending_tools.approvals:
         candidate = approval_id_for_call(
-            checkpoint.tenant_id,
+            tenant_id,
             checkpoint.execution_id,
             checkpoint.pending_tools.source_step_run_id,
             pending.tool_call_id,

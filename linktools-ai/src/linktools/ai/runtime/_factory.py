@@ -162,14 +162,6 @@ async def compose_runtime_components(
                     raise
             else:
                 agents["default"] = AgentSpec("default")
-        workspace_ref = (
-            None
-            if workspace is not None
-            and workspace.workspace_id == resolved_namespace
-            else {
-                "id": None if workspace is None else workspace.workspace_id
-            }
-        )
         compiler = AgentCompiler(
             model_resolver=resolver,
             candidates=tuple(
@@ -178,8 +170,6 @@ async def compose_runtime_components(
                 if candidate.kind not in {"agent", "task", "task_expander"}
             ),
             agents=agents,
-            namespace=resolved_namespace,
-            workspace_ref=workspace_ref,
         )
         definitions = {
             agent_id: compiler.compile(agents[agent_id])

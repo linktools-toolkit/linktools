@@ -217,6 +217,29 @@ class CapabilityContribution(Generic[AppT]):
             contract,
         )
 
+    @classmethod
+    def from_declaration(
+        cls,
+        value: AgentSpec | SkillDefinition | MCPServerSpec,
+    ) -> "CapabilityContribution[object]":
+        """Create a declaration contribution from its public semantic value."""
+        if isinstance(value, AgentSpec):
+            kind: Literal["agent", "skill", "mcp"] = "agent"
+        elif isinstance(value, SkillDefinition):
+            kind = "skill"
+        elif isinstance(value, MCPServerSpec):
+            kind = "mcp"
+        else:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        contract = contribution_semantic_contract(kind, value.id, value)
+        return _SemanticContribution(
+            kind,
+            value.id,
+            capability_fingerprint(kind, value.id, contract),
+            value,
+            contract,
+        )
+
     @property
     def semantic_contract(self) -> "dict[str, JsonValue]":
         return contribution_semantic_contract(
@@ -278,6 +301,7 @@ class CapabilityLoadContext:
         self._entries = tuple(entries)
         self._by_key = {entry.key: entry for entry in self._entries}
         self._cache: dict[AssetKey, bytes] = {}
+        self._read_keys: set[AssetKey] = set()
         if len(self._by_key) != len(self._entries):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -305,25 +329,20 @@ class CapabilityLoadContext:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         cached = self._cache.get(key)
         if cached is not None:
+            self._read_keys.add(key)
             return cached
-        current = await self._store.stat(key)
-        if (
-            current is None
-            or current.etag != entry.etag
-            or current.size != entry.size
-            or current.metadata != entry.metadata
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
         value = await self._store.get(key)
         if value is None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         data = bytes(value)
-        if hashlib.sha256(data).hexdigest() != entry.etag:
+        if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.etag:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._cache[key] = data
+        self._read_keys.add(key)
         return data
 
-    async def _preload(self, keys: Sequence[AssetKey]) -> None:
+    async def read_many(self, keys: Sequence[AssetKey]) -> "tuple[bytes, ...]":
+        """Read captured assets once, preserving the requested order."""
         requested = tuple(dict.fromkeys(keys))
         if any(key not in self._by_key for key in requested):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -333,29 +352,42 @@ class CapabilityLoadContext:
             if key not in self._cache
         )
         if not pending:
-            return
+            return tuple(self._cache[key] for key in keys)
         values = await self._store.get_many(tuple(entry.key for entry in pending))
-        current = {info.key: info for info in await self._store.metadata_snapshot()}
-        for entry, value in zip(pending, values, strict=True):
-            info = current.get(entry.key)
+        for entry, value in zip(pending, values):
             if (
                 value is None
-                or info is None
-                or info.etag != entry.etag
-                or info.size != entry.size
-                or info.metadata != entry.metadata
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             data = bytes(value)
             if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.etag:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._cache[entry.key] = data
+            self._read_keys.add(entry.key)
+        return tuple(self._cache[key] for key in keys)
+
+    async def verify(self) -> None:
+        """Recheck metadata for the captured assets read by loaders."""
+        if not self._read_keys:
+            return
+        current = {
+            info.key: info
+            for info in await self._store.metadata_snapshot()
+            if info.key in self._read_keys
+        }
+        for key in self._read_keys:
+            entry = self._by_key[key]
+            info = current.get(key)
+            if (
+                info is None
+                or info.etag != entry.etag
+                or info.size != entry.size
+                or info.metadata != entry.metadata
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
 
 
 class CapabilityLoader(Protocol[AppT]):
-    @property
-    def id(self) -> str: ...
-
     async def load(
         self,
         context: CapabilityLoadContext,
@@ -394,7 +426,7 @@ class CapabilityGroup(Generic[AppT]):
         self._owned_store_factory: "Callable[[], AssetStore] | None" = None
         self._workspace = workspace
         self._skill_source = skill_source
-        self._loaders: list[CapabilityLoader[AppT]] = []
+        self._loaders: list[tuple[str, CapabilityLoader[AppT]]] = []
         self._contributions: list[CapabilityContribution[AppT]] = []
         if workspace is not None:
             self._contributions.extend(
@@ -406,18 +438,32 @@ class CapabilityGroup(Generic[AppT]):
                 group_id,
                 assets,
             )
-            self._loaders.append(
-                cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader())
-            )
+            for kind in ("agent", "skill", "mcp"):
+                self._loaders.append(
+                    (
+                        kind,
+                        cast(
+                            "CapabilityLoader[AppT]",
+                            _BuiltinDeclarationLoader(kind),
+                        ),
+                    )
+                )
         elif workspace is not None and discover_workspace_assets:
             self._owned_store_factory = lambda: _workspace_declaration_store(workspace)
             self._skill_source = skill_source or LocalSkillResourceSource(
                 group_id,
                 workspace.storage_root / "skills",
             )
-            self._loaders.append(
-                cast("CapabilityLoader[AppT]", _BuiltinDeclarationLoader())
-            )
+            for kind in ("agent", "skill", "mcp"):
+                self._loaders.append(
+                    (
+                        kind,
+                        cast(
+                            "CapabilityLoader[AppT]",
+                            _BuiltinDeclarationLoader(kind),
+                        ),
+                    )
+                )
 
     @property
     def id(self) -> str:
@@ -594,23 +640,30 @@ class CapabilityGroup(Generic[AppT]):
             output_retries=output_retries,
             description=description,
         )
-        self._contributions.append(_declaration_contribution("agent", spec))
+        self._contributions.append(CapabilityContribution.from_declaration(spec))
         return spec
 
-    def loader(self, loader: CapabilityLoader[AppT]) -> CapabilityLoader[AppT]:
-        """Register one deterministic loader for the group's frozen Store snapshot."""
-        loader_id = loader.id
-        if not isinstance(loader_id, str) or not loader_id.strip():
+    def loader(
+        self,
+        kind: str,
+        loader: CapabilityLoader[AppT],
+    ) -> CapabilityLoader[AppT]:
+        """Replace or append the loader for one input Asset kind."""
+        if not isinstance(kind, str) or not kind.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if any(existing.id == loader_id for existing in self._loaders):
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        self._loaders.append(loader)
+        if not callable(getattr(loader, "load", None)):
+            raise TypeError("loader must implement load")
+        for index, (registered_kind, _registered) in enumerate(self._loaders):
+            if registered_kind == kind:
+                self._loaders[index] = (kind, loader)
+                return loader
+        self._loaders.append((kind, loader))
         return loader
 
     async def freeze(self) -> "tuple[CapabilityContribution[AppT], ...]":
         """Freeze direct registrations and a metadata-stable Store snapshot."""
         contributions = list(tuple(self._contributions))
-        loaders = tuple(self._loaders)
+        loaders = tuple(loader for _kind, loader in self._loaders)
         store = self._store
         owned_store = (
             None if self._owned_store_factory is None else self._owned_store_factory()
@@ -642,6 +695,9 @@ class CapabilityGroup(Generic[AppT]):
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     contributions.extend(loaded)
+                await context.verify()
+            elif loaders:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         except BaseException as error:
             primary_error = error
             raise
@@ -704,19 +760,19 @@ def _workspace_declaration_store(workspace: Workspace) -> AssetStore:
 
 
 class _BuiltinDeclarationLoader:
-    @property
-    def id(self) -> str:
-        return "linktools-declarations-v1"
+    def __init__(self, kind: str) -> None:
+        self._kind = kind
 
     async def load(
         self,
         context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
-        entries = context.list()
+        entries = context.list(kind=self._kind)
+        all_entries = context.list()
         directory_roots = tuple(
             sorted(
                 entry.key.id[: -len("/SKILL.md")]
-                for entry in entries
+                for entry in all_entries
                 if entry.key.kind == "skill" and entry.key.id.endswith("/SKILL.md")
             )
         )
@@ -726,7 +782,7 @@ class _BuiltinDeclarationLoader:
         directory_root_set = frozenset(directory_roots)
         flat_skill_ids = {
             entry.key.id
-            for entry in entries
+            for entry in all_entries
             if entry.key.kind == "skill"
             and not entry.key.id.endswith("/SKILL.md")
             and not _inside_skill_root(entry.key.id, directory_roots)
@@ -745,7 +801,13 @@ class _BuiltinDeclarationLoader:
                 )
             )
         )
-        await context._preload(declaration_keys)
+        values = dict(
+            zip(
+                declaration_keys,
+                await context.read_many(declaration_keys),
+                strict=True,
+            )
+        )
 
         result: list[CapabilityContribution[object]] = []
         skill_codec = SkillSpecCodec()
@@ -754,16 +816,16 @@ class _BuiltinDeclarationLoader:
         for entry in entries:
             key = entry.key
             if key.kind == "agent":
-                value = AgentSpecCodec().decode(await context.read(key))
+                value = AgentSpecCodec().decode(values[key])
                 if value.id != key.id:
                     raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-                result.append(_declaration_contribution("agent", value))
+                result.append(CapabilityContribution.from_declaration(value))
                 continue
             if key.kind == "mcp":
-                value = MCPServerSpecCodec().decode(await context.read(key))
+                value = MCPServerSpecCodec().decode(values[key])
                 if value.id != key.id:
                     raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-                result.append(_declaration_contribution("mcp", value))
+                result.append(CapabilityContribution.from_declaration(value))
                 continue
             if key.kind != "skill":
                 continue
@@ -771,11 +833,10 @@ class _BuiltinDeclarationLoader:
                 logical_id = key.id[: -len("/SKILL.md")]
                 value = adapter.to_logical(
                     logical_id,
-                    markdown_codec.decode(await context.read(key)),
+                    markdown_codec.decode(values[key]),
                 )
                 result.append(
-                    _declaration_contribution(
-                        "skill",
+                    CapabilityContribution.from_declaration(
                         SkillDefinition(
                             value,
                             SkillSourceRef(context.group_id, logical_id),
@@ -785,10 +846,12 @@ class _BuiltinDeclarationLoader:
                 continue
             if _inside_skill_root(key.id, directory_roots):
                 continue
-            value = skill_codec.decode(await context.read(key))
+            value = skill_codec.decode(values[key])
             if value.id != key.id:
                 raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-            result.append(_declaration_contribution("skill", SkillDefinition(value)))
+            result.append(
+                CapabilityContribution.from_declaration(SkillDefinition(value))
+            )
         return result
 
 
@@ -803,26 +866,6 @@ def _validate_skill_roots(roots: Sequence[str]) -> None:
 
 def _inside_skill_root(identifier: str, roots: Sequence[str]) -> bool:
     return any(identifier.startswith(f"{root}/") for root in roots)
-
-
-def _declaration_contribution(
-    kind: Literal["agent", "skill", "mcp"],
-    value: AgentSpec | SkillDefinition | MCPServerSpec,
-) -> CapabilityContribution[object]:
-    if not (
-        kind == "agent" and isinstance(value, AgentSpec)
-        or kind == "skill" and isinstance(value, SkillDefinition)
-        or kind == "mcp" and isinstance(value, MCPServerSpec)
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    identity = value.id
-    semantic = contribution_semantic_contract(kind, identity, value)
-    return CapabilityContribution(
-        kind,
-        identity,
-        capability_fingerprint(kind, identity, semantic),
-        value,
-    )
 
 
 def _freeze_contribution(

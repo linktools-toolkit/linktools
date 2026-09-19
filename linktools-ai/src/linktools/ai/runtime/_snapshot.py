@@ -55,7 +55,6 @@ class RestoredRuntime:
     tenant_id: str
     state_root: Path
     workspace_root: Path | None
-    workspace_id: str | None
     generation: str
 
     def open_history(self) -> RuntimeHistory:
@@ -127,7 +126,7 @@ class RuntimeSnapshot:
                 )
                 manifest: dict[str, JsonValue] = {
                     "kind": "runtime-snapshot",
-                    "format_version": 1,
+                    "format_version": 2,
                     "namespace": resolved_namespace,
                     "tenant_id": resolved_tenant,
                     "state": _object_ref_payload(state_ref),
@@ -148,7 +147,7 @@ class RuntimeSnapshot:
                 ):
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 digest = _digest_bytes(payload)
-                key = f"v1/runtime-snapshot/{digest}"
+                key = f"v2/runtime-snapshot/{digest}"
                 await _put_object(object_store, key, payload)
                 _logger.info(
                     "runtime snapshot published: namespace=%s tenant=%s digest=%s",
@@ -197,17 +196,13 @@ class RuntimeSnapshot:
         if not isinstance(workspace, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         present = workspace.get("present")
-        workspace_id = workspace.get("workspace_id")
         entries = workspace.get("entries")
         if (
             not isinstance(present, bool)
-            or (workspace_id is not None and not isinstance(workspace_id, str))
             or not isinstance(entries, list)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (not present and (workspace_id is not None or entries)) or (
-            present and (workspace_id is None or not workspace_id)
-        ):
+        if not present and entries:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         kinds = _validate_workspace_entries(entries)
         workspace_count, workspace_bytes = _workspace_snapshot_usage(workspace)
@@ -384,11 +379,6 @@ class RuntimeSnapshot:
                         if workspace_root is None
                         else str(generation_root / "workspace")
                     ),
-                    "workspace_id": (
-                        cast(Mapping[str, object], manifest["workspace"]).get(
-                            "workspace_id"
-                        )
-                    ),
                 }
                 _write_current(current_file, value)
                 return _restored_runtime(root, value)
@@ -498,7 +488,6 @@ async def _capture_workspace(
     if workspace is None:
         return {
             "present": False,
-            "workspace_id": None,
             "entries": [],
         }
     root = workspace.root.resolve()
@@ -591,7 +580,6 @@ async def _capture_workspace(
     _validate_workspace_entries(entries)
     return {
         "present": True,
-        "workspace_id": workspace.workspace_id,
         "entries": entries,
     }
 
@@ -606,20 +594,16 @@ async def _restore_workspace(
     if not isinstance(raw, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     present = raw.get("present")
-    workspace_id = raw.get("workspace_id")
     entries = raw.get("entries")
     if (
         not isinstance(present, bool)
-        or (workspace_id is not None and not isinstance(workspace_id, str))
         or not isinstance(entries, list)
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not present:
-        if workspace_id is not None or entries:
+        if entries:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return None
-    if workspace_id is None or not workspace_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if len(entries) > limits.max_entries:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
 
@@ -898,20 +882,16 @@ async def _verify_restored_generation(
     if not isinstance(workspace, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     present = workspace.get("present")
-    workspace_id = workspace.get("workspace_id")
     expected = workspace.get("entries")
     if (
         not isinstance(present, bool)
-        or (workspace_id is not None and not isinstance(workspace_id, str))
         or not isinstance(expected, list)
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not present:
-        if workspace_id is not None or expected or workspace_root.exists():
+        if expected or workspace_root.exists():
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return
-    if workspace_id is None or not workspace_id:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not workspace_root.is_dir():
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
@@ -1074,7 +1054,7 @@ def _parse_state_manifest(payload: bytes) -> Mapping[str, object]:
     if (
         not isinstance(value, Mapping)
         or value.get("kind") != "runtime-state-snapshot"
-        or value.get("format_version") != 1
+        or value.get("format_version") != 2
         or not isinstance(value.get("domains"), Mapping)
     ):
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1209,7 +1189,7 @@ async def _read_manifest(
     if (
         not isinstance(value, Mapping)
         or value.get("kind") != "runtime-snapshot"
-        or value.get("format_version") != 1
+        or value.get("format_version") != 2
     ):
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     return value
@@ -1326,7 +1306,6 @@ def _restored_runtime(root: Path, value: Mapping[str, object]) -> RestoredRuntim
             if value.get("workspace_root") is None
             else Path(cast(str, value["workspace_root"]))
         ),
-        cast(str | None, value.get("workspace_id")),
         cast(str, value["generation"]),
     )
 

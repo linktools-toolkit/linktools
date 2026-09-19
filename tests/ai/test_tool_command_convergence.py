@@ -24,7 +24,6 @@ def _record(
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
         "operation",
-        "tenant",
         "execution",
         "step",
         "call",
@@ -45,7 +44,6 @@ def _record(
 
 def _admission() -> ToolOperationAdmission:
     return ToolOperationAdmission(
-        tenant_id="tenant",
         execution_id="execution",
         tool_operation_id="operation",
         step_run_id="step",
@@ -90,6 +88,7 @@ class _AdmissionStateStore:
 class _AdmissionTools:
     def __init__(self, current: ToolOperationRecord) -> None:
         self.current = current
+        self.tenant_id = "tenant"
         self.group = _AdmissionGroup()
         self.state_store = _AdmissionStateStore(self.group)
 

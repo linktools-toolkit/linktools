@@ -47,7 +47,6 @@ def _execution() -> ExecutionRecord:
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",

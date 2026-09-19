@@ -33,7 +33,7 @@ async def test_runtime_snapshot_rejects_coerced_object_ref_fields() -> None:
     store = InMemoryObjectStore("snapshot")
     manifest = {
         "kind": "runtime-snapshot",
-        "format_version": 1,
+        "format_version": 2,
         "namespace": "runtime",
         "tenant_id": "tenant",
         "state": {
@@ -44,7 +44,6 @@ async def test_runtime_snapshot_rejects_coerced_object_ref_fields() -> None:
         },
         "workspace": {
             "present": False,
-            "workspace_id": None,
             "entries": [],
         },
         "metadata": {},

@@ -147,8 +147,11 @@ class ACPAgent:
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:
         loaded = await self._runtime.session.load(session_id, principal=self._principal)
-        for execution_id in loaded.active_execution_ids:
-            await self._runtime.execution.cancel(execution_id, CancelExecutionRequest(self._principal, uuid4().hex, True))
+        if loaded.active_execution_id is not None:
+            await self._runtime.execution.cancel(
+                loaded.active_execution_id,
+                CancelExecutionRequest(self._principal, uuid4().hex, True),
+            )
 
     async def ext_method(self, method: str, params: "dict[str, JsonValue]") -> None:
         acp, _ = _require_acp()
@@ -181,7 +184,7 @@ class ACPApplication:
 
     async def serve(self, *, memory_scope: str) -> None:
         async with Runtime.open(
-            self.workspace.workspace_id,
+            "default",
             models=self.models,
             state=self.state,
             capabilities=(CapabilityGroup("workspace", workspace=self.workspace),),

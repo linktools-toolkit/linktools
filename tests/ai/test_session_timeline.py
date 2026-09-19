@@ -58,7 +58,6 @@ def _session() -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         status=SessionStatus.OPEN,
         revision=0,
@@ -83,8 +82,6 @@ def _execution(
     result = None
     if status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
         result = ResultRecord(
-            execution_id,
-            "tenant",
             StoredPayload.inline_json({"text": "ok"})
             if status is ExecutionStatus.SUCCEEDED
             else None,
@@ -94,7 +91,6 @@ def _execution(
         )
     return ExecutionRecord(
         execution_id=execution_id,
-        tenant_id="tenant",
         session_id="session",
         parent_execution_id=None,
         root_execution_id=execution_id,

@@ -718,7 +718,6 @@ class DefaultExecutionService:
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
-            tenant_id=principal.tenant_id,
             session_id=None,
             parent_execution_id=None,
             root_execution_id=execution_id,
@@ -746,7 +745,6 @@ class DefaultExecutionService:
             ExecutionStartReservation(
                 execution,
                 IdempotencyRecord(
-                    tenant_id=principal.tenant_id,
                     scope=scope,
                     idempotency_key_digest=key_digest,
                     request_digest=request_digest,
@@ -776,7 +774,6 @@ class DefaultExecutionService:
             current = await self._state.executions.claim_start(
                 ExecutionStartClaim(
                     current.execution_id,
-                    current.tenant_id,
                     current.revision,
                     current.event_sequence,
                     scope,
@@ -834,7 +831,7 @@ class DefaultExecutionService:
             deadline = now + timedelta(seconds=current.binding.timeout_seconds)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
-            tenant_id=current.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
             expected_event_sequence=current.event_sequence,
             expected_status=current.status,
@@ -875,7 +872,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
-            tenant_id=current.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
             expected_event_sequence=current.event_sequence,
             expected_status=ExecutionStatus.STARTED,
@@ -912,7 +909,7 @@ class DefaultExecutionService:
         now = datetime.now(timezone.utc)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
-            tenant_id=current.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
             expected_event_sequence=current.event_sequence,
             expected_status=ExecutionStatus.STARTED,
@@ -953,7 +950,7 @@ class DefaultExecutionService:
         now = datetime.now(timezone.utc)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
-            tenant_id=current.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
             expected_event_sequence=current.event_sequence,
             expected_status=ExecutionStatus.STARTED,
@@ -1038,7 +1035,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.TASK_NOT_READY)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
-            tenant_id=current.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
             expected_revision=current.revision,
             expected_event_sequence=current.event_sequence,
             expected_status=ExecutionStatus.RECOVERY_REQUIRED,
@@ -1217,8 +1214,6 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.TASK_EFFECT_UNKNOWN)
         now = datetime.now(timezone.utc)
         result = ResultRecord(
-            execution_id,
-            current.tenant_id,
             None,
             StopReason.CANCELLED,
             UsageMetrics(),
@@ -1292,12 +1287,10 @@ class DefaultExecutionService:
         normalized = normalize_json_value(output)
         payload = await self._store_task_output(
             normalized,
-            tenant_id=current.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
         )
         now = datetime.now(timezone.utc)
         result = ResultRecord(
-            execution_id,
-            current.tenant_id,
             payload,
             StopReason.END_TURN,
             UsageMetrics(),
@@ -1358,8 +1351,6 @@ class DefaultExecutionService:
         now = datetime.now(timezone.utc)
         details = dict(error.safe_details)
         result = ResultRecord(
-            execution_id,
-            current.tenant_id,
             None,
             StopReason.ERROR,
             UsageMetrics(),
@@ -1434,7 +1425,7 @@ class DefaultExecutionService:
         records = await self._state.idempotency.list_by_resource(
             ResourceKind.EXECUTION,
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
         )
         if len(records) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1959,7 +1950,6 @@ class DefaultExecutionService:
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
-            tenant_id=request.principal.tenant_id,
             session_id=session_id,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id or execution_id,
@@ -1991,7 +1981,6 @@ class DefaultExecutionService:
             ExecutionStartReservation(
                 execution,
                 IdempotencyRecord(
-                    tenant_id=request.principal.tenant_id,
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
@@ -2149,7 +2138,7 @@ class DefaultExecutionService:
             return False
         await self.acquire_dependency_hold(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
             hold_id=hold_id,
         )
         return True
@@ -2165,14 +2154,14 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = await self._state.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         idempotency = await self._state.idempotency.get(
             identity.scope,
             identity.idempotency_key_digest,
-            tenant_id=current.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
         )
         if (
             idempotency is None
@@ -2180,7 +2169,6 @@ class DefaultExecutionService:
             or idempotency.idempotency_key_digest != identity.idempotency_key_digest
             or idempotency.resource_kind is not ResourceKind.EXECUTION
             or idempotency.resource_id != current.execution_id
-            or idempotency.tenant_id != current.tenant_id
             or idempotency.request_digest != identity.request_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2221,8 +2209,6 @@ class DefaultExecutionService:
                         expected_event_sequence=current.event_sequence,
                         execution=terminal,
                         result=ResultRecord(
-                            current.execution_id,
-                            current.tenant_id,
                             None,
                             StopReason.ERROR,
                             UsageMetrics(),
@@ -2254,7 +2240,7 @@ class DefaultExecutionService:
                     raise
                 latest = await self._state.executions.get(
                     current.execution_id,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._state.executions.tenant_id,
                 )
                 if (
                     latest is None
@@ -2305,7 +2291,7 @@ class DefaultExecutionService:
             if hold_acquired:
                 await self.release_dependency_hold(
                     execution.execution_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._state.executions.tenant_id,
                     hold_id=dependency_hold_id or "",
                 )
             raise
@@ -2323,7 +2309,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         launch_record = await self._state.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._state.executions.tenant_id,
         )
         if launch_record is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2378,20 +2364,20 @@ class DefaultExecutionService:
                     launch_record.execution_id
                 )
             current = await self._state.executions.get(
-                execution.execution_id, tenant_id=execution.tenant_id
+                execution.execution_id,
+                tenant_id=self._state.executions.tenant_id,
             )
             if current is not None and current.status is ExecutionStatus.STARTED:
                 identity = await self._state.idempotency.get(
                     scope,
                     idempotency_key_digest,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._state.executions.tenant_id,
                 )
                 if identity is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self._state.executions.mark_start_unknown(
                     ExecutionStartUnknownCommit(
                         execution.execution_id,
-                        execution.tenant_id,
                         current.revision,
                         current.event_sequence,
                         scope,
@@ -2896,7 +2882,6 @@ class DefaultExecutionService:
                 cancelling = await self._backend.commit_cancel_checkpoint(
                     ExecutionCancelRequestCommit(
                         execution_id=execution_id,
-                        tenant_id=request.principal.tenant_id,
                         expected_revision=execution.revision,
                         expected_event_sequence=execution.event_sequence,
                         operation_id=operation.operation_id,
@@ -3010,8 +2995,6 @@ class DefaultExecutionService:
                 terminal_event=True,
             )
             result = ResultRecord(
-                execution_id,
-                request.principal.tenant_id,
                 None,
                 StopReason.CANCELLED,
                 UsageMetrics(),

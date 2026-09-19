@@ -304,7 +304,14 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
     )
 
     class Port:
-        async def load_execution(self, execution_id: str, *, tenant_id: str) -> object:
+        tenant_id = "tenant"
+
+        async def load_execution(
+            self,
+            execution_id: str,
+            *,
+            tenant_id: str,
+        ) -> object:
             assert execution_id == "execution"
             assert tenant_id == "tenant"
             return execution

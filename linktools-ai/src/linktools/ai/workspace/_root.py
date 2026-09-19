@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace discovery, identity, and immutable policy."""
+"""Workspace discovery, configuration, and immutable policy."""
 
-import os
-import tempfile
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import yaml as _yaml
-from filelock import FileLock
 from linktools.core import environ
 
-from ..core import JsonValue, Principal, PrincipalKind, normalize_json_value
+from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
@@ -161,7 +157,6 @@ class WorkspacePolicy:
 class Workspace:
     root: Path
     config: "dict[str, JsonValue]"
-    workspace_id: str
     policy: WorkspacePolicy = field(default_factory=WorkspacePolicy)
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
 
@@ -175,7 +170,6 @@ class Workspace:
         start: "str | Path",
         *,
         root: "str | Path | None" = None,
-        workspace_id: "str | None" = None,
         policy: "WorkspacePolicy | None" = None,
         sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
@@ -196,7 +190,6 @@ class Workspace:
                         config_file,
                         selected_policy,
                         sandbox,
-                        workspace_id,
                     )
         config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
         return cls._build(
@@ -204,7 +197,6 @@ class Workspace:
             config_file if config_file.exists() else None,
             selected_policy,
             sandbox,
-            workspace_id,
         )
 
     @classmethod
@@ -212,7 +204,6 @@ class Workspace:
         cls,
         root: "str | Path",
         *,
-        workspace_id: "str | None" = None,
         policy: "WorkspacePolicy | None" = None,
         sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
@@ -223,7 +214,6 @@ class Workspace:
             config_file if config_file.exists() else None,
             _select_policy(policy),
             sandbox,
-            workspace_id,
         )
 
     @classmethod
@@ -231,43 +221,22 @@ class Workspace:
         cls,
         root: "str | Path",
         *,
-        workspace_id: "str | None" = None,
         policy: "WorkspacePolicy | None" = None,
         sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
-        """Create the workspace identity once, then load it without path-derived state."""
+        """Create the workspace storage directory without persisting identity."""
         candidate = Path(root).expanduser().resolve()
         config_dir = candidate / _STORAGE_DIR_NAME
-        config_file = config_dir / "config.yaml"
         config_dir.mkdir(parents=True, exist_ok=True)
-        with FileLock(str(config_file) + ".lock"):
-            if config_file.exists():
-                config = load_config(config_file)
-                resolved = _configured_workspace_id(config)
-                if resolved is None:
-                    resolved = _validate_workspace_id(
-                        workspace_id
-                        if workspace_id is not None
-                        else uuid.uuid4().hex
-                    )
-                    config = dict(config)
-                    config["workspace_id"] = resolved
-                    _write_config_atomically(config_file, config)
-                elif workspace_id is not None and workspace_id != resolved:
-                    raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
-            else:
-                resolved = _validate_workspace_id(
-                    workspace_id if workspace_id is not None else uuid.uuid4().hex
-                )
-                config = {"workspace_id": resolved}
-                _write_config_atomically(config_file, config)
-                _logger.info("workspace initialized: id=%s", resolved)
+        config_file = config_dir / "config.yaml"
+        if config_file.exists():
+            load_config(config_file)
+        _logger.info("workspace initialized: root=%s", candidate)
         return cls._build(
             candidate,
-            config_file,
+            config_file if config_file.exists() else None,
             _select_policy(policy),
             sandbox,
-            workspace_id,
         )
 
     @classmethod
@@ -277,37 +246,14 @@ class Workspace:
         config_file: "Path | None",
         policy: WorkspacePolicy,
         sandbox: "Sandbox | None",
-        workspace_id: "str | None",
     ) -> "Workspace":
         config = load_config(config_file) if config_file else {}
-        configured_workspace_id = _configured_workspace_id(config)
-        if workspace_id is not None:
-            resolved_workspace_id = _validate_workspace_id(workspace_id)
-            if (
-                configured_workspace_id is not None
-                and configured_workspace_id != resolved_workspace_id
-            ):
-                raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
-        elif configured_workspace_id is None:
-            raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
-        else:
-            resolved_workspace_id = configured_workspace_id
         return cls(
             root=root,
             config=config,
-            workspace_id=resolved_workspace_id,
             policy=policy,
             sandbox=sandbox,
         )
-
-
-def trusted_workspace_principal(
-    workspace_id: str,
-    principal_id: str = "workspace",
-) -> Principal:
-    if not workspace_id.strip() or not principal_id.strip():
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return Principal(principal_id, workspace_id, PrincipalKind.LOCAL_TRUSTED.value)
 
 
 def load_config(path: Path) -> "dict[str, JsonValue]":
@@ -320,6 +266,8 @@ def load_config(path: Path) -> "dict[str, JsonValue]":
         value = normalize_json_value(raw)
         if not isinstance(value, dict):
             raise TypeError("workspace config root must be a mapping")
+        if "workspace_id" in value:
+            raise ValueError("workspace config contains removed workspace identity")
         return value
     except (_yaml.YAMLError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID) from error
@@ -333,42 +281,6 @@ def _select_policy(policy: "WorkspacePolicy | None") -> WorkspacePolicy:
     return selected
 
 
-def _validate_workspace_id(value: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
-    return value
-
-
-def _configured_workspace_id(config: Mapping[str, JsonValue]) -> "str | None":
-    value = config.get("workspace_id")
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value.strip():
-        raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID)
-    return value
-
-
-def _write_config_atomically(path: Path, config: Mapping[str, JsonValue]) -> None:
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as handle:
-            temporary = Path(handle.name)
-            _yaml.safe_dump(dict(config), handle, allow_unicode=True, sort_keys=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        temporary = None
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-
-
 __all__ = [
     "PermissionDecision",
     "ToolPermissionRule",
@@ -377,5 +289,4 @@ __all__ = [
     "WorkspaceToolPermissionPolicy",
     "load_config",
     "normalize_workspace_path",
-    "trusted_workspace_principal",
 ]

@@ -181,18 +181,6 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
             comment="SHA-256 digest of the caller batch idempotency key.",
         ),
         Column(
-            "request_digest",
-            digest,
-            nullable=False,
-            comment="Canonical SHA-256 digest of the original batch request.",
-        ),
-        Column(
-            "store_revision",
-            BigInteger,
-            nullable=False,
-            comment="AssetStore revision committed by the original batch.",
-        ),
-        Column(
             "payload_json",
             JSON,
             nullable=False,
@@ -203,7 +191,6 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
         **sql_table_options(),
     )
     sql_unique(receipts, "namespace_digest", "idempotency_key_digest")
-    sql_query_index(receipts, "namespace_digest", "store_revision")
     sql_audit_indexes(receipts)
     return metadata
 
@@ -222,7 +209,6 @@ class SqlAssetBackend:
         self._namespace = namespace
         self._namespace_digest = hashlib.sha256(namespace.encode("utf-8")).digest()
         self._root = AssetRoot(
-            f"sql:{self._namespace_digest.hex()[:16]}",
             "sql",
             namespace,
             self._namespace_digest.hex(),
@@ -616,8 +602,6 @@ class SqlAssetBackend:
                     receipts.insert().values(
                         namespace_digest=self._namespace_digest.hex(),
                         idempotency_key_digest=digest,
-                        request_digest=request_digest,
-                        store_revision=next_revision,
                         payload_json=encode_asset_batch_receipt(result),
                     )
                 )
@@ -797,7 +781,7 @@ class SqlAssetBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if int(row["entry_revision"]) != info.revision.value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if info.root_id != self._root.root_id or info.root_digest != self._root.digest:
+            if info.root_digest != self._root.digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             store_revision = int(info.store_revision.value)
             if store_revision < 1 or store_revision > head:
@@ -830,7 +814,6 @@ def _info_data(info: AssetInfo) -> dict[str, JsonValue]:
             "etag": info.etag,
             "size": info.size,
             "status": info.status.value,
-            "root_id": info.root_id,
             "root_digest": info.root_digest,
             "modified_at": info.modified_at.isoformat(),
             "metadata": dict(info.metadata),
@@ -848,7 +831,6 @@ def _info_from_data(data: Mapping[str, object]) -> AssetInfo:
         str(value["etag"]),
         int(value["size"]),
         StorageEntryStatus(str(value["status"])),
-        str(value["root_id"]),
         str(value["root_digest"]),
         datetime.fromisoformat(str(value["modified_at"])),
         dict(value.get("metadata", {})),
@@ -878,7 +860,6 @@ def _next_info(
         hashlib.sha256(value).hexdigest(),
         len(value),
         status,
-        root.root_id,
         root.digest,
         datetime.now(timezone.utc),
         change.metadata,

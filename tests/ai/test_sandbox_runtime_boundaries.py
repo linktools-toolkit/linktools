@@ -73,7 +73,7 @@ async def test_workspace_capability_adapts_the_caller_owned_session(
 ) -> None:
     session = _FakeSession()
     capability = workspace_capabilities(
-        Workspace.load(tmp_path, workspace_id="workspace"),
+        Workspace.load(tmp_path),
         ("run_command",),
         session=session,  # type: ignore[arg-type]
     )[0]

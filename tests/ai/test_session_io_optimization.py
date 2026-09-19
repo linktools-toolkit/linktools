@@ -22,6 +22,8 @@ from linktools.ai.runtime.state._contracts import SessionRecord
 
 
 class _Sessions:
+    tenant_id = "tenant"
+
     def __init__(self, record: SessionRecord) -> None:
         self._record = record
 
@@ -33,7 +35,7 @@ class _Sessions:
     ) -> ResourceRef | None:
         if (
             session_id != self._record.session_id
-            or tenant_id != self._record.tenant_id
+            or tenant_id != self.tenant_id
         ):
             return None
         return ResourceRef(
@@ -51,7 +53,7 @@ class _Sessions:
     ) -> SessionRecord | None:
         if (
             session_id != self._record.session_id
-            or tenant_id != self._record.tenant_id
+            or tenant_id != self.tenant_id
         ):
             return None
         return self._record
@@ -145,7 +147,6 @@ def _session_record(
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return SessionRecord(
         session_id=session_id,
-        tenant_id="tenant",
         owner_principal_id="principal",
         status=SessionStatus.OPEN,
         revision=1,
@@ -177,9 +178,8 @@ async def test_session_load_reuses_reconciled_active_execution() -> None:
         principal=Principal("principal", "tenant"),
     )
 
-    assert loaded.active_execution_ids == ("execution",)
-    assert loaded.view.active_execution_ids == ("execution",)
-    assert executions.get_calls == 1
+    assert loaded.active_execution_id == "execution"
+    assert executions.get_calls == 2
 
 
 @pytest.mark.asyncio
@@ -217,10 +217,10 @@ async def test_session_list_batches_active_execution_reads() -> None:
         "session-terminal",
         "session-idle",
     )
-    assert tuple(view.active_execution_ids for view in page.items) == (
-        ("execution-active",),
-        (),
-        (),
+    assert tuple(view.active_execution_id for view in page.items) == (
+        "execution-active",
+        None,
+        None,
     )
     assert executions.get_many_calls == 1
     assert executions.get_calls == 0

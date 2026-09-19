@@ -22,11 +22,7 @@ def test_runtime_state_plan_routes_each_domain_explicitly(tmp_path) -> None:
             transaction_root=transaction_root,
         ),
         execution=RuntimeStateRoute.filesystem(
-            transaction_root / "execution",
-            transaction_root=transaction_root,
-        ),
-        recovery=RuntimeStateRoute.filesystem(
-            transaction_root / "recovery",
+            transaction_root,
             transaction_root=transaction_root,
         ),
     )
@@ -45,11 +41,7 @@ async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
                 transaction_root=root,
             ),
             execution=RuntimeStateRoute.filesystem(
-                root / "execution",
-                transaction_root=root,
-            ),
-            recovery=RuntimeStateRoute.filesystem(
-                root / "recovery",
+                root,
                 transaction_root=root,
             ),
         )

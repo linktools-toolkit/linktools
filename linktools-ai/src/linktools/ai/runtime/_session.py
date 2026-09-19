@@ -49,7 +49,6 @@ from .service_api import (
     ExecutionService,
     ForkSessionRequest,
     ListSessionRequest,
-    LoadedSession,
     ResumeSessionRequest,
     SessionHistoryItem,
     SessionHistoryReader,
@@ -168,6 +167,7 @@ def _decode_timeline_cursor(
 
 
 _logger = environ.get_logger("ai.runtime.session")
+_VIEW_ACTIVE_UNSET = object()
 
 
 class _SessionReleaseCallback(Protocol):
@@ -286,7 +286,6 @@ class DefaultSessionService:
         now = datetime.now(timezone.utc)
         record = SessionRecord(
             session_id=request.session_id,
-            tenant_id=request.principal.tenant_id,
             owner_principal_id=request.principal.principal_id,
             status=SessionStatus.OPEN,
             revision=0,
@@ -323,7 +322,11 @@ class DefaultSessionService:
             record = await self._authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ
             )
-            return await self._view(record, principal)
+            return await self._view(
+                record,
+                principal,
+                active=record.active_execution_id,
+            )
 
     async def history(
         self,
@@ -405,7 +408,7 @@ class DefaultSessionService:
                 end = values[-1].sequence + 1
                 committed = await self._conversation.sessions.list_timeline_commits(
                     record.session_id,
-                    tenant_id=record.tenant_id,
+                    tenant_id=self._conversation.sessions.tenant_id,
                     start_sequence=start,
                     end_sequence=end,
                 )
@@ -425,7 +428,7 @@ class DefaultSessionService:
                             async for item in self._transcript_store.iter_conversation_message_range(
                                 history_id=record.history_id,
                                 step_run_id=record.continuation.step_run_id,
-                                tenant_id=record.tenant_id,
+                                tenant_id=self._conversation.sessions.tenant_id,
                                 start=range_start,
                                 end=range_end,
                             )
@@ -495,7 +498,7 @@ class DefaultSessionService:
         tuple[tuple[SessionRecord, tuple[SessionTurnRef, ...]], ...],
         "tuple[str, int] | None",
     ]:
-        tenant_id = root.tenant_id
+        tenant_id = self._conversation.sessions.tenant_id
         source_id = root.session_id if coordinate is None else coordinate[0]
         source_before = None if coordinate is None else coordinate[1]
         remaining = limit
@@ -513,8 +516,7 @@ class DefaultSessionService:
                 if current is None:
                     raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 if (
-                    current.tenant_id != root.tenant_id
-                    or current.owner_principal_id != root.owner_principal_id
+                    current.owner_principal_id != root.owner_principal_id
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             head = await self._conversation.sessions.timeline_head(
@@ -604,7 +606,7 @@ class DefaultSessionService:
                     self._view(
                         record,
                         request.principal,
-                        active=self._active_execution_ids(
+                        active=self._active_execution_id(
                             record,
                             None
                             if record.active_execution_id is None
@@ -624,21 +626,13 @@ class DefaultSessionService:
         )
         return Page(views, next_cursor)
 
-    async def load(self, session_id: str, *, principal: Principal) -> LoadedSession:
+    async def load(self, session_id: str, *, principal: Principal) -> SessionView:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(
                 session_id, principal, AuthorizationAction.SESSION_READ
             )
             record = await self._reconcile_terminal_admission(record)
-            active = (
-                ()
-                if record.active_execution_id is None
-                else (record.active_execution_id,)
-            )
-            return LoadedSession(
-                await self._view(record, principal, active=active),
-                active,
-            )
+            return await self._view(record, principal)
 
     async def load_model_context(
         self,
@@ -656,7 +650,7 @@ class DefaultSessionService:
             return await self._transcript_store.load_conversation_model_context(
                 history_id=history_id,
                 step_run_id=record.continuation.step_run_id,
-                tenant_id=record.tenant_id,
+                tenant_id=self._conversation.sessions.tenant_id,
             )
 
     async def _iter_session_messages(
@@ -675,7 +669,7 @@ class DefaultSessionService:
             async for message in self._transcript_store.iter_conversation_messages(
                 history_id=history_id,
                 step_run_id=record.continuation.step_run_id,
-                tenant_id=record.tenant_id,
+                tenant_id=self._conversation.sessions.tenant_id,
             ):
                 yield message
 
@@ -798,7 +792,6 @@ class DefaultSessionService:
             target_metadata = dict(source.metadata)
             target = SessionRecord(
                 session_id=request.new_session_id,
-                tenant_id=source.tenant_id,
                 owner_principal_id=source.owner_principal_id,
                 status=SessionStatus.OPEN,
                 revision=0,
@@ -939,7 +932,12 @@ class DefaultSessionService:
             )
             if closed is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._validate_close_replay(operation, closed, session_id)
+            self._validate_close_replay(
+                operation,
+                closed,
+                session_id,
+                tenant_id=request.principal.tenant_id,
+            )
             view = await self._view(closed, request.principal)
             await self._request_session_release(
                 session_id,
@@ -1261,15 +1259,13 @@ class DefaultSessionService:
         record: SessionRecord,
         principal: Principal,
         *,
-        active: "tuple[str, ...] | None" = None,
+        active: object = _VIEW_ACTIVE_UNSET,
     ) -> SessionView:
-        if active is None:
+        if active is _VIEW_ACTIVE_UNSET:
             active_execution = await self._active_admitted_execution(record)
-            active = (
-                ()
-                if active_execution is None
-                else (active_execution.execution_id,)
-            )
+            active = None if active_execution is None else active_execution.execution_id
+        if active is not None and not isinstance(active, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return SessionView(
             record.session_id,
             record.agent_id,
@@ -1282,15 +1278,15 @@ class DefaultSessionService:
         )
 
     @staticmethod
-    def _active_execution_ids(
+    def _active_execution_id(
         record: SessionRecord,
         execution: "ExecutionRecord | None",
-    ) -> tuple[str, ...]:
+    ) -> "str | None":
         active = DefaultSessionService._validate_active_admitted_execution(
             record,
             execution,
         )
-        return () if active is None else (active.execution_id,)
+        return None if active is None else active.execution_id
 
     @staticmethod
     def _validate_active_admitted_execution(
@@ -1305,7 +1301,6 @@ class DefaultSessionService:
         if (
             execution is None
             or execution.execution_id != execution_id
-            or execution.tenant_id != record.tenant_id
             or execution.session_id != record.session_id
             or execution.parent_execution_id is not None
         ):
@@ -1325,7 +1320,10 @@ class DefaultSessionService:
         execution_id = record.active_execution_id
         if execution_id is None:
             return None
-        execution = await self._executions.get(execution_id, tenant_id=record.tenant_id)
+        execution = await self._executions.get(
+            execution_id,
+            tenant_id=self._conversation.sessions.tenant_id,
+        )
         return self._validate_active_admitted_execution(record, execution)
 
     async def _reconcile_terminal_admission(
@@ -1338,12 +1336,12 @@ class DefaultSessionService:
             return record
         await self._conversation.sessions.release_execution(
             record.session_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._conversation.sessions.tenant_id,
             execution_id=execution_id,
         )
         updated = await self._conversation.sessions.get(
             record.session_id,
-            tenant_id=record.tenant_id,
+            tenant_id=self._conversation.sessions.tenant_id,
         )
         if updated is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1571,6 +1569,8 @@ class DefaultSessionService:
         operation: OperationLedgerRecord,
         session: SessionRecord,
         session_id: str,
+        *,
+        tenant_id: str,
     ) -> None:
         if (
             session.status is not SessionStatus.CLOSED
@@ -1583,12 +1583,12 @@ class DefaultSessionService:
         DefaultSessionService._validate_close_operation_identity(
             operation,
             operation,
-            tenant_id=session.tenant_id,
+            tenant_id=tenant_id,
             session_id=session_id,
         )
         DefaultSessionService._validate_succeeded_close_operation(
             operation,
-            tenant_id=session.tenant_id,
+            tenant_id=tenant_id,
             session_id=session_id,
             request_digest=operation.request_digest,
             result_digest=result_digest,

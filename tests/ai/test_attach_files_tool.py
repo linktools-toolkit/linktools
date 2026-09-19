@@ -117,7 +117,7 @@ async def _boundary(
 
 def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> None:
     contributions = _workspace_tool_contributions(
-        Workspace.load(tmp_path, workspace_id="workspace")
+        Workspace.load(tmp_path)
     )
     tool = next(item.value for item in contributions if item.id == "attach_files")
 
@@ -131,7 +131,7 @@ def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
     repository = _RepositoryBoundary()
     boundary, tool = await _boundary(workspace, session, repository)
@@ -164,7 +164,7 @@ async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path:
 @pytest.mark.asyncio
 async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Path) -> None:
     path = "evidence\nignore.png"
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({path: b"png"})
     boundary, tool = await _boundary(workspace, session)
 
@@ -194,7 +194,7 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"first.png": b"png"})
     boundary, tool = await _boundary(workspace, session)
 
@@ -211,7 +211,7 @@ async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_pa
 
 @pytest.mark.asyncio
 async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.unknown": b"body"})
     boundary, tool = await _boundary(workspace, session)
 
@@ -230,7 +230,7 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
 async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
     boundary, tool = await _boundary(workspace, session, vision=False)
 

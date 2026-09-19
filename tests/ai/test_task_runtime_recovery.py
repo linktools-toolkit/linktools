@@ -48,7 +48,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     capabilities: CapabilityGroup[None] = CapabilityGroup("application")
     handler = TaskFunction[None]("test.recovery", 1, _recover_node)
     capabilities.task(handler, effect="none")
@@ -64,7 +64,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     await state.initialize(
-        namespace=workspace.workspace_id,
+        namespace="default",
         tenant_id="default",
     )
     try:
@@ -75,8 +75,8 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         )
         snapshot_manifest: dict[str, JsonValue] = {
             "kind": "task-capability-snapshot",
-            "format_version": 1,
-            "namespace": workspace.workspace_id,
+                "format_version": 2,
+            "namespace": "default",
             "tenant_id": admission.principal.tenant_id,
             "graph_id": admission.graph_id,
             "request_digest": admission.initial_request_digest,
@@ -86,11 +86,11 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         snapshot_payload = canonical_json_bytes(snapshot_manifest)
         snapshot_digest = canonical_sha256(snapshot_manifest)
         snapshot_key = (
-            "v1/task-capability-snapshot/"
+            "v2/task-capability-snapshot/"
             + canonical_sha256(
                 {
-                    "version": 1,
-                    "namespace": workspace.workspace_id,
+                    "version": 2,
+                    "namespace": "default",
                     "tenant_id": admission.principal.tenant_id,
                     "graph_id": admission.graph_id,
                     "request_digest": admission.initial_request_digest,
@@ -124,7 +124,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=ModelRegistry.openai(model="gpt-test"),
         state=reopened,
         capabilities=(capabilities,),

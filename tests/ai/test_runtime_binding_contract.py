@@ -93,7 +93,6 @@ def _execution(
     snapshot = _snapshot() if binding is None else binding
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -257,7 +256,6 @@ def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
 
     with pytest.raises(AIError) as raised:
         AgentBinding(
-            binding.digest,
             mismatched_definition,
             binding.output_binding,
             binding.snapshot,
@@ -281,7 +279,6 @@ def test_binding_preserves_selected_pin_version_error() -> None:
 
     with pytest.raises(AIError) as raised:
         AgentBinding(
-            binding.digest,
             invalid_definition,
             binding.output_binding,
             binding.snapshot,

@@ -161,9 +161,7 @@ def _project_session_view(record: SessionRecord) -> SessionView:
         status=record.status,
         revision=record.revision,
         cwd=record.cwd,
-        active_execution_ids=(
-            () if record.active_execution_id is None else (record.active_execution_id,)
-        ),
+        active_execution_id=record.active_execution_id,
         metadata=record.metadata,
         history_quality=record.history_quality,
     )
@@ -348,18 +346,13 @@ class RuntimeHistory:
             node_id,
             principal=principal,
         )
-        if record.execution_id is not None:
-            execution = await self.result(
-                record.execution_id,
-                principal=principal,
-            )
-            if execution.status is not ExecutionStatus.SUCCEEDED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            output = execution.output
-        elif record.payload is not None:
-            output = await self._read_payload(record.payload, self._task_objects)
-        else:
+        execution = await self.result(
+            record.execution_id,
+            principal=principal,
+        )
+        if execution.status is not ExecutionStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        output = execution.output
         if canonical_sha256(output) != record.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return output
@@ -519,7 +512,7 @@ class RuntimeHistory:
             payload = decode_runtime_cursor(
                 cursor,
                 signer,
-                tenant_id=record.tenant_id,
+                tenant_id=principal.tenant_id,
                 resource_kind="EXECUTION_EVENTS",
                 filter_digest=canonical_sha256(
                     {
@@ -547,7 +540,7 @@ class RuntimeHistory:
         page_limit = min(limit, high_water - after_sequence)
         page = await events.list(
             execution_id,
-            tenant_id=record.tenant_id,
+            tenant_id=principal.tenant_id,
             after_sequence=after_sequence,
             limit=page_limit,
         )
@@ -577,7 +570,7 @@ class RuntimeHistory:
             if next_after >= high_water
             else encode_runtime_cursor(
                 signer,
-                tenant_id=record.tenant_id,
+                tenant_id=principal.tenant_id,
                 resource_kind="EXECUTION_EVENTS",
                 filter_digest=canonical_sha256(
                     {
@@ -666,7 +659,6 @@ class RuntimeHistory:
             for child in children:
                 if (
                     child.parent_execution_id != execution_id
-                    or child.tenant_id != principal.tenant_id
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if child.execution_id not in seen:
@@ -700,7 +692,7 @@ class RuntimeHistory:
                 resource = ResourceRef(
                     ResourceKind.SESSION,
                     record.session_id,
-                    record.tenant_id,
+                    principal.tenant_id,
                     record.owner_principal_id,
                 )
                 try:

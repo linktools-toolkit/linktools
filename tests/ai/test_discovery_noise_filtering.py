@@ -31,7 +31,7 @@ from linktools.ai.workspace import LocalRuleCatalog, Workspace, WorkspacePolicy
 async def test_workspace_declaration_discovery_ignores_noise_without_restricting_ids(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     root = workspace.storage_root
     (root / "agents" / "__pycache__").mkdir(parents=True)
     (root / "agents" / "nested").mkdir()

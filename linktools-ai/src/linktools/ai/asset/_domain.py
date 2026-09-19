@@ -42,7 +42,6 @@ class AssetKey:
 
 @dataclass(frozen=True, slots=True)
 class AssetRoot:
-    root_id: str
     scheme: "Literal['file', 'sql', 'memory']"
     locator: str
     digest: str
@@ -50,7 +49,6 @@ class AssetRoot:
     def __post_init__(self) -> None:
         if (
             self.scheme not in {"file", "sql", "memory"}
-            or not self.root_id
             or not self.locator
             or not self.digest
         ):
@@ -65,7 +63,6 @@ class AssetInfo:
     etag: str
     size: int
     status: StorageEntryStatus
-    root_id: str
     root_digest: str
     modified_at: datetime
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
@@ -74,7 +71,6 @@ class AssetInfo:
     def __post_init__(self) -> None:
         if (
             self.size < 0
-            or not self.root_id
             or not self.root_digest
             or not isinstance(self.status, StorageEntryStatus)
             or len(self.etag) != 64

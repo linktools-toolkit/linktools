@@ -48,6 +48,14 @@ class _RepositoryBase:
     def state_store(self) -> StateStore:
         return self._store
 
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
+
+    @property
+    def namespace(self) -> str:
+        return self._namespace
+
     def _partition(self, kind: str) -> bytes:
         return partition_digest(
             self._namespace, self._tenant_id, self._domain.value, kind
@@ -668,27 +676,9 @@ def _record_lease(value: object) -> tuple[str | None, int, datetime | None]:
 
 
 def _require_tenant(value: object, tenant_id: str) -> None:
-    tenant_value = None
-    if isinstance(
-        value,
-        (
-            SessionRecord,
-            ExecutionRecord,
-            IdempotencyRecord,
-            OperationLedgerRecord,
-            OperationLedgerInput,
-            MemoryRecord,
-            EvaluationRecord,
-            ArtifactRecord,
-            ApprovalRecord,
-            ExternalCallRecord,
-            RecoveryCheckpoint,
-            ConversationHistoryRecord,
-            ToolOperationRecord,
-        ),
+    if isinstance(value, (OperationLedgerRecord, OperationLedgerInput)) and (
+        value.tenant_id != tenant_id
     ):
-        tenant_value = value.tenant_id
-    if tenant_value is not None and tenant_value != tenant_id:
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
 
@@ -770,14 +760,12 @@ def _require_session_identity(
 ) -> None:
     if (
         candidate.session_id,
-        candidate.tenant_id,
         candidate.owner_principal_id,
         candidate.agent_id,
         candidate.history_id,
         candidate.created_at,
     ) != (
         current.session_id,
-        current.tenant_id,
         current.owner_principal_id,
         current.agent_id,
         current.history_id,

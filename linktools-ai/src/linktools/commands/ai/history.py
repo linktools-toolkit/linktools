@@ -44,7 +44,7 @@ class Command(BaseCommand):
 
         async def execute() -> int:
             async with RuntimeHistory.open(
-                workspace.workspace_id,
+                "default",
                 state=_local_runtime_state(workspace),
             ) as history:
                 principal = service_principal(history.tenant_id, "ai-history")

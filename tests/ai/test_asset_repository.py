@@ -102,7 +102,7 @@ async def test_custom_loader_receives_frozen_metadata_and_reads_explicit_keys_on
     await store.put(AssetKey("custom", "b"), b"b")
     loader = _CapturingLoader()
     group = CapabilityGroup("workspace", assets=store)
-    group.loader(loader)
+    group.loader("custom", loader)
 
     assert await group.freeze() == ()
     assert loader.calls == 1
@@ -128,7 +128,7 @@ async def test_custom_loader_cannot_read_key_outside_frozen_metadata() -> None:
     store = await _store()
     await store.put(AssetKey("custom", "a"), b"a")
     group = CapabilityGroup("workspace", assets=store)
-    group.loader(_OutsideSnapshotLoader())
+    group.loader("custom", _OutsideSnapshotLoader())
 
     with pytest.raises(AIError) as error:
         await group.freeze()
@@ -166,7 +166,7 @@ async def test_duplicate_candidate_identity_is_rejected_after_all_loaders_finish
         AgentSpecCodec().encode(AgentSpec("agent", model="model")),
     )
     group = CapabilityGroup("workspace", assets=store)
-    group.loader(_DuplicateAgentLoader())
+    group.loader("custom", _DuplicateAgentLoader())
 
     with pytest.raises(AIError) as error:
         await group.freeze()
@@ -245,12 +245,12 @@ async def test_builtin_loader_batches_declaration_body_reads() -> None:
     frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
     assert [item.id for item in frozen] == ["agent", "server", "skill"]
-    assert len(store.batch_reads) == 1
-    assert set(store.batch_reads[0]) == {
-        AssetKey("agent", "agent"),
-        AssetKey("mcp", "server"),
-        AssetKey("skill", "skill"),
-    }
+    assert len(store.batch_reads) == 3
+    assert tuple(store.batch_reads) == (
+        (AssetKey("agent", "agent"),),
+        (AssetKey("skill", "skill"),),
+        (AssetKey("mcp", "server"),),
+    )
     assert store.individual_reads == 0
 
 

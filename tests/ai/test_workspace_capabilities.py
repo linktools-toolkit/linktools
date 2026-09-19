@@ -190,7 +190,7 @@ def _semantic_contract(tool: object) -> dict[str, object]:
 
 
 def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)
 
     assert tuple(item.id for item in contributions) == (
@@ -236,9 +236,9 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
 def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspaces = (
-        Workspace.load(tmp_path, workspace_id="workspace"),
-        Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox),
-        Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox()),
+        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, sandbox=sandbox),
+        Workspace.load(tmp_path, sandbox=DisabledSandbox()),
     )
     projected = tuple(
         tuple((item.id, item.fingerprint, item.semantic_contract) for item in _workspace_tool_contributions(workspace))
@@ -249,7 +249,7 @@ def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path
 
 
 def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
 
     with pytest.raises(AIError) as raised:
         workspace_capabilities(workspace, ("read_file", "run_command"))
@@ -259,13 +259,13 @@ def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) ->
 
 def test_workspace_capabilities_with_no_selected_tools_do_not_open_sandbox(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    assert workspace_capabilities(Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox), ()) == ()
+    assert workspace_capabilities(Workspace.load(tmp_path, sandbox=sandbox), ()) == ()
     assert sandbox.sessions == []
 
 
 def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown workspace tools"):
-        workspace_capabilities(Workspace.load(tmp_path, workspace_id="workspace"), ("missing_tool",))
+        workspace_capabilities(Workspace.load(tmp_path), ("missing_tool",))
 
 
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
@@ -278,7 +278,7 @@ def test_workspace_sandbox_capability_id_is_reserved() -> None:
 @pytest.mark.asyncio
 async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     contributions = _workspace_tool_contributions(workspace)
     expected = {item.id: item.semantic_contract for item in contributions}
     capability = workspace_capabilities(
@@ -312,7 +312,7 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
 @pytest.mark.asyncio
 async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     capability = workspace_capabilities(
         workspace,
         ("read_file", "start_command", "check_command", "stop_command"),
@@ -347,7 +347,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
     expected_error: type[BaseException],
 ) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -395,7 +395,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
 @pytest.mark.asyncio
 async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -438,7 +438,7 @@ async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path
 
 @pytest.mark.asyncio
 async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
+    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
 
     with pytest.raises(AIError) as raised:
         await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
@@ -456,7 +456,7 @@ async def test_workspace_group_can_disable_default_asset_discovery(
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(
         tmp_path,
-        workspace_id="workspace",
+
         sandbox=sandbox,
     )
 

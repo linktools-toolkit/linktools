@@ -25,7 +25,6 @@ def _checkpoint(
     active = state is RecoveryCheckpointState.ACTIVE
     return RecoveryCheckpoint(
         execution_id=execution_id,
-        tenant_id="tenant",
         step_run_id="run-1" if active else None,
         state=state,
         revision=revision,

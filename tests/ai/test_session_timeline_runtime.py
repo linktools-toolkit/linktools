@@ -19,7 +19,7 @@ async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
     workspace = runtime_usage_workspace(tmp_path / "workspace")
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
@@ -55,7 +55,7 @@ async def test_in_memory_fork_survives_parent_close(tmp_path: Path) -> None:
     workspace = runtime_usage_workspace(tmp_path / "workspace-fork")
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),

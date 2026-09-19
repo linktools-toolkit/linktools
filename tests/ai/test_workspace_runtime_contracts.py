@@ -205,10 +205,10 @@ def _workspace_runtime_state(workspace: Workspace) -> RuntimeState:
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=models,
         state=_workspace_runtime_state(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),
@@ -225,7 +225,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         ).items == ()
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
         state=_workspace_runtime_state(workspace),
@@ -236,7 +236,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         await runtime.agent("default").create_session("custom-tenant")
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=models,
         state=_workspace_runtime_state(workspace),
         capabilities=(CapabilityGroup("workspace", workspace=workspace),),

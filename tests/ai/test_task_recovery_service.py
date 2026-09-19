@@ -36,7 +36,7 @@ class _Launcher:
 
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
         self.started.append(launch.graph_id)
-        return TaskGraphHandle(launch.graph_id, f"test:{launch.graph_id}")
+        return TaskGraphHandle(launch.graph_id)
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         self.cancelled.append(launch.graph_id)
@@ -106,7 +106,6 @@ async def test_wait_and_stream_end_at_durable_recovery_boundary() -> None:
         ]
 
         assert result.status is TaskStatus.RECOVERY_REQUIRED
-        assert result.execution_ids == ("execution",)
         assert result.node_results[0].status is TaskStatus.RECOVERY_REQUIRED
         assert events[-1].node_id is None
         assert events[-1].status is TaskStatus.RECOVERY_REQUIRED

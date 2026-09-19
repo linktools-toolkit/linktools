@@ -76,7 +76,7 @@ async def test_directory_assets_are_limited_to_registered_kinds(tmp_path: Path) 
     (tmp_path / "agents" / "default.json").write_bytes(b"agent")
     (tmp_path / "runtime" / "state.json").write_bytes(b"runtime")
     backend = DirectoryAssetBackend(
-        AssetRoot("file:assets", "file", str(tmp_path), "assets"),
+        AssetRoot("file", str(tmp_path), "assets"),
         path_adapter=PrefixAssetPathAdapter({"agent": "agents"}),
         kinds=("agent",),
     )

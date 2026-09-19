@@ -368,20 +368,20 @@ class AssetStore:
             value = await self.get(key)
             if value is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            content_key = f"v1/asset-content/{info.etag}"
+            content_key = f"v2/asset-content/{info.etag}"
             await _put_snapshot_object(object_store, content_key, value)
             entries.append(_snapshot_entry(info, content_key))
         if await self.current_revision() != captured_revision:
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         manifest: dict[str, JsonValue] = {
             "kind": "asset-snapshot",
-            "format_version": 1,
+            "format_version": 2,
             "captured_revision": captured_revision.value,
             "entries": entries,
         }
         payload = canonical_json_bytes(manifest)
         digest = hashlib.sha256(payload).hexdigest()
-        key = f"v1/asset-snapshot/{digest}"
+        key = f"v2/asset-snapshot/{digest}"
         await _put_snapshot_object(object_store, key, payload)
         _logger.info(
             "asset snapshot published: entries=%s revision=%s digest=%s",
@@ -462,7 +462,7 @@ async def _put_snapshot_object(
 def _snapshot_entry(info: AssetInfo, content_key: str) -> dict[str, JsonValue]:
     return {
         "key": {"kind": info.key.kind, "id": info.key.id},
-        "source": {"root_id": info.root_id, "root_digest": info.root_digest},
+        "source": {"root_digest": info.root_digest},
         "entry_revision": info.revision.value,
         "store_revision": info.store_revision.value,
         "etag": info.etag,
@@ -512,7 +512,7 @@ class _SnapshotAssetStore(AssetStore):
         if (
             not isinstance(manifest, Mapping)
             or manifest.get("kind") != "asset-snapshot"
-            or manifest.get("format_version") != 1
+            or manifest.get("format_version") != 2
             or not isinstance(manifest.get("entries"), list)
         ):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -787,7 +787,6 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
             etag=etag,
             size=size,
             status=StorageEntryStatus(str(raw["status"])),
-            root_id=str(source["root_id"]),
             root_digest=str(source["root_digest"]),
             modified_at=datetime.fromisoformat(str(raw["modified_at"])),
             metadata=cast(Mapping[str, JsonValue], raw.get("metadata", {})),
