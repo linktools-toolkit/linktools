@@ -101,12 +101,19 @@ class TaskCapabilitySnapshotStore:
                 admission,
             )
 
-        roots = await self._freeze_roots()
+        node_bindings = tuple(
+            snapshot
+            for node in graph.nodes
+            if (snapshot := self._node_binding(node)) is not None
+        )
+        required_roots: set[str] = set()
+        for snapshot in node_bindings:
+            required_roots.update(snapshot.subagent_ids)
+        if any(node.expander is not None for node in graph.nodes):
+            required_roots.update(self._catalog.root_ids)
+        roots = await self._freeze_roots(required_roots)
         bindings: dict[str, AgentBindingSnapshot] = {}
-        for node in graph.nodes:
-            snapshot = self._node_binding(node)
-            if snapshot is None:
-                continue
+        for snapshot in node_bindings:
             bindings[snapshot.binding_digest] = await self._freeze_binding(
                 snapshot,
                 roots=roots,
@@ -192,18 +199,34 @@ class TaskCapabilitySnapshotStore:
 
     async def _freeze_roots(
         self,
+        agent_ids: set[str],
     ) -> Mapping[str, AgentBindingSnapshot]:
+        if not agent_ids:
+            return MappingProxyType({})
+        pending = set(agent_ids)
         base: dict[str, AgentBindingSnapshot] = {}
-        for agent_id in self._catalog.root_ids:
+        while pending:
+            agent_id = min(pending)
+            pending.remove(agent_id)
+            if agent_id in base:
+                continue
             definition = self._catalog.root_definition(agent_id)
-            snapshot = self._compiler.bind(
-                definition,
-                output=None,
-            ).snapshot
-            base[agent_id] = await self._freeze_skills(snapshot)
+            snapshot = await self._freeze_skills(
+                self._compiler.bind(
+                    definition,
+                    output=None,
+                ).snapshot
+            )
+            base[agent_id] = snapshot
+            pending.update(
+                child_id
+                for child_id in snapshot.subagent_ids
+                if child_id not in base
+            )
 
         roots: dict[str, AgentBindingSnapshot] = {}
-        for agent_id, snapshot in sorted(base.items()):
+        for agent_id in sorted(agent_ids):
+            snapshot = base[agent_id]
             children = tuple(
                 self._compiler.bind_subagent(
                     self._compiler.restore(base[child_id]).definition
