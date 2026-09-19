@@ -844,7 +844,7 @@ class Runtime(Generic[AppT]):
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
         correlation: "Mapping[str, object] | None" = None,
-        observer: "Callable[[TaskGraphRunEvent], object] | None" = None,
+        observer: "Callable[[TaskGraphRunEvent], Awaitable[None]] | None" = None,
     ) -> TaskGraphResult:
         run = await self.start_graph(
             graph,
