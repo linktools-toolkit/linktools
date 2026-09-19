@@ -110,6 +110,8 @@ class StepStore(Protocol):
         limit: int | None = None,
     ) -> list[object]: ...
 
+    async def model_interaction_count(self, *, run_id: str) -> int: ...
+
     async def resolve_model_interaction(
         self,
         interaction: object,

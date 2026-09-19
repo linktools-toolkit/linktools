@@ -478,6 +478,16 @@ class StagingStepStore(StepStore):
                 break
         return selected
 
+    async def model_interaction_count(self, *, run_id: str) -> int:
+        self._ensure_open()
+        values = self._interactions.get(run_id, ())
+        if not values:
+            return 0
+        sequences = tuple(value.request_sequence for value in values)
+        if sequences != tuple(range(1, len(values) + 1)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return len(values)
+
     async def resolve_model_interaction(self, interaction: object) -> object:
         del interaction
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
@@ -2074,6 +2084,25 @@ class StateStepArchive(StepStore):
             if limit is not None and len(result) >= limit:
                 break
         return result
+
+    async def model_interaction_count(self, *, run_id: str) -> int:
+        require_no_run_history_lock(
+            "StateStepArchive.model_interaction_count"
+        )
+        values = await self._facts(run_id, "interaction", latest=True)
+        if not values:
+            return 0
+        if len(values) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        fact = values[0]
+        interaction = _decode_step(fact.data)
+        if (
+            not isinstance(interaction, ModelInteractionRecord)
+            or fact.sequence != interaction.request_sequence
+            or fact.sequence < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return fact.sequence
 
     async def iter_messages(self, *, run_id: str) -> AsyncIterator[object]:
         require_no_run_history_lock("StateStepArchive.iter_messages")
