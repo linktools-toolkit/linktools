@@ -1111,7 +1111,10 @@ class TaskRepositoryImpl(RepositoryBase):
                 return node
             now = await transaction.now()
             _require_live_task_lease(node, lease, now)
-            if node.execution_id is not None:
+            if (
+                node.execution_id is not None
+                and node.execution_id != execution_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             value = replace(
                 node,
