@@ -418,7 +418,13 @@ class _AgentTaskNodeHandler:
         correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
         dependency_values: Mapping[str, JsonValue],
-    ) -> tuple[str, ExecutionRequest, str, str | None]:
+    ) -> tuple[
+        str,
+        ExecutionRequest,
+        str,
+        str | None,
+        AgentBindingSnapshot,
+    ]:
         payload = node.input
         if payload.get("type") != self.type or payload.get("version") != self.version:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
