@@ -28,6 +28,7 @@ from ..task import (
 )
 from ._watch_cursor import (
     decode_graph_watch_cursor,
+    encode_execution_watch_cursor,
     encode_graph_watch_cursor,
 )
 from .service_api import (
@@ -531,6 +532,7 @@ class TaskGraphRun(Generic[AppT]):
                 )
 
         events: list[TaskGraphRunEvent] = []
+        replay_execution_sequences: dict[str, dict[str, int]] = {}
         after_sequence = 0
         while after_sequence < graph_cutoff:
             page = await self._runtime.graph.list_events(
@@ -544,14 +546,22 @@ class TaskGraphRun(Generic[AppT]):
             for event in page.items:
                 if event.sequence > graph_cutoff:
                     break
+                after_sequence = event.sequence
                 events.append(
                     TaskGraphRunEvent(
                         self.graph_id,
                         event.node_id,
                         event,
+                        encode_graph_watch_cursor(
+                            self._runtime.namespace,
+                            self._principal.tenant_id,
+                            self.graph_id,
+                            include_content=False,
+                            graph_sequence=after_sequence,
+                            execution_sequences=replay_execution_sequences,
+                        ),
                     )
                 )
-                after_sequence = event.sequence
 
         for execution_id in sorted(
             captured,
@@ -584,6 +594,12 @@ class TaskGraphRun(Generic[AppT]):
                         event.event_type,
                         {},
                     )
+                    sequence = event.sequence
+                    node_sequences = replay_execution_sequences.setdefault(
+                        node_id,
+                        {},
+                    )
+                    node_sequences[execution_id] = sequence
                     tree = ExecutionTreeEvent(
                         execution_id,
                         view.agent_id,
@@ -593,15 +609,29 @@ class TaskGraphRun(Generic[AppT]):
                         view.parent_invocation_id,
                         depth,
                         stream,
+                        encode_execution_watch_cursor(
+                            self._runtime.namespace,
+                            self._principal.tenant_id,
+                            view.root_execution_id,
+                            include_content=False,
+                            sequences=node_sequences,
+                        ),
                     )
                     events.append(
                         TaskGraphRunEvent(
                             self.graph_id,
                             node_id,
                             tree,
+                            encode_graph_watch_cursor(
+                                self._runtime.namespace,
+                                self._principal.tenant_id,
+                                self.graph_id,
+                                include_content=False,
+                                graph_sequence=graph_cutoff,
+                                execution_sequences=replay_execution_sequences,
+                            ),
                         )
                     )
-                    sequence = event.sequence
         return tuple(events)
 
 
