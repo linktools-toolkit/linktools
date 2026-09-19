@@ -10,10 +10,26 @@ from linktools.ai.core import TaskStatus
 from linktools.ai.task import TaskEvent, TaskEventType, TaskNodeView
 
 
+def test_pending_task_state_rejects_execution_id() -> None:
+    with pytest.raises(ValueError, match="pending task node cannot carry an execution id"):
+        TaskNodeView(
+            "graph",
+            "node",
+            (),
+            TaskStatus.PENDING,
+            None,
+            0,
+            None,
+            None,
+            None,
+            None,
+            "execution",
+        )
+
+
 @pytest.mark.parametrize(
     ("status", "owner", "fence", "lease_expires_at"),
     (
-        (TaskStatus.PENDING, None, 0, None),
         (TaskStatus.READY, None, 0, None),
         (
             TaskStatus.RUNNING,
@@ -23,27 +39,26 @@ from linktools.ai.task import TaskEvent, TaskEventType, TaskNodeView
         ),
     ),
 )
-def test_unbound_task_states_reject_execution_id(
+def test_bound_active_task_states_preserve_execution_id(
     status: TaskStatus,
     owner: str | None,
     fence: int,
     lease_expires_at: datetime | None,
 ) -> None:
-    with pytest.raises(ValueError, match="cannot carry an execution id"):
-        TaskNodeView(
-            "graph",
-            "node",
-            (),
-            status,
-            owner,
-            fence,
-            lease_expires_at,
-            None,
-            None,
-            None,
-            "execution",
-        )
-
+    state = TaskNodeView(
+        "graph",
+        "node",
+        (),
+        status,
+        owner,
+        fence,
+        lease_expires_at,
+        None,
+        None,
+        None,
+        "execution",
+    )
+    assert state.execution_id == "execution"
 
 def test_running_event_rejects_execution_id() -> None:
     with pytest.raises(ValueError, match="running task event state is invalid"):
