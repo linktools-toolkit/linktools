@@ -396,6 +396,67 @@ class LocalTaskGraphLauncher:
             f"local:{key[0]}:{key[1]}",
         )
 
+    async def supply_input(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskGraphView:
+        tenant_id = launch.principal.tenant_id
+        graph_id = launch.graph_id
+        snapshot = await self._repository.snapshot_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        if (
+            state is None
+            or node is None
+            or state.status is not TaskStatus.WAITING
+            or state.execution_id != execution_id
+        ):
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        completion = await self._runner.supply_input(
+            TaskNodeInvocation(
+                node,
+                graph_id,
+                launch.principal,
+                launch.correlation,
+                {},
+                execution_id,
+            ),
+            execution_id,
+            value,
+        )
+        if completion.execution_id != execution_id or completion.retry_at is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._repository.complete(
+            None,
+            tenant_id=tenant_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            execution_id=execution_id,
+            result_digest=completion.result_digest,
+            expanded_nodes=completion.expanded_nodes,
+        )
+        view = await self._repository.get_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return view
+
     async def resolve_effect(
         self,
         launch: TaskGraphLaunch,

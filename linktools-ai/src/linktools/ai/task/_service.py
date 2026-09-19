@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..core import Page, Principal, validate_idempotency_key
+from ..core import JsonValue, Page, Principal, validate_idempotency_key
 from ._handler import TaskEffectResolution
 from ._event import TaskEvent
 from ._graph import (
@@ -139,6 +139,14 @@ class TaskGraphLauncher(Protocol):
         launch: TaskGraphLaunch,
         node_id: str,
         execution_id: str,
+    ) -> TaskGraphView: ...
+
+    async def supply_input(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+        value: JsonValue,
     ) -> TaskGraphView: ...
 
     async def resolve_effect(
