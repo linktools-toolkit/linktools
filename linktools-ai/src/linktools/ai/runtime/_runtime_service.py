@@ -472,8 +472,7 @@ class Runtime(Generic[AppT]):
             if current.snapshot != snapshot:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return current
-        restored = self._compiler.restore(snapshot)
-        return self._catalog.register_binding(restored)
+        return self._compiler.restore(snapshot)
 
     async def _compile_agent(self, agent_id: str) -> AgentDefinition:
         self._ensure_open()
