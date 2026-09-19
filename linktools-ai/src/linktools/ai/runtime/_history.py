@@ -1405,10 +1405,11 @@ def _project_attachment_fact(
     step_index: int | None = None,
 ) -> AttachmentFact:
     try:
+        fact = cast(str, value.get("fact"))
         return AttachmentFact(
             execution_id=execution_id,
             attachment_id=cast(str, value.get("attachment_id")),
-            fact=cast(str, value.get("fact")),
+            fact=fact,
             source=cast(str, value.get("source")),
             media_type=cast("str | None", value.get("media_type")),
             size=cast("int | None", value.get("size")),
@@ -1416,8 +1417,10 @@ def _project_attachment_fact(
             position=cast(int, value.get("position")),
             processing_status="unknown",
             segment_sequence=segment_sequence,
-            request_sequence=request_sequence,
-            step_index=step_index,
+            request_sequence=(
+                request_sequence if fact == "included_in_request" else None
+            ),
+            step_index=step_index if fact == "included_in_request" else None,
             call_id=cast("str | None", value.get("call_id")),
         )
     except (TypeError, ValueError) as error:
