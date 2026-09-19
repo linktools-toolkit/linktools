@@ -376,6 +376,65 @@ class ModelInteractionItem:
 
 
 @dataclass(frozen=True, slots=True)
+class AttachmentFact:
+    execution_id: str
+    attachment_id: str
+    fact: str
+    source: str
+    media_type: str | None
+    size: int | None
+    digest: str | None
+    position: int
+    processing_status: str = "unknown"
+    segment_sequence: int | None = None
+    request_sequence: int | None = None
+    step_index: int | None = None
+    call_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.execution_id, str)
+            or not self.execution_id
+            or not _is_digest(self.attachment_id)
+            or self.fact not in {"accepted", "included_in_request"}
+            or not isinstance(self.source, str)
+            or not self.source
+            or self.media_type is not None
+            and (not isinstance(self.media_type, str) or not self.media_type)
+            or self.size is not None
+            and (
+                isinstance(self.size, bool)
+                or not isinstance(self.size, int)
+                or self.size < 0
+            )
+            or self.digest is not None
+            and not _is_digest(self.digest)
+            or isinstance(self.position, bool)
+            or not isinstance(self.position, int)
+            or self.position < 0
+            or self.processing_status != "unknown"
+        ):
+            raise ValueError("attachment fact is invalid")
+        for value in (self.segment_sequence, self.request_sequence):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                raise ValueError("attachment request association is invalid")
+        if self.step_index is not None and (
+            isinstance(self.step_index, bool)
+            or not isinstance(self.step_index, int)
+            or self.step_index < 0
+        ):
+            raise ValueError("attachment step association is invalid")
+        if self.call_id is not None and (
+            not isinstance(self.call_id, str) or not self.call_id
+        ):
+            raise ValueError("attachment call association is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class UsageReadCutoff:
     execution_id: str
     segment_sequence: int
@@ -545,6 +604,15 @@ class ExecutionHistoryReader(Protocol):
         cursor: "str | None",
         limit: int,
     ) -> Page[ModelInteractionItem]: ...
+
+    async def attachment_facts(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> Page[AttachmentFact]: ...
 
     async def usage(
         self,
@@ -1024,6 +1092,15 @@ class ExecutionHistoryService(Protocol):
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]": ...
 
+    async def attachment_facts(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[AttachmentFact]": ...
+
     async def usage(
         self,
         execution_id: str,
@@ -1358,6 +1435,7 @@ class ArtifactService(Protocol):
 
 __all__ = [
     "ApprovalDecisionRequest",
+    "AttachmentFact",
     "ApprovalDecisionResult",
     "ApprovalService",
     "ApprovalView",
