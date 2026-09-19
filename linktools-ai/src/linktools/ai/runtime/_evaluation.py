@@ -11,6 +11,8 @@ from typing import Protocol
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot
+
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
