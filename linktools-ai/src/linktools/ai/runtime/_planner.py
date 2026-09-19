@@ -758,6 +758,16 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 if isinstance(error, AIError)
                 else AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
             )
+            if node.effect == "non_replay_safe":
+                await self._execution.require_task_recovery(
+                    execution_id,
+                    principal=principal,
+                    error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                )
+                raise TaskNodeRunError(
+                    ErrorCode.TASK_EFFECT_UNKNOWN,
+                    execution_id,
+                ) from error
             await self._execution.fail_task(
                 execution_id,
                 principal=principal,

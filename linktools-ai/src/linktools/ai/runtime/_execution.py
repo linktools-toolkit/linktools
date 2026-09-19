@@ -963,6 +963,8 @@ class DefaultExecutionService:
             and current.task_deadline_at <= now
         ):
             raise AIError(ErrorCode.EXECUTION_WAIT_TIMEOUT)
+        if current.task_attempt >= current.binding.max_attempts:
+            raise AIError(ErrorCode.TASK_NOT_READY)
         updated = await self._state.executions.transition_task_execution(
             execution_id,
             tenant_id=current.tenant_id,
