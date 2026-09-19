@@ -9,7 +9,7 @@ import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import CapabilityGroup, TaskExpansionContext
-from linktools.ai.core import JsonValue, TaskStatus
+from linktools.ai.core import JsonValue, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.storage import StoredPayload
