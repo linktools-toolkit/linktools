@@ -362,6 +362,12 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
     ]
     assert [event.durable_sequence for event in execution_events] == [1, 2]
     assert all(event.payload == {} for event in execution_events)
+    assert all(event.cursor is not None for event in observed)
+    assert all(
+        item.event.cursor is not None
+        for item in observed
+        if isinstance(item.event, ExecutionTreeEvent)
+    )
 
 
 
