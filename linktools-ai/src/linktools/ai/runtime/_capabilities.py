@@ -210,17 +210,7 @@ class _RuntimeStepPersistence(StepPersistence[None]):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self.deferred_pause_sink(self._last_observed_step_index)
             self._runtime_store.mark_interrupted(self._runtime_run_id(ctx))
-        observed = await super().after_run(ctx, result=result)
-        if interrupted:
-            await self._runtime_store.save_interrupted_snapshot(
-                run_id=self._runtime_run_id(ctx),
-                step_index=cast(int, self._last_observed_step_index),
-                messages=result.all_messages(),
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
-                agent_name=self.agent_name,
-            )
-        return observed
+        return await super().after_run(ctx, result=result)
 
     def remember_context_projection(
         self,
