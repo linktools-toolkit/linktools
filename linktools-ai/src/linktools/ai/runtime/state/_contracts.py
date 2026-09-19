@@ -1759,7 +1759,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
         hold_id: str,
-    ) -> ExecutionRecord: ...
+    ) -> bool: ...
     async def release_dependency_hold(
         self,
         execution_id: str,

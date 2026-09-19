@@ -1039,7 +1039,7 @@ class ExecutionService(Protocol):
         *,
         tenant_id: str,
         hold_id: str,
-    ) -> None: ...
+    ) -> bool: ...
 
     async def release_dependency_hold(
         self,

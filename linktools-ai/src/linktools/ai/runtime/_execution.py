@@ -581,8 +581,8 @@ class DefaultExecutionService:
         *,
         tenant_id: str,
         hold_id: str,
-    ) -> None:
-        await self._state.executions.acquire_dependency_hold(
+    ) -> bool:
+        created = await self._state.executions.acquire_dependency_hold(
             execution_id,
             tenant_id=tenant_id,
             hold_id=hold_id,
@@ -593,12 +593,14 @@ class DefaultExecutionService:
                 hold_id,
             )
         except BaseException:
-            await self._state.executions.release_dependency_hold(
-                execution_id,
-                tenant_id=tenant_id,
-                hold_id=hold_id,
-            )
+            if created:
+                await self._state.executions.release_dependency_hold(
+                    execution_id,
+                    tenant_id=tenant_id,
+                    hold_id=hold_id,
+                )
             raise
+        return created
 
     async def release_dependency_hold(
         self,

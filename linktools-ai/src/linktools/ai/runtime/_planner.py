@@ -357,12 +357,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 authorize=True,
             ):
                 hold_id = _task_dependency_hold_id(graph_id, execution_id)
-                await self._execution.acquire_dependency_hold(
+                created = await self._execution.acquire_dependency_hold(
                     execution_id,
                     tenant_id=principal.tenant_id,
                     hold_id=hold_id,
                 )
-                acquired.append((execution_id, hold_id))
+                if created:
+                    acquired.append((execution_id, hold_id))
         except BaseException:
             for execution_id, hold_id in reversed(acquired):
                 try:

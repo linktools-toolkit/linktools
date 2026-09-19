@@ -1222,13 +1222,13 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         *,
         tenant_id: str,
         hold_id: str,
-    ) -> ExecutionRecord:
+    ) -> bool:
         _require_repository_tenant(tenant_id, self._tenant_id)
         if not isinstance(hold_id, str) or not hold_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         key = self._key("execution", execution_id)
 
-        async def mutate(transaction: StateTransaction) -> ExecutionRecord:
+        async def mutate(transaction: StateTransaction) -> bool:
             stored = await transaction.get_record(key)
             if stored is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -1236,7 +1236,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             if current.retention_closed:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if hold_id in current.dependency_hold_ids:
-                return current
+                return False
             next_value = replace(
                 current,
                 dependency_hold_ids=tuple(
@@ -1250,7 +1250,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 _projected_record(self, stored, next_value),
                 stored.storage_version,
             )
-            return next_value
+            return True
 
         return await self._store.mutate(mutate)
 
