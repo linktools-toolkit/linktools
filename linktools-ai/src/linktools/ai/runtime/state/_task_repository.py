@@ -16,6 +16,7 @@ from ...core import (
     ResourceKind,
     ResourceRef,
     TaskStatus,
+    canonical_sha256,
     validate_lease_owner,
     validate_lease_seconds,
 )
@@ -1320,14 +1321,12 @@ class TaskRepositoryImpl(RepositoryBase):
                 status=TaskStatus.RECOVERY_REQUIRED,
                 owner=None,
                 lease_expires_at=None,
-                            next_attempt_at=None,
-                            occupies_concurrency=False,
-                            result_digest=None,
+                next_attempt_at=None,
+                occupies_concurrency=False,
+                result_digest=None,
                 error_code=error_code,
                 error_digest=error_digest,
                 execution_id=resolved_execution_id,
-                next_attempt_at=None,
-                occupies_concurrency=False,
             )
             next_nodes = tuple(
                 value if node.node_id == target_node_id else node
@@ -1580,7 +1579,12 @@ class TaskRepositoryImpl(RepositoryBase):
                 if (
                     current is not None
                     and current.status is TaskStatus.READY
-                    and current.execution_id == selected.execution_id
+                    and current.fence == expected_fence
+                    and current.execution_id is not None
+                    and (
+                        execution_id is None
+                        or current.execution_id == execution_id
+                    )
                     and current.next_attempt_at == next_attempt_at
                 ):
                     return view
