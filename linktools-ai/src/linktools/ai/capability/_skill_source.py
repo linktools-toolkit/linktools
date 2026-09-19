@@ -358,6 +358,152 @@ async def _put_skill_snapshot_object(
     )
 
 
+class FrozenSkillResourceSource:
+    """Read one or more immutable Skill resource roots from snapshot objects."""
+
+    def __init__(
+        self,
+        source_id: str,
+        snapshots: Mapping[str, ObjectRef],
+        object_store: ObjectStore,
+    ) -> None:
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("skill source id must be non-empty")
+        roots = {
+            _normalize_relative_path(root, field_name="skill root"): ref
+            for root, ref in snapshots.items()
+        }
+        if not roots or any(not isinstance(ref, ObjectRef) for ref in roots.values()):
+            raise ValueError("skill snapshots must contain ObjectRef values")
+        self._id = source_id
+        self._snapshots = MappingProxyType(dict(sorted(roots.items())))
+        self._object_store = object_store
+        self._manifests: dict[str, Mapping[str, object]] = {}
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    async def inspect(self, root: str) -> SkillResourceView:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        manifest = await self._manifest(logical_root)
+        entries = manifest["resources"]
+        assert isinstance(entries, list)
+        resources = tuple(
+            cast(str, entry["path"])
+            for entry in entries
+            if isinstance(entry, Mapping)
+        )
+        if len(resources) != len(entries):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return SkillResourceView(
+            SkillLocation(
+                "virtual",
+                f"{self._id}/skills/{logical_root}",
+            ),
+            resources,
+        )
+
+    async def read(self, root: str, path: str) -> bytes:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        relative = _normalize_resource_path(path)
+        manifest = await self._manifest(logical_root)
+        entries = manifest["resources"]
+        assert isinstance(entries, list)
+        for raw in entries:
+            if not isinstance(raw, Mapping) or raw.get("path") != relative:
+                continue
+            content = raw.get("content")
+            if not isinstance(content, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                key = str(content["key"])
+                digest = str(content["digest"])
+                size = int(content["size"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            return await read_object(
+                self._object_store,
+                key,
+                expected_digest=digest,
+                expected_size=size,
+            )
+        raise AIError(ErrorCode.ASSET_NOT_FOUND)
+
+    async def _manifest(self, root: str) -> Mapping[str, object]:
+        cached = self._manifests.get(root)
+        if cached is not None:
+            return cached
+        ref = self._snapshots.get(root)
+        if ref is None:
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                safe_details={
+                    "source_id": self._id,
+                    "root": root,
+                },
+            )
+        payload = await read_object(
+            self._object_store,
+            ref.key,
+            expected_digest=ref.digest,
+            expected_size=ref.size,
+        )
+        try:
+            manifest = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if (
+            not isinstance(manifest, Mapping)
+            or manifest.get("kind") != "skill-source-snapshot"
+            or manifest.get("format_version") != 1
+            or manifest.get("source_id") != self._id
+            or manifest.get("root") != root
+            or not isinstance(manifest.get("revision"), str)
+            or not isinstance(manifest.get("resources"), list)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        seen: set[str] = set()
+        previous: str | None = None
+        for raw in cast(list[object], manifest["resources"]):
+            if not isinstance(raw, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            relative = raw.get("path")
+            content = raw.get("content")
+            if (
+                not isinstance(relative, str)
+                or not isinstance(content, Mapping)
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            relative = _normalize_resource_path(relative)
+            if relative in seen or (
+                previous is not None and relative < previous
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                key = content["key"]
+                digest = content["digest"]
+                size = content["size"]
+            except KeyError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if (
+                not isinstance(key, str)
+                or not key
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in digest)
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or size < 0
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            seen.add(relative)
+            previous = relative
+        frozen = MappingProxyType(dict(manifest))
+        self._manifests[root] = frozen
+        return frozen
+
+
 class SkillSourceRegistry:
     def __init__(self, sources: Sequence[SkillResourceSource] = ()) -> None:
         values: dict[str, SkillResourceSource] = {}
@@ -446,6 +592,7 @@ def _resolve_contained_file(root: Path, candidate: Path) -> Path:
 
 __all__ = [
     "AssetSkillResourceSource",
+    "FrozenSkillResourceSource",
     "LocalSkillResourceSource",
     "SkillLocation",
     "SkillResourceSource",
