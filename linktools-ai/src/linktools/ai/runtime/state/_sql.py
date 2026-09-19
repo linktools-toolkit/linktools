@@ -3,6 +3,7 @@
 """SQL implementation of the backend-neutral Runtime StateStore."""
 
 import asyncio
+import hashlib
 from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -82,10 +83,12 @@ class SqlStateStorageGroup:
         metadata: "MetaData",
         *,
         owns_context: bool = False,
+        read_only: bool = False,
     ) -> None:
         self._context = context
         self._metadata = metadata
         self._owns_context = owns_context
+        self._read_only = read_only
         self._closed = False
         self._initialized = False
 
@@ -125,7 +128,12 @@ class SqlStateStorageGroup:
         if active is not None:
             return await fn(active)
         async with self._session() as session:
-            transaction = _SqlTransaction(session, self._metadata, self._context)
+            transaction = _SqlTransaction(
+                session,
+                self._metadata,
+                self._context,
+                store.owner_digest,
+            )
             token = bind_state_scope(
                 self,
                 {store: transaction},
@@ -144,6 +152,8 @@ class SqlStateStorageGroup:
         stores: Sequence["SqlStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
+        if self._read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
         members = tuple(dict.fromkeys(stores))
         if not members:
             raise ValueError("StateStorageGroup mutation requires a store")
@@ -154,8 +164,15 @@ class SqlStateStorageGroup:
             return await fn(active_state_group_transaction(self, members))
 
         async def execute(session: "AsyncSession") -> ValueT:
-            transaction = _SqlTransaction(session, self._metadata, self._context)
-            transactions = {store: transaction for store in members}
+            transactions = {
+                store: _SqlTransaction(
+                    session,
+                    self._metadata,
+                    self._context,
+                    store.owner_digest,
+                )
+                for store in members
+            }
             group_transaction = _SqlGroupTransaction(self, transactions)
             token = bind_state_scope(self, transactions)
             try:
@@ -256,6 +273,7 @@ class SqlStateStore:
         context: "SqlStorageContext | None" = None,
         runtime_domain: RuntimeDomain = RuntimeDomain.CONVERSATION,
         group: SqlStateStorageGroup | None = None,
+        owner_digest: bytes | None = None,
     ) -> None:
         resolved_context = context or create_sql_storage_context(engine)
         self._metadata = (
@@ -264,6 +282,15 @@ class SqlStateStore:
             else build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
         )
         self._runtime_domain = runtime_domain
+        self._owner_digest = (
+            hashlib.sha256(
+                f"standalone:{runtime_domain.value}".encode("utf-8")
+            ).digest()
+            if owner_digest is None
+            else bytes(owner_digest)
+        )
+        if len(self._owner_digest) != 32:
+            raise ValueError("owner_digest must be a 32-byte digest")
         self._owns_group = group is None
         self._storage_group = group or SqlStateStorageGroup(
             resolved_context,
@@ -284,6 +311,10 @@ class SqlStateStore:
     @property
     def runtime_domain(self) -> RuntimeDomain:
         return self._runtime_domain
+
+    @property
+    def owner_digest(self) -> bytes:
+        return self._owner_digest
 
     async def initialize(self) -> None:
         if self._closed:
@@ -331,8 +362,13 @@ class SqlStateStore:
             record_cursor = RecordScanCursor(last.kind, last.key_digest)
 
         async with self._storage_group._session() as session:
-            transaction = _SqlTransaction(session, self._metadata, self.context)
-            from sqlalchemy import select
+            transaction = _SqlTransaction(
+                session,
+                self._metadata,
+                self.context,
+                self._owner_digest,
+            )
+            from sqlalchemy import and_, select
 
             records = transaction._table("ai_state_records")
             aliases = transaction._table("ai_state_aliases")
@@ -341,7 +377,9 @@ class SqlStateStore:
             sequence_rows = (
                 (
                     await session.execute(
-                        select(sequences.c.key_digest, sequences.c.value)
+                        select(sequences.c.key_digest, sequences.c.value).where(
+                            sequences.c.owner_digest == transaction._owner_hex
+                        )
                     )
                 )
                 .mappings()
@@ -353,7 +391,9 @@ class SqlStateStore:
             alias_rows = (
                 (
                     await session.execute(
-                        select(aliases.c.alias_digest, aliases.c.record_key_digest)
+                        select(aliases.c.alias_digest, aliases.c.record_key_digest).where(
+                            aliases.c.owner_digest == transaction._owner_hex
+                        )
                     )
                 )
                 .mappings()
@@ -367,10 +407,16 @@ class SqlStateStore:
                 .select_from(
                     aliases.outerjoin(
                         records,
-                        aliases.c.record_key_digest == records.c.key_digest,
+                        and_(
+                            aliases.c.record_key_digest == records.c.key_digest,
+                            records.c.owner_digest == transaction._owner_hex,
+                        ),
                     )
                 )
-                .where(records.c.id.is_(None))
+                .where(
+                    aliases.c.owner_digest == transaction._owner_hex,
+                    records.c.id.is_(None),
+                )
                 .limit(1)
             )
             orphan_fact = await session.scalar(
@@ -378,10 +424,16 @@ class SqlStateStore:
                 .select_from(
                     facts.outerjoin(
                         records,
-                        facts.c.owner_key_digest == records.c.key_digest,
+                        and_(
+                            facts.c.owner_key_digest == records.c.key_digest,
+                            records.c.owner_digest == transaction._owner_hex,
+                        ),
                     )
                 )
-                .where(records.c.id.is_(None))
+                .where(
+                    facts.c.owner_digest == transaction._owner_hex,
+                    records.c.id.is_(None),
+                )
                 .limit(1)
             )
             if orphan_alias is not None or orphan_fact is not None:
@@ -442,10 +494,15 @@ class _SqlTransaction:
         session: "AsyncSession",
         metadata: "MetaData",
         context: SqlStorageContext,
+        owner_digest: bytes,
     ) -> None:
+        if not isinstance(owner_digest, bytes) or len(owner_digest) != 32:
+            raise ValueError("owner_digest must be a 32-byte digest")
         self._session = session
         self._metadata = metadata
         self._context = context
+        self._owner_digest = owner_digest
+        self._owner_hex = owner_digest.hex()
         self._guarded_record_keys: set[bytes] = set()
         self._record_cache: dict[bytes, StoredRecord | None] = {}
         self._alias_cache: dict[bytes, bytes | None] = {}
@@ -527,7 +584,10 @@ class _SqlTransaction:
         await self._session.execute(
             insert(self._table("ai_state_records")).values(
                 [
-                    _record_values(record)
+                    {
+                        **_record_values(record),
+                        "owner_digest": self._owner_hex,
+                    }
                     for record in sorted(values, key=lambda value: value.key_digest)
                 ]
             )
@@ -792,7 +852,11 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_records")
-        rows = (await self._session.execute(select(table))).mappings().all()
+        rows = (
+            await self._session.execute(
+                select(table).where(table.c.owner_digest == self._owner_hex)
+            )
+        ).mappings().all()
         return tuple(_record_from_row(row) for row in rows)
 
     async def scan_records_page(
@@ -805,7 +869,7 @@ class _SqlTransaction:
         from sqlalchemy import and_, or_, select
 
         table = self._table("ai_state_records")
-        conditions = []
+        conditions = [table.c.owner_digest == self._owner_hex]
         if after is not None:
             conditions.append(
                 or_(
@@ -880,6 +944,51 @@ class _SqlTransaction:
         }
         return values
 
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_aliases")
+        rows = (
+            await self._session.execute(
+                select(table)
+                .where(table.c.owner_digest == self._owner_hex)
+                .order_by(table.c.alias_digest)
+            )
+        ).mappings().all()
+        return tuple(
+            StoredAlias(
+                _row_digest(row["alias_digest"]),
+                _row_digest(row["record_key_digest"]),
+            )
+            for row in rows
+        )
+
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        _require_scan_limit(limit)
+        from sqlalchemy import select
+
+        table = self._table("ai_state_aliases")
+        statement = select(table).where(table.c.owner_digest == self._owner_hex)
+        if after is not None:
+            statement = statement.where(table.c.alias_digest > _hex(after))
+        rows = (
+            await self._session.execute(
+                statement.order_by(table.c.alias_digest).limit(limit)
+            )
+        ).mappings().all()
+        return tuple(
+            StoredAlias(
+                _row_digest(row["alias_digest"]),
+                _row_digest(row["record_key_digest"]),
+            )
+            for row in rows
+        )
+
     async def insert_alias(self, alias: StoredAlias) -> None:
         await self.insert_aliases((alias,))
 
@@ -912,6 +1021,7 @@ class _SqlTransaction:
                 continue
             rows.append(
                 {
+                    "owner_digest": self._owner_hex,
                     "alias_digest": _hex(alias.alias_digest),
                     "record_key_digest": _hex(alias.record_key_digest),
                 }
@@ -962,6 +1072,45 @@ class _SqlTransaction:
                 self._sequence_cache.setdefault(key, 0)
         return {key: self._sequence_cache[key] for key in unique_keys}
 
+    async def scan_sequences(self) -> Mapping[bytes, int]:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_sequences")
+        rows = (
+            await self._session.execute(
+                select(table)
+                .where(table.c.owner_digest == self._owner_hex)
+                .order_by(table.c.key_digest)
+            )
+        ).mappings().all()
+        return {
+            _row_digest(row["key_digest"]): _row_nonnegative_int(row["value"])
+            for row in rows
+        }
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        _require_scan_limit(limit)
+        from sqlalchemy import select
+
+        table = self._table("ai_state_sequences")
+        statement = select(table).where(table.c.owner_digest == self._owner_hex)
+        if after is not None:
+            statement = statement.where(table.c.key_digest > _hex(after))
+        rows = (
+            await self._session.execute(
+                statement.order_by(table.c.key_digest).limit(limit)
+            )
+        ).mappings().all()
+        return {
+            _row_digest(row["key_digest"]): _row_nonnegative_int(row["value"])
+            for row in rows
+        }
+
     async def next_sequence(self, key: bytes) -> int:
         return await self.reserve_sequence(key, 1)
 
@@ -980,7 +1129,11 @@ class _SqlTransaction:
             return {}
         table = self._table("ai_state_sequences")
         rows = [
-            {"key_digest": _hex(key), "value": requests[key]}
+            {
+                "owner_digest": self._owner_hex,
+                "key_digest": _hex(key),
+                "value": requests[key],
+            }
             for key in sorted(requests)
         ]
         values = await self._context.dialect.upsert_increment_many(
@@ -1046,7 +1199,10 @@ class _SqlTransaction:
 
         await self._session.execute(
             insert(self._table("ai_state_facts")).values(
-                [_fact_values(fact) for fact in facts]
+                [
+                    {**_fact_values(fact), "owner_digest": self._owner_hex}
+                    for fact in facts
+                ]
             )
         )
         self._log_batch("insert_facts", len(facts), 1)
@@ -1092,7 +1248,11 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_facts")
-        rows = (await self._session.execute(select(table))).mappings().all()
+        rows = (
+            await self._session.execute(
+                select(table).where(table.c.owner_digest == self._owner_hex)
+            )
+        ).mappings().all()
         return tuple(_fact_from_row(row) for row in rows)
 
     async def scan_facts_page(
@@ -1105,7 +1265,7 @@ class _SqlTransaction:
         from sqlalchemy import and_, or_, select
 
         table = self._table("ai_state_facts")
-        conditions = []
+        conditions = [table.c.owner_digest == self._owner_hex]
         if after is not None:
             conditions.append(
                 or_(
@@ -1138,7 +1298,9 @@ class _SqlTransaction:
         from sqlalchemy import insert
 
         await self._session.execute(
-            insert(self._table("ai_state_operations")).values(_operation_values(value))
+            insert(self._table("ai_state_operations")).values(
+                {**_operation_values(value), "owner_digest": self._owner_hex}
+            )
         )
 
     async def get_operation(self, key: bytes) -> StoredOperation | None:
@@ -1205,7 +1367,11 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_operations")
-        rows = (await self._session.execute(select(table))).mappings().all()
+        rows = (
+            await self._session.execute(
+                select(table).where(table.c.owner_digest == self._owner_hex)
+            )
+        ).mappings().all()
         return tuple(_operation_from_row(row) for row in rows)
 
     async def scan_operations_page(
@@ -1218,7 +1384,7 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_operations")
-        statement = select(table)
+        statement = select(table).where(table.c.owner_digest == self._owner_hex)
         if after is not None:
             statement = statement.where(table.c.key_digest > _hex(after.key_digest))
         statement = statement.order_by(table.c.key_digest).limit(limit)

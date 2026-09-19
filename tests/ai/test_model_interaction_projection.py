@@ -12,6 +12,8 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolReturn,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestParameters
@@ -22,6 +24,10 @@ from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime._attachment import (
+    bind_tool_return_attachments,
+    input_attachment_views,
+)
 from linktools.ai.runtime._harness import HarnessStepStoreAdapter
 from linktools.ai.runtime._journal import ModelRequestJournal
 from linktools.ai.runtime._model_interaction import (
@@ -203,6 +209,125 @@ async def test_staging_interaction_identity_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_request_records_attach_files_call_identity() -> None:
+    import hashlib
+
+    body = b"image"
+    digest = hashlib.sha256(body).hexdigest()
+    store = ModelInteractionStagingStepStore()
+    await store.initialize()
+    await store.register_run(RunRecord("run"))
+    adapter = HarnessStepStoreAdapter(store, execution_id="execution", step_run_id="run")
+    return_value = {
+        "files": [
+            {
+                "path": "evidence.png",
+                "media_type": "image/png",
+                "size": len(body),
+                "sha256": digest,
+            }
+        ]
+    }
+    result = bind_tool_return_attachments(
+        "attach_files",
+        "call-1",
+        ToolReturn(
+            return_value=return_value,
+            content=[BinaryContent(body, media_type="image/png")],
+        ),
+    )
+    assert isinstance(result, ToolReturn)
+    assert result.content is not None and not isinstance(result.content, str)
+    message = ModelRequest(
+        parts=[
+            ToolReturnPart(
+                "attach_files",
+                return_value,
+                tool_call_id="call-1",
+            ),
+            UserPromptPart(result.content),
+        ]
+    )
+    journal = _journal()
+    fact = journal.begin(1)
+    adapter.begin_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    adapter.finish_model_interaction(
+        finished,
+        model=TestModel(),
+        response=ModelResponse(parts=[TextPart("done")]),
+        status="SUCCEEDED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+    )
+
+    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    assert [value["fact"] for value in interaction.attachments] == [
+        "accepted",
+        "included_in_request",
+    ]
+    assert interaction.attachments[0]["attachment_id"] == (
+        interaction.attachments[1]["attachment_id"]
+    )
+    assert all(value["call_id"] == "call-1" for value in interaction.attachments)
+    assert interaction.attachments[1]["digest"] == digest
+
+
+@pytest.mark.asyncio
+async def test_model_request_preserves_duplicate_initial_attachment_identity() -> None:
+    body = BinaryContent(b"same", media_type="image/png")
+    accepted = input_attachment_views((body, body))
+    store = ModelInteractionStagingStepStore()
+    await store.initialize()
+    await store.register_run(RunRecord("run"))
+    adapter = HarnessStepStoreAdapter(
+        store,
+        execution_id="execution",
+        step_run_id="run",
+        initial_attachments=accepted,
+    )
+    message = ModelRequest(parts=[UserPromptPart([body, body])])
+    journal = _journal()
+    fact = journal.begin(1)
+    adapter.begin_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    adapter.finish_model_interaction(
+        finished,
+        model=TestModel(),
+        response=ModelResponse(parts=[TextPart("done")]),
+        status="SUCCEEDED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+    )
+
+    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    included = interaction.attachments
+    assert len(included) == 2
+    assert all(value["fact"] == "included_in_request" for value in included)
+    assert [value["attachment_id"] for value in included] == [
+        accepted[0]["attachment_id"],
+        accepted[1]["attachment_id"],
+    ]
+    assert included[0]["attachment_id"] != included[1]["attachment_id"]
+
+
+@pytest.mark.asyncio
 async def test_success_request_does_not_stage_full_message_payloads() -> None:
     store = ModelInteractionStagingStepStore()
     await store.initialize()
@@ -313,7 +438,7 @@ async def test_compaction_request_uses_explicit_source_not_stale_projection() ->
 async def _assert_public_interaction(runtime: Runtime[object]) -> None:
     execution = await runtime.agent("default").start("hello")
     result = await execution.wait()
-    page = await execution.model_interactions()
+    page = await execution.model_interactions(include_content=True)
     assert result.status == "SUCCEEDED"
     assert len(page.items) == 1
     assert page.items[0].purpose == "agent"
@@ -330,7 +455,7 @@ async def test_execution_model_interactions_are_durable_and_public(tmp_path: Pat
         workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
@@ -346,7 +471,7 @@ async def test_execution_model_interactions_support_volatile_memory_state(
         workspace.workspace_id,
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)

@@ -15,7 +15,14 @@ from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import SessionRecord
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._contracts import (
+    ContextProjection,
+    ModelInteractionRecord,
+    RuntimePayloadRef,
+    SessionRecord,
+)
+from linktools.ai.storage import StoredPayload
 from linktools.ai.runtime.state._step_contracts import RunRecord
 from linktools.ai.task import TaskNode
 
@@ -157,6 +164,49 @@ def test_persisted_custom_dataclass_allows_additive_field() -> None:
         _envelope(payload, wire_id="task_node"),
         TaskNode,
     ) == node
+
+
+def test_persisted_model_interaction_defaults_legacy_attachments() -> None:
+    interaction = ModelInteractionRecord(
+        run_id="run",
+        step_index=1,
+        request_sequence=1,
+        purpose="agent",
+        output_retry_index=None,
+        model={"route_id": "default"},
+        request_context=ContextProjection(()),
+        request_envelope=RuntimePayloadRef(
+            StoredPayload.inline_bytes(b"{}"),
+            RuntimeDomain.EXECUTION,
+        ),
+        response_context=None,
+        status="CANCELLED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+        attachments=(
+            {
+                "fact": "included_in_request",
+                "attachment_id": "a" * 64,
+                "source": "binary",
+                "media_type": "image/png",
+                "size": 4,
+                "digest": "b" * 64,
+                "content_key": "b" * 64,
+                "position": 0,
+                "call_id": None,
+            },
+        ),
+    )
+    payload = copy.deepcopy(_encode_persisted_domain(interaction))
+    payload["fields"].pop("attachments")
+
+    decoded = _decode_enveloped_domain(
+        _envelope(payload, wire_id="model_interaction"),
+        ModelInteractionRecord,
+    )
+
+    assert decoded == replace(interaction, attachments=())
 
 
 def test_step_persistence_reads_current_payload() -> None:

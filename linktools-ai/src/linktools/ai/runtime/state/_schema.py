@@ -71,6 +71,12 @@ def build_runtime_sql_metadata(
         metadata,
         sql_id_column(),
         Column(
+            "owner_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.",
+        ),
+        Column(
             "key_digest",
             digest,
             nullable=False,
@@ -152,12 +158,19 @@ def build_runtime_sql_metadata(
     sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
     sql_query_index(records, "scope_digest", "state", "sort_key", mysql_length=128)
     sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
+    sql_query_index(records, "owner_digest")
     sql_audit_indexes(records)
 
     aliases = Table(
         "ai_state_aliases",
         metadata,
         sql_id_column(),
+        Column(
+            "owner_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.",
+        ),
         Column(
             "alias_digest",
             digest,
@@ -176,12 +189,19 @@ def build_runtime_sql_metadata(
     )
     sql_unique(aliases, "alias_digest")
     sql_query_index(aliases, "record_key_digest")
+    sql_query_index(aliases, "owner_digest")
     sql_audit_indexes(aliases)
 
     facts = Table(
         "ai_state_facts",
         metadata,
         sql_id_column(),
+        Column(
+            "owner_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.",
+        ),
         Column(
             "stream_digest",
             digest,
@@ -231,12 +251,19 @@ def build_runtime_sql_metadata(
     sql_unique(facts, "stream_digest", "sequence")
     sql_query_index(facts, "owner_key_digest")
     sql_query_index(facts, "stream_digest", "subject_digest", "sequence")
+    sql_query_index(facts, "owner_digest")
     sql_audit_indexes(facts)
 
     sequences = Table(
         "ai_state_sequences",
         metadata,
         sql_id_column(),
+        Column(
+            "owner_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.",
+        ),
         Column(
             "key_digest",
             digest,
@@ -254,12 +281,19 @@ def build_runtime_sql_metadata(
         **sql_table_options(),
     )
     sql_unique(sequences, "key_digest")
+    sql_query_index(sequences, "owner_digest")
     sql_audit_indexes(sequences)
 
     operations = Table(
         "ai_state_operations",
         metadata,
         sql_id_column(),
+        Column(
+            "owner_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 owner scope for one namespace, tenant, and Runtime domain.",
+        ),
         Column(
             "key_digest",
             digest,
@@ -303,6 +337,7 @@ def build_runtime_sql_metadata(
     sql_unique(operations, "key_digest")
     sql_unique(operations, "stream_digest", "sequence")
     sql_query_index(operations, "stream_digest", "state", "sequence")
+    sql_query_index(operations, "owner_digest")
     sql_audit_indexes(operations)
     return metadata
 

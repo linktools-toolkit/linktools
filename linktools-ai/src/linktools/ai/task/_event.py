@@ -172,7 +172,7 @@ class TaskEvent:
             raise ValueError("task graph event cannot carry expansion identity")
 
     def _validate_node_state_fields(self) -> None:
-        if self.status in {TaskStatus.PENDING, TaskStatus.READY}:
+        if self.status is TaskStatus.PENDING:
             if (
                 self.owner is not None
                 or self.execution_id is not None
@@ -182,11 +182,19 @@ class TaskEvent:
             ):
                 raise ValueError("pending task event carries active or terminal state")
             return
+        if self.status is TaskStatus.READY:
+            if (
+                self.owner is not None
+                or self.result_digest is not None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("ready task event state is invalid")
+            return
         if self.status is TaskStatus.RUNNING:
             if (
                 self.owner is None
                 or self.fence < 1
-                or self.execution_id is not None
                 or self.result_digest is not None
                 or self.error_code is not None
                 or self.error_digest is not None

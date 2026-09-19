@@ -53,8 +53,8 @@ class DefaultArtifactService:
     async def list(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> Page[ArtifactView]:
         await self._authorization.authorize(
             principal,
-            AuthorizationAction.ARTIFACT_READ,
-            ResourceRef(ResourceKind.ARTIFACT, execution_id, principal.tenant_id),
+            AuthorizationAction.EXECUTION_READ,
+            ResourceRef(ResourceKind.EXECUTION, execution_id, principal.tenant_id),
         )
         raw_cursor = _decode_cursor(cursor, principal.tenant_id, execution_id, self._cursor_signer)
         page = await self._state.records.list_by_execution(

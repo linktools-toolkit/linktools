@@ -184,7 +184,7 @@ class ACPApplication:
             self.workspace.workspace_id,
             models=self.models,
             state=self.state,
-            capabilities=(CapabilityGroup.from_workspace(self.workspace),),
+            capabilities=(CapabilityGroup("workspace", workspace=self.workspace),),
         ) as runtime:
             await serve_stdio(
                 ACPAgent(

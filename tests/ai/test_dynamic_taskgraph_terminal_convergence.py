@@ -56,7 +56,7 @@ async def test_failure_does_not_terminalize_graph_before_independent_expansion_s
         await repository.complete(
             expand_lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-expand",
             result_digest="b" * 64,
             expanded_nodes=(TaskNode("child"),),
         )
@@ -82,7 +82,7 @@ async def test_failure_does_not_terminalize_graph_before_independent_expansion_s
         await repository.complete(
             child_lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-child",
             result_digest="c" * 64,
         )
         terminal = await repository.scheduler_snapshot(

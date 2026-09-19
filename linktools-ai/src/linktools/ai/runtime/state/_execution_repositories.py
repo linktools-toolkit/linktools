@@ -8,6 +8,7 @@ from datetime import datetime
 from linktools.core import environ
 from ...core import ExecutionEventType, ExecutionStatus, IdempotencyStatus, JsonValue, Page, ResourceKind
 from ...errors import AIError, ErrorCode
+from ...task import TaskBindingSnapshot
 from ._contracts import ExecutionCandidate, ExecutionCandidatePage, ExecutionCancelRequestCommit, ExecutionEventAppend, ExecutionEventRecord, ExecutionHistoryHeadRecord, ExecutionHistorySealRecord, ExecutionHistoryState, ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord
 from ._plan import RuntimeDomain
 from ._store import FactQuery, RecordQuery, RecordReplacement, StateStore, StateTransaction, StoredFact, StoredRecord, operation_key, stream_digest
@@ -554,6 +555,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             revision=current.revision + 1,
             event_sequence=current.event_sequence + 1,
             updated_at=now,
+            started_at=current.started_at or now,
         )
         execution_replacement = RecordReplacement(
             _projected_record(self, execution_record, next_execution),
@@ -755,6 +757,50 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         )
         return next_value
 
+    async def transition_task_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_status: ExecutionStatus,
+        next_status: ExecutionStatus,
+        task_attempt: int,
+        task_deadline_at: datetime | None,
+        task_next_attempt_at: datetime | None,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
+        event_type: str,
+        payload: Mapping[str, JsonValue],
+        occurred_at: datetime,
+    ) -> ExecutionRecord:
+        if (
+            isinstance(task_attempt, bool)
+            or not isinstance(task_attempt, int)
+            or task_attempt < 0
+            or occurred_at.tzinfo is None
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return await self._transition_execution(
+            execution_id,
+            tenant_id=tenant_id,
+            expected_revision=expected_revision,
+            expected_event_sequence=expected_event_sequence,
+            expected_status=expected_status,
+            next_status=next_status,
+            event_type=event_type,
+            payload=payload,
+            updated_at=occurred_at,
+            task_state=(
+                task_attempt,
+                task_deadline_at,
+                task_next_attempt_at,
+                error_code,
+                safe_error_details,
+            ),
+        )
+
     async def mark_start_unknown(
         self, commit: ExecutionStartUnknownCommit
     ) -> ExecutionRecord:
@@ -846,6 +892,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         payload: Mapping[str, object],
         updated_at: datetime,
         pending_events: Sequence[ExecutionEventAppend] = (),
+        task_state: "tuple[int, datetime | None, datetime | None, str | None, Mapping[str, object]] | None" = None,
         transaction: StateTransaction | None = None,
     ) -> ExecutionRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
@@ -876,12 +923,31 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             event_count = len(pending_events) + 1
+            task_updates: dict[str, object] = {}
+            if task_state is not None:
+                if not isinstance(stored_value.binding, TaskBindingSnapshot):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                (
+                    task_attempt,
+                    task_deadline_at,
+                    task_next_attempt_at,
+                    error_code,
+                    safe_error_details,
+                ) = task_state
+                task_updates = {
+                    "task_attempt": task_attempt,
+                    "task_deadline_at": task_deadline_at,
+                    "task_next_attempt_at": task_next_attempt_at,
+                    "error_code": error_code,
+                    "safe_error_details": dict(safe_error_details),
+                }
             next_value = replace(
                 stored_value,
                 status=next_status,
                 revision=stored_value.revision + event_count,
                 event_sequence=stored_value.event_sequence + event_count,
                 updated_at=updated_at,
+                **task_updates,
             )
             candidate = _projected_record(self, stored, next_value)
             await _replace_checked(transaction, candidate, stored.storage_version)
@@ -1150,6 +1216,121 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
     ) -> ResultRecord | None:
         execution = await self.get(execution_id, tenant_id=tenant_id)
         return None if execution is None else execution.result
+
+    async def acquire_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> bool:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if not isinstance(hold_id, str) or not hold_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        key = self._key("execution", execution_id)
+
+        async def mutate(transaction: StateTransaction) -> bool:
+            stored = await transaction.get_record(key)
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._decode(stored, ExecutionRecord)
+            if current.retention_closed:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if hold_id in current.dependency_hold_ids:
+                return False
+            next_value = replace(
+                current,
+                dependency_hold_ids=tuple(
+                    sorted((*current.dependency_hold_ids, hold_id))
+                ),
+                revision=current.revision + 1,
+                updated_at=await transaction.now(),
+            )
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, next_value),
+                stored.storage_version,
+            )
+            return True
+
+        return await self._store.mutate(mutate)
+
+    async def release_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> ExecutionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if not isinstance(hold_id, str) or not hold_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        key = self._key("execution", execution_id)
+
+        async def mutate(transaction: StateTransaction) -> ExecutionRecord:
+            stored = await transaction.get_record(key)
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._decode(stored, ExecutionRecord)
+            if hold_id not in current.dependency_hold_ids:
+                return current
+            next_value = replace(
+                current,
+                dependency_hold_ids=tuple(
+                    value
+                    for value in current.dependency_hold_ids
+                    if value != hold_id
+                ),
+                revision=current.revision + 1,
+                updated_at=await transaction.now(),
+            )
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, next_value),
+                stored.storage_version,
+            )
+            return next_value
+
+        return await self._store.mutate(mutate)
+
+    async def close_retention(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> bool:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        key = self._key("execution", execution_id)
+
+        async def mutate(transaction: StateTransaction) -> bool:
+            stored = await transaction.get_record(key)
+            if stored is None:
+                return True
+            current = await self._decode(stored, ExecutionRecord)
+            if current.status not in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                return False
+            if current.dependency_hold_ids:
+                return False
+            if current.retention_closed:
+                return True
+            next_value = replace(
+                current,
+                retention_closed=True,
+                revision=current.revision + 1,
+                updated_at=await transaction.now(),
+            )
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, next_value),
+                stored.storage_version,
+            )
+            return True
+
+        return await self._store.mutate(mutate)
 
     async def get_history_seal(
         self,

@@ -57,6 +57,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
+    TaskBindingSnapshot,
     TaskExpanderRef,
     TaskGraph,
     TaskGraphAdmission,
@@ -66,6 +67,7 @@ from ...task import (
     TaskNode,
     TaskNodeView,
     TaskResultRecord,
+    TaskResultRef,
     TaskTerminalRecord,
 )
 from .._message import decode_model_messages, encode_model_messages
@@ -196,6 +198,7 @@ _V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("loaded_model_context", LoadedModelContext),
     ("runtime_payload_ref", RuntimePayloadRef),
     ("stored_user_input", StoredUserInput),
+    ("task_binding_snapshot", TaskBindingSnapshot),
     ("transcript_chunk", TranscriptChunk),
     ("transcript_head", TranscriptHeadRecord),
     ("transcript_message_ref", TranscriptMessageRef),
@@ -290,7 +293,7 @@ def _encode_v1_task_node(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNode):
         raise TypeError("V1 task_node encoder received the wrong type")
-    return {
+    fields: dict[str, JsonValue] = {
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
         "dependencies": _encode_domain(
             value.dependencies, codec, persisted=persisted
@@ -301,6 +304,31 @@ def _encode_v1_task_node(
         ),
         "expander": _encode_domain(value.expander, codec, persisted=persisted),
     }
+    if value.input_refs:
+        fields["input_refs"] = [
+            [
+                name,
+                {
+                    "namespace": reference.namespace,
+                    "tenant_id": reference.tenant_id,
+                    "graph_id": reference.graph_id,
+                    "node_id": reference.node_id,
+                    "result_digest": reference.result_digest,
+                },
+            ]
+            for name, reference in sorted(value.input_refs.items())
+        ]
+    if value.timeout_seconds is not None:
+        fields["timeout_seconds"] = value.timeout_seconds
+    if value.max_attempts != 1:
+        fields["max_attempts"] = value.max_attempts
+    if value.retry_delay_seconds != 0:
+        fields["retry_delay_seconds"] = value.retry_delay_seconds
+    if value.output_contract is not None:
+        fields["output_contract"] = dict(value.output_contract)
+    if value.effect != "none":
+        fields["effect"] = value.effect
+    return fields
 
 
 def _decode_v1_task_node(
@@ -321,6 +349,32 @@ def _decode_v1_task_node(
         ),
         persisted=persisted,
     )
+    raw_refs = raw_fields.get("input_refs", [])
+    if not isinstance(raw_refs, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    input_refs: dict[str, TaskResultRef] = {}
+    for item in raw_refs:
+        if not isinstance(item, list) or len(item) != 2:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        name, raw_reference = item
+        if not isinstance(name, str) or not isinstance(raw_reference, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_exact_keys(
+            raw_reference,
+            frozenset(
+                {"namespace", "tenant_id", "graph_id", "node_id", "result_digest"}
+            ),
+        )
+        try:
+            input_refs[name] = TaskResultRef(
+                str(raw_reference["namespace"]),
+                str(raw_reference["tenant_id"]),
+                str(raw_reference["graph_id"]),
+                str(raw_reference["node_id"]),
+                str(raw_reference["result_digest"]),
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     return TaskNode(
         str(_decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
@@ -351,6 +405,15 @@ def _decode_v1_task_node(
                 persisted=persisted,
             ),
         ),
+        input_refs=input_refs,
+        timeout_seconds=cast("float | None", raw_fields.get("timeout_seconds")),
+        max_attempts=int(raw_fields.get("max_attempts", 1)),
+        retry_delay_seconds=float(raw_fields.get("retry_delay_seconds", 0)),
+        output_contract=cast(
+            Mapping[str, JsonValue] | None,
+            raw_fields.get("output_contract"),
+        ),
+        effect=str(raw_fields.get("effect", "none")),
     )
 
 
@@ -407,6 +470,12 @@ def _encode_v1_task_node_view(
         "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
         "error_code": _encode_domain(value.error_code, codec, persisted=persisted),
         "error_digest": _encode_domain(value.error_digest, codec, persisted=persisted),
+        "next_attempt_at": _encode_domain(
+            value.next_attempt_at, codec, persisted=persisted
+        ),
+        "occupies_concurrency": _encode_domain(
+            value.occupies_concurrency, codec, persisted=persisted
+        ),
     }
     if not persisted:
         fields.update(
@@ -439,6 +508,8 @@ def _decode_v1_task_node_view(
         "result_digest",
         "error_code",
         "error_digest",
+        "next_attempt_at",
+        "occupies_concurrency",
     }
     if not persisted:
         expected.update({"dependencies", "owner", "fence", "lease_expires_at"})
@@ -504,6 +575,23 @@ def _decode_v1_task_node_view(
                 raw_fields["execution_id"], str | None, codec, persisted=persisted
             ),
         ),
+        cast(
+            datetime | None,
+            _decode_domain(
+                raw_fields["next_attempt_at"],
+                datetime | None,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+        bool(
+            _decode_domain(
+                raw_fields["occupies_concurrency"],
+                bool,
+                codec,
+                persisted=persisted,
+            )
+        ),
     )
 
 
@@ -514,12 +602,28 @@ def _encode_v1_task_result(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskResultRecord):
         raise TypeError("V1 task_result encoder received the wrong type")
-    return {
+    encoded: dict[str, JsonValue] = {
         "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
-        "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
-        "payload": _encode_domain(value.payload, codec, persisted=persisted),
+        "result_digest": _encode_domain(
+            value.result_digest,
+            codec,
+            persisted=persisted,
+        ),
     }
+    if value.execution_id is not None:
+        encoded["execution_id"] = _encode_domain(
+            value.execution_id,
+            codec,
+            persisted=persisted,
+        )
+    if value.payload is not None:
+        encoded["payload"] = _encode_domain(
+            value.payload,
+            codec,
+            persisted=persisted,
+        )
+    return encoded
 
 
 def _decode_v1_task_result(
@@ -527,22 +631,71 @@ def _decode_v1_task_result(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskResultRecord:
-    _require_contract_fields(
-        raw_fields,
-        frozenset({"graph_id", "node_id", "result_digest", "payload"}),
-        persisted=persisted,
+    keys = frozenset(raw_fields)
+    base = frozenset({"graph_id", "node_id", "result_digest"})
+    supported = {
+        base | {"payload"},
+        base | {"execution_id"},
+        base | {"execution_id", "payload"},
+    }
+    if keys not in supported:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    execution_id = (
+        None
+        if "execution_id" not in raw_fields
+        else cast(
+            str,
+            _decode_domain(
+                raw_fields["execution_id"],
+                str,
+                codec,
+                persisted=persisted,
+            ),
+        )
+    )
+    payload = (
+        None
+        if "payload" not in raw_fields
+        else cast(
+            StoredPayload,
+            _decode_domain(
+                raw_fields["payload"],
+                StoredPayload,
+                codec,
+                persisted=persisted,
+            ),
+        )
     )
     return TaskResultRecord(
-        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
-        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         cast(
             str,
-            _decode_domain(raw_fields["result_digest"], str, codec, persisted=persisted),
+            _decode_domain(
+                raw_fields["graph_id"],
+                str,
+                codec,
+                persisted=persisted,
+            ),
         ),
         cast(
-            StoredPayload,
-            _decode_domain(raw_fields["payload"], StoredPayload, codec, persisted=persisted),
+            str,
+            _decode_domain(
+                raw_fields["node_id"],
+                str,
+                codec,
+                persisted=persisted,
+            ),
         ),
+        cast(
+            str,
+            _decode_domain(
+                raw_fields["result_digest"],
+                str,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+        execution_id,
+        payload,
     )
 
 
@@ -633,7 +786,7 @@ def _decode_v1_stored_user_input(
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
     )
-    if codec_name not in {"text", "user-content-v1"}:
+    if codec_name not in {"text", "user-content-v1", "task-input-v1"}:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     payload = _decode_domain(
         raw_fields["payload"], StoredPayload, codec, persisted=persisted
@@ -2022,6 +2175,13 @@ def _validate_v1_codec_definition() -> None:
         "dependencies",
         "budget_cost",
         "expander",
+        "input_refs",
+        "timeout_seconds",
+        "max_attempts",
+        "retry_delay_seconds",
+        "output_schema",
+        "output_contract",
+        "effect",
         "_input",
     ):
         raise RuntimeError("Runtime v1 task_node source contract changed")

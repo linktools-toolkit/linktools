@@ -42,4 +42,4 @@ class OfflineRuntimeStorageMaintenance:
                 return await self._inspection._compact_objects()
 
 
-__all__ = ["OfflineRuntimeStorageMaintenance"]
+__all__ = ["OfflineExclusiveStorage", "OfflineRuntimeStorageMaintenance"]

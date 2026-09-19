@@ -11,6 +11,8 @@ from typing import Protocol
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot
+
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -27,7 +29,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ._handoff import HandoffGate, HandoffState
-from ._snapshot import RunSnapshot
+from ._snapshot_contract import RunSnapshot
 from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,
@@ -135,7 +137,11 @@ class DefaultEvaluationService:
         self._handoff = HandoffGate[tuple[str, str], object]()
 
     async def start(
-        self, binding_digest: str, request: StartEvaluationRequest
+        self,
+        binding_digest: str,
+        request: StartEvaluationRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
@@ -207,6 +213,7 @@ class DefaultEvaluationService:
                         planning=False,
                         thinking=False,
                     ),
+                    binding_snapshot=binding_snapshot,
                 )
                 await self._acquire_execution_hold(
                     execution.execution_id,
@@ -432,7 +439,12 @@ class DefaultEvaluationService:
             return snapshot
 
     async def replay(
-        self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest
+        self,
+        binding_digest: str,
+        snapshot_id: str,
+        request: ReplayEvaluationRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         async with self._evaluation_consumer(snapshot_id, request.principal.tenant_id):
             record = await self._synchronize(
@@ -454,6 +466,7 @@ class DefaultEvaluationService:
                     planning=False,
                     thinking=False,
                 ),
+                binding_snapshot=binding_snapshot,
             )
             if record.status in {
                 EvaluationStatus.SUCCEEDED,

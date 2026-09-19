@@ -3,7 +3,6 @@
 """Runtime composition and local service graph construction."""
 
 import asyncio
-import hashlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -56,11 +55,13 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
+from ._runtime_history import RuntimeHistory
+from ._task_capability_snapshot import TaskCapabilitySnapshotStore
+from ._runtime_identity import grant_key as runtime_grant_key
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeState
-from .state._contracts import RecoveryCheckpointState
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -83,6 +84,7 @@ class _RuntimeComponents:
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
     metric_control: _RuntimeMetricBuffer | None
+    history: object
 
 
 async def compose_runtime_components(
@@ -151,9 +153,15 @@ async def compose_runtime_components(
             for candidate in frozen
             if candidate.kind == "agent"
         }
-        if "default" not in agents:
-            agents["default"] = AgentSpec("default")
         resolver = models.snapshot()
+        if "default" not in agents:
+            try:
+                resolver.resolve("default")
+            except AIError as error:
+                if error.code is not ErrorCode.MODEL_CONNECTION_NOT_FOUND:
+                    raise
+            else:
+                agents["default"] = AgentSpec("default")
         workspace_ref = (
             None
             if workspace is not None
@@ -383,7 +391,7 @@ def _memory_store_factory(
 
 
 def _grant_key(namespace: str) -> bytes:
-    return hashlib.sha256(f"workspace:{namespace}".encode()).digest()
+    return runtime_grant_key(namespace)
 
 
 def _capture_host_cwd() -> "str | None":
@@ -490,6 +498,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
+            skill_snapshot_store=state.object_store(RuntimeDomain.TASK),
             metrics=metric_buffer,
         )
     except BaseException:
@@ -542,6 +551,7 @@ async def _build_local_components(
             state.steps,
             executor,
             catalog,
+            restore_binding=compiler.restore,
             tenant_id=tenant_id,
             workspace=workspace,
             limits=limits,
@@ -585,15 +595,28 @@ async def _build_local_components(
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )
+        task_capability_snapshots = TaskCapabilitySnapshotStore(
+            namespace,
+            catalog,
+            compiler,
+            skill_sources,
+            state.object_store(RuntimeDomain.TASK),
+            agent_task_type="linktools.ai.agent",
+        )
         task_runner = RuntimeTaskNodeRunner(
             execution,
             catalog,
             compiler,
+            session=session,
+            namespace=namespace,
             app=app,
+            authorization=authorization,
             task_state=state.task.tasks,
             task_objects=state.object_store(RuntimeDomain.TASK),
+            artifact_state=state.artifact,
+            artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
-            payload_policy=payload_policy,
+            capability_snapshots=task_capability_snapshots,
             handlers=task_handlers,
             expanders=task_expanders,
             release_dependency_hold=execution.release_dependency_hold,
@@ -685,7 +708,6 @@ async def _build_local_components(
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
-        await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
         await graph_service.recover_pending()
@@ -721,53 +743,41 @@ async def _build_local_components(
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
+        history=_borrowed_runtime_history(
+            history_service,
+            tenant_id=tenant_id,
+            state=state,
+            authorization=authorization,
+            artifact=artifact,
+        ),
     )
 
 
-async def _restore_recovery_bindings(
-    catalog: AgentCatalog,
-    compiler: AgentCompiler,
-    state: RuntimeState,
+def _borrowed_runtime_history(
+    service: DefaultExecutionHistoryService,
     *,
     tenant_id: str,
-) -> None:
-    cursor: str | None = None
-    while True:
-        page = await state.recovery.checkpoints.list_recoverable_page(
-            tenant_id=tenant_id,
-            cursor=cursor,
-            limit=128,
-        )
-        for checkpoint in page.items:
-            if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution = await state.execution.executions.get(
-                checkpoint.execution_id,
-                tenant_id=tenant_id,
-            )
-            if execution is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                binding = compiler.restore(execution.binding)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    raise
-                if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
-                    if error.safe_details.get("reason") == "workspace_mismatch":
-                        raise
-                    _logger.warning(
-                        "recovery binding unavailable: execution=%s",
-                        checkpoint.execution_id,
-                    )
-                    continue
-                raise
-            if binding.digest != execution.binding_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            catalog.register_definition(binding.definition)
-            catalog.register_binding(binding)
-        if page.next_cursor is None:
-            return
-        cursor = page.next_cursor
+    state: RuntimeState,
+    authorization: object,
+    artifact: DefaultArtifactService,
+) -> "RuntimeHistory":
+    return RuntimeHistory(
+        service,
+        tenant_id=tenant_id,
+        executions=state.execution.executions,
+        events=state.execution.events,
+        sessions=state.conversation.sessions,
+        tasks=state.task.tasks,
+        authorization=authorization,
+        namespace=state.namespace,
+        execution_objects=state.object_store(RuntimeDomain.EXECUTION),
+        task_objects=state.object_store(RuntimeDomain.TASK),
+        artifacts=artifact,
+        cursor_signer=HmacCursorSigner(
+            "runtime-history",
+            runtime_grant_key(state.namespace),
+        ),
+    )
 
 
 class _RuntimeCloseCoordinator:

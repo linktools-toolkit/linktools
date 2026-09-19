@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from linktools.core import environ
 
@@ -42,6 +43,12 @@ class _RuntimeObjectRouter:
             return self._stores[domain]
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
+
+    def local_paths(self) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        for store in self._stores.values():
+            paths.extend(store.local_paths())
+        return tuple(dict.fromkeys(paths))
 
     def resolve_object(
         self, domain: RuntimeDomain, reference: ObjectRef

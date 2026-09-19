@@ -97,6 +97,7 @@ class _AgentSegmentInput:
     limits: PromptLimits
     mcp_cwd: "str | None"
     user_prompt: CanonicalUserInput | None
+    initial_attachments: tuple[Mapping[str, JsonValue], ...]
     history: list[ModelMessage]
     conversation_id: str
     step_store: StepStore
@@ -160,6 +161,7 @@ class _AgentSegmentRunner:
             mcp_cwd=segment.mcp_cwd,
             user_prompt=segment.user_prompt,
             history=segment.history,
+            initial_attachments=segment.initial_attachments,
             conversation_id=segment.conversation_id,
             step_store=segment.step_store,
             step_run_id=segment.step_run_id,

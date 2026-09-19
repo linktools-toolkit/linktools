@@ -23,7 +23,7 @@ from pydantic_ai.tools import (
     DeferredToolRequests,
 )
 
-from ..agent import AgentBinding, AgentCatalog, SubagentRef
+from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
 from ..workspace import (
     RepositoryInstructionResolver,
@@ -36,7 +36,11 @@ from ._agent_executor import (
     LiveDelta,
 )
 from ._harness_memory import select_harness_memory_tools
-from ._input import CanonicalUserInput, ExecutionInputMaterializer
+from ._input import (
+    CanonicalUserInput,
+    ExecutionInputMaterializer,
+    stored_input_attachment_views,
+)
 from ._plan import RuntimePlanStore
 from ..core import (
     ExecutionEventType,
@@ -150,6 +154,7 @@ class _SubagentDispatcher(Protocol):
         memory_scope: "str | None",
         principal: Principal,
         refs: "tuple[SubagentRef, ...]",
+        binding: AgentBindingSnapshot,
         mode: ExecutionMode,
     ) -> SubagentDelegate: ...
 
@@ -248,6 +253,7 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         catalog: AgentCatalog,
         *,
+        restore_binding: "Callable[[AgentBindingSnapshot], AgentBinding] | None" = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
         mcp_cwd: "str | None",
@@ -277,6 +283,7 @@ class LocalExecutionBackend:
         self._executor = executor
         self._segment_runner = _AgentSegmentRunner(executor)
         self._catalog = catalog
+        self._restore_binding = restore_binding
         self._workspace = workspace
         self._limits = limits
         self._mcp_cwd = mcp_cwd
@@ -369,10 +376,21 @@ class LocalExecutionBackend:
     def tenant_id(self) -> str:
         return self._tenant_id
 
-    def validate_binding(self, execution: ExecutionRecord) -> None:
-        binding = self._catalog.binding(execution.binding_digest)
-        if execution.binding != binding.snapshot:
+    def _execution_binding(self, execution: ExecutionRecord) -> AgentBinding:
+        binding = (
+            self._catalog.binding(execution.binding_digest)
+            if self._restore_binding is None
+            else self._restore_binding(execution.binding)
+        )
+        if (
+            binding.digest != execution.binding_digest
+            or binding.snapshot != execution.binding
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return binding
+
+    def validate_binding(self, execution: ExecutionRecord) -> None:
+        self._execution_binding(execution)
 
     async def load_execution(
         self,
@@ -497,12 +515,11 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if request.correlation != execution.correlation:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        binding = self._catalog.binding(execution.binding_digest)
+        self._execution_binding(execution)
         if (
             request.mode != execution.mode
             or request.planning is not execution.planning
             or request.thinking != execution.thinking
-            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -784,9 +801,7 @@ class LocalExecutionBackend:
         await self._validate_start(request, execution)
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._catalog.binding(execution.binding_digest)
-        if execution.binding != binding.snapshot:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._execution_binding(execution)
         now = datetime.now(timezone.utc)
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
@@ -2703,9 +2718,7 @@ class LocalExecutionBackend:
                 or checkpoint.step_run_id is None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            binding = self._catalog.binding(current.binding_digest)
-            if current.binding != binding.snapshot:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            binding = self._execution_binding(current)
             definition = binding.definition
             initial_repository_instructions = await self.load_repository_instructions(
                 current.repository_instructions
@@ -2915,6 +2928,9 @@ class LocalExecutionBackend:
                         limits=self._limits,
                         mcp_cwd=self._mcp_cwd,
                         user_prompt=run_user_prompt,
+                        initial_attachments=stored_input_attachment_views(
+                            current.stored_user_input
+                        ),
                         history=history,
                         conversation_id=conversation_id,
                         step_store=self._steps,
@@ -2944,6 +2960,7 @@ class LocalExecutionBackend:
                                 memory_scope=current.memory_scope,
                                 principal=request.principal,
                                 refs=subagent_refs,
+                                binding=binding.snapshot,
                                 mode=current.mode,
                             )
                         ),

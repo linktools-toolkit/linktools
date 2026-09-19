@@ -3,22 +3,24 @@
 """Task-node runner contracts shared by TaskGraph schedulers and Runtime adapters."""
 
 import re
+from datetime import datetime
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
 from ._graph import TaskDependencyResult, TaskNode
+from ._handler import TaskEffectResolution
 
 
 @dataclass(frozen=True, slots=True)
 class TaskNodeRunResult:
     result_digest: str
     execution_id: "str | None" = None
-    result_payload: "StoredPayload | None" = None
     expanded_nodes: "tuple[TaskNode, ...]" = ()
+    deferred: bool = False
+    retry_at: "datetime | None" = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
@@ -27,14 +29,13 @@ class TaskNodeRunResult:
             not isinstance(self.execution_id, str) or not self.execution_id.strip()
         ):
             raise ValueError("task node result execution id is invalid")
-        if (
-            self.result_payload is not None
-            and self.result_payload.digest != self.result_digest
-        ):
-            raise ValueError("task node result payload digest does not match result")
         expanded_nodes = tuple(self.expanded_nodes)
         if any(not isinstance(node, TaskNode) for node in expanded_nodes):
             raise TypeError("expanded task nodes are invalid")
+        if self.retry_at is not None and self.retry_at.tzinfo is None:
+            raise ValueError("task retry timestamp must be timezone-aware")
+        if self.deferred and self.retry_at is not None:
+            raise ValueError("deferred task cannot also request retry")
         object.__setattr__(self, "expanded_nodes", expanded_nodes)
 
 
@@ -56,7 +57,17 @@ class TaskNodeRunError(AIError):
 
 @runtime_checkable
 class TaskNodeRunControl(Protocol):
-    async def handoff_execution(self, execution_id: str) -> None: ...
+    @property
+    def execution_id(self) -> "str | None": ...
+
+    async def bind_execution(self, execution_id: str) -> None: ...
+
+    async def handoff_execution(
+        self,
+        execution_id: str,
+        *,
+        occupies_concurrency: bool = True,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +77,7 @@ class TaskNodeInvocation:
     principal: Principal
     correlation: CorrelationData
     dependency_results: "Mapping[str, TaskDependencyResult]"
+    execution_id: "str | None" = None
 
 
 class TaskNodeRunner(Protocol):
@@ -81,6 +93,20 @@ class TaskNodeRunner(Protocol):
         invocation: TaskNodeInvocation,
         execution_id: str,
     ) -> TaskNodeRunResult: ...
+
+    async def supply_input(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskNodeRunResult: ...
+
+    async def resolve_effect(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        resolution: TaskEffectResolution,
+    ) -> "TaskNodeRunResult | None": ...
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None: ...
 

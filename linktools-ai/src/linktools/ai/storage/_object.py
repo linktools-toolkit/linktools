@@ -57,6 +57,8 @@ class ObjectStore(Protocol):
 
     def open(self, key: str) -> AsyncIterator[bytes]: ...
 
+    def local_paths(self) -> tuple[Path, ...]: ...
+
 
 def runtime_object_key(
     *,

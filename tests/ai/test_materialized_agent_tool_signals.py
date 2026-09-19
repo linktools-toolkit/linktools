@@ -115,7 +115,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         workspace.workspace_id,
         models=_CompositionModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace), application),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run(
@@ -128,6 +128,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         history = await runtime.execution.history(
             result.execution_id,
             principal=runtime.default_principal,
+            include_content=True,
         )
         tool_results = {
             item.tool_name: item.content

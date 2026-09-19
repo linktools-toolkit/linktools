@@ -51,6 +51,7 @@
     "loaded_model_context",
     "runtime_payload_ref",
     "stored_user_input",
+    "task_binding_snapshot",
     "transcript_chunk",
     "transcript_head",
     "transcript_message_ref",

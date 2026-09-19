@@ -72,7 +72,7 @@ async def test_runtime_projects_storage_operation_metrics(tmp_path: Path) -> Non
         workspace.workspace_id,
         models=_Models(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run("hello", timeout_seconds=10)

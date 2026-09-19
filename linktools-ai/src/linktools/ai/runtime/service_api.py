@@ -9,6 +9,7 @@ from typing import Protocol, cast
 
 from pydantic_ai.messages import UserContent
 
+from ..agent import AgentBindingSnapshot
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -32,9 +33,9 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskEvent
+from ..task import TaskBindingSnapshot, TaskEffectResolution, TaskEvent
 from ._input_contract import validate_user_input
-from ._snapshot import RunSnapshot
+from ._snapshot_contract import RunSnapshot
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -144,39 +145,57 @@ class ExecutionHandle:
 
 class _ExecutionViewSource(Protocol):
     execution_id: str
-    agent_id: str
+    agent_id: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
     session_id: str | None
+    binding_kind: str
+    task_type: str | None
+    task_attempt: int
+    task_deadline_at: datetime | None
+    task_next_attempt_at: datetime | None
+    event_sequence: int
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
-    agent_id: str
+    agent_id: str | None
     status: ExecutionStatus
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
     session_id: str | None = None
+    binding_kind: str = "agent"
+    task_type: str | None = None
+    task_attempt: int = 0
+    task_deadline_at: datetime | None = None
+    task_next_attempt_at: datetime | None = None
+    event_sequence: int = 0
 
 
 def project_execution_view(source: object) -> ExecutionView:
     """Project an internal execution source into the stable public view."""
     value = cast(_ExecutionViewSource, source)
     return ExecutionView(
-        value.execution_id,
-        value.agent_id,
-        value.status,
-        value.lineage_kind,
-        value.parent_execution_id,
-        value.root_execution_id,
-        value.parent_invocation_id,
-        value.session_id,
+        execution_id=value.execution_id,
+        agent_id=value.agent_id,
+        status=value.status,
+        lineage_kind=value.lineage_kind,
+        parent_execution_id=value.parent_execution_id,
+        root_execution_id=value.root_execution_id,
+        parent_invocation_id=value.parent_invocation_id,
+        session_id=value.session_id,
+        binding_kind=value.binding_kind,
+        task_type=value.task_type,
+        task_attempt=value.task_attempt,
+        task_deadline_at=value.task_deadline_at,
+        task_next_attempt_at=value.task_next_attempt_at,
+        event_sequence=value.event_sequence,
     )
 
 
@@ -205,7 +224,7 @@ class ExecutionResult:
                 or self.error_diagnostics is not None
             ):
                 raise ValueError("successful execution result cannot carry an error")
-            if self.output is None or not _is_digest(self.output_fingerprint):
+            if not _is_digest(self.output_fingerprint):
                 raise ValueError("successful execution result requires output contract")
             return
         if self.status is ExecutionStatus.CANCELLED:
@@ -286,7 +305,19 @@ class ExecutionTraceItem:
 class TranscriptItem:
     execution_id: str
     sequence: int
-    text: str
+    text: "str | None"
+    content_included: bool = True
+
+    def __post_init__(self) -> None:
+        if self.sequence < 0:
+            raise ValueError("transcript sequence must be non-negative")
+        if not isinstance(self.content_included, bool):
+            raise TypeError("transcript content flag must be bool")
+        if self.content_included:
+            if not isinstance(self.text, str):
+                raise ValueError("included transcript content must be text")
+        elif self.text is not None:
+            raise ValueError("omitted transcript content must be None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,10 +328,15 @@ class ExecutionHistoryItem:
     content: JsonValue
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
+    content_included: bool = True
 
     def __post_init__(self) -> None:
         if self.sequence < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
             raise ValueError("execution history item is invalid")
+        if not isinstance(self.content_included, bool):
+            raise TypeError("history content flag must be bool")
+        if not self.content_included and self.content is not None:
+            raise ValueError("omitted history content must be None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +355,7 @@ class ModelInteractionItem:
     error_code: str | None
     duration_ns: int
     usage: UsageMetrics | None
+    content_included: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -331,8 +368,163 @@ class ModelInteractionItem:
             or self.duration_ns < 0
         ):
             raise ValueError("model interaction item is invalid")
+        if not isinstance(self.content_included, bool):
+            raise TypeError("model interaction content flag must be bool")
+        if not self.content_included and (self.request or self.response is not None):
+            raise ValueError("omitted model interaction content must be empty")
         object.__setattr__(self, "model", dict(self.model))
         object.__setattr__(self, "request", dict(self.request))
+
+
+@dataclass(frozen=True, slots=True)
+class AttachmentFact:
+    execution_id: str
+    attachment_id: str
+    fact: str
+    source: str
+    media_type: str | None
+    size: int | None
+    digest: str | None
+    position: int
+    processing_status: str = "unknown"
+    segment_sequence: int | None = None
+    request_sequence: int | None = None
+    step_index: int | None = None
+    call_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.execution_id, str)
+            or not self.execution_id
+            or not _is_digest(self.attachment_id)
+            or self.fact not in {"accepted", "included_in_request"}
+            or not isinstance(self.source, str)
+            or not self.source
+            or self.media_type is not None
+            and (not isinstance(self.media_type, str) or not self.media_type)
+            or self.size is not None
+            and (
+                isinstance(self.size, bool)
+                or not isinstance(self.size, int)
+                or self.size < 0
+            )
+            or self.digest is not None
+            and not _is_digest(self.digest)
+            or isinstance(self.position, bool)
+            or not isinstance(self.position, int)
+            or self.position < 0
+            or self.processing_status != "unknown"
+        ):
+            raise ValueError("attachment fact is invalid")
+        for value in (self.segment_sequence, self.request_sequence):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                raise ValueError("attachment request association is invalid")
+        if self.step_index is not None and (
+            isinstance(self.step_index, bool)
+            or not isinstance(self.step_index, int)
+            or self.step_index < 0
+        ):
+            raise ValueError("attachment step association is invalid")
+        if self.call_id is not None and (
+            not isinstance(self.call_id, str) or not self.call_id
+        ):
+            raise ValueError("attachment call association is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class UsageReadCutoff:
+    execution_id: str
+    segment_sequence: int
+    request_sequence: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.execution_id, str)
+            or not self.execution_id
+            or isinstance(self.segment_sequence, bool)
+            or not isinstance(self.segment_sequence, int)
+            or self.segment_sequence < 1
+            or isinstance(self.request_sequence, bool)
+            or not isinstance(self.request_sequence, int)
+            or self.request_sequence < 0
+        ):
+            raise ValueError("usage read cutoff is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class UsageSummary:
+    logical_requests: int = 0
+    succeeded_requests: int = 0
+    failed_requests: int = 0
+    cancelled_requests: int = 0
+    output_correction_retries: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    model_duration_ns: int = 0
+    unknown_usage_requests: int = 0
+    transport_retries: "int | None" = None
+    unrecorded_executions: int = 0
+    cutoffs: "tuple[UsageReadCutoff, ...]" = ()
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.logical_requests,
+            self.succeeded_requests,
+            self.failed_requests,
+            self.cancelled_requests,
+            self.output_correction_retries,
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.cache_write_tokens,
+            self.model_duration_ns,
+            self.unknown_usage_requests,
+            self.unrecorded_executions,
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in counts
+        ):
+            raise ValueError("usage summary counts must be non-negative integers")
+        if (
+            self.succeeded_requests
+            + self.failed_requests
+            + self.cancelled_requests
+            != self.logical_requests
+            or self.output_correction_retries > self.logical_requests
+            or self.unknown_usage_requests > self.logical_requests
+        ):
+            raise ValueError("usage summary request counts are inconsistent")
+        if self.transport_retries is not None and (
+            isinstance(self.transport_retries, bool)
+            or not isinstance(self.transport_retries, int)
+            or self.transport_retries < 0
+        ):
+            raise ValueError("usage transport retries must be non-negative")
+        cutoffs = tuple(sorted(
+            self.cutoffs,
+            key=lambda value: (
+                value.execution_id,
+                value.segment_sequence,
+            ),
+        ))
+        if (
+            any(not isinstance(value, UsageReadCutoff) for value in cutoffs)
+            or len({
+                (value.execution_id, value.segment_sequence)
+                for value in cutoffs
+            }) != len(cutoffs)
+        ):
+            raise ValueError("usage read cutoffs are invalid")
+        object.__setattr__(self, "cutoffs", cutoffs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,6 +605,22 @@ class ExecutionHistoryReader(Protocol):
         cursor: "str | None",
         limit: int,
     ) -> Page[ModelInteractionItem]: ...
+
+    async def attachment_facts(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> Page[AttachmentFact]: ...
+
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> UsageSummary: ...
 
 
 class SessionHistoryReader(Protocol):
@@ -748,18 +956,25 @@ class ExecutionStreamEvent:
 @dataclass(frozen=True, slots=True)
 class ExecutionTreeEvent:
     execution_id: str
-    agent_id: str
+    agent_id: str | None
     lineage_kind: ExecutionLineageKind
     parent_execution_id: str | None
     root_execution_id: str
     parent_invocation_id: str | None
     depth: int
     event: ExecutionStreamEvent
+    cursor: str | None = None
 
     def __post_init__(self) -> None:
-        if not all(
-            isinstance(value, str) and value
-            for value in (self.execution_id, self.agent_id, self.root_execution_id)
+        if (
+            not isinstance(self.execution_id, str)
+            or not self.execution_id
+            or not isinstance(self.root_execution_id, str)
+            or not self.root_execution_id
+            or (
+                self.agent_id is not None
+                and (not isinstance(self.agent_id, str) or not self.agent_id)
+            )
         ):
             raise ValueError("execution tree event identity is invalid")
         if not isinstance(self.lineage_kind, ExecutionLineageKind):
@@ -772,6 +987,10 @@ class ExecutionTreeEvent:
             raise ValueError("execution tree event depth must be zero or one")
         if not isinstance(self.event, ExecutionStreamEvent):
             raise TypeError("execution tree event requires an execution event")
+        if self.cursor is not None and (
+            not isinstance(self.cursor, str) or not self.cursor
+        ):
+            raise ValueError("execution tree event cursor is invalid")
         if self.execution_id != self.event.execution_id:
             raise ValueError("execution tree event identity does not match execution")
         if self.depth == 0:
@@ -794,6 +1013,7 @@ class TaskGraphRunEvent:
     graph_id: str
     node_id: "str | None"
     event: "TaskEvent | ExecutionTreeEvent"
+    cursor: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -802,6 +1022,10 @@ class TaskGraphRunEvent:
             not isinstance(self.node_id, str) or not self.node_id.strip()
         ):
             raise ValueError("task graph run event node id is invalid")
+        if self.cursor is not None and (
+            not isinstance(self.cursor, str) or not self.cursor
+        ):
+            raise ValueError("task graph run event cursor is invalid")
         if isinstance(self.event, TaskEvent):
             if (
                 self.event.graph_id != self.graph_id
@@ -845,6 +1069,7 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]": ...
 
@@ -854,6 +1079,7 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[TranscriptItem]: ...
 
@@ -863,6 +1089,7 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]": ...
 
@@ -872,8 +1099,25 @@ class ExecutionHistoryService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]": ...
+
+    async def attachment_facts(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[AttachmentFact]": ...
+
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> UsageSummary: ...
 
 
 class ExecutionService(Protocol):
@@ -883,7 +1127,7 @@ class ExecutionService(Protocol):
         *,
         tenant_id: str,
         hold_id: str,
-    ) -> None: ...
+    ) -> bool: ...
 
     async def release_dependency_hold(
         self,
@@ -906,11 +1150,101 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         dependency_hold_id: "str | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
+    async def start_task(
+        self,
+        binding: TaskBindingSnapshot,
+        *,
+        principal: Principal,
+        input: Mapping[str, JsonValue],
+        idempotency_key: str,
+        correlation: Mapping[str, str | int],
+    ) -> ExecutionHandle: ...
+
+    async def claim_task_attempt(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionView: ...
+
+    async def schedule_task_retry(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error_code: str,
+    ) -> ExecutionView: ...
+
+    async def defer_task_input(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        wait_id: str,
+    ) -> ExecutionView: ...
+
+    async def supply_task_input(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        value: JsonValue,
+    ) -> ExecutionView: ...
+
+    async def resume_task_not_applied(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> ExecutionView: ...
+
+    async def resolve_task_effect(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        resolution: TaskEffectResolution,
+    ) -> ExecutionView: ...
+
+    async def complete_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        output: JsonValue,
+    ) -> ExecutionResult: ...
+
+    async def fail_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error: AIError,
+    ) -> ExecutionResult: ...
+
+    async def require_task_recovery(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        error_code: str,
+    ) -> ExecutionView: ...
+    async def cancel_task(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> CancelExecutionResult: ...
+
+
     async def resolve_existing(
         self,
         binding_digest: str,
         request: ExecutionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> "ExecutionHandle | None": ...
     async def inspect(
         self, execution_id: str, *, principal: Principal
@@ -918,6 +1252,12 @@ class ExecutionService(Protocol):
     async def list(
         self, request: ListExecutionRequest
     ) -> "Page[ExecutionView]": ...
+    async def list_children(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> "tuple[ExecutionView, ...]": ...
     async def result(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionResult: ...
@@ -934,6 +1274,7 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         timeout_seconds: "float | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionResult: ...
     async def retry(
         self, binding_digest: str, execution_id: str, request: RetryExecutionRequest
@@ -967,6 +1308,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]": ...
     async def transcript(
@@ -975,6 +1317,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[TranscriptItem]": ...
     async def history(
@@ -983,6 +1326,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]": ...
 
@@ -992,6 +1336,7 @@ class ExecutionService(Protocol):
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]": ...
 
@@ -1025,6 +1370,8 @@ class SessionService(Protocol):
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
@@ -1039,7 +1386,11 @@ class SessionService(Protocol):
 
 class EvaluationService(Protocol):
     async def start(
-        self, binding_digest: str, request: StartEvaluationRequest
+        self,
+        binding_digest: str,
+        request: StartEvaluationRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> EvaluationHandle: ...
     async def inspect(
         self, evaluation_id: str, *, principal: Principal
@@ -1051,7 +1402,12 @@ class EvaluationService(Protocol):
         self, evaluation_id: str, *, principal: Principal
     ) -> RunSnapshot: ...
     async def replay(
-        self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest
+        self,
+        binding_digest: str,
+        snapshot_id: str,
+        request: ReplayEvaluationRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
 
 
@@ -1105,6 +1461,7 @@ class ArtifactService(Protocol):
 
 __all__ = [
     "ApprovalDecisionRequest",
+    "AttachmentFact",
     "ApprovalDecisionResult",
     "ApprovalService",
     "ApprovalView",
@@ -1161,5 +1518,7 @@ __all__ = [
     "TaskGraphRunEvent",
     "TranscriptItem",
     "UpdateSessionRequest",
+    "UsageReadCutoff",
+    "UsageSummary",
     "project_execution_view",
 ]

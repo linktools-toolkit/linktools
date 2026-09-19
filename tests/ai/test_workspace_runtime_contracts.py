@@ -190,7 +190,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     store = AssetStore(StorageOverlay(source))
     await store.initialize()
 
-    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
     assert [(item.kind, item.id) for item in frozen] == [
         ("agent", "default"),
@@ -211,7 +211,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         workspace.workspace_id,
         models=models,
         state=_workspace_runtime_state(workspace),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
@@ -229,7 +229,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
         state=_workspace_runtime_state(workspace),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
@@ -239,7 +239,7 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         workspace.workspace_id,
         models=models,
         state=_workspace_runtime_state(workspace),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         loaded = await runtime.session.get(
             created.session_id,

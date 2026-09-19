@@ -53,6 +53,7 @@ from ...core import (
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
+    TaskBindingSnapshot,
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
@@ -79,6 +80,53 @@ def _is_sha256(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _normalize_model_attachment_fact(
+    value: Mapping[str, JsonValue],
+) -> Mapping[str, JsonValue]:
+    expected = {
+        "fact",
+        "attachment_id",
+        "source",
+        "media_type",
+        "size",
+        "digest",
+        "content_key",
+        "position",
+        "call_id",
+    }
+    if set(value) != expected:
+        raise ValueError("model attachment fact fields are invalid")
+    fact = value.get("fact")
+    attachment_id = value.get("attachment_id")
+    source = value.get("source")
+    media_type = value.get("media_type")
+    size = value.get("size")
+    digest = value.get("digest")
+    content_key = value.get("content_key")
+    position = value.get("position")
+    call_id = value.get("call_id")
+    if (
+        fact not in {"accepted", "included_in_request"}
+        or not _is_sha256(attachment_id)
+        or not isinstance(source, str)
+        or not source
+        or media_type is not None
+        and (not isinstance(media_type, str) or not media_type)
+        or size is not None
+        and (isinstance(size, bool) or not isinstance(size, int) or size < 0)
+        or digest is not None
+        and not _is_sha256(digest)
+        or not _is_sha256(content_key)
+        or isinstance(position, bool)
+        or not isinstance(position, int)
+        or position < 0
+        or call_id is not None
+        and (not isinstance(call_id, str) or not call_id)
+    ):
+        raise ValueError("model attachment fact is invalid")
+    return dict(value)
 
 
 def _validate_tool_arguments_payload(
@@ -224,7 +272,7 @@ class StoredUserInput:
     view: Mapping[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
-        if self.codec not in {"text", "user-content-v1"}:
+        if self.codec not in {"text", "user-content-v1", "task-input-v1"}:
             raise ValueError("stored user input codec is invalid")
         if not isinstance(self.payload, StoredPayload):
             raise TypeError("stored user input payload is invalid")
@@ -447,6 +495,7 @@ class ModelInteractionRecord:
     error_code: str | None
     duration_ns: int
     usage: UsageMetrics | None
+    attachments: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -467,6 +516,11 @@ class ModelInteractionRecord:
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
         object.__setattr__(self, "model", dict(self.model))
+        object.__setattr__(
+            self,
+            "attachments",
+            tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,10 +639,10 @@ class ExecutionRecord:
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
-    mode: ExecutionMode
-    planning: bool
-    thinking: ThinkingValue
-    binding: AgentBindingSnapshot
+    mode: ExecutionMode | None
+    planning: bool | None
+    thinking: ThinkingValue | None
+    binding: AgentBindingSnapshot | TaskBindingSnapshot
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
@@ -599,16 +653,68 @@ class ExecutionRecord:
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
+    task_attempt: int = 0
+    task_deadline_at: datetime | None = None
+    task_next_attempt_at: datetime | None = None
+    dependency_hold_ids: tuple[str, ...] = ()
+    retention_closed: bool = False
+    started_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        mode = normalize_execution_mode(self.mode)
-        thinking = normalize_thinking(self.thinking)
-        if not isinstance(self.planning, bool):
-            raise TypeError("execution planning must be bool")
-        if mode == "plan" and not self.planning:
-            raise ValueError("plan mode requires planning")
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "thinking", thinking)
+        agent_binding = isinstance(self.binding, AgentBindingSnapshot)
+        task_binding = isinstance(self.binding, TaskBindingSnapshot)
+        if agent_binding == task_binding:
+            raise TypeError("execution binding snapshot is invalid")
+        if agent_binding:
+            mode = normalize_execution_mode(self.mode)
+            thinking = normalize_thinking(self.thinking)
+            if not isinstance(self.planning, bool):
+                raise TypeError("agent execution planning must be bool")
+            if mode == "plan" and not self.planning:
+                raise ValueError("plan mode requires planning")
+            if (
+                self.task_attempt != 0
+                or self.task_deadline_at is not None
+                or self.task_next_attempt_at is not None
+            ):
+                raise ValueError("agent execution cannot carry task attempt state")
+            object.__setattr__(self, "mode", mode)
+            object.__setattr__(self, "thinking", thinking)
+        else:
+            if self.mode is not None or self.planning is not None or self.thinking is not None:
+                raise ValueError("task execution cannot carry agent execution policy")
+            if (
+                self.session_id is not None
+                or self.memory_scope is not None
+                or self.conversation_step_run_id is not None
+                or self.parent_execution_id is not None
+                or self.parent_invocation_id is not None
+                or self.lineage_kind is not ExecutionLineageKind.RUN
+                or self.agent_run_sequence != 0
+            ):
+                raise ValueError("task execution carries agent-only state")
+            if (
+                isinstance(self.task_attempt, bool)
+                or not isinstance(self.task_attempt, int)
+                or self.task_attempt < 0
+                or self.task_attempt > self.binding.max_attempts
+            ):
+                raise ValueError("task execution attempt is invalid")
+            for value in (self.task_deadline_at, self.task_next_attempt_at):
+                if value is not None and value.tzinfo is None:
+                    raise ValueError("task execution timestamps must be timezone-aware")
+        holds = tuple(self.dependency_hold_ids)
+        if (
+            any(not isinstance(value, str) or not value.strip() for value in holds)
+            or len(set(holds)) != len(holds)
+            or tuple(sorted(holds)) != holds
+        ):
+            raise ValueError("execution dependency holds must be sorted and unique")
+        if not isinstance(self.retention_closed, bool):
+            raise TypeError("execution retention_closed must be bool")
+        if self.started_at is not None and self.started_at.tzinfo is None:
+            raise ValueError("execution started_at must be timezone-aware")
+        object.__setattr__(self, "dependency_hold_ids", holds)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
         if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
             if (
@@ -622,8 +728,6 @@ class ExecutionRecord:
                 raise ValueError("subagent execution lineage is invalid")
         elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
             raise ValueError("non-subagent execution cannot carry parent lineage")
-        if not isinstance(self.binding, AgentBindingSnapshot):
-            raise TypeError("execution binding snapshot is invalid")
         if not isinstance(self.principal_id, str) or not self.principal_id:
             raise TypeError("execution principal id is invalid")
         if not isinstance(self.principal_kind, str) or not self.principal_kind:
@@ -645,8 +749,24 @@ class ExecutionRecord:
         return self.binding.binding_digest
 
     @property
-    def agent_id(self) -> str:
-        return self.binding.agent_spec.id
+    def binding_kind(self) -> str:
+        return "agent" if isinstance(self.binding, AgentBindingSnapshot) else "task"
+
+    @property
+    def agent_id(self) -> str | None:
+        return (
+            self.binding.agent_spec.id
+            if isinstance(self.binding, AgentBindingSnapshot)
+            else None
+        )
+
+    @property
+    def task_type(self) -> str | None:
+        return (
+            self.binding.task_type
+            if isinstance(self.binding, TaskBindingSnapshot)
+            else None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1635,6 +1755,25 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_event_sequence: int,
         expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
+    async def transition_task_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_status: ExecutionStatus,
+        next_status: ExecutionStatus,
+        task_attempt: int,
+        task_deadline_at: datetime | None,
+        task_next_attempt_at: datetime | None,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
+        event_type: str,
+        payload: Mapping[str, JsonValue],
+        occurred_at: datetime,
+    ) -> ExecutionRecord: ...
+
     async def mark_start_unknown(
         self, commit: ExecutionStartUnknownCommit
     ) -> ExecutionRecord: ...
@@ -1670,6 +1809,26 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> ExecutionHistorySealRecord | None: ...
+    async def acquire_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> bool: ...
+    async def release_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> ExecutionRecord: ...
+    async def close_retention(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> bool: ...
     async def get_history_head(
         self,
         execution_id: str,
@@ -2020,6 +2179,23 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def scheduler_snapshot(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskGraphSnapshot: ...
+    async def recover_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        cancel_requested: bool = False,
+    ) -> TaskGraphView: ...
+    async def requeue_recovery(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        expected_fence: int,
+        execution_id: "str | None" = None,
+        next_attempt_at: "datetime | None" = None,
+    ) -> TaskGraphView: ...
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def claim(
         self,
@@ -2043,10 +2219,10 @@ class TaskRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
-        result_payload: StoredPayload | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord: ...
     async def fail(
         self,
@@ -2058,6 +2234,7 @@ class TaskRepository(RuntimeRepository, Protocol):
         execution_id: str | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord: ...
     async def list_nodes(
         self, graph_id: str, *, tenant_id: str

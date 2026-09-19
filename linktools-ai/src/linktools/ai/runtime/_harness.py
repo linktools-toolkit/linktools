@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Protocol, cast
 
@@ -34,8 +34,9 @@ from pydantic_ai_harness.step_persistence import (
 )
 
 from ..capability import ToolCallRetry
-from ..core import UsageMetrics
+from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
+from ._attachment import request_attachment_facts
 from ._journal import ModelRequestFact
 from ._message import project_transient_binary_content
 from ._model_interaction import (
@@ -223,11 +224,19 @@ class HarnessStepStoreAdapter:
         *,
         execution_id: str | None,
         step_run_id: str | None = None,
+        initial_attachments: Sequence[Mapping[str, JsonValue]] = (),
     ) -> None:
         self._store = store
         self._interaction_store = cast(_InteractionStagingStore, store)
         self._execution_id = execution_id
         self._step_run_id = step_run_id
+        self._initial_attachments = tuple(dict(value) for value in initial_attachments)
+        self._accepted_attachment_ids = {
+            attachment_id
+            for value in self._initial_attachments
+            if isinstance((attachment_id := value.get("attachment_id")), str)
+            and attachment_id
+        }
         self._effects: dict[tuple[str, str], ToolEffectRecord] = {}
         self._effects_lock = asyncio.Lock()
         self._interrupted_runs: set[str] = set()
@@ -240,6 +249,10 @@ class HarnessStepStoreAdapter:
         self._interaction_payloads: dict[int, str] = {}
         self._interaction_runs: dict[int, str] = {}
         self._interaction_models: dict[int, dict[str, str]] = {}
+        self._interaction_attachments: dict[
+            int,
+            tuple[Mapping[str, JsonValue], ...],
+        ] = {}
 
     async def register_run(self, record: HarnessRunRecord) -> None:
         value = RunRecord(
@@ -378,31 +391,6 @@ class HarnessStepStoreAdapter:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._interrupted_runs.add(run_id)
 
-    async def save_interrupted_snapshot(
-        self,
-        *,
-        run_id: str,
-        step_index: int,
-        messages: Sequence[ModelMessage],
-        conversation_id: str | None,
-        parent_run_id: str | None,
-        agent_name: str | None,
-    ) -> None:
-        values = list(messages)
-        await self._save_step_snapshot(
-            ContinuableSnapshot(
-                run_id=run_id,
-                step_index=step_index,
-                messages=values,
-                conversation_id=conversation_id,
-                parent_run_id=parent_run_id,
-                agent_name=agent_name,
-                state="interrupted",
-                idempotency_key=f"pause:{step_index}:{len(values)}",
-                context_messages=self.snapshot_context_messages(values),
-            )
-        )
-
     async def _append_step_event(self, event: StepEvent) -> None:
         if self._execution_id is None:
             await self._store.append_event(event)
@@ -521,6 +509,11 @@ class HarnessStepStoreAdapter:
             model,
             route_id=model_id,
         )
+        self._interaction_attachments[fact.request_sequence] = request_attachment_facts(
+            projected,
+            self._initial_attachments,
+            accepted_attachment_ids=self._accepted_attachment_ids,
+        )
 
     def finish_model_interaction(
         self,
@@ -540,6 +533,7 @@ class HarnessStepStoreAdapter:
         run_id = self._interaction_runs.pop(request_sequence)
         envelope_digest = self._interaction_payloads.pop(request_sequence)
         model_value = self._interaction_models.pop(request_sequence)
+        attachments = self._interaction_attachments.pop(request_sequence)
         if status != "SUCCEEDED":
             projection = build_inline_context_projection(
                 request_messages,
@@ -578,6 +572,7 @@ class HarnessStepStoreAdapter:
                 error_code,
                 duration_ns,
                 _usage_metrics(usage),
+                attachments,
             )
         )
 

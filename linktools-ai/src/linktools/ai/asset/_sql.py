@@ -44,6 +44,12 @@ from ..storage import (
     sql_unique,
 )
 from ._domain import AssetInfo, AssetKey, AssetRoot
+from ._receipt import (
+    batch_receipt_key_digest,
+    decode_asset_batch_receipt,
+    encode_asset_batch_receipt,
+    validate_batch_receipt_identity,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -158,6 +164,47 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
     sql_unique(changes, "key_digest", "entry_revision")
     sql_unique(changes, "namespace_digest", "store_revision", "key_digest")
     sql_audit_indexes(changes)
+    receipts = Table(
+        "ai_asset_batch_receipts",
+        metadata,
+        sql_id_column(),
+        Column(
+            "namespace_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 identity of the AssetStore namespace.",
+        ),
+        Column(
+            "idempotency_key_digest",
+            digest,
+            nullable=False,
+            comment="SHA-256 digest of the caller batch idempotency key.",
+        ),
+        Column(
+            "request_digest",
+            digest,
+            nullable=False,
+            comment="Canonical SHA-256 digest of the original batch request.",
+        ),
+        Column(
+            "store_revision",
+            BigInteger,
+            nullable=False,
+            comment="AssetStore revision committed by the original batch.",
+        ),
+        Column(
+            "payload_json",
+            JSON,
+            nullable=False,
+            comment="Versioned committed Asset batch receipt without input file bytes.",
+        ),
+        *sql_audit_columns(),
+        comment="Durable idempotency receipts for committed atomic AssetStore batches.",
+        **sql_table_options(),
+    )
+    sql_unique(receipts, "namespace_digest", "idempotency_key_digest")
+    sql_query_index(receipts, "namespace_digest", "store_revision")
+    sql_audit_indexes(receipts)
     return metadata
 
 
@@ -337,29 +384,98 @@ class SqlAssetBackend:
         return result.results[0]
 
     async def apply_batch(
-        self, changes: Sequence[StorageChange[AssetKey, bytes]], *, expected_revision: StorageRevision | None = None
+        self,
+        changes: Sequence[StorageChange[AssetKey, bytes]],
+        *,
+        expected_revision: StorageRevision | None = None,
+        idempotency_key: str | None = None,
+        request_digest: str | None = None,
     ) -> StorageBatchResult[AssetInfo, AssetKey]:
         self._ensure_ready()
+        validate_batch_receipt_identity(idempotency_key, request_digest)
         if len({change.key for change in changes}) != len(changes):
             raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
+        if idempotency_key is not None:
+            previous = await self.batch_result(idempotency_key)
+            if previous is not None:
+                if previous.request_digest != request_digest:
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                return previous
         for _ in range(_RETRY_LIMIT):
-            result = await self._apply_once(changes, expected_revision)
+            try:
+                result = await self._apply_once(
+                    changes,
+                    expected_revision,
+                    idempotency_key,
+                    request_digest,
+                )
+            except AIError as error:
+                if idempotency_key is None or error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                previous = await self.batch_result(idempotency_key)
+                if previous is not None:
+                    if previous.request_digest != request_digest:
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+                    return previous
+                continue
             if result is not None:
                 return result
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
+    async def batch_result(
+        self,
+        idempotency_key: str,
+    ) -> StorageBatchResult[AssetInfo, AssetKey] | None:
+        self._ensure_ready()
+        digest = batch_receipt_key_digest(idempotency_key)
+        table = self._metadata.tables["ai_asset_batch_receipts"]
+        session = self._context.sessions()
+        try:
+            from sqlalchemy import select
+
+            row = (
+                await session.execute(
+                    select(table.c.payload_json).where(
+                        table.c.namespace_digest == self._namespace_digest.hex(),
+                        table.c.idempotency_key_digest == digest,
+                    )
+                )
+            ).scalar_one_or_none()
+        finally:
+            await session.close()
+        if row is None:
+            return None
+        return decode_asset_batch_receipt(
+            row,
+            idempotency_key=idempotency_key,
+            expected_key_digest=digest,
+        )
+
     async def _apply_once(
-        self, changes: Sequence[StorageChange[AssetKey, bytes]], expected_revision: StorageRevision | None
+        self,
+        changes: Sequence[StorageChange[AssetKey, bytes]],
+        expected_revision: StorageRevision | None,
+        idempotency_key: str | None,
+        request_digest: str | None,
     ) -> StorageBatchResult[AssetInfo, AssetKey] | None:
         try:
-            return await self._apply_once_transaction(changes, expected_revision)
+            return await self._apply_once_transaction(
+                changes,
+                expected_revision,
+                idempotency_key,
+                request_digest,
+            )
         except AIError:
             raise
         except Exception as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     async def _apply_once_transaction(
-        self, changes: Sequence[StorageChange[AssetKey, bytes]], expected_revision: StorageRevision | None
+        self,
+        changes: Sequence[StorageChange[AssetKey, bytes]],
+        expected_revision: StorageRevision | None,
+        idempotency_key: str | None,
+        request_digest: str | None,
     ) -> StorageBatchResult[AssetInfo, AssetKey] | None:
         current_revision = await self._head()
         if expected_revision is not None and int(expected_revision.value) != current_revision:
@@ -376,42 +492,63 @@ class SqlAssetBackend:
             if any(_mutates(change, current[change.key]) for change in changes)
             else current_revision
         )
-        if next_revision == current_revision:
+        if next_revision == current_revision and idempotency_key is None:
             return StorageBatchResult(
                 StorageRevision(str(current_revision)),
                 True,
                 tuple(_unchanged(change, current[change.key], current_revision) for change in changes),
             )
         prepared: list[tuple[StorageChange[AssetKey, bytes], AssetInfo]] = []
-        for change in changes:
-            info = _next_info(change, current[change.key], next_revision, self._root)
-            if change.operation is StorageOperation.PUT:
-                content = bytes(change.value or b"")
-                inline = StoredPayload.inline_bytes(content)
-                if payload_fits_inline(inline, self._payload_policy):
-                    info = replace(info, content=inline)
-                else:
-                    object_key = _asset_object_key(self._namespace_digest, info.etag)
-                    await _put_asset_object(self._object_store, object_key, content)
-                    info = replace(
-                        info,
-                        content=StoredPayload.object(
-                            ObjectRef(
-                                self._object_store.store_id,
-                                object_key,
-                                info.etag,
-                                info.size,
-                            )
-                        ),
-                    )
-            prepared.append((change, info))
+        if next_revision != current_revision:
+            for change in changes:
+                info = _next_info(change, current[change.key], next_revision, self._root)
+                if change.operation is StorageOperation.PUT:
+                    content = bytes(change.value or b"")
+                    inline = StoredPayload.inline_bytes(content)
+                    if payload_fits_inline(inline, self._payload_policy):
+                        info = replace(info, content=inline)
+                    else:
+                        object_key = _asset_object_key(self._namespace_digest, info.etag)
+                        await _put_asset_object(self._object_store, object_key, content)
+                        info = replace(
+                            info,
+                            content=StoredPayload.object(
+                                ObjectRef(
+                                    self._object_store.store_id,
+                                    object_key,
+                                    info.etag,
+                                    info.size,
+                                )
+                            ),
+                        )
+                prepared.append((change, info))
         entries = self._metadata.tables["ai_asset_entries"]
         history = self._metadata.tables["ai_asset_changes"]
         heads = self._metadata.tables["ai_asset_heads"]
-        values: list[object] = []
-        async def execute(session) -> StorageBatchResult[AssetInfo, AssetKey] | None:
-            from sqlalchemy import func, update
+        receipts = self._metadata.tables["ai_asset_batch_receipts"]
 
+        async def execute(session) -> StorageBatchResult[AssetInfo, AssetKey] | None:
+            from sqlalchemy import func, select, update
+
+            if idempotency_key is not None:
+                digest = batch_receipt_key_digest(idempotency_key)
+                existing_payload = (
+                    await session.execute(
+                        select(receipts.c.payload_json).where(
+                            receipts.c.namespace_digest == self._namespace_digest.hex(),
+                            receipts.c.idempotency_key_digest == digest,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing_payload is not None:
+                    existing = decode_asset_batch_receipt(
+                        existing_payload,
+                        idempotency_key=idempotency_key,
+                        expected_key_digest=digest,
+                    )
+                    if existing.request_digest != request_digest:
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    return existing
             head_result = await session.execute(
                 update(heads)
                 .where(
@@ -425,44 +562,68 @@ class SqlAssetBackend:
             )
             if head_result.rowcount != 1:
                 return None
-            for change, info in prepared:
-                data = _info_data(info)
-                key_digest = _asset_key_digest(self._namespace_digest, change.key).hex()
+            values: list[
+                StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]
+            ] = []
+            if next_revision == current_revision:
+                values.extend(
+                    _unchanged(change, current[change.key], current_revision)
+                    for change in changes
+                )
+            else:
+                for change, info in prepared:
+                    data = _info_data(info)
+                    key_digest = _asset_key_digest(self._namespace_digest, change.key).hex()
+                    await session.execute(
+                        history.insert().values(
+                            key_digest=key_digest,
+                            entry_revision=info.revision.value,
+                            namespace_digest=self._namespace_digest.hex(),
+                            store_revision=next_revision,
+                            payload_json=data,
+                        )
+                    )
+                    await self._context.dialect.upsert(
+                        session,
+                        table=entries,
+                        values={
+                            "key_digest": key_digest,
+                            "namespace_digest": self._namespace_digest.hex(),
+                            "entry_revision": info.revision.value,
+                            "store_revision": next_revision,
+                            "payload_json": data,
+                        },
+                        set_values={
+                            "namespace_digest": self._namespace_digest.hex(),
+                            "entry_revision": info.revision.value,
+                            "store_revision": next_revision,
+                            "payload_json": data,
+                            "updated_at": func.current_timestamp(),
+                        },
+                        index_elements=("key_digest",),
+                    )
+                    values.append(_result(change, info, next_revision))
+            result = StorageBatchResult(
+                StorageRevision(str(next_revision)),
+                True,
+                tuple(values),
+                request_digest,
+                idempotency_key,
+            )
+            if idempotency_key is not None:
+                digest = batch_receipt_key_digest(idempotency_key)
                 await session.execute(
-                    history.insert().values(
-                        key_digest=key_digest,
-                        entry_revision=info.revision.value,
+                    receipts.insert().values(
                         namespace_digest=self._namespace_digest.hex(),
+                        idempotency_key_digest=digest,
+                        request_digest=request_digest,
                         store_revision=next_revision,
-                        payload_json=data,
+                        payload_json=encode_asset_batch_receipt(result),
                     )
                 )
-                await self._context.dialect.upsert(
-                    session,
-                    table=entries,
-                    values={
-                        "key_digest": key_digest,
-                        "namespace_digest": self._namespace_digest.hex(),
-                        "entry_revision": info.revision.value,
-                        "store_revision": next_revision,
-                        "payload_json": data,
-                    },
-                    set_values={
-                        "namespace_digest": self._namespace_digest.hex(),
-                        "entry_revision": info.revision.value,
-                        "store_revision": next_revision,
-                        "payload_json": data,
-                        "updated_at": func.current_timestamp(),
-                    },
-                    index_elements=("key_digest",),
-                )
-                values.append(_result(change, info, next_revision))
-            return StorageBatchResult(StorageRevision(str(next_revision)), True, tuple(values))
+            return result
 
-        result = await self._context.run_mutation(execute)
-        if result is None:
-            return None
-        return result
+        return await self._context.run_mutation(execute)
 
     async def _load_current(self, keys: Sequence[AssetKey]) -> dict[AssetKey, AssetInfo | None]:
         entries = self._metadata.tables["ai_asset_entries"]

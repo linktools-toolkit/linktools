@@ -14,10 +14,12 @@ from ._mcp import mcp_server_namespace, mcp_server_selector
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
+    FrozenSkillResourceSource,
     LocalSkillResourceSource,
     SkillLocation,
     SkillResourceSource,
     SkillResourceView,
+    SnapshotSkillResourceSource,
     SkillSourceRef,
     SkillSourceRegistry,
 )
@@ -50,6 +52,7 @@ __all__ = [
     "CapabilityLoadEntry",
     "CapabilityLoader",
     "AssetSkillResourceSource",
+    "FrozenSkillResourceSource",
     "SkillCapability",
     "SubagentCapability",
     "LocalSkillResourceSource",
@@ -63,6 +66,7 @@ __all__ = [
     "SkillLocation",
     "SkillResourceSource",
     "SkillResourceView",
+    "SnapshotSkillResourceSource",
     "SkillSourceRef",
     "SkillSourceRegistry",
     "SubagentDelegate",

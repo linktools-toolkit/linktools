@@ -83,7 +83,7 @@ async def test_composed_runtime_ask_enters_approval_wait(
         workspace.workspace_id,
         models=_ToolModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         execution = await runtime.agent("default").start("read a file")
         record = None

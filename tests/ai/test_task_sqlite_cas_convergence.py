@@ -114,7 +114,10 @@ async def _digest_run(
     payload = StoredPayload.inline_json(
         {"graph_id": invocation.graph_id, "node_id": invocation.node.node_id}
     )
-    return TaskNodeRunResult(payload.digest, result_payload=payload)
+    return TaskNodeRunResult(
+        payload.digest,
+        execution_id=f"execution-{invocation.graph_id}-{invocation.node.node_id}",
+    )
 
 
 async def _noop_cancel(
@@ -143,7 +146,7 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
         workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         agent = runtime.agent("default")
         for index in range(20):
@@ -229,7 +232,7 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         agent = runtime.agent("default")
         graph = TaskGraph(
@@ -294,7 +297,7 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         workspace.workspace_id,
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         agent = runtime.agent("default")
         graph = TaskGraph("timeout", (agent.task("blocked", "blocked"),))
@@ -344,7 +347,7 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
         await state.task.tasks.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-root",
             result_digest=canonical_sha256({"result": "done"}),
         )
         page = await state.task.admissions.list_recoverable_page(
@@ -686,7 +689,7 @@ async def test_task_complete_conflict_reads_back_without_retry(
             await repository.complete(
                 lease,
                 tenant_id="tenant",
-                execution_id=None,
+                execution_id="execution-root",
                 result_digest=canonical_sha256({"result": True}),
             )
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
@@ -700,11 +703,11 @@ async def test_task_complete_conflict_reads_back_without_retry(
 
 
 @pytest.mark.asyncio
-async def test_task_complete_readback_rejects_same_digest_different_payload(
+async def test_task_complete_readback_rejects_same_digest_different_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(
-        TaskGraph("complete-payload-race", (TaskNode("root"),))
+        TaskGraph("complete-execution-race", (TaskNode("root"),))
     )
     repository = state.task.tasks
     assert isinstance(repository, TaskRepositoryImpl)
@@ -715,21 +718,12 @@ async def test_task_complete_readback_rejects_same_digest_different_payload(
         owner="runner",
         lease_seconds=60,
     )
-    stored_payload = StoredPayload.inline_bytes(b"same payload bytes")
+    result_digest = canonical_sha256({"result": "same"})
     await repository.complete(
         lease,
         tenant_id="tenant",
-        execution_id=None,
-        result_digest=stored_payload.digest,
-        result_payload=stored_payload,
-    )
-    conflicting_payload = StoredPayload.object(
-        ObjectRef(
-            "alternate-store",
-            "alternate-key",
-            stored_payload.digest,
-            stored_payload.size,
-        )
+        execution_id="execution-a",
+        result_digest=result_digest,
     )
 
     async def conflict(operation):
@@ -742,9 +736,8 @@ async def test_task_complete_readback_rejects_same_digest_different_payload(
             await repository.complete(
                 lease,
                 tenant_id="tenant",
-                execution_id=None,
-                result_digest=stored_payload.digest,
-                result_payload=conflicting_payload,
+                execution_id="execution-b",
+                result_digest=result_digest,
             )
         assert raised.value.code is ErrorCode.TASK_RESULT_CONFLICT
     finally:
@@ -859,7 +852,7 @@ async def test_task_terminal_conflict_preserves_cancelled_state(
             await repository.complete(
                 lease,
                 tenant_id="tenant",
-                execution_id=None,
+                execution_id="execution-root",
                 result_digest=canonical_sha256({"result": True}),
             )
         assert raised.value.code is ErrorCode.TASK_TERMINAL_CONFLICT
@@ -889,7 +882,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
     await repository.complete(
         lease,
         tenant_id="tenant",
-        execution_id=None,
+        execution_id="execution-a",
         result_digest=canonical_sha256({"result": "a"}),
     )
     original = repository._mutate_with_event_retry

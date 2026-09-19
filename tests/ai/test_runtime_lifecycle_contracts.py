@@ -482,7 +482,11 @@ async def test_late_build_abort_stops_after_owner_cleanup_failure(
         state_close_calls += 1
         await original_state_close(current)
 
-    monkeypatch.setattr(factory, "_restore_recovery_bindings", fail_restore)
+    monkeypatch.setattr(
+        factory.DefaultTaskGraphService,
+        "recover_pending",
+        fail_restore,
+    )
     monkeypatch.setattr(
         factory.DefaultTaskGraphService,
         "drain_owned_finalizers",

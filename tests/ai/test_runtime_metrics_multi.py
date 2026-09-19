@@ -104,7 +104,7 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
                 workspace.workspace_id,
                 models=_Models(),  # type: ignore[arg-type]
                 state=state,
-                capabilities=(CapabilityGroup.from_workspace(workspace),),
+                capabilities=(CapabilityGroup("workspace", workspace=workspace),),
                 metrics=metrics,
             ) as runtime:
                 result = await runtime.agent("default").run(

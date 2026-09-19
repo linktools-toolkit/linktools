@@ -14,7 +14,12 @@ from pydantic_ai.messages import BinaryContent, ModelMessage, ModelResponse
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
-from ..core import JsonValue, UsageMetrics, canonical_json_bytes
+from ..core import (
+    JsonValue,
+    UsageMetrics,
+    canonical_json_bytes,
+    normalize_json_value,
+)
 from ..storage import StoredPayload
 from ._message import encode_model_messages
 from .state._contracts import (
@@ -94,6 +99,7 @@ class StagedModelInteraction:
     error_code: str | None
     duration_ns: int
     usage: UsageMetrics | None
+    attachments: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -124,6 +130,18 @@ class StagedModelInteraction:
         ):
             raise TypeError("staged response context is invalid")
         object.__setattr__(self, "model", dict(self.model))
+        normalized_attachments: list[Mapping[str, JsonValue]] = []
+        for attachment in self.attachments:
+            if not isinstance(attachment, Mapping):
+                raise TypeError("staged model attachment fact is invalid")
+            try:
+                normalized = normalize_json_value(dict(attachment))
+            except (TypeError, ValueError) as error:
+                raise ValueError("staged model attachment fact is invalid") from error
+            if not isinstance(normalized, dict):
+                raise ValueError("staged model attachment fact is invalid")
+            normalized_attachments.append(normalized)
+        object.__setattr__(self, "attachments", tuple(normalized_attachments))
 
 
 PayloadIntern = Callable[[bytes], tuple[str, int]]

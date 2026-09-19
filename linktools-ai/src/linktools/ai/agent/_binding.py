@@ -110,6 +110,7 @@ class AgentBindingSnapshot:
     output_mode: OutputMode
     output_schema: Mapping[str, JsonValue]
     workspace_ref: "Mapping[str, JsonValue] | None" = None
+    subagent_bindings: "tuple[AgentBindingSnapshot, ...]" = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.agent_spec, AgentSpec) or self.output_mode not in {"text", "structured"}:
@@ -147,10 +148,42 @@ class AgentBindingSnapshot:
         subagents = tuple(sorted(self.subagents, key=lambda item: item.id))
         if subagents != self.subagents or len({item.id for item in subagents}) != len(subagents):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        child_bindings = tuple(
+            sorted(
+                self.subagent_bindings,
+                key=lambda item: item.agent_spec.id,
+            )
+        )
+        if (
+            child_bindings != self.subagent_bindings
+            or any(
+                not isinstance(item, AgentBindingSnapshot)
+                or item.subagents
+                or item.subagent_bindings
+                for item in child_bindings
+            )
+            or len({item.agent_spec.id for item in child_bindings})
+            != len(child_bindings)
+            or (
+                child_bindings
+                and tuple(item.agent_spec.id for item in child_bindings)
+                != self.subagent_ids
+            )
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @property
     def subagent_ids(self) -> "tuple[str, ...]":
         return tuple(item.id for item in self.subagents)
+
+    @property
+    def subagent_binding_map(
+        self,
+    ) -> "Mapping[str, AgentBindingSnapshot]":
+        return {
+            item.agent_spec.id: item
+            for item in self.subagent_bindings
+        }
 
     def required_workspace_id(self, namespace: str) -> "str | None":
         resolved_namespace = validate_persistence_namespace(namespace)
@@ -179,6 +212,11 @@ class AgentBindingSnapshot:
         }
         if self.workspace_ref is not None:
             payload["workspace_ref"] = dict(self.workspace_ref)
+        if self.subagent_bindings:
+            payload["subagent_bindings"] = [
+                item.to_payload()
+                for item in self.subagent_bindings
+            ]
         return payload
 
     @classmethod
@@ -206,6 +244,13 @@ class AgentBindingSnapshot:
                     None
                     if "workspace_ref" not in value
                     else _normalize_mapping(value["workspace_ref"])
+                ),
+                subagent_bindings=(
+                    ()
+                    if "subagent_bindings" not in value
+                    else _decode_subagent_bindings(
+                        value["subagent_bindings"]
+                    )
                 ),
             )
         except AIError:
@@ -271,6 +316,17 @@ def _definition_selected_pins(
             candidate.semantic_contract,
         )
         for candidate in candidates
+    )
+
+
+def _decode_subagent_bindings(
+    value: object,
+) -> "tuple[AgentBindingSnapshot, ...]":
+    if not isinstance(value, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return tuple(
+        AgentBindingSnapshot.from_payload(item)
+        for item in value
     )
 
 

@@ -148,6 +148,8 @@ class StorageBatchResult(Generic[InfoT, KeyT]):
     store_revision: StorageRevision
     atomic: bool
     results: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT], ...]"
+    request_digest: "str | None" = None
+    idempotency_key: "str | None" = None
 
 
 class MetadataLoadMode(str, Enum):
@@ -246,7 +248,14 @@ class BatchStorageWriter(Protocol[KeyT, ValueT, InfoT]):
         changes: 'Sequence[StorageChange[KeyT, ValueT]]',
         *,
         expected_revision: 'StorageRevision | None' = None,
+        idempotency_key: 'str | None' = None,
+        request_digest: 'str | None' = None,
     ) -> 'StorageBatchResult[InfoT, KeyT]': ...
+
+    async def batch_result(
+        self,
+        idempotency_key: str,
+    ) -> 'StorageBatchResult[InfoT, KeyT] | None': ...
 
 
 @runtime_checkable

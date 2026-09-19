@@ -30,7 +30,7 @@ async def run(project: Path) -> object:
         workspace.workspace_id,
         models=models,
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace), application),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         result = await runtime.agent("writer").run("Say hello.")
         return result.output

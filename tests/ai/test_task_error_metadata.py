@@ -58,8 +58,7 @@ def test_agent_task_background_failure_preserves_metadata() -> None:
 
 def test_runtime_task_runner_background_failure_preserves_metadata() -> None:
     runner = object.__new__(RuntimeTaskNodeRunner)
-    runner._background_failure = _source_error()
-    runner._agent = SimpleNamespace(background_failure=None)
+    runner._agent = SimpleNamespace(background_failure=_source_error())
 
     failure = runner.background_failure
     assert failure is not None

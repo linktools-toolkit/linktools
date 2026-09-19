@@ -22,7 +22,7 @@ async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
         workspace.workspace_id,
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         session = await runtime.agent("default").create_session("session")
         first = await session.run("hello", timeout_seconds=10)
@@ -58,7 +58,7 @@ async def test_in_memory_fork_survives_parent_close(tmp_path: Path) -> None:
         workspace.workspace_id,
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         parent = await runtime.agent("default").create_session("parent")
         parent_turn = await parent.run("before fork", timeout_seconds=10)
