@@ -8,13 +8,16 @@ import pytest
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
+    Page,
     Principal,
     TaskStatus,
 )
 from linktools.ai.runtime import Execution, Runtime, TaskGraphRun, TaskGraphRunEvent
 from linktools.ai.runtime.service_api import (
+    ExecutionEvent,
     ExecutionStreamEvent,
     ExecutionTreeEvent,
+    ExecutionView,
 )
 from linktools.ai.task import TaskEvent, TaskEventType
 
@@ -167,6 +170,159 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
         execution[0].event.event.event_type
         == ExecutionEventType.EXECUTION_SUCCEEDED.value
     )
+
+
+@pytest.mark.asyncio
+async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
+    now = datetime.now(timezone.utc)
+
+    class ReplayGraphService:
+        async def snapshot(self, graph_id: str, *, principal: Principal):
+            del principal
+            assert graph_id == "graph"
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "graph_id": "graph",
+                    "status": TaskStatus.RUNNING,
+                    "event_sequence": 2,
+                    "node_states": (
+                        type(
+                            "State",
+                            (),
+                            {
+                                "node_id": "node",
+                                "status": TaskStatus.WAITING,
+                                "result_digest": None,
+                                "execution_id": "execution",
+                                "error_code": None,
+                                "error_digest": None,
+                            },
+                        )(),
+                    ),
+                },
+            )()
+
+        async def list_events(
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+            limit: int = 100,
+        ):
+            del principal, limit
+            assert graph_id == "graph"
+            values = (
+                TaskEvent(
+                    1,
+                    graph_id,
+                    1,
+                    TaskEventType.GRAPH_ADMITTED,
+                    now,
+                    TaskStatus.PENDING,
+                ),
+                TaskEvent(
+                    1,
+                    graph_id,
+                    2,
+                    TaskEventType.NODE_CHANGED,
+                    now,
+                    TaskStatus.WAITING,
+                    TaskStatus.RUNNING,
+                    "node",
+                    None,
+                    1,
+                    "execution",
+                ),
+                TaskEvent(
+                    1,
+                    graph_id,
+                    3,
+                    TaskEventType.GRAPH_CHANGED,
+                    now,
+                    TaskStatus.SUCCEEDED,
+                    TaskStatus.RUNNING,
+                ),
+            )
+            return Page(tuple(value for value in values if value.sequence > after_sequence))
+
+    class ReplayExecutionService:
+        async def inspect(self, execution_id: str, *, principal: Principal):
+            del principal
+            assert execution_id == "execution"
+            return ExecutionView(
+                "execution",
+                "agent",
+                TaskStatus.RUNNING,  # type: ignore[arg-type]
+                ExecutionLineageKind.RUN,
+                None,
+                "execution",
+                None,
+                event_sequence=2,
+            )
+
+        async def list_children(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+        ):
+            del principal
+            assert execution_id == "execution"
+            return ()
+
+    class ReplayEventService:
+        async def list(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+            limit: int = 100,
+        ):
+            del principal, limit
+            assert execution_id == "execution"
+            values = (
+                ExecutionEvent(execution_id, 1, "EXECUTION_STARTED", {"raw": "one"}),
+                ExecutionEvent(execution_id, 2, "EXECUTION_SUCCEEDED", {"raw": "two"}),
+                ExecutionEvent(execution_id, 3, "LATE_EVENT", {"raw": "late"}),
+            )
+            return Page(tuple(value for value in values if value.sequence > after_sequence))
+
+    runtime = type(
+        "ReplayRuntime",
+        (),
+        {
+            "graph": ReplayGraphService(),
+            "execution": ReplayExecutionService(),
+            "event": ReplayEventService(),
+        },
+    )()
+    run = TaskGraphRun(
+        runtime,
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+    observed: list[TaskGraphRunEvent] = []
+
+    result = await run.replay(observed.append)
+
+    assert result.status is TaskStatus.WAITING
+    assert [
+        event.event.sequence
+        for event in observed
+        if isinstance(event.event, TaskEvent)
+    ] == [1, 2]
+    execution_events = [
+        event.event.event
+        for event in observed
+        if isinstance(event.event, ExecutionTreeEvent)
+    ]
+    assert [event.durable_sequence for event in execution_events] == [1, 2]
+    assert all(event.payload == {} for event in execution_events)
 
 
 def test_runtime_does_not_expose_stream_tree() -> None:

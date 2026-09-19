@@ -99,6 +99,48 @@ async def test_task_admission_starts_contiguous_durable_event_history() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_snapshot_captures_event_high_water_with_state() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="task-event-snapshot-cutoff", tenant_id="tenant")
+    try:
+        repository = state.task.tasks
+        graph = TaskGraph("event-snapshot-cutoff", (TaskNode("node"),))
+        await admit_graph(state, graph)
+
+        admitted = await repository.snapshot_graph(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert admitted is not None
+        assert admitted.event_sequence == 1
+
+        await repository.claim(
+            graph.graph_id,
+            "node",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        running = await repository.snapshot_graph(
+            graph.graph_id,
+            tenant_id="tenant",
+        )
+        assert running is not None
+        assert running.node_states[0].status is TaskStatus.RUNNING
+        assert running.event_sequence == 2
+
+        events = await repository.list_events(
+            graph.graph_id,
+            tenant_id="tenant",
+            after_sequence=0,
+            limit=100,
+        )
+        assert events.items[-1].sequence == running.event_sequence
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_task_expansion_commits_topology_and_events_atomically() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-event-expansion", tenant_id="tenant")
