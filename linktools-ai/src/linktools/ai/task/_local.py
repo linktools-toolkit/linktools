@@ -67,6 +67,24 @@ async def _noop_execution_hold(*args: object, **kwargs: object) -> None:
 
 
 @runtime_checkable
+class _TaskDependencyPreparation(Protocol):
+    async def prepare_node(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+        principal: Principal,
+    ) -> None: ...
+
+    async def release_graph_dependencies(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        tenant_id: str,
+    ) -> None: ...
+
+
+@runtime_checkable
 class _RunnerBackgroundOwner(Protocol):
     @property
     def pending_background_tasks(self) -> "tuple[asyncio.Task[object], ...]": ...
@@ -882,10 +900,11 @@ class LocalTaskGraphLauncher:
                 if view.status is TaskStatus.RECOVERY_REQUIRED:
                     return
                 if view.status in _TERMINAL:
-                    await self._runner.release_graph_dependencies(
-                        snapshot,
-                        tenant_id=tenant_id,
-                    )
+                    if isinstance(self._runner, _TaskDependencyPreparation):
+                        await self._runner.release_graph_dependencies(
+                            snapshot,
+                            tenant_id=tenant_id,
+                        )
                     if self._metric_projector is not None:
                         self._metric_projector.trigger(
                             request.graph_id,
@@ -947,11 +966,17 @@ class LocalTaskGraphLauncher:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if state.node_id in used or not _runnable(state, now):
                         continue
-                    await self._runner.prepare_node(
-                        node,
-                        graph_id=request.graph_id,
-                        principal=request.principal,
-                    )
+                    if isinstance(
+                        self._runner,
+                        _TaskDependencyPreparation,
+                    ):
+                        await self._runner.prepare_node(
+                            node,
+                            graph_id=request.graph_id,
+                            principal=request.principal,
+                        )
+                    elif node.input_refs:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                     try:
                         lease = await self._repository.claim(
                             request.graph_id,
