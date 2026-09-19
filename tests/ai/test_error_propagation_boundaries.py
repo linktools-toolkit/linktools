@@ -217,8 +217,14 @@ def test_subagent_background_failure_preserves_classified_ai_error() -> None:
 @pytest.mark.asyncio
 async def test_recovery_reconcile_defers_unavailable_definition_per_execution() -> None:
     checkpoints = (
-        SimpleNamespace(execution_id="unavailable"),
-        SimpleNamespace(execution_id="available"),
+        SimpleNamespace(
+            execution_id="unavailable",
+            state=RecoveryCheckpointState.ADMITTED,
+        ),
+        SimpleNamespace(
+            execution_id="available",
+            state=RecoveryCheckpointState.ADMITTED,
+        ),
     )
 
     class Port:
@@ -245,7 +251,10 @@ async def test_recovery_reconcile_defers_unavailable_definition_per_execution() 
 
 @pytest.mark.asyncio
 async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
-    checkpoint = SimpleNamespace(execution_id="execution")
+    checkpoint = SimpleNamespace(
+        execution_id="execution",
+        state=RecoveryCheckpointState.ADMITTED,
+    )
 
     class Port:
         async def _list_recoverable_checkpoints(self, *, cursor: str | None):
