@@ -1042,8 +1042,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         )
         if result.status is not ExecutionStatus.SUCCEEDED:
             raise _execution_failure(result)
-        if result.output is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._complete_output(
             node,
             result.output,

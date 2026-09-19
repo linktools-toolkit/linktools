@@ -196,7 +196,6 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
             tenant_id="tenant",
             execution_id="execution",
             result_digest=payload.digest,
-            result_payload=payload,
             graph_id=graph.graph_id,
             node_id="node",
         )
@@ -212,7 +211,8 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
             ("node",),
             tenant_id="tenant",
         )
-        assert results["node"].payload == payload
+        assert results["node"].execution_id == "execution"
+        assert results["node"].payload is None
     finally:
         await state.close()
 
@@ -399,7 +399,7 @@ class _BindingRunner:
         self.entered.set()
         await self.release.wait()
         payload = StoredPayload.inline_json({"done": True})
-        return TaskNodeRunResult(payload.digest, result_payload=payload)
+        return TaskNodeRunResult(payload.digest)
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         del invocation
@@ -507,7 +507,6 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
                 return TaskNodeRunResult(
                     payload.digest,
                     execution_id=execution_id,
-                    result_payload=payload,
                 )
 
             async def cancel(self, invocation: TaskNodeInvocation) -> None:
