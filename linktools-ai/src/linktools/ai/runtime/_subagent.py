@@ -8,7 +8,7 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ..agent import AgentCatalog, AgentCompiler
+from ..agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from ..capability import SubagentDelegate
 from ..core import (
     ExecutionMode,
@@ -82,11 +82,17 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         refs: "tuple[SubagentRef, ...]",
+        binding: AgentBindingSnapshot,
         mode: ExecutionMode,
     ) -> SubagentDelegate:
+        if not isinstance(binding, AgentBindingSnapshot):
+            raise TypeError("binding must be AgentBindingSnapshot")
         allowed = {ref.id: ref for ref in refs}
         if len(allowed) != len(refs):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        frozen_children = dict(binding.subagent_binding_map)
+        if frozen_children and set(frozen_children) != set(allowed):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         async def dispatch(
             ref: SubagentRef,
@@ -104,6 +110,7 @@ class SubagentDispatcher:
                 memory_scope=memory_scope,
                 principal=principal,
                 ref=ref,
+                frozen_binding=frozen_children.get(ref.id),
                 mode=mode,
                 user_prompt=task,
                 files=files,
@@ -120,6 +127,7 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         ref: SubagentRef,
+        frozen_binding: "AgentBindingSnapshot | None" = None,
         mode: ExecutionMode,
         user_prompt: str,
         files: Sequence[str] = (),
@@ -153,6 +161,7 @@ class SubagentDispatcher:
             memory_scope=memory_scope,
             principal=principal,
             ref=ref,
+            frozen_binding=frozen_binding,
             child_mode=child_mode,
             user_prompt=user_prompt,
             files=files,
@@ -176,6 +185,7 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
         ref: SubagentRef,
+        frozen_binding: "AgentBindingSnapshot | None",
         child_mode: ExecutionMode,
         user_prompt: str,
         files: tuple[str, ...],
@@ -196,10 +206,18 @@ class SubagentDispatcher:
         )
         if child is not None:
             return child
-        definition = self._catalog.root_definition(ref.id)
-        binding = self._catalog.register_binding(
-            self._compiler.bind_subagent(definition)
-        )
+        if frozen_binding is None:
+            definition = self._catalog.root_definition(ref.id)
+            child_binding = self._catalog.register_binding(
+                self._compiler.bind_subagent(definition)
+            )
+        else:
+            if frozen_binding.agent_spec.id != ref.id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            child_binding = self._catalog.register_binding(
+                self._compiler.restore(frozen_binding)
+            )
+            definition = child_binding.definition
         child_planning = True if child_mode == "plan" else definition.spec.planning
         request = ExecutionRequest(
             user_prompt=user_prompt,
@@ -213,7 +231,7 @@ class SubagentDispatcher:
         )
         try:
             return await self._execution.start_subagent(
-                binding.digest,
+                child_binding.digest,
                 request,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,

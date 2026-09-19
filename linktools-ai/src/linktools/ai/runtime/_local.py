@@ -150,6 +150,7 @@ class _SubagentDispatcher(Protocol):
         memory_scope: "str | None",
         principal: Principal,
         refs: "tuple[SubagentRef, ...]",
+        binding: AgentBindingSnapshot,
         mode: ExecutionMode,
     ) -> SubagentDelegate: ...
 
@@ -2944,6 +2945,7 @@ class LocalExecutionBackend:
                                 memory_scope=current.memory_scope,
                                 principal=request.principal,
                                 refs=subagent_refs,
+                                binding=binding.snapshot,
                                 mode=current.mode,
                             )
                         ),
