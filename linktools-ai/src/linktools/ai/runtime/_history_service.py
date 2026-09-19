@@ -135,14 +135,32 @@ class DefaultExecutionHistoryService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[ExecutionTraceItem]:
         record = await self._authorize(execution_id, principal)
-        return await self._reader.trace(
+        inner_cursor = self._decode_content_cursor(
+            cursor,
+            execution_id=execution_id,
+            tenant_id=record.tenant_id,
+            query_kind="trace",
+            include_content=include_content,
+        )
+        page = await self._reader.trace(
             execution_id,
             tenant_id=record.tenant_id,
-            cursor=cursor,
+            cursor=inner_cursor,
             limit=limit,
+        )
+        return Page(
+            page.items,
+            self._encode_content_cursor(
+                page.next_cursor,
+                execution_id=execution_id,
+                tenant_id=record.tenant_id,
+                query_kind="trace",
+                include_content=include_content,
+            ),
         )
 
     async def transcript(
@@ -151,14 +169,45 @@ class DefaultExecutionHistoryService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[TranscriptItem]:
         record = await self._authorize(execution_id, principal)
-        return await self._reader.transcript(
+        inner_cursor = self._decode_content_cursor(
+            cursor,
+            execution_id=execution_id,
+            tenant_id=record.tenant_id,
+            query_kind="transcript",
+            include_content=include_content,
+        )
+        page = await self._reader.transcript(
             execution_id,
             tenant_id=record.tenant_id,
-            cursor=cursor,
+            cursor=inner_cursor,
             limit=limit,
+        )
+        items = (
+            page.items
+            if include_content
+            else tuple(
+                TranscriptItem(
+                    item.execution_id,
+                    item.sequence,
+                    None,
+                    False,
+                )
+                for item in page.items
+            )
+        )
+        return Page(
+            items,
+            self._encode_content_cursor(
+                page.next_cursor,
+                execution_id=execution_id,
+                tenant_id=record.tenant_id,
+                query_kind="transcript",
+                include_content=include_content,
+            ),
         )
 
     async def history(
@@ -167,14 +216,48 @@ class DefaultExecutionHistoryService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[ExecutionHistoryItem]:
         record = await self._authorize(execution_id, principal)
-        return await self._reader.history(
+        inner_cursor = self._decode_content_cursor(
+            cursor,
+            execution_id=execution_id,
+            tenant_id=record.tenant_id,
+            query_kind="history",
+            include_content=include_content,
+        )
+        page = await self._reader.history(
             execution_id,
             tenant_id=record.tenant_id,
-            cursor=cursor,
+            cursor=inner_cursor,
             limit=limit,
+        )
+        items = (
+            page.items
+            if include_content
+            else tuple(
+                ExecutionHistoryItem(
+                    item.execution_id,
+                    item.sequence,
+                    item.item_kind,
+                    None,
+                    item.tool_name,
+                    item.tool_call_id,
+                    False,
+                )
+                for item in page.items
+            )
+        )
+        return Page(
+            items,
+            self._encode_content_cursor(
+                page.next_cursor,
+                execution_id=execution_id,
+                tenant_id=record.tenant_id,
+                query_kind="history",
+                include_content=include_content,
+            ),
         )
 
     async def model_interactions(
@@ -183,14 +266,132 @@ class DefaultExecutionHistoryService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[ModelInteractionItem]:
         record = await self._authorize(execution_id, principal)
-        return await self._reader.model_interactions(
+        inner_cursor = self._decode_content_cursor(
+            cursor,
+            execution_id=execution_id,
+            tenant_id=record.tenant_id,
+            query_kind="model_interactions",
+            include_content=include_content,
+        )
+        page = await self._reader.model_interactions(
             execution_id,
             tenant_id=record.tenant_id,
-            cursor=cursor,
+            cursor=inner_cursor,
             limit=limit,
+        )
+        items = (
+            page.items
+            if include_content
+            else tuple(
+                ModelInteractionItem(
+                    item.execution_id,
+                    item.segment_sequence,
+                    item.depth,
+                    item.request_sequence,
+                    item.purpose,
+                    item.step_index,
+                    item.output_retry_index,
+                    item.model,
+                    {},
+                    None,
+                    item.status,
+                    item.error_code,
+                    item.duration_ns,
+                    item.usage,
+                    False,
+                )
+                for item in page.items
+            )
+        )
+        return Page(
+            items,
+            self._encode_content_cursor(
+                page.next_cursor,
+                execution_id=execution_id,
+                tenant_id=record.tenant_id,
+                query_kind="model_interactions",
+                include_content=include_content,
+            ),
+        )
+
+    def _content_filter_digest(
+        self,
+        execution_id: str,
+        query_kind: str,
+        include_content: bool,
+    ) -> str:
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return canonical_sha256(
+            {
+                "execution_id": execution_id,
+                "query_kind": query_kind,
+                "include_content": include_content,
+            }
+        )
+
+    def _decode_content_cursor(
+        self,
+        cursor: "str | None",
+        *,
+        execution_id: str,
+        tenant_id: str,
+        query_kind: str,
+        include_content: bool,
+    ) -> "str | None":
+        if cursor is None:
+            self._content_filter_digest(
+                execution_id,
+                query_kind,
+                include_content,
+            )
+            return None
+        signer = self._cursor_signer
+        if signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        payload = decode_runtime_cursor(
+            cursor,
+            signer,
+            tenant_id=tenant_id,
+            resource_kind=f"EXECUTION_{query_kind.upper()}",
+            filter_digest=self._content_filter_digest(
+                execution_id,
+                query_kind,
+                include_content,
+            ),
+        )
+        if payload.revision != 0:
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        return payload.position
+
+    def _encode_content_cursor(
+        self,
+        cursor: "str | None",
+        *,
+        execution_id: str,
+        tenant_id: str,
+        query_kind: str,
+        include_content: bool,
+    ) -> "str | None":
+        if cursor is None:
+            return None
+        signer = self._cursor_signer
+        if signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return encode_runtime_cursor(
+            signer,
+            tenant_id=tenant_id,
+            resource_kind=f"EXECUTION_{query_kind.upper()}",
+            filter_digest=self._content_filter_digest(
+                execution_id,
+                query_kind,
+                include_content,
+            ),
+            position=cursor,
         )
 
     async def _authorize(
