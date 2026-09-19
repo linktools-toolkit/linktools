@@ -36,7 +36,11 @@ from ._agent_executor import (
     LiveDelta,
 )
 from ._harness_memory import select_harness_memory_tools
-from ._input import CanonicalUserInput, ExecutionInputMaterializer
+from ._input import (
+    CanonicalUserInput,
+    ExecutionInputMaterializer,
+    stored_input_attachment_views,
+)
 from ._plan import RuntimePlanStore
 from ..core import (
     ExecutionEventType,
@@ -2916,6 +2920,9 @@ class LocalExecutionBackend:
                         limits=self._limits,
                         mcp_cwd=self._mcp_cwd,
                         user_prompt=run_user_prompt,
+                        initial_attachments=stored_input_attachment_views(
+                            current.stored_user_input
+                        ),
                         history=history,
                         conversation_id=conversation_id,
                         step_store=self._steps,
