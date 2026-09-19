@@ -62,7 +62,6 @@ from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeState
-from .state._contracts import RecoveryCheckpointState
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -709,7 +708,6 @@ async def _build_local_components(
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
-        await _preflight_recovery_bindings(compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
         await graph_service.recover_pending()
@@ -780,52 +778,6 @@ def _borrowed_runtime_history(
             runtime_grant_key(state.namespace),
         ),
     )
-
-
-async def _preflight_recovery_bindings(
-    compiler: AgentCompiler,
-    state: RuntimeState,
-    *,
-    tenant_id: str,
-) -> None:
-    cursor: str | None = None
-    while True:
-        page = await state.recovery.checkpoints.list_recoverable_page(
-            tenant_id=tenant_id,
-            cursor=cursor,
-            limit=128,
-        )
-        for checkpoint in page.items:
-            if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution = await state.execution.executions.get(
-                checkpoint.execution_id,
-                tenant_id=tenant_id,
-            )
-            if execution is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                binding = compiler.restore(execution.binding)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    raise
-                if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
-                    if error.safe_details.get("reason") == "workspace_mismatch":
-                        raise
-                    _logger.warning(
-                        "recovery binding unavailable: execution=%s",
-                        checkpoint.execution_id,
-                    )
-                    continue
-                raise
-            if (
-                binding.digest != execution.binding_digest
-                or binding.snapshot != execution.binding
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if page.next_cursor is None:
-            return
-        cursor = page.next_cursor
 
 
 class _RuntimeCloseCoordinator:
