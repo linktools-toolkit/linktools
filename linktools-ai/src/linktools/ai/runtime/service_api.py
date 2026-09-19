@@ -962,6 +962,7 @@ class ExecutionTreeEvent:
     parent_invocation_id: str | None
     depth: int
     event: ExecutionStreamEvent
+    cursor: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -985,6 +986,10 @@ class ExecutionTreeEvent:
             raise ValueError("execution tree event depth must be zero or one")
         if not isinstance(self.event, ExecutionStreamEvent):
             raise TypeError("execution tree event requires an execution event")
+        if self.cursor is not None and (
+            not isinstance(self.cursor, str) or not self.cursor
+        ):
+            raise ValueError("execution tree event cursor is invalid")
         if self.execution_id != self.event.execution_id:
             raise ValueError("execution tree event identity does not match execution")
         if self.depth == 0:
@@ -1007,6 +1012,7 @@ class TaskGraphRunEvent:
     graph_id: str
     node_id: "str | None"
     event: "TaskEvent | ExecutionTreeEvent"
+    cursor: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -1015,6 +1021,10 @@ class TaskGraphRunEvent:
             not isinstance(self.node_id, str) or not self.node_id.strip()
         ):
             raise ValueError("task graph run event node id is invalid")
+        if self.cursor is not None and (
+            not isinstance(self.cursor, str) or not self.cursor
+        ):
+            raise ValueError("task graph run event cursor is invalid")
         if isinstance(self.event, TaskEvent):
             if (
                 self.event.graph_id != self.graph_id
