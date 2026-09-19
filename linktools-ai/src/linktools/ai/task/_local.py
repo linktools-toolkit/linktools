@@ -1315,6 +1315,14 @@ class LocalTaskGraphLauncher:
                 raise
             except BaseException as error:  # noqa: BLE001
                 await _stop_heartbeat(heartbeat_stop, heartbeat)
+                if not isinstance(error, asyncio.CancelledError):
+                    _logger.error(
+                        "task node runner failed: graph=%s node=%s type=%s",
+                        graph_id,
+                        node.node_id,
+                        type(error).__name__,
+                        exc_info=True,
+                    )
                 if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
                     await self._defer_recovery(
                         run,
