@@ -498,6 +498,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
+            skill_snapshot_store=state.object_store(RuntimeDomain.TASK),
             metrics=metric_buffer,
         )
     except BaseException:

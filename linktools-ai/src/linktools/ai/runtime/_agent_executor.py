@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
+from tempfile import TemporaryDirectory
 from collections.abc import (
     AsyncIterable,
     Awaitable,
@@ -85,6 +87,7 @@ from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..capability import (
     AgentContext,
     CapabilityContribution,
+    FrozenSkillResourceSource,
     SkillCapability,
     SkillSourceRegistry,
     SubagentCapability,
@@ -112,6 +115,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ..storage import ObjectRef, ObjectStore
 from ..workspace import LocalSandbox, SandboxResource, SandboxSession, Workspace
 
 if TYPE_CHECKING:
@@ -239,11 +243,13 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
+        skill_snapshot_store: ObjectStore | None = None,
         metrics: MetricRecorder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
+        self._skill_snapshot_store = skill_snapshot_store
         self._metrics = metrics
 
     async def execute(self, scope: _RunScope) -> AgentExecutionOutcome:
@@ -326,6 +332,34 @@ class AgentExecutor:
                         exc_info=False,
                     )
 
+    def _skill_sources_for(
+        self,
+        definition: AgentDefinition,
+    ) -> SkillSourceRegistry:
+        grouped: dict[str, dict[str, ObjectRef]] = {}
+        for skill in definition.skill_definitions:
+            source_ref = skill.source_ref
+            if source_ref is None or source_ref.snapshot is None:
+                continue
+            roots = grouped.setdefault(source_ref.source_id, {})
+            existing = roots.get(source_ref.root)
+            if existing is not None and existing != source_ref.snapshot:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            roots[source_ref.root] = source_ref.snapshot
+        if not grouped:
+            return self._skill_sources
+        if self._skill_snapshot_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        frozen = tuple(
+            FrozenSkillResourceSource(
+                source_id,
+                dict(sorted(roots.items())),
+                self._skill_snapshot_store,
+            )
+            for source_id, roots in sorted(grouped.items())
+        )
+        return self._skill_sources.with_overrides(frozen)
+
     def _record_agent_run(
         self,
         scope: _RunScope,
@@ -391,6 +425,9 @@ class AgentExecutor:
         run_usage: RunUsage,
         usage_limits: UsageLimits,
     ) -> AgentExecutionOutcome:
+        skill_sources = self._skill_sources_for(
+            scope.binding.definition
+        )
         selected = tuple(
             candidate.id
             for candidate in scope.binding.definition.selected_tools
@@ -398,67 +435,77 @@ class AgentExecutor:
             in {"filesystem.read", "filesystem.write", "shell"}
         )
         workspace = scope.workspace
+        temporary_resources: tuple[TemporaryDirectory[str], ...] = ()
         if workspace is None:
             resources: tuple[SandboxResource, ...] = ()
             resource_keys: Mapping[str, str] = {}
         else:
-            resources, resource_keys = await _skill_sandbox_resources(
-                scope.binding.definition,
-                self._skill_sources,
-            )
-        if not selected and not resources:
-            return await self._execute(
-                scope,
-                run_usage=run_usage,
-                usage_limits=usage_limits,
-            )
-        if workspace is None:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        sandbox = workspace.sandbox
-        backend = sandbox if sandbox is not None else LocalSandbox()
-        session = await backend.open(
-            root=workspace.root,
-            resources=resources,
-        )
-        try:
-            resource_paths = {
-                skill_id: session.resource_path(key)
-                for skill_id, key in resource_keys.items()
-            }
-            _logger.debug(
-                "workspace sandbox opened for agent run: step=%s tools=%s resources=%s",
-                scope.step_run_id,
-                selected,
-                tuple(resource_paths),
-            )
-            result = await self._execute(
-                replace(
-                    scope,
-                    sandbox_session=session,
-                    skill_resource_paths=resource_paths,
-                ),
-                run_usage=run_usage,
-                usage_limits=usage_limits,
-            )
-        except BaseException as primary_error:
-            try:
-                await _close_sandbox_session(session)
-            except asyncio.CancelledError as cleanup_cancel:
-                if cleanup_cancel.__cause__ is not None:
-                    raise primary_error from cleanup_cancel.__cause__
-                raise primary_error
-            except AIError as cleanup_error:
-                _logger.warning(
-                    "workspace sandbox cleanup failed after agent error: "
-                    "step=%s code=%s exception_type=%s",
-                    scope.step_run_id,
-                    cleanup_error.code.value,
-                    type(cleanup_error).__name__,
+            resources, resource_keys, temporary_resources = (
+                await _skill_sandbox_resources(
+                    scope.binding.definition,
+                    skill_sources,
                 )
-                raise primary_error from cleanup_error
-            raise
-        await _close_sandbox_session(session)
-        return result
+            )
+        try:
+            if not selected and not resources:
+                return await self._execute(
+                    scope,
+                    run_usage=run_usage,
+                    usage_limits=usage_limits,
+                    skill_sources=skill_sources,
+                )
+            if workspace is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            sandbox = workspace.sandbox
+            backend = sandbox if sandbox is not None else LocalSandbox()
+            session = await backend.open(
+                root=workspace.root,
+                resources=resources,
+            )
+            try:
+                resource_paths = {
+                    skill_id: session.resource_path(key)
+                    for skill_id, key in resource_keys.items()
+                }
+                _logger.debug(
+                    "workspace sandbox opened for agent run: "
+                    "step=%s tools=%s resources=%s",
+                    scope.step_run_id,
+                    selected,
+                    tuple(resource_paths),
+                )
+                result = await self._execute(
+                    replace(
+                        scope,
+                        sandbox_session=session,
+                        skill_resource_paths=resource_paths,
+                    ),
+                    run_usage=run_usage,
+                    usage_limits=usage_limits,
+                    skill_sources=skill_sources,
+                )
+            except BaseException as primary_error:
+                try:
+                    await _close_sandbox_session(session)
+                except asyncio.CancelledError as cleanup_cancel:
+                    if cleanup_cancel.__cause__ is not None:
+                        raise primary_error from cleanup_cancel.__cause__
+                    raise primary_error
+                except AIError as cleanup_error:
+                    _logger.warning(
+                        "workspace sandbox cleanup failed after agent error: "
+                        "step=%s code=%s exception_type=%s",
+                        scope.step_run_id,
+                        cleanup_error.code.value,
+                        type(cleanup_error).__name__,
+                    )
+                    raise primary_error from cleanup_error
+                raise
+            await _close_sandbox_session(session)
+            return result
+        finally:
+            await _cleanup_skill_resources(temporary_resources)
+
 
     async def _execute(
         self,
@@ -466,6 +513,7 @@ class AgentExecutor:
         *,
         run_usage: RunUsage,
         usage_limits: UsageLimits,
+        skill_sources: SkillSourceRegistry,
     ) -> AgentExecutionOutcome:
         binding = scope.binding
         definition = binding.definition
@@ -489,7 +537,7 @@ class AgentExecutor:
         agent, capabilities = await _materialize_agent(
             scope,
             model=model,
-            skill_sources=self._skill_sources,
+            skill_sources=skill_sources,
             deferred_pause_sink=capture_deferred_step,
             metrics=self._metrics,
             model_journal=model_journal,
@@ -600,32 +648,85 @@ async def _close_sandbox_session(session: SandboxSession) -> None:
 async def _skill_sandbox_resources(
     definition: AgentDefinition,
     sources: SkillSourceRegistry,
-) -> tuple[tuple[SandboxResource, ...], Mapping[str, str]]:
+) -> tuple[
+    tuple[SandboxResource, ...],
+    Mapping[str, str],
+    tuple[TemporaryDirectory[str], ...],
+]:
     resources: dict[str, SandboxResource] = {}
     resource_keys: dict[str, str] = {}
-    for skill in definition.skill_definitions:
-        source_ref = skill.source_ref
-        if source_ref is None:
-            continue
-        source = sources.resolve(source_ref.source_id)
-        view = await source.inspect(source_ref.root)
-        if view.location.kind != "local":
-            continue
-        source_path = Path(view.location.path)
-        key = canonical_sha256(
-            {
-                "source_id": source_ref.source_id,
-                "root": source_ref.root,
-            }
-        )
-        resource = SandboxResource(key=key, source=source_path)
-        existing = resources.get(key)
-        if existing is not None and existing.source != resource.source:
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        resources[key] = resource
-        resource_keys[skill.id] = key
-    ordered = tuple(resources[key] for key in sorted(resources))
-    return ordered, resource_keys
+    temporary: list[TemporaryDirectory[str]] = []
+    try:
+        for skill in definition.skill_definitions:
+            source_ref = skill.source_ref
+            if source_ref is None:
+                continue
+            source = sources.resolve(source_ref.source_id)
+            view = await source.inspect(source_ref.root)
+            source_path: Path | None
+            if view.location.kind == "local":
+                source_path = Path(view.location.path)
+            elif (
+                isinstance(source, FrozenSkillResourceSource)
+                and await source.sandbox_materialize(source_ref.root)
+            ):
+                holder = TemporaryDirectory(
+                    prefix="linktools-skill-snapshot-"
+                )
+                temporary.append(holder)
+                source_path = Path(holder.name)
+                for relative in view.resources:
+                    target = source_path / relative
+                    await asyncio.to_thread(
+                        target.parent.mkdir,
+                        parents=True,
+                        exist_ok=True,
+                    )
+                    payload = await source.read(
+                        source_ref.root,
+                        relative,
+                    )
+                    await asyncio.to_thread(target.write_bytes, payload)
+                    mode = await source.resource_mode(
+                        source_ref.root,
+                        relative,
+                    )
+                    await asyncio.to_thread(
+                        os.chmod,
+                        target,
+                        0o444 | mode,
+                    )
+            else:
+                continue
+            key = canonical_sha256(
+                {
+                    "source_id": source_ref.source_id,
+                    "root": source_ref.root,
+                    "snapshot": (
+                        None
+                        if source_ref.snapshot is None
+                        else source_ref.snapshot.digest
+                    ),
+                }
+            )
+            resource = SandboxResource(key=key, source=source_path)
+            existing = resources.get(key)
+            if existing is not None and existing.source != resource.source:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            resources[key] = resource
+            resource_keys[skill.id] = key
+        ordered = tuple(resources[key] for key in sorted(resources))
+        return ordered, resource_keys, tuple(temporary)
+    except BaseException:
+        await _cleanup_skill_resources(tuple(temporary))
+        raise
+
+
+async def _cleanup_skill_resources(
+    values: tuple[TemporaryDirectory[str], ...],
+) -> None:
+    for value in values:
+        await asyncio.to_thread(value.cleanup)
 
 
 def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
