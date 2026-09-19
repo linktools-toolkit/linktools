@@ -18,8 +18,12 @@ from linktools.ai.runtime.state._filesystem import FilesystemStateStore
 from linktools.ai.runtime.state._sql import SqlStateStore
 from linktools.ai.runtime.state._store import (
     FactQuery,
+    OperationQuery,
+    RecordQuery,
     StateTransaction,
+    StoredAlias,
     StoredFact,
+    StoredOperation,
     StoredRecord,
 )
 from linktools.ai.spec import AgentSpec
@@ -346,3 +350,127 @@ async def test_filesystem_unknown_commit_poison_is_fail_closed(
         assert read_error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     finally:
         await store.close()
+
+
+async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "scoped-runtime.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    first = SqlStateStore(engine, store_digest=b"a" * 32)
+    second = SqlStateStore(engine, store_digest=b"b" * 32)
+    await first.initialize()
+    await second.initialize()
+
+    record_key = b"r" * 32
+    alias_key = b"a" * 32
+    stream_key = b"s" * 32
+    sequence_key = b"q" * 32
+    operation_key = b"o" * 32
+    operation_stream = b"p" * 32
+    record = StoredRecord(
+        record_key,
+        b"d" * 32,
+        None,
+        None,
+        "scope-test",
+        "record",
+        None,
+        0,
+        None,
+        0,
+        None,
+        {},
+    )
+    fact = StoredFact(
+        stream_key,
+        1,
+        record_key,
+        "scope-test",
+        None,
+        None,
+        {"value": 1},
+    )
+    operation = StoredOperation(
+        operation_key,
+        operation_stream,
+        1,
+        "RUNNING",
+        False,
+        {},
+    )
+
+    async def seed(transaction: StateTransaction) -> None:
+        await transaction.insert_record(record)
+        await transaction.insert_alias(StoredAlias(alias_key, record_key))
+        await transaction.insert_fact(fact)
+        assert await transaction.reserve_sequence(sequence_key, 1) == 1
+        await transaction.insert_operation(operation)
+
+    try:
+        await first.mutate(seed)
+
+        assert await second.read(
+            lambda transaction: transaction.get_record(record_key)
+        ) is None
+        assert await second.read(
+            lambda transaction: transaction.list_records(
+                RecordQuery(kind="scope-test")
+            )
+        ) == ()
+        assert await second.read(
+            lambda transaction: transaction.resolve_alias(alias_key)
+        ) is None
+        assert await second.read(
+            lambda transaction: transaction.get_sequence(sequence_key)
+        ) == 0
+        assert await second.read(
+            lambda transaction: transaction.list_facts(FactQuery(stream_key))
+        ) == ()
+        assert await second.read(
+            lambda transaction: transaction.get_operation(operation_key)
+        ) is None
+
+        assert await second.mutate(
+            lambda transaction: transaction.guard_record(
+                record_key,
+                expected_storage_version=0,
+            )
+        ) is None
+        with pytest.raises(AIError) as raised:
+            await second.mutate(
+                lambda transaction: transaction.advance_sequence(sequence_key, 1)
+            )
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+
+        await second.mutate(
+            lambda transaction: transaction.delete_sequences((sequence_key,))
+        )
+        await second.mutate(
+            lambda transaction: transaction.delete_fact_streams(record_key)
+        )
+        assert await second.mutate(
+            lambda transaction: transaction.delete_operations(
+                OperationQuery(stream_digest=operation_stream)
+            )
+        ) == ()
+
+        assert await first.read(
+            lambda transaction: transaction.get_sequence(sequence_key)
+        ) == 1
+        assert tuple(
+            value.sequence
+            for value in await first.read(
+                lambda transaction: transaction.list_facts(
+                    FactQuery(stream_key)
+                )
+            )
+        ) == (1,)
+        assert await first.read(
+            lambda transaction: transaction.get_operation(operation_key)
+        ) == operation
+    finally:
+        await first.close()
+        await second.close()
+        await engine.dispose()

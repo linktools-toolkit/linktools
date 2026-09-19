@@ -523,7 +523,10 @@ class _SqlTransaction:
         row = (
             (
                 await self._session.execute(
-                    select(table).where(table.c.key_digest == _hex(key))
+                    select(table).where(
+                        table.c.store_digest == self._store_hex,
+                        table.c.key_digest == _hex(key),
+                    )
                 )
             )
             .mappings()
@@ -550,6 +553,7 @@ class _SqlTransaction:
                 (
                     await self._session.execute(
                         select(table).where(
+                            table.c.store_digest == self._store_hex,
                             table.c.key_digest.in_(tuple(_hex(key) for key in missing))
                         )
                     )
@@ -620,6 +624,7 @@ class _SqlTransaction:
         result = await self._session.execute(
             update(table)
             .where(
+                table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(key),
                 table.c.storage_version == expected_storage_version,
             )
@@ -676,6 +681,7 @@ class _SqlTransaction:
         statement = (
             update(table)
             .where(
+                table.c.store_digest == self._store_hex,
                 table.c.key_digest == bindparam("_replacement_key_digest"),
                 table.c.storage_version == bindparam("_replacement_expected_version"),
             )
@@ -731,6 +737,7 @@ class _SqlTransaction:
         result = await self._session.execute(
             update(table)
             .where(
+                table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(key),
                 table.c.storage_version == expected_storage_version,
             )
@@ -781,17 +788,20 @@ class _SqlTransaction:
             return False
         table = self._table("ai_state_records")
         statement = delete(table).where(
+            table.c.store_digest == self._store_hex,
             table.c.key_digest == _hex(key),
             table.c.storage_version == guarded.storage_version,
         )
         await self._session.execute(
             delete(self._table("ai_state_aliases")).where(
-                self._table("ai_state_aliases").c.record_key_digest == _hex(key)
+                self._table("ai_state_aliases").c.store_digest == self._store_hex,
+                self._table("ai_state_aliases").c.record_key_digest == _hex(key),
             )
         )
         await self._session.execute(
             delete(self._table("ai_state_facts")).where(
-                self._table("ai_state_facts").c.owner_key_digest == _hex(key)
+                self._table("ai_state_facts").c.store_digest == self._store_hex,
+                self._table("ai_state_facts").c.owner_key_digest == _hex(key),
             )
         )
         result = await self._session.execute(statement)
@@ -807,7 +817,7 @@ class _SqlTransaction:
         from sqlalchemy import and_, or_, select
 
         table = self._table("ai_state_records")
-        conditions = []
+        conditions = [table.c.store_digest == self._store_hex]
         if query.partition_digest is not None:
             conditions.append(table.c.partition_digest == _hex(query.partition_digest))
         if query.scope_digest is not None:
@@ -900,7 +910,7 @@ class _SqlTransaction:
             alias for alias in unique_aliases if alias not in self._alias_cache
         )
         if missing:
-            from sqlalchemy import select
+            from sqlalchemy import and_, select
 
             table = self._table("ai_state_aliases")
             records = self._table("ai_state_records")
@@ -915,13 +925,17 @@ class _SqlTransaction:
                         .select_from(
                             table.outerjoin(
                                 records,
-                                table.c.record_key_digest == records.c.key_digest,
+                                and_(
+                                    table.c.record_key_digest == records.c.key_digest,
+                                    records.c.store_digest == self._store_hex,
+                                ),
                             )
                         )
                         .where(
+                            table.c.store_digest == self._store_hex,
                             table.c.alias_digest.in_(
                                 tuple(_hex(alias) for alias in missing)
-                            )
+                            ),
                         )
                     )
                 )
@@ -1055,6 +1069,7 @@ class _SqlTransaction:
                 (
                     await self._session.execute(
                         select(table).where(
+                            table.c.store_digest == self._store_hex,
                             table.c.key_digest.in_(tuple(_hex(key) for key in missing))
                         )
                     )
@@ -1158,7 +1173,11 @@ class _SqlTransaction:
         table = self._table("ai_state_sequences")
         result = await self._session.execute(
             update(table)
-            .where(table.c.key_digest == _hex(key), table.c.value == expected)
+            .where(
+                table.c.store_digest == self._store_hex,
+                table.c.key_digest == _hex(key),
+                table.c.value == expected,
+            )
             .values(value=expected + 1, updated_at=func.current_timestamp())
         )
         if result.rowcount != 1:
@@ -1176,9 +1195,10 @@ class _SqlTransaction:
 
         await self._session.execute(
             delete(self._table("ai_state_sequences")).where(
+                self._table("ai_state_sequences").c.store_digest == self._store_hex,
                 self._table("ai_state_sequences").c.key_digest.in_(
                     tuple(_hex(key) for key in values)
-                )
+                ),
             )
         )
         self._log_batch("delete_sequences", len(values), 1)
@@ -1211,7 +1231,10 @@ class _SqlTransaction:
         from sqlalchemy import func, select
 
         table = self._table("ai_state_facts")
-        conditions = [table.c.stream_digest == _hex(query.stream_digest)]
+        conditions = [
+            table.c.store_digest == self._store_hex,
+            table.c.stream_digest == _hex(query.stream_digest),
+        ]
         if query.after_sequence is not None:
             conditions.append(table.c.sequence > query.after_sequence)
         if query.subject_digest is not None:
@@ -1225,6 +1248,7 @@ class _SqlTransaction:
             statement = (
                 select(table)
                 .where(
+                    table.c.store_digest == self._store_hex,
                     table.c.stream_digest == _hex(query.stream_digest),
                     table.c.sequence.in_(latest_sequences),
                 )
@@ -1290,7 +1314,8 @@ class _SqlTransaction:
 
         await self._session.execute(
             delete(self._table("ai_state_facts")).where(
-                self._table("ai_state_facts").c.owner_key_digest == _hex(owner_key)
+                self._table("ai_state_facts").c.store_digest == self._store_hex,
+                self._table("ai_state_facts").c.owner_key_digest == _hex(owner_key),
             )
         )
 
@@ -1310,7 +1335,10 @@ class _SqlTransaction:
         row = (
             (
                 await self._session.execute(
-                    select(table).where(table.c.key_digest == _hex(key))
+                    select(table).where(
+                        table.c.store_digest == self._store_hex,
+                        table.c.key_digest == _hex(key),
+                    )
                 )
             )
             .mappings()
@@ -1331,6 +1359,7 @@ class _SqlTransaction:
         result = await self._session.execute(
             update(table)
             .where(
+                table.c.store_digest == self._store_hex,
                 table.c.key_digest == _hex(value.key_digest),
                 table.c.state == expected_state,
             )
@@ -1344,7 +1373,7 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_operations")
-        conditions = []
+        conditions = [table.c.store_digest == self._store_hex]
         if query.stream_digest is not None:
             conditions.append(table.c.stream_digest == _hex(query.stream_digest))
         if query.states is not None:
@@ -1400,9 +1429,10 @@ class _SqlTransaction:
         if values:
             await self._session.execute(
                 delete(self._table("ai_state_operations")).where(
+                    self._table("ai_state_operations").c.store_digest == self._store_hex,
                     self._table("ai_state_operations").c.key_digest.in_(
                         tuple(_hex(value.key_digest) for value in values)
-                    )
+                    ),
                 )
             )
         return values
