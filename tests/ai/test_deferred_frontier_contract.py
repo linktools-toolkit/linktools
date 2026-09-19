@@ -89,7 +89,16 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
         deferred_pause_sink=captured.append,
     )
     node_result = object()
-    ctx = SimpleNamespace(run_step=7, conversation_id=None, messages=[])
+
+    async def emit(_event: object) -> None:
+        return None
+
+    ctx = SimpleNamespace(
+        run_step=7,
+        conversation_id=None,
+        messages=[],
+        emit=emit,
+    )
     assert (
         await persistence.after_node_run(
             ctx,
