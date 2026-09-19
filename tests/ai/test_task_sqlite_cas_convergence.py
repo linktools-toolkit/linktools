@@ -700,11 +700,11 @@ async def test_task_complete_conflict_reads_back_without_retry(
 
 
 @pytest.mark.asyncio
-async def test_task_complete_readback_rejects_same_digest_different_payload(
+async def test_task_complete_readback_rejects_same_digest_different_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state, request = await _admitted_state(
-        TaskGraph("complete-payload-race", (TaskNode("root"),))
+        TaskGraph("complete-execution-race", (TaskNode("root"),))
     )
     repository = state.task.tasks
     assert isinstance(repository, TaskRepositoryImpl)
@@ -715,21 +715,12 @@ async def test_task_complete_readback_rejects_same_digest_different_payload(
         owner="runner",
         lease_seconds=60,
     )
-    stored_payload = StoredPayload.inline_bytes(b"same payload bytes")
+    result_digest = canonical_sha256({"result": "same"})
     await repository.complete(
         lease,
         tenant_id="tenant",
-        execution_id=None,
-        result_digest=stored_payload.digest,
-        result_payload=stored_payload,
-    )
-    conflicting_payload = StoredPayload.object(
-        ObjectRef(
-            "alternate-store",
-            "alternate-key",
-            stored_payload.digest,
-            stored_payload.size,
-        )
+        execution_id="execution-a",
+        result_digest=result_digest,
     )
 
     async def conflict(operation):
@@ -742,9 +733,8 @@ async def test_task_complete_readback_rejects_same_digest_different_payload(
             await repository.complete(
                 lease,
                 tenant_id="tenant",
-                execution_id=None,
-                result_digest=stored_payload.digest,
-                result_payload=conflicting_payload,
+                execution_id="execution-b",
+                result_digest=result_digest,
             )
         assert raised.value.code is ErrorCode.TASK_RESULT_CONFLICT
     finally:
