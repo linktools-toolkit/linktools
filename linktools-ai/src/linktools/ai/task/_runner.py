@@ -94,6 +94,13 @@ class TaskNodeRunner(Protocol):
         execution_id: str,
     ) -> TaskNodeRunResult: ...
 
+    async def supply_input(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskNodeRunResult: ...
+
     async def resolve_effect(
         self,
         invocation: TaskNodeInvocation,

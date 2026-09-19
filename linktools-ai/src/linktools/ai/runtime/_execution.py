@@ -942,6 +942,49 @@ class DefaultExecutionService:
         )
         return _execution_view(updated)
 
+    async def supply_task_input(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        value: JsonValue,
+    ) -> ExecutionView:
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        if not isinstance(current.binding, TaskBindingSnapshot):
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        normalized = normalize_json_value(value)
+        try:
+            _validate_task_binding_output(current.binding, normalized)
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                raise
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                retryable=False,
+            ) from error
+        value_digest = canonical_sha256(normalized)
+        if current.status is ExecutionStatus.SUCCEEDED:
+            result = await self.result(execution_id, principal=principal)
+            if canonical_sha256(result.output) != value_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return _execution_view(current)
+        if current.status is not ExecutionStatus.WAITING_DEFERRED:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        await self._complete_task_output(
+            current,
+            principal=principal,
+            output=normalized,
+            terminal_event_payload={
+                "task_input": "supplied",
+                "task_input_value_digest": value_digest,
+            },
+        )
+        return await self.inspect(execution_id, principal=principal)
+
     async def resume_task_not_applied(
         self,
         execution_id: str,

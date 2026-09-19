@@ -1096,6 +1096,14 @@ class ExecutionService(Protocol):
         wait_id: str,
     ) -> ExecutionView: ...
 
+    async def supply_task_input(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        value: JsonValue,
+    ) -> ExecutionView: ...
+
     async def resume_task_not_applied(
         self,
         execution_id: str,

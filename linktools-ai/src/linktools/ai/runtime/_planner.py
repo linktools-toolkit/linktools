@@ -380,13 +380,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             self._validate_durability(node, graph_id=graph.graph_id, request=True)
 
     def validate_input(self, node: TaskNode, value: JsonValue) -> None:
+        del value
         task_type, task_version, _body = _parse_node(node, request=False)
         if (
             task_type != self._deferred_input.type
             or task_version != self._deferred_input.version
         ):
             raise AIError(ErrorCode.TASK_NOT_READY)
-        _validate_task_output(node, normalize_json_value(value))
 
     def validate_effect_resolution(
         self,
@@ -930,6 +930,31 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution_id=execution_id,
             principal=principal,
             graph_id=graph_id,
+        )
+
+    async def supply_input(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskNodeRunResult:
+        view = await self._execution.supply_task_input(
+            execution_id,
+            principal=invocation.principal,
+            value=value,
+        )
+        if view.status is not ExecutionStatus.SUCCEEDED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result = await self._execution.result(
+            execution_id,
+            principal=invocation.principal,
+        )
+        return await self._complete_output(
+            invocation.node,
+            result.output,
+            execution_id=execution_id,
+            principal=invocation.principal,
+            graph_id=invocation.graph_id,
         )
 
     async def resolve_effect(

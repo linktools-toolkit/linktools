@@ -42,7 +42,6 @@ class TaskBindingSnapshot:
         if (
             not isinstance(self.task_type, str)
             or _TASK_TYPE.fullmatch(self.task_type) is None
-            or self.task_type.startswith(_RESERVED_TASK_TYPE_PREFIX)
         ):
             raise ValueError("task binding type is invalid")
         if (
