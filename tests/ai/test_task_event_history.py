@@ -633,7 +633,7 @@ async def test_terminal_event_stream_replays_from_durable_sequence(
         await repository.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-node",
             result_digest="b" * 64,
         )
         await repository.scheduler_snapshot(graph.graph_id, tenant_id="tenant")
