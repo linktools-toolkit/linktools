@@ -13,6 +13,7 @@ from linktools.core import environ
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
+    CursorSigner,
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
@@ -28,10 +29,13 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskEvent, TaskGraphInfo
+from ._cursor import decode_cursor as decode_runtime_cursor
+from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._runtime_identity import grant_key
 from .service_api import (
+    ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionHistoryService,
     ExecutionTraceItem,
@@ -43,6 +47,7 @@ from .service_api import (
 )
 from .state import RuntimeDomain, RuntimeState
 from .state._contracts import (
+    EventRepository,
     ExecutionRecord,
     ExecutionRepository,
     SessionRecord,
@@ -121,16 +126,20 @@ class RuntimeHistory:
         *,
         tenant_id: str,
         executions: "ExecutionRepository | None" = None,
+        events: "EventRepository | None" = None,
         sessions: "SessionRepository | None" = None,
         tasks: "TaskRepository | None" = None,
         authorization: "AuthorizationPolicy | None" = None,
+        cursor_signer: "CursorSigner | None" = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
         self._executions = executions
+        self._events = events
         self._sessions = sessions
         self._tasks = tasks
         self._authorization = authorization
+        self._cursor_signer = cursor_signer
 
     @property
     def tenant_id(self) -> str:
@@ -223,7 +232,7 @@ class RuntimeHistory:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return TaskGraphInfo.from_snapshot(snapshot)
 
-    async def list_events(
+    async def task_events(
         self,
         graph_id: str,
         *,
@@ -259,6 +268,100 @@ class RuntimeHistory:
             after_sequence=after_sequence,
             limit=limit,
         )
+
+    async def list_events(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        include_content: bool = False,
+        limit: int = 100,
+    ) -> Page[ExecutionEvent]:
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        validate_page_limit(limit)
+        record = await self._authorized_record(execution_id, principal)
+        events, signer = self._require_event_reader()
+        if cursor is None:
+            high_water = record.event_sequence
+            after_sequence = 0
+        else:
+            payload = decode_runtime_cursor(
+                cursor,
+                signer,
+                tenant_id=record.tenant_id,
+                resource_kind="EXECUTION_EVENTS",
+                filter_digest=canonical_sha256(
+                    {
+                        "execution_id": execution_id,
+                        "include_content": include_content,
+                    }
+                ),
+            )
+            if payload.revision != 0:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            try:
+                high_water_raw, after_raw = payload.position.split(":", 1)
+                high_water = int(high_water_raw)
+                after_sequence = int(after_raw)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.CURSOR_INVALID) from error
+            if (
+                high_water < 0
+                or after_sequence < 0
+                or after_sequence > high_water
+            ):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+        if after_sequence >= high_water:
+            return Page((), None)
+        page_limit = min(limit, high_water - after_sequence)
+        page = await events.list(
+            execution_id,
+            tenant_id=record.tenant_id,
+            after_sequence=after_sequence,
+            limit=page_limit,
+        )
+        expected = after_sequence
+        projected: list[ExecutionEvent] = []
+        for event in page.items:
+            expected += 1
+            if (
+                event.execution_id != execution_id
+                or event.sequence != expected
+                or event.sequence > high_water
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            projected.append(
+                event
+                if include_content
+                else ExecutionEvent(
+                    event.execution_id,
+                    event.sequence,
+                    event.event_type,
+                    {},
+                )
+            )
+        if len(projected) != page_limit:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        next_after = after_sequence + len(projected)
+        next_cursor = (
+            None
+            if next_after >= high_water
+            else encode_runtime_cursor(
+                signer,
+                tenant_id=record.tenant_id,
+                resource_kind="EXECUTION_EVENTS",
+                filter_digest=canonical_sha256(
+                    {
+                        "execution_id": execution_id,
+                        "include_content": include_content,
+                    }
+                ),
+                position=f"{high_water}:{next_after}",
+            )
+        )
+        return Page(tuple(projected), next_cursor)
 
     async def recent_sessions(
         self,
@@ -432,6 +535,13 @@ class RuntimeHistory:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self._executions, self._authorization
 
+    def _require_event_reader(
+        self,
+    ) -> tuple[EventRepository, CursorSigner]:
+        if self._events is None or self._cursor_signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self._events, self._cursor_signer
+
     def _require_task_reader(
         self,
     ) -> tuple[TaskRepository, AuthorizationPolicy]:
@@ -518,9 +628,14 @@ async def _open_runtime_history(
             service,
             tenant_id=effective_tenant_id,
             executions=selected_state.execution.executions,
+            events=selected_state.execution.events,
             sessions=selected_state.conversation.sessions,
             tasks=selected_state.task.tasks,
             authorization=effective_authorization,
+            cursor_signer=HmacCursorSigner(
+                "runtime-history",
+                grant_key(resolved_namespace),
+            ),
         )
     except BaseException as error:
         body_error = error

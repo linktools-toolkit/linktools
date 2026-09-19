@@ -752,9 +752,14 @@ def _borrowed_runtime_history(
         service,
         tenant_id=tenant_id,
         executions=state.execution.executions,
+        events=state.execution.events,
         sessions=state.conversation.sessions,
         tasks=state.task.tasks,
         authorization=authorization,
+        cursor_signer=HmacCursorSigner(
+            "runtime-history",
+            grant_key(state.namespace),
+        ),
     )
 
 
