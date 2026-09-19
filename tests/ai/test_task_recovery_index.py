@@ -36,7 +36,7 @@ async def test_terminal_graph_is_removed_from_recovery_index_after_reconcile() -
         await state.task.tasks.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-root",
             result_digest="0" * 64,
         )
 
@@ -82,7 +82,7 @@ async def test_recovery_index_filters_by_graph_header_without_topology_hydration
         await state.task.tasks.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-root",
             result_digest="1" * 64,
         )
 
