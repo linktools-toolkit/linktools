@@ -341,7 +341,7 @@ async def test_local_event_stream_observes_foreign_update_via_scheduler_notifica
         await repository.complete(
             foreign_lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-foreign",
             result_digest="b" * 64,
         )
 
