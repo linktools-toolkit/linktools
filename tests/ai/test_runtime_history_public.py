@@ -7,16 +7,20 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.core import (
+    ExecutionStatus,
     HmacCursorSigner,
     Principal,
     PrincipalKind,
     ResourceKind,
     ResourceRef,
     SessionStatus,
+    UsageMetrics,
     TenantAuthorizationPolicy,
+    canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
+    ArtifactView,
     ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionTraceItem,
@@ -26,6 +30,16 @@ from linktools.ai.runtime import (
 )
 from linktools.ai.runtime._history_service import DefaultExecutionHistoryService
 from linktools.ai.runtime._runtime_history import RuntimeHistory
+from linktools.ai.storage import StoredPayload
+from linktools.ai.task import (
+    TaskBindingSnapshot,
+    TaskGraph,
+    TaskGraphSnapshot,
+    TaskNode,
+    TaskNodeView,
+    TaskResultRecord,
+    TaskStatus,
+)
 
 
 class _Executions:
@@ -427,3 +441,181 @@ async def test_runtime_history_projects_owned_sessions_without_runtime_open() ->
             principal=Principal("other", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
         )
     assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+class _ResultExecutions:
+    def __init__(self) -> None:
+        self.binding = TaskBindingSnapshot(
+            "handler",
+            1,
+            "none",
+            {},
+            None,
+            1,
+            0,
+        )
+        self.record = SimpleNamespace(
+            execution_id="execution",
+            tenant_id="tenant",
+            status=ExecutionStatus.SUCCEEDED,
+            binding=self.binding,
+            error_code=None,
+            safe_error_details={},
+            error_diagnostics=None,
+        )
+        self.result = SimpleNamespace(
+            output=StoredPayload.inline_json(None),
+            usage=UsageMetrics(),
+        )
+
+    async def get_header(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
+        return None
+
+    async def get(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> object | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return self.record
+        return None
+
+    async def get_result(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> object | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return self.result
+        return None
+
+
+class _TaskResults:
+    def __init__(self) -> None:
+        result_digest = canonical_sha256(None)
+        node = TaskNode("node")
+        state = TaskNodeView(
+            "graph",
+            "node",
+            (),
+            TaskStatus.SUCCEEDED,
+            None,
+            1,
+            None,
+            result_digest,
+            None,
+            None,
+            "execution",
+        )
+        self.snapshot = TaskGraphSnapshot(
+            "graph",
+            TaskStatus.SUCCEEDED,
+            TaskGraph("graph", (node,)).nodes,
+            (state,),
+        )
+        self.record = TaskResultRecord(
+            "graph",
+            "node",
+            result_digest,
+            execution_id="execution",
+        )
+
+    async def get_header(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None:
+        if graph_id == "graph" and tenant_id == "tenant":
+            return ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
+        return None
+
+    async def snapshot_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> TaskGraphSnapshot | None:
+        if graph_id == "graph" and tenant_id == "tenant":
+            return self.snapshot
+        return None
+
+    async def get_results(
+        self,
+        graph_id: str,
+        node_ids: tuple[str, ...],
+        *,
+        tenant_id: str,
+    ) -> dict[str, TaskResultRecord]:
+        if graph_id == "graph" and tenant_id == "tenant" and node_ids == ("node",):
+            return {"node": self.record}
+        return {}
+
+
+class _Artifacts:
+    async def list(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> Page[ArtifactView]:
+        assert execution_id == "execution"
+        assert principal.tenant_id == "tenant"
+        assert cursor is None
+        assert limit == 10
+        return Page((ArtifactView("artifact", execution_id, 3),))
+
+
+@pytest.mark.asyncio
+async def test_runtime_history_reads_execution_task_results_and_artifacts() -> None:
+    executions = _ResultExecutions()
+    tasks = _TaskResults()
+    history = RuntimeHistory(
+        SimpleNamespace(),
+        tenant_id="tenant",
+        executions=executions,  # type: ignore[arg-type]
+        tasks=tasks,  # type: ignore[arg-type]
+        authorization=TenantAuthorizationPolicy("tenant"),
+        namespace="workspace",
+        artifacts=_Artifacts(),  # type: ignore[arg-type]
+    )
+    principal = Principal("caller", "tenant", "service")
+
+    result = await history.result("execution", principal=principal)
+    reference = await history.task_result_ref(
+        "graph",
+        "node",
+        principal=principal,
+    )
+    task_result = await history.task_result(
+        "graph",
+        "node",
+        principal=principal,
+    )
+    artifacts = await history.artifacts(
+        "execution",
+        principal=principal,
+        limit=10,
+    )
+
+    assert result.status is ExecutionStatus.SUCCEEDED
+    assert result.output is None
+    assert result.output_fingerprint == executions.binding.output_fingerprint
+    assert reference.namespace == "workspace"
+    assert reference.tenant_id == "tenant"
+    assert reference.graph_id == "graph"
+    assert reference.node_id == "node"
+    assert reference.result_digest == canonical_sha256(None)
+    assert task_result is None
+    assert artifacts.items == (ArtifactView("artifact", "execution", 3),)
