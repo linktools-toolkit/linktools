@@ -205,14 +205,20 @@ class _AgentTaskNodeHandler:
         principal: Principal,
         correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
+        dependency_reader: Callable[[TaskDependency], Awaitable[JsonValue]],
         control: TaskNodeRunControl,
     ) -> tuple[JsonValue, str]:
+        dependency_values = await self._read_dependencies(
+            dependencies,
+            dependency_reader,
+        )
         prepared = self._prepare_request(
             node,
             graph_id=graph_id,
             principal=principal,
             correlation=correlation,
             dependencies=dependencies,
+            dependency_values=dependency_values,
         )
         binding_digest, request = prepared[:2]
         agent_id = prepared[2] if len(prepared) > 2 else ""
@@ -323,6 +329,7 @@ class _AgentTaskNodeHandler:
         principal: Principal,
         correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
+        dependency_reader: Callable[[TaskDependency], Awaitable[JsonValue]],
         durable_execution_id: str | None,
     ) -> None:
         key = (principal.tenant_id, graph_id, node.node_id)
@@ -345,12 +352,17 @@ class _AgentTaskNodeHandler:
                 if handle is not None and handle.execution_id:
                     execution_id = handle.execution_id
         if execution_id is None:
+            dependency_values = await self._read_dependencies(
+                dependencies,
+                dependency_reader,
+            )
             binding_digest, request, _, _ = self._prepare_request(
                 node,
                 graph_id=graph_id,
                 principal=principal,
                 correlation=correlation,
                 dependencies=dependencies,
+                dependency_values=dependency_values,
             )
             try:
                 handle = await self._execution.resolve_existing(binding_digest, request)
@@ -381,6 +393,19 @@ class _AgentTaskNodeHandler:
         )
         self._background_failures.pop(key, None)
 
+    async def _read_dependencies(
+        self,
+        dependencies: Mapping[str, TaskDependency],
+        reader: Callable[[TaskDependency], Awaitable[JsonValue]],
+    ) -> dict[str, JsonValue]:
+        values: dict[str, JsonValue] = {}
+        for name in sorted(dependencies):
+            value = await reader(dependencies[name])
+            if canonical_sha256(value) != dependencies[name].result_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values[name] = value
+        return values
+
     def _prepare_request(
         self,
         node: TaskNode,
@@ -389,6 +414,7 @@ class _AgentTaskNodeHandler:
         principal: Principal,
         correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
+        dependency_values: Mapping[str, JsonValue],
     ) -> tuple[str, ExecutionRequest, str, str | None]:
         payload = node.input
         if payload.get("type") != self.type or payload.get("version") != self.version:
@@ -417,9 +443,11 @@ class _AgentTaskNodeHandler:
             if not isinstance(value, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             base_user_prompt = decode_user_content_payload(value)
+        if set(dependency_values) != set(dependencies):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         dependency_payload = {
-            dependency_id: dependencies[dependency_id].output
-            for dependency_id in sorted(node.dependencies)
+            dependency_id: dependency_values[dependency_id]
+            for dependency_id in sorted(dependencies)
         }
         if dependency_payload:
             dependency_text = (
@@ -447,7 +475,7 @@ class _AgentTaskNodeHandler:
                         "node_id": dependency_id,
                         "result_digest": dependencies[dependency_id].result_digest,
                     }
-                    for dependency_id in sorted(node.dependencies)
+                    for dependency_id in sorted(dependencies)
                 ],
                 "principal": principal_identity_payload(principal),
             }
