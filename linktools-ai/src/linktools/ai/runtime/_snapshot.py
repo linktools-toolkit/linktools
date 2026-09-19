@@ -24,7 +24,13 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import FilesystemMutationLock, ObjectRef, ObjectStore, read_object
+from ..storage import (
+    FilesystemMutationLock,
+    InMemoryObjectStore,
+    ObjectRef,
+    ObjectStore,
+    read_object,
+)
 from ._snapshot_contract import RunSnapshot, snapshot_digest
 from ._runtime_history import RuntimeHistory
 from .state import OfflineExclusiveStorage, RuntimeState, SnapshotLimits
@@ -849,12 +855,36 @@ async def _verify_restored_generation(
     if not isinstance(namespace, str) or not isinstance(tenant_id, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     restored_state = RuntimeState.from_root(state_root)
+    probe_store = InMemoryObjectStore("snapshot-freshness")
     try:
         await restored_state.initialize(
             namespace=namespace,
             tenant_id=tenant_id,
             read_only=True,
         )
+        actual_ref = await restored_state.export_snapshot(
+            object_store=probe_store,
+            limits=limits,
+        )
+        actual_payload = await read_object(
+            probe_store,
+            actual_ref.key,
+            expected_digest=actual_ref.digest,
+            expected_size=actual_ref.size,
+        )
+        actual_manifest = _parse_state_manifest(actual_payload)
+        expected_ref = _object_ref_from_payload(manifest.get("state"))
+        expected_payload = await read_object(
+            object_store,
+            expected_ref.key,
+            expected_digest=expected_ref.digest,
+            expected_size=expected_ref.size,
+        )
+        expected_manifest = _parse_state_manifest(expected_payload)
+        if _state_manifest_identity(actual_manifest) != _state_manifest_identity(
+            expected_manifest
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
     except AIError as error:
         if error.code is ErrorCode.STORAGE_NOT_FOUND:
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
@@ -941,6 +971,56 @@ def _read_generation_manifest(root: Path) -> Mapping[str, object]:
     if not isinstance(value, Mapping) or value.get("kind") != "runtime-snapshot":
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     return value
+
+
+def _state_manifest_identity(
+    manifest: Mapping[str, object],
+) -> str:
+    domains = manifest.get("domains")
+    objects = manifest.get("objects")
+    if not isinstance(domains, Mapping) or not isinstance(objects, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    normalized_objects: list[dict[str, object]] = []
+    for raw in objects:
+        if not isinstance(raw, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        domain = raw.get("domain")
+        source = raw.get("source")
+        content = raw.get("content")
+        if (
+            not isinstance(domain, str)
+            or not isinstance(source, Mapping)
+            or not isinstance(content, Mapping)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source_ref = _object_ref_from_payload(source)
+        content_ref = _object_ref_from_payload(content)
+        if source_ref.digest != content_ref.digest or source_ref.size != content_ref.size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        normalized_objects.append(
+            {
+                "domain": domain,
+                "source": _object_ref_payload(source_ref),
+                "content": {
+                    "key": content_ref.key,
+                    "digest": content_ref.digest,
+                    "size": content_ref.size,
+                },
+            }
+        )
+    return canonical_sha256(
+        cast(
+            JsonValue,
+            {
+                "kind": manifest.get("kind"),
+                "format_version": manifest.get("format_version"),
+                "namespace": manifest.get("namespace"),
+                "tenant_id": manifest.get("tenant_id"),
+                "domains": domains,
+                "objects": normalized_objects,
+            },
+        )
+    )
 
 
 def _state_snapshot_usage(
