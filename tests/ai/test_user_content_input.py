@@ -86,7 +86,10 @@ async def test_binary_content_preserves_duplicate_workspace_occurrences() -> Non
             canonical_files,
         )
         stored = await materializer.store(canonical, tenant_id="tenant")
-        assert session.reads == ["evidence.txt", "evidence.txt"]
+        assert [path for path, _limit in session.reads] == [
+            "evidence.txt",
+            "evidence.txt",
+        ]
         assert canonical[0] == "Inspect this file"
         assert canonical[1] == 'Workspace file path: "evidence.txt"'
         assert isinstance(canonical[2], BinaryContent)
