@@ -149,9 +149,9 @@ def _execution_panel(execution: ExecutionInfo) -> Panel:
         "Terminal",
         "-" if execution.terminal_at is None else execution.terminal_at.isoformat(),
     )
-    table.add_row("Binding", execution.binding_digest)
-    table.add_row("Input", execution.input_digest)
-    table.add_row("Output contract", execution.output_fingerprint)
+    table.add_row("Binding", execution.binding_digest or "-")
+    table.add_row("Input", execution.input_digest or "-")
+    table.add_row("Output contract", execution.output_fingerprint or "-")
     table.add_row("Output", execution.output_digest or "-")
     table.add_row("Usage", _usage_label(execution.usage))
     table.add_row("Error", execution.error_code or "-")
