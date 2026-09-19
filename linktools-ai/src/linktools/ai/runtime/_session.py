@@ -185,6 +185,8 @@ class _SessionExecutionService(ExecutionService, Protocol):
         binding_digest: str,
         session_id: str,
         request: ExecutionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
 
 
@@ -689,8 +691,16 @@ class DefaultSessionService:
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
-        return await self._resume(agent_id, binding_digest, session_id, request)
+        return await self._resume(
+            agent_id,
+            binding_digest,
+            session_id,
+            request,
+            binding_snapshot=binding_snapshot,
+        )
 
     async def _resume(
         self,
@@ -698,6 +708,8 @@ class DefaultSessionService:
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(
@@ -736,6 +748,7 @@ class DefaultSessionService:
                 binding_digest,
                 session_id,
                 execution_request,
+                binding_snapshot=binding_snapshot,
             )
 
     async def fork(
