@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from typing import Protocol, cast
 
 from linktools.core import environ
+
+from ..agent import AgentBindingSnapshot
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 from ..core import (
