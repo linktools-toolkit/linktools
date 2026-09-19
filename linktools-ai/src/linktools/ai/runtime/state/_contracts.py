@@ -2129,7 +2129,6 @@ class TaskRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
-        result_payload: StoredPayload | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),

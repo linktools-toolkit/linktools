@@ -18,7 +18,6 @@ from ..core import (
     validate_lease_owner,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
 from ._event import TaskEvent
 from ._graph import (
     TaskDependencyResult,
@@ -178,7 +177,6 @@ class _TaskRepository(Protocol):
         tenant_id: str,
         execution_id: "str | None",
         result_digest: str,
-        result_payload: "StoredPayload | None" = None,
         graph_id: "str | None" = None,
         node_id: "str | None" = None,
         expanded_nodes: "tuple[TaskNode, ...]" = (),
@@ -1170,7 +1168,6 @@ class LocalTaskGraphLauncher:
                             or control.handed_off_execution_id
                         ),
                         result_digest=completion.result_digest,
-                        result_payload=completion.result_payload,
                         graph_id=(
                             graph_id
                             if control.handed_off_execution_id is not None
@@ -1238,19 +1235,6 @@ class LocalTaskGraphLauncher:
                 or state.execution_id != completion.execution_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if completion.result_payload is not None:
-                results = await self._repository.get_results(
-                    graph_id,
-                    (node_id,),
-                    tenant_id=tenant_id,
-                )
-                record = results.get(node_id)
-                if (
-                    record is None
-                    or record.result_digest != completion.result_digest
-                    or record.payload != completion.result_payload
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return True
         if state.status in _TERMINAL or state.status is TaskStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1371,7 +1355,6 @@ class LocalTaskGraphLauncher:
             result[dependency_id] = TaskDependencyResult(
                 state.result_digest,
                 state.execution_id,
-                record.payload,
             )
         return result
 

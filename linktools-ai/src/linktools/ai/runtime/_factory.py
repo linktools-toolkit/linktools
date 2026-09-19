@@ -605,7 +605,6 @@ async def _build_local_components(
             artifact_state=state.artifact,
             artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
-            payload_policy=payload_policy,
             handlers=task_handlers,
             expanders=task_expanders,
             release_dependency_hold=execution.release_dependency_hold,

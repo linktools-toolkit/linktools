@@ -636,20 +636,12 @@ class TaskResultRecord:
 class TaskDependencyResult:
     result_digest: str
     execution_id: str
-    result_payload: "StoredPayload | None" = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task dependency result digest is invalid")
         if not isinstance(self.execution_id, str) or not self.execution_id.strip():
             raise ValueError("task dependency execution id is required")
-        if self.result_payload is not None:
-            if not isinstance(self.result_payload, StoredPayload):
-                raise TypeError("task dependency result payload is invalid")
-            if self.result_payload.digest != self.result_digest:
-                raise ValueError(
-                    "task dependency result payload digest does not match result"
-                )
 
 
 @dataclass(frozen=True, slots=True)

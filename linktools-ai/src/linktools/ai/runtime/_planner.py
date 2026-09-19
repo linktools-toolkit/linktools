@@ -37,13 +37,7 @@ from ..core import (
     validate_agent_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import (
-    ObjectRef,
-    ObjectStore,
-    PayloadPolicy,
-    StoredPayload,
-    payload_fits_inline,
-)
+from ..storage import ObjectRef, ObjectStore, StoredPayload
 from ..task import (
     TaskBindingSnapshot,
     TaskDependency,
@@ -64,11 +58,7 @@ from ..task import (
 )
 from ._agent_task import _AgentTaskNodeHandler, _execution_failure
 from ._input import CanonicalUserInput, task_prompt_draft, validate_user_input
-from ._object import (
-    RuntimeObjectKeyFactory,
-    put_runtime_object,
-    read_runtime_object,
-)
+from ._object import RuntimeObjectKeyFactory, read_runtime_object
 from .service_api import ExecutionService, SessionService
 from .state import ArtifactRecord, ArtifactState, RuntimeDomain
 
@@ -295,7 +285,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         app: AppT,
         task_state: _TaskStateReader,
         task_objects: ObjectStore,
-        payload_policy: PayloadPolicy,
         artifact_state: ArtifactState | None = None,
         artifact_objects: ObjectStore | None = None,
         object_key_factory: RuntimeObjectKeyFactory,
@@ -313,9 +302,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._execution = execution
         self._task_state = task_state
         self._task_objects = task_objects
-        self._payload_policy = payload_policy
-        self._materialization_tasks: set[asyncio.Task[StoredPayload]] = set()
-        self._background_failure: AIError | None = None
         self._artifact_state = artifact_state
         self._artifact_objects = artifact_objects
         self._object_key_factory = object_key_factory
@@ -347,12 +333,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
-        materializations = tuple(
-            cast("asyncio.Task[object]", task)
-            for task in self._materialization_tasks
-            if not task.done()
-        )
-        return (*self._agent.pending_background_tasks, *materializations)
+        return self._agent.pending_background_tasks
 
     @property
     def pending_cancelled_tasks(self) -> tuple[asyncio.Task[object], ...]:
@@ -360,15 +341,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     @property
     def background_failure(self) -> AIError | None:
-        if self._background_failure is not None:
-            return AIError(
-                self._background_failure.code,
-                category=self._background_failure.category,
-                retryable=self._background_failure.retryable,
-                operation_id=self._background_failure.operation_id,
-                safe_details=dict(self._background_failure.safe_details),
-                diagnostics=self._background_failure.diagnostics,
-            )
         return self._agent.background_failure
 
     def admit_node(self, node: TaskNode) -> TaskNode:
@@ -1207,10 +1179,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         principal: "Principal | None" = None,
     ) -> JsonValue:
-        if record.payload is not None:
-            output = await self._read_payload(record.payload)
-        else:
-            if record.execution_id is None or principal is None:
+        if record.execution_id is not None:
+            if principal is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result = await self._execution.result(
                 record.execution_id,
@@ -1222,129 +1192,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             output = result.output
+        elif record.payload is not None:
+            output = await self._read_payload(record.payload)
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if canonical_sha256(output) != record.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return output
-
-    async def _complete_output(
-        self,
-        node: TaskNode,
-        output: JsonValue,
-        *,
-        execution_id: str | None,
-        principal: Principal,
-        graph_id: str,
-    ) -> TaskNodeRunResult:
-        if execution_id is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        normalized = normalize_json_value(output)
-        _validate_task_output(node, normalized)
-        digest = canonical_sha256(normalized)
-        payload = await self._materialize_result(
-            normalized,
-            tenant_id=principal.tenant_id,
-            graph_id=graph_id,
-            node_id=node.node_id,
-        )
-        if payload.digest != digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        expanded_nodes = self._expand_nodes(
-            node,
-            normalized,
-            principal=principal,
-            graph_id=graph_id,
-        )
-        return TaskNodeRunResult(
-            digest,
-            execution_id,
-            payload,
-            expanded_nodes=expanded_nodes,
-        )
-
-    async def _materialize_result(
-        self,
-        output: JsonValue,
-        *,
-        tenant_id: str,
-        graph_id: str,
-        node_id: str,
-    ) -> StoredPayload:
-        task = asyncio.create_task(
-            self._materialize_result_inner(
-                output,
-                tenant_id=tenant_id,
-            ),
-            name=f"task-result-materialize-{graph_id}-{node_id}",
-        )
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            if task.done():
-                self._consume_materialization(
-                    task,
-                    graph_id=graph_id,
-                    node_id=node_id,
-                )
-            else:
-                self._materialization_tasks.add(task)
-
-                def consume(done: asyncio.Task[StoredPayload]) -> None:
-                    try:
-                        self._consume_materialization(
-                            done,
-                            graph_id=graph_id,
-                            node_id=node_id,
-                        )
-                    finally:
-                        self._materialization_tasks.discard(done)
-
-                task.add_done_callback(consume)
-            raise
-
-    def _consume_materialization(
-        self,
-        task: asyncio.Task[StoredPayload],
-        *,
-        graph_id: str,
-        node_id: str,
-    ) -> None:
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except BaseException as error:  # noqa: BLE001
-            if self._background_failure is not None:
-                return
-            details = (
-                dict(error.safe_details)
-                if isinstance(error, AIError)
-                else {}
-            )
-            details.setdefault("phase", "task_result_materialize")
-            details.setdefault("graph_id", graph_id)
-            details.setdefault("node_id", node_id)
-            self._background_failure = AIError(
-                ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details=details,
-            )
-
-    async def _materialize_result_inner(
-        self,
-        output: JsonValue,
-        *,
-        tenant_id: str,
-    ) -> StoredPayload:
-        inline = StoredPayload.inline_json(output)
-        if payload_fits_inline(inline, self._payload_policy):
-            return inline
-        reference = await put_runtime_object(
-            self._task_objects,
-            self._object_key_factory,
-            RuntimeDomain.TASK,
-            tenant_id,
-            canonical_json_bytes(output),
-        )
-        return StoredPayload.object(reference)
 
     async def _read_payload(self, payload: StoredPayload) -> JsonValue:
         try:
@@ -1371,6 +1225,32 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if canonical_sha256(normalized) != payload.digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return normalized
+
+    async def _complete_output(
+        self,
+        node: TaskNode,
+        output: JsonValue,
+        *,
+        execution_id: str | None,
+        principal: Principal,
+        graph_id: str,
+    ) -> TaskNodeRunResult:
+        if execution_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        normalized = normalize_json_value(output)
+        _validate_task_output(node, normalized)
+        digest = canonical_sha256(normalized)
+        expanded_nodes = self._expand_nodes(
+            node,
+            normalized,
+            principal=principal,
+            graph_id=graph_id,
+        )
+        return TaskNodeRunResult(
+            digest,
+            execution_id,
+            expanded_nodes=expanded_nodes,
+        )
 
     def _expand_nodes(
         self,
@@ -1529,24 +1409,20 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         values: dict[str, TaskDependency] = {}
         for dependency_id in sorted(node.dependencies):
             dependency = dependency_results[dependency_id]
-            if dependency.result_payload is None:
-                result = await self._execution.result(
-                    dependency.execution_id,
-                    principal=principal,
-                )
-                if (
-                    result.status is not ExecutionStatus.SUCCEEDED
-                    or result.output is None
-                    or canonical_sha256(result.output)
-                    != dependency.result_digest
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                output = result.output
-            else:
-                output = await self._read_payload(dependency.result_payload)
+            result = await self._execution.result(
+                dependency.execution_id,
+                principal=principal,
+            )
+            if (
+                result.status is not ExecutionStatus.SUCCEEDED
+                or result.output is None
+                or canonical_sha256(result.output)
+                != dependency.result_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values[dependency_id] = TaskDependency(
                 dependency_id,
-                output,
+                result.output,
                 dependency.result_digest,
                 dependency.execution_id,
             )
@@ -1597,21 +1473,18 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     )
                     if execution.status is not ExecutionStatus.SUCCEEDED:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if record.payload is None:
-                        result = await self._execution.result(
-                            execution_id,
-                            principal=principal,
-                        )
-                        if (
-                            result.status is not ExecutionStatus.SUCCEEDED
-                            or result.output is None
-                        ):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        output = result.output
-                    else:
-                        output = await self._read_payload(record.payload)
-                    if canonical_sha256(output) != reference.result_digest:
+                    result = await self._execution.result(
+                        execution_id,
+                        principal=principal,
+                    )
+                    if (
+                        result.status is not ExecutionStatus.SUCCEEDED
+                        or result.output is None
+                        or canonical_sha256(result.output)
+                        != reference.result_digest
+                    ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    output = result.output
                     values[name] = TaskDependency(
                         reference.node_id,
                         output,
