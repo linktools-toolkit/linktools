@@ -338,7 +338,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             return ExecutionView(
                 "execution",
                 "agent",
-                ExecutionStatus.RUNNING,
+                ExecutionStatus.STARTED,
                 ExecutionLineageKind.RUN,
                 None,
                 "execution",
