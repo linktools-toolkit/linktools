@@ -5,7 +5,7 @@
 import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
@@ -448,10 +448,24 @@ class TaskGraphRun(Generic[AppT]):
                         if durable_sequence <= previous:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         node_sequences[event.execution_id] = durable_sequence
+                    node_sequences = cursor_execution_sequences.get(
+                        node_id,
+                        {},
+                    )
+                    event_with_cursor = replace(
+                        event,
+                        cursor=encode_execution_watch_cursor(
+                            self._runtime.namespace,
+                            self._principal.tenant_id,
+                            event.root_execution_id,
+                            include_content=include_content,
+                            sequences=node_sequences,
+                        ),
+                    )
                     yield TaskGraphRunEvent(
                         self.graph_id,
                         node_id,
-                        event,
+                        event_with_cursor,
                         encode_graph_watch_cursor(
                             self._runtime.namespace,
                             self._principal.tenant_id,
