@@ -1099,6 +1099,7 @@ class StateStepArchive(StepStore):
                     staged.error_code,
                     staged.duration_ns,
                     staged.usage,
+                    staged.attachments,
                 )
             )
         return tuple(result)
