@@ -128,6 +128,7 @@ async def test_materialized_agent_converts_all_model_facing_tool_signals(
         history = await runtime.execution.history(
             result.execution_id,
             principal=runtime.default_principal,
+            include_content=True,
         )
         tool_results = {
             item.tool_name: item.content
