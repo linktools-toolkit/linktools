@@ -54,7 +54,7 @@ class _BlockingRunner:
         except asyncio.CancelledError:
             self.cancelled.set()
             raise
-        return TaskNodeRunResult("c" * 64)
+        return TaskNodeRunResult("c" * 64, execution_id="execution-local")
 
     async def cancel(
         self,
