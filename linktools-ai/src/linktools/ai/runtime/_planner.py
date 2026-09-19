@@ -731,6 +731,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 principal=principal,
                 correlation=correlation,
                 dependencies=dependencies,
+                dependency_reader=lambda dependency: self._read_dependency(
+                    dependency,
+                    principal=principal,
+                ),
                 control=control,
             )
             return await self._complete_output(
@@ -896,6 +900,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             body,
             dependencies,
             _custom_idempotency_key(graph_id, node, principal, dependencies),
+            lambda dependency: self._read_dependency(
+                dependency,
+                principal=principal,
+            ),
             correlation,
             artifacts=self._artifact_publisher(
                 principal,
@@ -1077,6 +1085,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             body,
             dependencies,
             _custom_idempotency_key(graph_id, node, principal, dependencies),
+            lambda dependency: self._read_dependency(
+                dependency,
+                principal=principal,
+            ),
             correlation,
             artifacts=None,
         )
@@ -1404,6 +1416,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 principal=principal,
                 correlation=correlation,
                 dependencies=dependencies,
+                dependency_reader=lambda dependency: self._read_dependency(
+                    dependency,
+                    principal=principal,
+                ),
                 durable_execution_id=execution_id,
             )
             return
@@ -1421,6 +1437,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node,
                 principal,
                 dependencies,
+            ),
+            lambda dependency: self._read_dependency(
+                dependency,
+                principal=principal,
             ),
             correlation,
             artifacts=self._artifact_publisher(
@@ -1691,92 +1711,98 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         principal: Principal,
         graph_id: str,
     ) -> dict[str, TaskDependency]:
+        del graph_id
         if set(dependency_results) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values: dict[str, TaskDependency] = {}
         for dependency_id in sorted(node.dependencies):
             dependency = dependency_results[dependency_id]
-            result = await self._execution.result(
-                dependency.execution_id,
-                principal=principal,
-            )
-            if (
-                result.status is not ExecutionStatus.SUCCEEDED
-                or canonical_sha256(result.output)
-                != dependency.result_digest
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             values[dependency_id] = TaskDependency(
                 dependency_id,
-                result.output,
                 dependency.result_digest,
                 dependency.execution_id,
             )
 
-        if node.input_refs:
-            grouped: dict[str, list[tuple[str, TaskResultRef]]] = {}
-            for name, reference in node.input_refs.items():
+        grouped: dict[str, list[tuple[str, TaskResultRef]]] = {}
+        for name, reference in node.input_refs.items():
+            if (
+                reference.namespace != self._namespace
+                or reference.tenant_id != principal.tenant_id
+            ):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            grouped.setdefault(reference.graph_id, []).append((name, reference))
+
+        for source_graph_id, entries in sorted(grouped.items()):
+            node_ids = tuple(
+                dict.fromkeys(
+                    reference.node_id
+                    for _, reference in entries
+                )
+            )
+            records = await self._task_state.get_results(
+                source_graph_id,
+                node_ids,
+                tenant_id=principal.tenant_id,
+            )
+            snapshot = await self._task_state.snapshot_graph(
+                source_graph_id,
+                tenant_id=principal.tenant_id,
+            )
+            states = (
+                {}
+                if snapshot is None
+                else {
+                    state.node_id: state
+                    for state in snapshot.node_states
+                }
+            )
+            for name, reference in entries:
+                record = records.get(reference.node_id)
+                state = states.get(reference.node_id)
                 if (
-                    reference.namespace != self._namespace
-                    or reference.tenant_id != principal.tenant_id
+                    record is None
+                    or state is None
+                    or state.status is not TaskStatus.SUCCEEDED
+                    or state.result_digest != reference.result_digest
+                    or state.execution_id is None
+                    or (
+                        record.execution_id is not None
+                        and record.execution_id != state.execution_id
+                    )
                 ):
-                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                grouped.setdefault(reference.graph_id, []).append((name, reference))
-            for source_graph_id, entries in grouped.items():
-                records = await self._task_state.get_results(
-                    source_graph_id,
-                    tuple(reference.node_id for _, reference in entries),
-                    tenant_id=principal.tenant_id,
+                    raise AIError(ErrorCode.TASK_NOT_READY)
+                execution_id = state.execution_id
+                execution = await self._execution.inspect(
+                    execution_id,
+                    principal=principal,
                 )
-                snapshot = await self._task_state.snapshot_graph(
-                    source_graph_id,
-                    tenant_id=principal.tenant_id,
+                if execution.status is not ExecutionStatus.SUCCEEDED:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                values[name] = TaskDependency(
+                    reference.node_id,
+                    reference.result_digest,
+                    execution_id,
                 )
-                states = (
-                    {}
-                    if snapshot is None
-                    else {state.node_id: state for state in snapshot.node_states}
-                )
-                for name, reference in entries:
-                    record = records.get(reference.node_id)
-                    state = states.get(reference.node_id)
-                    if (
-                        record is None
-                        or state is None
-                        or state.status is not TaskStatus.SUCCEEDED
-                        or state.result_digest != reference.result_digest
-                        or state.execution_id is None
-                        or (
-                            record.execution_id is not None
-                            and record.execution_id != state.execution_id
-                        )
-                    ):
-                        raise AIError(ErrorCode.TASK_NOT_READY)
-                    execution_id = state.execution_id
-                    execution = await self._execution.inspect(
-                        execution_id,
-                        principal=principal,
-                    )
-                    if execution.status is not ExecutionStatus.SUCCEEDED:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    result = await self._execution.result(
-                        execution_id,
-                        principal=principal,
-                    )
-                    if (
-                        result.status is not ExecutionStatus.SUCCEEDED
-                        or canonical_sha256(result.output)
-                        != reference.result_digest
-                    ):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    output = result.output
-                    values[name] = TaskDependency(
-                        reference.node_id,
-                        output,
-                        reference.result_digest,
-                        execution_id,
-                    )
         return values
+
+    async def _read_dependency(
+        self,
+        dependency: TaskDependency,
+        *,
+        principal: Principal,
+    ) -> JsonValue:
+        result = await self._execution.result(
+            dependency.execution_id,
+            principal=principal,
+        )
+        if (
+            result.status is not ExecutionStatus.SUCCEEDED
+            or result.output is None
+            or canonical_sha256(result.output)
+            != dependency.result_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result.output
 
     def _handler(
         self,
@@ -1912,7 +1938,7 @@ def _custom_idempotency_key(
                     "node_id": dependency_id,
                     "result_digest": dependencies[dependency_id].result_digest,
                 }
-                for dependency_id in sorted(node.dependencies)
+                for dependency_id in sorted(dependencies)
             ],
             "principal": principal_identity_payload(principal),
         }
