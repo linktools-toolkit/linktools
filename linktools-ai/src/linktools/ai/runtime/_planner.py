@@ -63,6 +63,10 @@ from ..task import (
 from ._agent_task import _AgentTaskNodeHandler, _execution_failure
 from ._input import CanonicalUserInput, task_prompt_draft, validate_user_input
 from ._object import RuntimeObjectKeyFactory, read_runtime_object
+from ._task_capability_snapshot import (
+    FrozenTaskCapabilities,
+    TaskCapabilitySnapshotStore,
+)
 from .service_api import ExecutionService, SessionService
 from .state import ArtifactRecord, ArtifactState, RuntimeDomain
 
@@ -300,6 +304,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         artifact_state: ArtifactState | None = None,
         artifact_objects: ObjectStore | None = None,
         object_key_factory: RuntimeObjectKeyFactory,
+        capability_snapshots: TaskCapabilitySnapshotStore,
         handlers: Sequence[TaskNodeHandler[AppT]] = (),
         expanders: Sequence[TaskExpander] = (),
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
@@ -318,6 +323,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._artifact_state = artifact_state
         self._artifact_objects = artifact_objects
         self._object_key_factory = object_key_factory
+        if not isinstance(capability_snapshots, TaskCapabilitySnapshotStore):
+            raise TypeError("capability_snapshots must be TaskCapabilitySnapshotStore")
+        self._capability_snapshots = capability_snapshots
+        self._frozen_capabilities: dict[str, FrozenTaskCapabilities] = {}
         self._agent = _AgentTaskNodeHandler(
             execution,
             catalog,
@@ -343,6 +352,99 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._task_durable = task_durable
         self._execution_durable = execution_durable
         self._recovery_durable = recovery_durable
+
+    async def capture_admission(
+        self,
+        admission: TaskGraphAdmission,
+        graph: TaskGraph,
+    ) -> None:
+        frozen = await self._capability_snapshots.capture(
+            admission,
+            graph,
+        )
+        self._frozen_capabilities[admission.graph_id] = frozen
+
+    async def load_admission(
+        self,
+        admission: TaskGraphAdmission,
+    ) -> None:
+        frozen = await self._capability_snapshots.load(admission)
+        self._frozen_capabilities[admission.graph_id] = frozen
+
+    def _require_frozen_capabilities(
+        self,
+        graph_id: str,
+    ) -> FrozenTaskCapabilities:
+        frozen = self._frozen_capabilities.get(graph_id)
+        if frozen is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "task_capability_snapshot",
+                    "graph_id": graph_id,
+                },
+            )
+        return frozen
+
+    def _frozen_agent_binding(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+    ) -> AgentBindingSnapshot:
+        payload = node.input.get("binding")
+        if not isinstance(payload, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        snapshot = AgentBindingSnapshot.from_payload(payload)
+        frozen = self._require_frozen_capabilities(graph_id)
+        resolved = frozen.bindings.get(snapshot.binding_digest)
+        if resolved is not None:
+            return resolved
+        root = frozen.roots.get(snapshot.agent_spec.id)
+        if root is None or not _binding_matches_frozen_root(snapshot, root):
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "agent_binding",
+                    "agent_id": snapshot.agent_spec.id,
+                    "graph_id": graph_id,
+                },
+            )
+        return snapshot
+
+    def _frozen_agent_node(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+    ) -> TaskNode:
+        if node.input.get("type") != self._agent.type:
+            return node
+        snapshot = self._frozen_agent_binding(
+            node,
+            graph_id=graph_id,
+        )
+        current = AgentBindingSnapshot.from_payload(
+            node.input.get("binding")
+        )
+        if current == snapshot:
+            return node
+        body = node.input
+        body["binding"] = snapshot.to_payload()
+        return TaskNode(
+            node.node_id,
+            node.dependencies,
+            input=body,
+            budget_cost=node.budget_cost,
+            expander=node.expander,
+            input_refs=node.input_refs,
+            timeout_seconds=node.timeout_seconds,
+            max_attempts=node.max_attempts,
+            retry_delay_seconds=node.retry_delay_seconds,
+            output_schema=node.output_schema,
+            output_contract=node.output_contract,
+            effect=node.effect,
+        )
 
     async def prepare_node(
         self,
@@ -426,11 +528,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         tenant_id: str,
     ) -> None:
-        await self._release_nodes_dependencies(
-            snapshot.graph_id,
-            snapshot.nodes,
-            tenant_id=tenant_id,
-        )
+        try:
+            await self._release_nodes_dependencies(
+                snapshot.graph_id,
+                snapshot.nodes,
+                tenant_id=tenant_id,
+            )
+        finally:
+            self._frozen_capabilities.pop(snapshot.graph_id, None)
 
     async def _release_nodes_dependencies(
         self,
@@ -621,6 +726,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None:
         for node, state in zip(snapshot.nodes, snapshot.node_states, strict=True):
+            node = self._frozen_agent_node(
+                node,
+                graph_id=snapshot.graph_id,
+            )
             if state.status in {
                 TaskStatus.SUCCEEDED,
                 TaskStatus.FAILED,
@@ -727,8 +836,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         *,
         control: TaskNodeRunControl,
     ) -> TaskNodeRunResult:
-        node = invocation.node
         graph_id = invocation.graph_id
+        node = self._frozen_agent_node(
+            invocation.node,
+            graph_id=graph_id,
+        )
         principal = invocation.principal
         correlation = invocation.correlation
         dependency_results = invocation.dependency_results
@@ -1340,6 +1452,80 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             output_schema=output,
         )
 
+    def _build_frozen_agent_task_by_id(
+        self,
+        graph_id: str,
+        agent_id: str,
+        node_id: str,
+        user_prompt: CanonicalUserInput,
+        *,
+        dependencies: tuple[str, ...] = (),
+        budget_cost: int = 1,
+        output: type[BaseModel] | None = None,
+        planning: bool | None = None,
+        thinking: ThinkingValue | None = None,
+        expander: TaskExpanderRef | None = None,
+        input_refs: Mapping[str, TaskResultRef] | None = None,
+        timeout_seconds: float | None = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
+        files: Sequence[str] = (),
+        session_id: str | None = None,
+        memory_scope: str | None = None,
+    ) -> TaskNode:
+        validate_agent_id(agent_id)
+        frozen = self._require_frozen_capabilities(graph_id)
+        root = frozen.roots.get(agent_id)
+        if root is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={"kind": "agent", "agent_id": agent_id},
+            )
+        definition = self._compiler.restore(root).definition
+        binding = self._compiler.bind(definition, output=output).snapshot
+        binding = replace(
+            binding,
+            subagent_bindings=root.subagent_bindings,
+        )
+        if not _binding_matches_frozen_root(binding, root):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._catalog.register_binding(
+            self._compiler.restore(binding)
+        )
+        resolved_planning = (
+            definition.spec.planning if planning is None else planning
+        )
+        if not isinstance(resolved_planning, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        resolved_thinking = (
+            definition.spec.thinking
+            if thinking is None
+            else normalize_thinking(thinking)
+        )
+        return TaskNode(
+            node_id,
+            dependencies,
+            input={
+                "type": self._agent.type,
+                "version": self._agent.version,
+                "binding": binding.to_payload(),
+                "user_prompt": task_prompt_draft(user_prompt),
+                "mode": "run",
+                "planning": resolved_planning,
+                "thinking": resolved_thinking,
+                "files": list(files),
+                "session_id": session_id,
+                "memory_scope": memory_scope,
+            },
+            budget_cost=budget_cost,
+            expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            output_schema=output,
+        )
+
     def _build_agent_task_by_id(
         self,
         agent_id: str,
@@ -1390,8 +1576,11 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         )
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
-        node = invocation.node
         graph_id = invocation.graph_id
+        node = self._frozen_agent_node(
+            invocation.node,
+            graph_id=graph_id,
+        )
         principal = invocation.principal
         correlation = invocation.correlation
         dependency_results = invocation.dependency_results
@@ -1579,7 +1768,15 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             graph_id,
             source_node,
             output,
-            build_agent_task=self._build_agent_task_by_id,
+            build_agent_task=lambda agent_id, node_id, user_prompt, **kwargs: (
+                self._build_frozen_agent_task_by_id(
+                    graph_id,
+                    agent_id,
+                    node_id,
+                    user_prompt,
+                    **kwargs,
+                )
+            ),
         )
         context: TaskExpansionContext = context_impl
         try:
@@ -1923,6 +2120,20 @@ def _normalize_handler_body(value: Mapping[str, JsonValue]) -> dict[str, JsonVal
     if "type" in normalized or "version" in normalized:
         raise ValueError("task handler normalize returned reserved fields")
     return normalized
+
+
+def _binding_matches_frozen_root(
+    binding: AgentBindingSnapshot,
+    root: AgentBindingSnapshot,
+) -> bool:
+    return (
+        binding.agent_spec == root.agent_spec
+        and dict(binding.base_model) == dict(root.base_model)
+        and binding.selected == root.selected
+        and binding.subagents == root.subagents
+        and binding.workspace_ref == root.workspace_ref
+        and binding.subagent_bindings == root.subagent_bindings
+    )
 
 
 def _task_dependency_hold_id(

@@ -56,6 +56,7 @@ from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
+from ._task_capability_snapshot import TaskCapabilitySnapshotStore
 from ._runtime_identity import grant_key as runtime_grant_key
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
@@ -594,6 +595,14 @@ async def _build_local_components(
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )
+        task_capability_snapshots = TaskCapabilitySnapshotStore(
+            namespace,
+            catalog,
+            compiler,
+            skill_sources,
+            state.object_store(RuntimeDomain.TASK),
+            agent_task_type="linktools.ai.agent",
+        )
         task_runner = RuntimeTaskNodeRunner(
             execution,
             catalog,
@@ -607,6 +616,7 @@ async def _build_local_components(
             artifact_state=state.artifact,
             artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
+            capability_snapshots=task_capability_snapshots,
             handlers=task_handlers,
             expanders=task_expanders,
             release_dependency_hold=execution.release_dependency_hold,

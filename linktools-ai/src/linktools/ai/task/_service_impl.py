@@ -85,6 +85,17 @@ class _LocalTaskWaiter(Protocol):
 class _TaskGraphPreflight(Protocol):
     def validate_request(self, graph: TaskGraph) -> None: ...
 
+    async def capture_admission(
+        self,
+        admission: TaskGraphAdmission,
+        graph: TaskGraph,
+    ) -> None: ...
+
+    async def load_admission(
+        self,
+        admission: TaskGraphAdmission,
+    ) -> None: ...
+
     def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None: ...
 
     async def prepare_graph(
@@ -327,6 +338,11 @@ class DefaultTaskGraphService(TaskGraphService):
         if self._preflight is not None:
             self._preflight.validate_request(request.graph)
         admission = TaskGraphAdmission.from_request(request)
+        if self._preflight is not None:
+            await self._preflight.capture_admission(
+                admission,
+                request.graph,
+            )
         view = await self._persistence.admissions.admit(admission, request.graph)
         durable_admission = await self._persistence.admissions.get(
             graph_id,
@@ -403,11 +419,18 @@ class DefaultTaskGraphService(TaskGraphService):
                 limit=128,
             )
             for launch in page.items:
+                admission = await self._persistence.admissions.get(
+                    launch.graph_id,
+                    tenant_id=launch.principal.tenant_id,
+                )
+                if admission is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 snapshot = await self._persistence.tasks.scheduler_snapshot(
                     launch.graph_id,
                     tenant_id=launch.principal.tenant_id,
                 )
                 if self._preflight is not None:
+                    await self._preflight.load_admission(admission)
                     self._preflight.validate_recovery(snapshot)
                 view = TaskGraphView(
                     snapshot.graph_id,
@@ -541,6 +564,7 @@ class DefaultTaskGraphService(TaskGraphService):
                 tenant_id=tenant_id,
             )
             if self._preflight is not None:
+                await self._preflight.load_admission(admission)
                 self._preflight.validate_recovery(snapshot)
                 await self._preflight.prepare_graph(
                     snapshot,
