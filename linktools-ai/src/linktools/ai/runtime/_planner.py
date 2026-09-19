@@ -356,6 +356,25 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._execution_durable = execution_durable
         self._recovery_durable = recovery_durable
 
+    def _artifact_publisher(
+        self,
+        principal: Principal,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+    ) -> "_TaskArtifactPublisher | None":
+        if self._artifact_state is None or self._artifact_objects is None:
+            return None
+        return _TaskArtifactPublisher(
+            self._artifact_state,
+            self._artifact_objects,
+            self._object_key_factory,
+            principal=principal,
+            graph_id=graph_id,
+            node_id=node_id,
+            execution_id=execution_id,
+        )
+
     async def capture_admission(
         self,
         admission: TaskGraphAdmission,
