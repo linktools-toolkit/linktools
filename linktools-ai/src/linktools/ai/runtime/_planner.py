@@ -638,50 +638,55 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 graph_id=graph_id,
                 execution_id=execution_id,
             )
+        promoted_from_retry = False
         if view.status is ExecutionStatus.WAITING_RETRY:
-            if view.task_next_attempt_at is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return TaskNodeRunResult(
-                canonical_sha256(
-                    {
-                        "execution_id": execution_id,
-                        "retry_at": view.task_next_attempt_at.isoformat(),
-                    }
-                ),
-                execution_id,
-                retry_at=view.task_next_attempt_at,
-            )
-        if view.status is not ExecutionStatus.STARTED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        if view.task_attempt > 0 and node.effect == "non_replay_safe":
-            await self._execution.require_task_recovery(
+            claimed = await self._execution.claim_task_attempt(
                 execution_id,
                 principal=principal,
-                error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
             )
-            raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
-
-        claimed = await self._execution.claim_task_attempt(
-            execution_id,
-            principal=principal,
-        )
-        if claimed.status is ExecutionStatus.WAITING_RETRY:
-            if claimed.task_next_attempt_at is None:
+            if claimed.status is ExecutionStatus.WAITING_RETRY:
+                if claimed.task_next_attempt_at is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return TaskNodeRunResult(
+                    canonical_sha256(
+                        {
+                            "execution_id": execution_id,
+                            "retry_at": claimed.task_next_attempt_at.isoformat(),
+                        }
+                    ),
+                    execution_id,
+                    retry_at=claimed.task_next_attempt_at,
+                )
+            if (
+                claimed.status is not ExecutionStatus.STARTED
+                or claimed.task_attempt <= view.task_attempt
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return TaskNodeRunResult(
-                canonical_sha256(
-                    {
-                        "execution_id": execution_id,
-                        "retry_at": claimed.task_next_attempt_at.isoformat(),
-                    }
-                ),
+            promoted_from_retry = True
+        else:
+            if view.status is not ExecutionStatus.STARTED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if view.task_attempt > 0 and node.effect == "non_replay_safe":
+                await self._execution.require_task_recovery(
+                    execution_id,
+                    principal=principal,
+                    error_code=ErrorCode.TASK_EFFECT_UNKNOWN.value,
+                )
+                raise TaskNodeRunError(ErrorCode.TASK_EFFECT_UNKNOWN, execution_id)
+            claimed = await self._execution.claim_task_attempt(
                 execution_id,
-                retry_at=claimed.task_next_attempt_at,
+                principal=principal,
             )
-        if claimed.status is not ExecutionStatus.STARTED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if claimed.task_attempt <= view.task_attempt:
+            if claimed.status is not ExecutionStatus.STARTED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if claimed.task_attempt <= view.task_attempt:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if (
+            node.effect == "non_replay_safe"
+            and claimed.task_attempt > 1
+            and not promoted_from_retry
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         context = TaskNodeContext(
