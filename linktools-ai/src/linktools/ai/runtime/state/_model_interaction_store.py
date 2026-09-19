@@ -120,6 +120,7 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
                 staged.error_code,
                 staged.duration_ns,
                 staged.usage,
+                staged.attachments,
             )
             for staged in values
         )
@@ -266,6 +267,7 @@ class ModelInteractionStateStepArchive(StateStepArchive):
                     staged.error_code,
                     staged.duration_ns,
                     staged.usage,
+                    staged.attachments,
                 )
             )
         return tuple(result)
