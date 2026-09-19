@@ -87,6 +87,20 @@ class _TaskGraphPreflight(Protocol):
 
     def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None: ...
 
+    async def prepare_graph(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        principal: Principal,
+    ) -> None: ...
+
+    async def release_graph_dependencies(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        tenant_id: str,
+    ) -> None: ...
+
     def validate_input(self, node: TaskNode, value: JsonValue) -> None: ...
 
     def validate_effect_resolution(
@@ -320,10 +334,20 @@ class DefaultTaskGraphService(TaskGraphService):
         )
         if durable_admission is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        snapshot = await self._persistence.tasks.scheduler_snapshot(
+            graph_id,
+            tenant_id=tenant_id,
+        )
         if _terminal(view.status):
-            await self._observe_metric_history(view, tenant_id=tenant_id)
-        elif view.status is not TaskStatus.RECOVERY_REQUIRED:
-            await self._arm_graph(durable_admission.launch())
+            await self._observe_metric_history(snapshot, tenant_id=tenant_id)
+        else:
+            if self._preflight is not None:
+                await self._preflight.prepare_graph(
+                    snapshot,
+                    principal=request.principal,
+                )
+            if view.status is not TaskStatus.RECOVERY_REQUIRED:
+                await self._arm_graph(durable_admission.launch())
         return await self._result(view, tenant_id)
 
     async def _arm_graph(self, launch: TaskGraphLaunch) -> None:
@@ -392,10 +416,15 @@ class DefaultTaskGraphService(TaskGraphService):
                 )
                 if _terminal(view.status):
                     await self._observe_metric_history(
-                        view,
+                        snapshot,
                         tenant_id=launch.principal.tenant_id,
                     )
                     continue
+                if self._preflight is not None:
+                    await self._preflight.prepare_graph(
+                        snapshot,
+                        principal=launch.principal,
+                    )
                 if view.status is TaskStatus.RECOVERY_REQUIRED:
                     continue
                 await self._arm_graph(launch)
@@ -513,6 +542,10 @@ class DefaultTaskGraphService(TaskGraphService):
             )
             if self._preflight is not None:
                 self._preflight.validate_recovery(snapshot)
+                await self._preflight.prepare_graph(
+                    snapshot,
+                    principal=request.principal,
+                )
             await self._arm_graph(admission.launch())
 
         settled = await self._record_success(
@@ -1873,6 +1906,19 @@ class DefaultTaskGraphService(TaskGraphService):
         *,
         tenant_id: str,
     ) -> None:
+        if _terminal(view.status) and self._preflight is not None:
+            snapshot = (
+                view
+                if isinstance(view, TaskGraphSnapshot)
+                else await self._persistence.tasks.scheduler_snapshot(
+                    view.graph_id,
+                    tenant_id=tenant_id,
+                )
+            )
+            await self._preflight.release_graph_dependencies(
+                snapshot,
+                tenant_id=tenant_id,
+            )
         if self._metric_projector is not None:
             self._metric_projector.trigger(view.graph_id, tenant_id=tenant_id)
 
