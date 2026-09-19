@@ -882,6 +882,10 @@ class LocalTaskGraphLauncher:
                 if view.status is TaskStatus.RECOVERY_REQUIRED:
                     return
                 if view.status in _TERMINAL:
+                    await self._runner.release_graph_dependencies(
+                        snapshot,
+                        tenant_id=tenant_id,
+                    )
                     if self._metric_projector is not None:
                         self._metric_projector.trigger(
                             request.graph_id,
@@ -943,6 +947,11 @@ class LocalTaskGraphLauncher:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if state.node_id in used or not _runnable(state, now):
                         continue
+                    await self._runner.prepare_node(
+                        node,
+                        graph_id=request.graph_id,
+                        principal=request.principal,
+                    )
                     try:
                         lease = await self._repository.claim(
                             request.graph_id,
