@@ -19,6 +19,7 @@ from linktools.ai.runtime import (
     ModelInteractionItem,
     Page,
     RuntimeHistory,
+    UsageSummary,
 )
 from linktools.cli import BaseCommand
 
@@ -80,7 +81,7 @@ def _emit_execution_list(executions: tuple[ExecutionInfo, ...]) -> None:
             execution.created_at.isoformat(timespec="seconds"),
             execution.execution_id,
             _status_text(execution.status.value),
-            execution.agent_id,
+            execution.agent_id or "-",
             execution.session_id or "-",
             execution.parent_execution_id or "-",
             execution.error_code or "-",
@@ -133,12 +134,26 @@ def _execution_panel(execution: ExecutionInfo) -> Panel:
     table.add_column()
     table.add_row("Execution", execution.execution_id)
     table.add_row("Status", _status_text(execution.status.value))
-    table.add_row("Agent", execution.agent_id)
+    table.add_row("Kind", execution.binding_kind)
+    table.add_row("Agent", execution.agent_id or "-")
+    table.add_row("Task", execution.task_type or "-")
     table.add_row("Session", execution.session_id or "-")
     table.add_row("Lineage", execution.lineage_kind.value)
     table.add_row("Parent", execution.parent_execution_id or "-")
     table.add_row("Created", execution.created_at.isoformat())
-    table.add_row("Updated", execution.updated_at.isoformat())
+    table.add_row(
+        "Started",
+        "-" if execution.started_at is None else execution.started_at.isoformat(),
+    )
+    table.add_row(
+        "Terminal",
+        "-" if execution.terminal_at is None else execution.terminal_at.isoformat(),
+    )
+    table.add_row("Binding", execution.binding_digest)
+    table.add_row("Input", execution.input_digest)
+    table.add_row("Output contract", execution.output_fingerprint)
+    table.add_row("Output", execution.output_digest or "-")
+    table.add_row("Usage", _usage_label(execution.usage))
     table.add_row("Error", execution.error_code or "-")
     if execution.safe_error_details:
         table.add_row("Safe details", _preview(execution.safe_error_details))
@@ -532,7 +547,7 @@ def _model_label(model: Mapping[str, object]) -> str:
     return "-"
 
 
-def _usage_label(usage: UsageMetrics | None) -> str:
+def _usage_label(usage: UsageMetrics | UsageSummary | None) -> str:
     if usage is None:
         return "-"
     return (
