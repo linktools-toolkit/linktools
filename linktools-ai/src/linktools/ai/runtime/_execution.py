@@ -2622,8 +2622,13 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         timeout_seconds: "float | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionResult:
-        handle = await self.start(binding_digest, request)
+        handle = await self.start(
+            binding_digest,
+            request,
+            binding_snapshot=binding_snapshot,
+        )
         return await self.wait(
             handle.execution_id,
             principal=request.principal,
