@@ -3148,13 +3148,17 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]":
-        record = await self._load_authorized(
-            execution_id, principal, AuthorizationAction.EXECUTION_READ
-        )
-        return await self._history_reader.trace(
-            record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit
+        if self._history_service is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._history_service.trace(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
         )
 
     @_observed_query
@@ -3164,13 +3168,17 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[TranscriptItem]:
-        record = await self._load_authorized(
-            execution_id, principal, AuthorizationAction.EXECUTION_READ
-        )
-        return await self._history_reader.transcript(
-            record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit
+        if self._history_service is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._history_service.transcript(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
         )
 
     @_observed_query
@@ -3180,13 +3188,17 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]":
-        record = await self._load_authorized(
-            execution_id, principal, AuthorizationAction.EXECUTION_READ
-        )
-        return await self._history_reader.history(
-            record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit
+        if self._history_service is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._history_service.history(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
         )
 
     @_observed_query
@@ -3196,17 +3208,16 @@ class DefaultExecutionService:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]":
-        record = await self._load_authorized(
+        if self._history_service is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._history_service.model_interactions(
             execution_id,
-            principal,
-            AuthorizationAction.EXECUTION_READ,
-        )
-        return await self._history_reader.model_interactions(
-            record.execution_id,
-            tenant_id=record.tenant_id,
+            principal=principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
