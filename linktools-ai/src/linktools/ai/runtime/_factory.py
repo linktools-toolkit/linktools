@@ -709,7 +709,7 @@ async def _build_local_components(
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
-        await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
+        await _restore_recovery_bindings(compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
         await graph_service.recover_pending()
@@ -783,7 +783,6 @@ def _borrowed_runtime_history(
 
 
 async def _restore_recovery_bindings(
-    catalog: AgentCatalog,
     compiler: AgentCompiler,
     state: RuntimeState,
     *,
