@@ -768,27 +768,28 @@ class _BuiltinDeclarationLoader:
         context: CapabilityLoadContext,
     ) -> "Sequence[CapabilityContribution[object]]":
         entries = context.list(kind=self._kind)
-        all_entries = context.list()
-        directory_roots = tuple(
-            sorted(
-                entry.key.id[: -len("/SKILL.md")]
-                for entry in all_entries
-                if entry.key.kind == "skill" and entry.key.id.endswith("/SKILL.md")
+        directory_roots: tuple[str, ...] = ()
+        directory_root_set: frozenset[str] = frozenset()
+        if self._kind == "skill":
+            directory_roots = tuple(
+                sorted(
+                    entry.key.id[: -len("/SKILL.md")]
+                    for entry in entries
+                    if entry.key.id.endswith("/SKILL.md")
+                )
             )
-        )
-        if any(not root for root in directory_roots):
-            raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
-        _validate_skill_roots(directory_roots)
-        directory_root_set = frozenset(directory_roots)
-        flat_skill_ids = {
-            entry.key.id
-            for entry in all_entries
-            if entry.key.kind == "skill"
-            and not entry.key.id.endswith("/SKILL.md")
-            and not _inside_skill_root(entry.key.id, directory_roots)
-        }
-        if directory_root_set.intersection(flat_skill_ids):
-            raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+            if any(not root for root in directory_roots):
+                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+            _validate_skill_roots(directory_roots)
+            directory_root_set = frozenset(directory_roots)
+            flat_skill_ids = {
+                entry.key.id
+                for entry in entries
+                if not entry.key.id.endswith("/SKILL.md")
+                and not _inside_skill_root(entry.key.id, directory_root_set)
+            }
+            if directory_root_set.intersection(flat_skill_ids):
+                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
         declaration_keys = tuple(
             entry.key
             for entry in entries
@@ -844,7 +845,7 @@ class _BuiltinDeclarationLoader:
                     )
                 )
                 continue
-            if _inside_skill_root(key.id, directory_roots):
+            if _inside_skill_root(key.id, directory_root_set):
                 continue
             value = skill_codec.decode(values[key])
             if value.id != key.id:
@@ -856,17 +857,27 @@ class _BuiltinDeclarationLoader:
 
 
 def _validate_skill_roots(roots: Sequence[str]) -> None:
-    if len(set(roots)) != len(roots):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-    for index, root in enumerate(roots):
-        for other in roots[index + 1 :]:
-            if other.startswith(f"{root}/") or root.startswith(f"{other}/"):
+    seen: set[str] = set()
+    for root in roots:
+        if root in seen:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        parts = root.split("/")
+        prefix: list[str] = []
+        for part in parts[:-1]:
+            prefix.append(part)
+            if "/".join(prefix) in seen:
                 raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+        seen.add(root)
 
 
-def _inside_skill_root(identifier: str, roots: Sequence[str]) -> bool:
-    return any(identifier.startswith(f"{root}/") for root in roots)
-
+def _inside_skill_root(identifier: str, roots: frozenset[str]) -> bool:
+    parts = identifier.split("/")
+    prefix: list[str] = []
+    for part in parts[:-1]:
+        prefix.append(part)
+        if "/".join(prefix) in roots:
+            return True
+    return False
 
 def _freeze_contribution(
     value: CapabilityContribution[AppT],

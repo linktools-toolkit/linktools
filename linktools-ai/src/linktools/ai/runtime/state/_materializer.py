@@ -95,6 +95,7 @@ async def materialize_runtime_state(
         sql_routes: dict[tuple[str, object], RuntimeStateRoute] = {}
         filesystem_domains: dict[Path, list[RuntimeDomain]] = {}
         filesystem_routes: dict[Path, RuntimeStateRoute] = {}
+        filesystem_member_roots: dict[RuntimeDomain, Path] = {}
         memory_group = MemoryStateStorageGroup(read_only=read_only)
         for domain in RuntimeDomain:
             route = plan.route(domain)
@@ -120,18 +121,21 @@ async def materialize_runtime_state(
                 group_root = route.transaction_root or route.path
                 filesystem_domains.setdefault(group_root, []).append(domain)
                 filesystem_routes[group_root] = route
+                filesystem_member_roots[domain] = _route_domain_path(
+                    plan, domain, namespace, tenant_id
+                )
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        _validate_filesystem_member_roots(
+            filesystem_member_roots,
+            tuple(filesystem_domains),
+        )
 
         for group_root, domains in filesystem_domains.items():
             route = filesystem_routes[group_root]
             member_roots = {
-                domain: _route_domain_path(
-                    plan,
-                    domain,
-                    namespace,
-                    tenant_id,
-                )
+                domain: filesystem_member_roots[domain]
                 for domain in domains
             }
             if read_only and any(
@@ -424,6 +428,40 @@ def _route_domain_path(
 ) -> Path:
     path = plan.filesystem_path(domain)
     return path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id)
+
+
+def _validate_filesystem_member_roots(
+    member_roots: Mapping[RuntimeDomain, Path],
+    group_roots: tuple[Path, ...],
+) -> None:
+    ordered = tuple(
+        sorted(
+            member_roots.items(),
+            key=lambda item: (item[1].as_posix(), item[0].value),
+        )
+    )
+    for index, (left_domain, left) in enumerate(ordered):
+        for right_domain, right in ordered[index + 1 :]:
+            if left == right or left in right.parents or right in left.parents:
+                raise ValueError(
+                    "filesystem RuntimeStateRoute member paths overlap: "
+                    f"{left_domain.value}={left} {right_domain.value}={right}"
+                )
+    reserved_roots = tuple(
+        root / ".state-groups"
+        for root in dict.fromkeys(group_roots)
+    )
+    for domain, member in ordered:
+        for reserved in reserved_roots:
+            if (
+                member == reserved
+                or member in reserved.parents
+                or reserved in member.parents
+            ):
+                raise ValueError(
+                    "filesystem RuntimeStateRoute member path overlaps "
+                    f"coordination storage: {domain.value}={member}"
+                )
 
 
 def _filesystem_group_scope(

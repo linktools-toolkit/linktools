@@ -110,6 +110,26 @@ async def test_custom_loader_receives_frozen_metadata_and_reads_explicit_keys_on
     assert loader.read_value == b"a"
 
 
+class _NoopLoader:
+    async def load(
+        self,
+        context: CapabilityLoadContext,
+    ) -> "Sequence[CapabilityContribution[object]]":
+        del context
+        return ()
+
+
+@pytest.mark.asyncio
+async def test_replacing_skill_loader_disables_builtin_skill_layout_validation() -> None:
+    store = await _store()
+    await store.put(AssetKey("skill", "a/SKILL.md"), b"custom")
+    await store.put(AssetKey("skill", "a/x/SKILL.md"), b"custom")
+    group = CapabilityGroup("workspace", assets=store)
+    group.loader("skill", _NoopLoader())
+
+    assert await group.freeze() == ()
+
+
 class _OutsideSnapshotLoader:
     @property
     def id(self) -> str:

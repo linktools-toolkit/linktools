@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Runtime state routing defaults."""
 
+import pytest
+
 from linktools.ai.runtime import RuntimeDomain, RuntimeState, RuntimeStatePlan, RuntimeStateRoute
 
 
@@ -37,3 +39,18 @@ def test_default_state_plan_uses_memory_for_all_domains() -> None:
     plan = RuntimeStatePlan()
 
     assert all(plan.route(domain).kind == "memory" for domain in RuntimeDomain)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_plan_rejects_effective_member_path_overlap(tmp_path) -> None:
+    execution_root = tmp_path / "state"
+    plan = RuntimeStatePlan(
+        execution=RuntimeStateRoute.filesystem(execution_root),
+        memory=RuntimeStateRoute.filesystem(execution_root / "execution"),
+    )
+    state = RuntimeState.from_plan(plan)
+
+    with pytest.raises(ValueError, match="member paths overlap"):
+        await state.initialize(namespace="runtime", tenant_id="tenant")
+
+    assert not execution_root.exists()

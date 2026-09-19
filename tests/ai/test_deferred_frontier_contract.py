@@ -112,7 +112,10 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
     assert await persistence.after_run(ctx, result=result) is result  # type: ignore[arg-type]
 
     assert captured == [7]
-    assert store.snapshots == []
+    assert len(store.snapshots) == 1
+    snapshot = store.snapshots[0]
+    assert getattr(snapshot, "state") == "interrupted"
+    assert getattr(snapshot, "step_index") == 7
 
 
 @pytest.mark.asyncio

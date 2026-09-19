@@ -106,17 +106,26 @@ class TaskCapabilitySnapshotStore:
             for node in graph.nodes
             if (snapshot := self._node_binding(node)) is not None
         )
+        unique_bindings = {
+            snapshot.binding_digest: snapshot
+            for snapshot in node_bindings
+        }
         required_roots: set[str] = set()
-        for snapshot in node_bindings:
+        for snapshot in unique_bindings.values():
             required_roots.update(snapshot.subagent_ids)
         if any(node.expander is not None for node in graph.nodes):
             required_roots.update(self._catalog.root_ids)
-        roots = await self._freeze_roots(required_roots)
+        skill_snapshots: dict[tuple[str, str], ObjectRef] = {}
+        roots = await self._freeze_roots(
+            required_roots,
+            skill_snapshots=skill_snapshots,
+        )
         bindings: dict[str, AgentBindingSnapshot] = {}
-        for snapshot in node_bindings:
-            bindings[snapshot.binding_digest] = await self._freeze_binding(
+        for binding_digest, snapshot in sorted(unique_bindings.items()):
+            bindings[binding_digest] = await self._freeze_binding(
                 snapshot,
                 roots=roots,
+                skill_snapshots=skill_snapshots,
             )
 
         manifest: dict[str, JsonValue] = {
@@ -200,6 +209,8 @@ class TaskCapabilitySnapshotStore:
     async def _freeze_roots(
         self,
         agent_ids: set[str],
+        *,
+        skill_snapshots: dict[tuple[str, str], ObjectRef],
     ) -> Mapping[str, AgentBindingSnapshot]:
         if not agent_ids:
             return MappingProxyType({})
@@ -215,7 +226,8 @@ class TaskCapabilitySnapshotStore:
                 self._compiler.bind(
                     definition,
                     output=None,
-                ).snapshot
+                ).snapshot,
+                skill_snapshots=skill_snapshots,
             )
             base[agent_id] = snapshot
             pending.update(
@@ -244,8 +256,12 @@ class TaskCapabilitySnapshotStore:
         snapshot: AgentBindingSnapshot,
         *,
         roots: Mapping[str, AgentBindingSnapshot],
+        skill_snapshots: dict[tuple[str, str], ObjectRef],
     ) -> AgentBindingSnapshot:
-        frozen = await self._freeze_skills(snapshot)
+        frozen = await self._freeze_skills(
+            snapshot,
+            skill_snapshots=skill_snapshots,
+        )
         children: list[AgentBindingSnapshot] = []
         for child_id in frozen.subagent_ids:
             root = roots.get(child_id)
@@ -270,6 +286,8 @@ class TaskCapabilitySnapshotStore:
     async def _freeze_skills(
         self,
         snapshot: AgentBindingSnapshot,
+        *,
+        skill_snapshots: dict[tuple[str, str], ObjectRef],
     ) -> AgentBindingSnapshot:
         selected: list[SemanticPin] = []
         for pin in snapshot.selected:
@@ -293,14 +311,18 @@ class TaskCapabilitySnapshotStore:
                         "source_id": source_ref.source_id,
                     },
                 )
-            revision = await source.current_revision(source_ref.root)
-            if not isinstance(revision, StorageRevision):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            reference = await source.snapshot(
-                source_ref.root,
-                expected_revision=revision,
-                object_store=self._objects,
-            )
+            source_key = (source_ref.source_id, source_ref.root)
+            reference = skill_snapshots.get(source_key)
+            if reference is None:
+                revision = await source.current_revision(source_ref.root)
+                if not isinstance(revision, StorageRevision):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                reference = await source.snapshot(
+                    source_ref.root,
+                    expected_revision=revision,
+                    object_store=self._objects,
+                )
+                skill_snapshots[source_key] = reference
             frozen_skill = SkillDefinition(
                 skill.spec,
                 source_ref.with_snapshot(reference),

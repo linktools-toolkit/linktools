@@ -20,7 +20,7 @@ namespace
 The main ownership rules are:
 
 - `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
-- `Workspace` owns workspace identity, paths, policy, and sandbox configuration when installed through `CapabilityGroup(..., workspace=...)`.
+- `Workspace` owns paths, policy, and sandbox configuration when installed through `CapabilityGroup(..., workspace=...)`; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one immutable `AssetStore` snapshot.
 - `AgentSpec` is a runtime-independent Agent declaration.
@@ -59,14 +59,14 @@ models = ModelRegistry.openai(model="gpt-4o-mini")
 state = RuntimeState.in_memory()
 
 async with Runtime.open(
-    workspace.workspace_id,
+    "default",
     models=models,
     state=state,
     capabilities=(CapabilityGroup("workspace", workspace=workspace),),
 ) as runtime:
     result = await runtime.agent("default").run(
         "review this change",
-        memory_scope=workspace.workspace_id,
+        memory_scope="default",
         planning=True,
     )
 ```
@@ -96,7 +96,7 @@ application.agent(
 )
 
 async with Runtime.open(
-    workspace.workspace_id,
+    "default",
     models=models,
     state=state,
     capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
@@ -135,7 +135,7 @@ For a filesystem Workspace, use the dedicated constructor:
 workspace_group = CapabilityGroup("workspace", workspace=workspace)
 
 async with Runtime.open(
-    workspace.workspace_id,
+    "default",
     models=models,
     state=state,
     capabilities=(workspace_group,),
@@ -147,7 +147,7 @@ For caller-owned declaration storage independent of a Workspace, `CapabilityGrou
 
 A store-backed group reads metadata, batch-loads the corresponding bytes, verifies content identity, runs its loaders, and verifies that the store revision did not change during the freeze. Conflicting identities or layouts fail closed.
 
-For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it with `group.loader(loader)`. The loader receives the frozen `AssetInfo` sequence and matching byte mapping and returns normal `CapabilityContribution` values. No additional Registry/Provider abstraction is required.
+For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it for its input Asset kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or `mcp` replaces only that built-in parser slot. The loader receives one `CapabilityLoadContext`, can inspect the captured metadata and read captured keys with `read()` / `read_many()`, and returns normal `CapabilityContribution` values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP declarations. No additional Registry/Provider abstraction is required.
 
 ### Workspace sandbox
 
@@ -337,8 +337,9 @@ with resumable cursors; it does not invoke models, task handlers, or external
 systems.
 
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
-private repositories directly. The added persistence fields are additive and
-defaulted for existing v1 records; no database migration is required.
+private repositories directly. Runtime persistence v2 is the new compatibility
+baseline; pre-v2 Runtime state is rejected rather than implicitly migrated or
+rewritten.
 
 ## 7. Runtime state
 
@@ -375,17 +376,9 @@ request context projection; it never rewrites the raw transcript.
 
 ### Workspace relocation
 
-Use an explicit logical `workspace_id` when a Workspace must survive a physical move:
+Workspace has no independent persistent identity. `Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Runtime.open()` / `RuntimeState`.
 
-```python
-workspace = Workspace.load(
-    "/new/project",
-    workspace_id="workspace-prod-01",
-)
-state = RuntimeState.filesystem("/new/runtime-state")
-```
-
-`Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore `store_id`, and storage topology are deployment details. Runtime persistence keeps logical Workspace paths and resolves object payloads by durable Runtime domain plus object key/digest/size, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore without freezing the original backend identity. A separate `Runtime.restore()` migration step is not required.
+Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime state consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the frozen execution inputs and Skill resource snapshots. A separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics
 
