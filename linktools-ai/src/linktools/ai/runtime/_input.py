@@ -28,6 +28,7 @@ from ..core import JsonValue, PromptLimits, canonical_json_bytes, normalize_json
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 from ..workspace import normalize_workspace_path
+from ._attachment import input_attachment_views
 from ._input_contract import (
     CanonicalUserInput,
     UserPromptInput,
@@ -159,7 +160,6 @@ class ExecutionInputMaterializer:
                 safe_details={"field": "files", "reason": "workspace_required"},
             )
         result: list[str] = []
-        seen: set[str] = set()
         for path in raw_files:
             try:
                 access = self._access
@@ -178,9 +178,6 @@ class ExecutionInputMaterializer:
                     ErrorCode.REQUEST_FIELD_INVALID,
                     safe_details={"field": "files", "reason": "path_invalid"},
                 ) from error
-            if canonical in seen:
-                continue
-            seen.add(canonical)
             result.append(canonical)
         return tuple(result)
 
@@ -448,6 +445,7 @@ def _input_view(
                 "version": 1,
                 "prompt": prompt,
                 "files": [dict(item) for item in files],
+                "attachments": list(input_attachment_views(canonical, files)),
             }
         )
     except (TypeError, ValueError) as error:
@@ -455,6 +453,22 @@ def _input_view(
     if not isinstance(normalized, dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return normalized
+
+
+def execution_input_attachment_views(
+    value: CanonicalUserInput,
+) -> tuple[Mapping[str, JsonValue], ...]:
+    if isinstance(value, _MaterializedUserContent):
+        raw = value.view.get("attachments", [])
+        if not isinstance(raw, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result: list[Mapping[str, JsonValue]] = []
+        for item in raw:
+            if not isinstance(item, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result.append(dict(item))
+        return tuple(result)
+    return tuple(input_attachment_views(value))
 
 
 def stored_user_input_view(value: "StoredUserInput") -> dict[str, JsonValue]:
@@ -655,6 +669,7 @@ __all__ = [
     "ExecutionInputMaterializer",
     "InputIntent",
     "decode_user_content_payload",
+    "execution_input_attachment_views",
     "input_intent",
     "stored_user_input_view",
     "task_prompt_draft",
