@@ -18,6 +18,7 @@ from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._input import (
     ExecutionInputMaterializer,
+    stored_input_attachment_views,
     stored_user_input_view,
 )
 from linktools.ai.runtime._tool_boundary import (
@@ -198,8 +199,12 @@ async def test_execution_freezes_materialized_input_once() -> None:
         assert "Workspace file path" not in view_text
         assert "ZXZpZGVuY2U=" not in view_text
 
+        attachment_id = attachments[0]["attachment_id"]
         replay = await materializer.restore(prepared.stored_user_input)
         assert replay == prepared.request.user_prompt
+        assert stored_input_attachment_views(prepared.stored_user_input)[0][
+            "attachment_id"
+        ] == attachment_id
         assert session.reads == ["evidence.txt"]
     finally:
         await materializer.close()
