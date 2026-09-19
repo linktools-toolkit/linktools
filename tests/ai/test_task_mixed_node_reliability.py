@@ -75,9 +75,10 @@ class _TaskTestModels:
 async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
     if not context.dependencies:
         return {"value": context.input.get("value")}
-    dependency = next(iter(context.dependencies.values()))
+    name = next(iter(context.dependencies))
+    dependency = context.dependencies[name]
     return {
-        "upstream": dependency.output,
+        "upstream": await context.read_dependency(name),
         "execution_id": dependency.execution_id,
     }
 
