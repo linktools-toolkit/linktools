@@ -489,6 +489,7 @@ class StepExecutionHistoryReader:
                     raise AIError(ErrorCode.CURSOR_INVALID)
                 sequences = tuple(sorted(fixed_cutoffs))
 
+            run_high_waters: list[tuple[int, str, int]] = []
             for segment_sequence in sequences:
                 run_id = step_run_id(
                     namespace=self._namespace,
@@ -507,7 +508,9 @@ class StepExecutionHistoryReader:
                 if high_water > current_high_water:
                     raise AIError(ErrorCode.CURSOR_INVALID)
                 cutoffs.append((segment_sequence, high_water))
+                run_high_waters.append((segment_sequence, run_id, high_water))
 
+            for segment_sequence, run_id, high_water in run_high_waters:
                 after_sequence = 0
                 while after_sequence < high_water and len(facts) < target:
                     batch_limit = min(256, high_water - after_sequence)
