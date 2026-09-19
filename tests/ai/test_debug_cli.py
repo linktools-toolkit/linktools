@@ -19,7 +19,7 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
     UsageMetrics,
 )
-from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricMeasurement, Metrics, Observation
 from linktools.ai.runtime import (
     ExecutionHistoryItem,
