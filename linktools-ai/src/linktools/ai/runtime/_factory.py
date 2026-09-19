@@ -600,6 +600,7 @@ async def _build_local_components(
             session=session,
             namespace=namespace,
             app=app,
+            authorization=authorization,
             task_state=state.task.tasks,
             task_objects=state.object_store(RuntimeDomain.TASK),
             artifact_state=state.artifact,
