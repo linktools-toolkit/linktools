@@ -359,7 +359,13 @@ class _AgentTaskNodeHandler:
                 dependencies,
                 dependency_reader,
             )
-            binding_digest, request, _, _ = self._prepare_request(
+            (
+                binding_digest,
+                request,
+                _,
+                _,
+                binding_snapshot,
+            ) = self._prepare_request(
                 node,
                 graph_id=graph_id,
                 principal=principal,
@@ -368,7 +374,11 @@ class _AgentTaskNodeHandler:
                 dependency_values=dependency_values,
             )
             try:
-                handle = await self._execution.resolve_existing(binding_digest, request)
+                handle = await self._execution.resolve_existing(
+                    binding_digest,
+                    request,
+                    binding_snapshot=binding_snapshot,
+                )
             except asyncio.CancelledError:
                 raise
             except BaseException as error:  # noqa: BLE001
