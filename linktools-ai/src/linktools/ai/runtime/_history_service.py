@@ -319,6 +319,22 @@ class DefaultExecutionHistoryService:
             ),
         )
 
+    async def attachment_facts(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ):
+        record = await self._authorize(execution_id, principal)
+        return await self._reader.attachment_facts(
+            execution_id,
+            tenant_id=record.tenant_id,
+            cursor=cursor,
+            limit=limit,
+        )
+
     async def usage(
         self,
         execution_id: str,
