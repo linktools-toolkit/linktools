@@ -401,25 +401,6 @@ def _content_descriptor(item: object) -> dict[str, JsonValue] | None:
     return None
 
 
-def _iter_multimodal(value: object) -> tuple[object, ...]:
-    if _content_descriptor(value) is not None:
-        return (value,)
-    if isinstance(value, Mapping):
-        result: list[object] = []
-        for item in value.values():
-            result.extend(_iter_multimodal(item))
-        return tuple(result)
-    if isinstance(value, Sequence) and not isinstance(
-        value,
-        (str, bytes, bytearray),
-    ):
-        result = []
-        for item in value:
-            result.extend(_iter_multimodal(item))
-        return tuple(result)
-    return ()
-
-
 def _attachment_id(
     source: str,
     position: int,
