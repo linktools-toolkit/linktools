@@ -98,9 +98,26 @@ async def test_execution_history_service_owns_authorization_boundary() -> None:
     trace = await service.trace("execution", principal=principal)
     transcript = await service.transcript("execution", principal=principal)
 
-    assert history.items[0].content == "hello"
+    assert history.items[0].content is None
+    assert history.items[0].content_included is False
     assert trace.items[0].payload == {"kind": "TEST"}
-    assert transcript.items[0].text == "hello"
+    assert transcript.items[0].text is None
+    assert transcript.items[0].content_included is False
+
+    raw_history = await service.history(
+        "execution",
+        principal=principal,
+        include_content=True,
+    )
+    raw_transcript = await service.transcript(
+        "execution",
+        principal=principal,
+        include_content=True,
+    )
+    assert raw_history.items[0].content == "hello"
+    assert raw_history.items[0].content_included is True
+    assert raw_transcript.items[0].text == "hello"
+    assert raw_transcript.items[0].content_included is True
 
     with pytest.raises(AIError) as error:
         await service.history(
