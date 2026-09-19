@@ -253,6 +253,7 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         catalog: AgentCatalog,
         *,
+        restore_binding: "Callable[[AgentBindingSnapshot], AgentBinding] | None" = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
         mcp_cwd: "str | None",
@@ -282,6 +283,7 @@ class LocalExecutionBackend:
         self._executor = executor
         self._segment_runner = _AgentSegmentRunner(executor)
         self._catalog = catalog
+        self._restore_binding = restore_binding
         self._workspace = workspace
         self._limits = limits
         self._mcp_cwd = mcp_cwd
@@ -374,10 +376,25 @@ class LocalExecutionBackend:
     def tenant_id(self) -> str:
         return self._tenant_id
 
-    def validate_binding(self, execution: ExecutionRecord) -> None:
-        binding = self._catalog.binding(execution.binding_digest)
-        if execution.binding != binding.snapshot:
+    def _execution_binding(self, execution: ExecutionRecord) -> AgentBinding:
+        try:
+            binding = self._catalog.binding(execution.binding_digest)
+        except AIError as error:
+            if (
+                error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+                or self._restore_binding is None
+            ):
+                raise
+            binding = self._restore_binding(execution.binding)
+        if (
+            binding.digest != execution.binding_digest
+            or binding.snapshot != execution.binding
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return binding
+
+    def validate_binding(self, execution: ExecutionRecord) -> None:
+        self._execution_binding(execution)
 
     async def load_execution(
         self,
@@ -502,12 +519,11 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if request.correlation != execution.correlation:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        binding = self._catalog.binding(execution.binding_digest)
+        self._execution_binding(execution)
         if (
             request.mode != execution.mode
             or request.planning is not execution.planning
             or request.thinking != execution.thinking
-            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -789,9 +805,7 @@ class LocalExecutionBackend:
         await self._validate_start(request, execution)
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._catalog.binding(execution.binding_digest)
-        if execution.binding != binding.snapshot:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._execution_binding(execution)
         now = datetime.now(timezone.utc)
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
@@ -2708,9 +2722,7 @@ class LocalExecutionBackend:
                 or checkpoint.step_run_id is None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            binding = self._catalog.binding(current.binding_digest)
-            if current.binding != binding.snapshot:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            binding = self._execution_binding(current)
             definition = binding.definition
             initial_repository_instructions = await self.load_repository_instructions(
                 current.repository_instructions
