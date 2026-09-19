@@ -1622,12 +1622,13 @@ class TaskRepositoryImpl(RepositoryBase):
                 next_nodes,
                 next_status,
             )
-            return TaskGraphSnapshot(
+            snapshot = await self._snapshot_graph_in_transaction(
+                transaction,
                 graph_id,
-                next_status,
-                before.graph.nodes,
-                next_nodes,
             )
+            if snapshot is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return snapshot
 
         try:
             return await self._mutate_with_event_retry(mutate)
@@ -1639,12 +1640,13 @@ class TaskRepositoryImpl(RepositoryBase):
                 tenant_id=tenant_id,
             )
             if converged:
-                return TaskGraphSnapshot(
-                    view.graph_id,
-                    view.status,
-                    view.nodes,
-                    await self.list_nodes(graph_id, tenant_id=tenant_id),
+                snapshot = await self.snapshot_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
                 )
+                if snapshot is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return snapshot
             if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
                 raise AIError(
                     ErrorCode.STORAGE_RECOVERY_REQUIRED,
