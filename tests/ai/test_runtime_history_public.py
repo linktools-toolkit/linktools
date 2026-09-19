@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.core import (
+    HmacCursorSigner,
     Principal,
     PrincipalKind,
     ResourceKind,
@@ -16,6 +17,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
+    ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionTraceItem,
     Page,
@@ -125,6 +127,159 @@ async def test_execution_history_service_owns_authorization_boundary() -> None:
             principal=Principal("caller", "other-tenant", "service"),
         )
     assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
+class _PagingReader(_Reader):
+    async def history(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[ExecutionHistoryItem]:
+        assert tenant_id == "tenant"
+        if cursor is None:
+            return Page(
+                (ExecutionHistoryItem(execution_id, 0, "user", "hello"),),
+                "inner-next",
+            )
+        assert cursor == "inner-next"
+        return Page(
+            (ExecutionHistoryItem(execution_id, 1, "assistant", "world"),),
+            None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_history_cursor_binds_content_mode() -> None:
+    service = DefaultExecutionHistoryService(
+        _Executions(),
+        TenantAuthorizationPolicy("tenant"),
+        _PagingReader(),
+        HmacCursorSigner("public-history", b"public-history-key"),
+    )
+    principal = Principal("caller", "tenant", "service")
+
+    page = await service.history("execution", principal=principal)
+    assert page.next_cursor is not None
+    with pytest.raises(AIError) as raised:
+        await service.history(
+            "execution",
+            principal=principal,
+            cursor=page.next_cursor,
+            include_content=True,
+        )
+    assert raised.value.code is ErrorCode.CURSOR_INVALID
+
+    second = await service.history(
+        "execution",
+        principal=principal,
+        cursor=page.next_cursor,
+    )
+    assert second.items[0].content is None
+    assert second.items[0].content_included is False
+
+
+class _EventExecutions:
+    async def get_header(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
+        return None
+
+    async def get(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> object | None:
+        if execution_id == "execution" and tenant_id == "tenant":
+            return SimpleNamespace(
+                execution_id=execution_id,
+                tenant_id=tenant_id,
+                event_sequence=2,
+            )
+        return None
+
+
+class _Events:
+    def __init__(self) -> None:
+        self.values = (
+            ExecutionEvent("execution", 1, "STARTED", {"secret": "one"}),
+            ExecutionEvent("execution", 2, "SUCCEEDED", {"secret": "two"}),
+            ExecutionEvent("execution", 3, "LATE", {"secret": "late"}),
+        )
+
+    async def list(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        after_sequence: int,
+        limit: int,
+    ) -> Page[ExecutionEvent]:
+        assert execution_id == "execution"
+        assert tenant_id == "tenant"
+        selected = tuple(
+            value
+            for value in self.values
+            if value.sequence > after_sequence
+        )[:limit]
+        return Page(selected, None)
+
+
+@pytest.mark.asyncio
+async def test_runtime_history_execution_events_use_fixed_safe_cutoff() -> None:
+    principal = Principal("caller", "tenant", "service")
+    history = RuntimeHistory(
+        DefaultExecutionHistoryService(
+            _EventExecutions(),  # type: ignore[arg-type]
+            TenantAuthorizationPolicy("tenant"),
+            _Reader(),
+        ),
+        tenant_id="tenant",
+        executions=_EventExecutions(),  # type: ignore[arg-type]
+        events=_Events(),  # type: ignore[arg-type]
+        authorization=TenantAuthorizationPolicy("tenant"),
+        cursor_signer=HmacCursorSigner(
+            "runtime-history",
+            b"runtime-history-key",
+        ),
+    )
+
+    first = await history.list_events(
+        "execution",
+        principal=principal,
+        limit=1,
+    )
+    assert [event.sequence for event in first.items] == [1]
+    assert first.items[0].payload == {}
+    assert first.next_cursor is not None
+
+    with pytest.raises(AIError) as raised:
+        await history.list_events(
+            "execution",
+            principal=principal,
+            cursor=first.next_cursor,
+            include_content=True,
+            limit=1,
+        )
+    assert raised.value.code is ErrorCode.CURSOR_INVALID
+
+    second = await history.list_events(
+        "execution",
+        principal=principal,
+        cursor=first.next_cursor,
+        limit=1,
+    )
+    assert [event.sequence for event in second.items] == [2]
+    assert second.items[0].payload == {}
+    assert second.next_cursor is None
 
 
 @pytest.mark.asyncio
