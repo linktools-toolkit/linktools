@@ -168,7 +168,7 @@ def _observed_query(method: "Callable[..., object]") -> "Callable[..., object]":
 
 
 class _ExecutionReleaseCallback(Protocol):
-    async def __call__(self, execution_id: str, *, tenant_id: str) -> None: ...
+    async def __call__(self, execution_id: str, *, tenant_id: str) -> bool: ...
 
 
 class _ExecutionTerminalVerifier(Protocol):
@@ -212,8 +212,9 @@ class _RepositoryInstructionResolver(Protocol):
     async def resolve(self, path: str) -> _RepositoryInstructionBundle: ...
 
 
-async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> None:
+async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> bool:
     del execution_id, tenant_id
+    return True
 
 
 async def _missing_terminal_verifier(
@@ -581,7 +582,23 @@ class DefaultExecutionService:
         tenant_id: str,
         hold_id: str,
     ) -> None:
-        await self._handoff.acquire_hold((tenant_id, execution_id), hold_id)
+        await self._state.executions.acquire_dependency_hold(
+            execution_id,
+            tenant_id=tenant_id,
+            hold_id=hold_id,
+        )
+        try:
+            await self._handoff.acquire_hold(
+                (tenant_id, execution_id),
+                hold_id,
+            )
+        except BaseException:
+            await self._state.executions.release_dependency_hold(
+                execution_id,
+                tenant_id=tenant_id,
+                hold_id=hold_id,
+            )
+            raise
 
     async def release_dependency_hold(
         self,
@@ -594,6 +611,12 @@ class DefaultExecutionService:
         state, owner = await self._handoff.release_hold(key, hold_id)
         if owner and state is not None:
             await self._run_handoff_cleanup(execution_id, tenant_id, state)
+        await self._state.executions.release_dependency_hold(
+            execution_id,
+            tenant_id=tenant_id,
+            hold_id=hold_id,
+        )
+        await self._request_handoff_if_terminal(execution_id, tenant_id)
 
     async def request_terminal_handoff(
         self, execution_id: str, *, tenant_id: str
@@ -622,7 +645,10 @@ class DefaultExecutionService:
     ) -> None:
         key = tenant_id, execution_id
         try:
-            await self._release_terminal(execution_id, tenant_id=tenant_id)
+            released = await self._release_terminal(
+                execution_id,
+                tenant_id=tenant_id,
+            )
         except BaseException as error:
             await self._handoff.finish_release(key, state, succeeded=False)
             if not isinstance(error, Exception):
@@ -633,7 +659,11 @@ class DefaultExecutionService:
                 exc_info=environ.debug,
             )
             return
-        await self._handoff.finish_release(key, state, succeeded=True)
+        await self._handoff.finish_release(
+            key,
+            state,
+            succeeded=released,
+        )
 
     @asynccontextmanager
     async def _execution_consumer(self, execution_id: str, tenant_id: str):

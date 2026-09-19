@@ -1216,6 +1216,121 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
         execution = await self.get(execution_id, tenant_id=tenant_id)
         return None if execution is None else execution.result
 
+    async def acquire_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> ExecutionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if not isinstance(hold_id, str) or not hold_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        key = self._key("execution", execution_id)
+
+        async def mutate(transaction: StateTransaction) -> ExecutionRecord:
+            stored = await transaction.get_record(key)
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._decode(stored, ExecutionRecord)
+            if current.retention_closed:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if hold_id in current.dependency_hold_ids:
+                return current
+            next_value = replace(
+                current,
+                dependency_hold_ids=tuple(
+                    sorted((*current.dependency_hold_ids, hold_id))
+                ),
+                revision=current.revision + 1,
+                updated_at=await transaction.now(),
+            )
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, next_value),
+                stored.storage_version,
+            )
+            return next_value
+
+        return await self._store.mutate(mutate)
+
+    async def release_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> ExecutionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        if not isinstance(hold_id, str) or not hold_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        key = self._key("execution", execution_id)
+
+        async def mutate(transaction: StateTransaction) -> ExecutionRecord:
+            stored = await transaction.get_record(key)
+            if stored is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._decode(stored, ExecutionRecord)
+            if hold_id not in current.dependency_hold_ids:
+                return current
+            next_value = replace(
+                current,
+                dependency_hold_ids=tuple(
+                    value
+                    for value in current.dependency_hold_ids
+                    if value != hold_id
+                ),
+                revision=current.revision + 1,
+                updated_at=await transaction.now(),
+            )
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, next_value),
+                stored.storage_version,
+            )
+            return next_value
+
+        return await self._store.mutate(mutate)
+
+    async def close_retention(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> bool:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        key = self._key("execution", execution_id)
+
+        async def mutate(transaction: StateTransaction) -> bool:
+            stored = await transaction.get_record(key)
+            if stored is None:
+                return True
+            current = await self._decode(stored, ExecutionRecord)
+            if current.status not in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                return False
+            if current.dependency_hold_ids:
+                return False
+            if current.retention_closed:
+                return True
+            next_value = replace(
+                current,
+                retention_closed=True,
+                revision=current.revision + 1,
+                updated_at=await transaction.now(),
+            )
+            await _replace_checked(
+                transaction,
+                _projected_record(self, stored, next_value),
+                stored.storage_version,
+            )
+            return True
+
+        return await self._store.mutate(mutate)
+
     async def get_history_seal(
         self,
         execution_id: str,

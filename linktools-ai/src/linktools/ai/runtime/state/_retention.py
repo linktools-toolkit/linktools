@@ -53,7 +53,12 @@ class RuntimeRetentionController:
 
     async def release_execution_handoff(
         self, execution_id: str, *, tenant_id: str
-    ) -> None:
+    ) -> bool:
+        if not await self._execution.executions.close_retention(
+            execution_id,
+            tenant_id=tenant_id,
+        ):
+            return False
         execution = await self._execution.executions.get(
             execution_id, tenant_id=tenant_id
         )
@@ -86,6 +91,7 @@ class RuntimeRetentionController:
             tenant_id,
             execution_id,
         )
+        return True
 
     async def release_session(
         self,

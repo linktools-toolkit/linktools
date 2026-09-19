@@ -603,6 +603,8 @@ class ExecutionRecord:
     task_attempt: int = 0
     task_deadline_at: datetime | None = None
     task_next_attempt_at: datetime | None = None
+    dependency_hold_ids: tuple[str, ...] = ()
+    retention_closed: bool = False
 
     def __post_init__(self) -> None:
         agent_binding = isinstance(self.binding, AgentBindingSnapshot)
@@ -647,6 +649,16 @@ class ExecutionRecord:
             for value in (self.task_deadline_at, self.task_next_attempt_at):
                 if value is not None and value.tzinfo is None:
                     raise ValueError("task execution timestamps must be timezone-aware")
+        holds = tuple(self.dependency_hold_ids)
+        if (
+            any(not isinstance(value, str) or not value.strip() for value in holds)
+            or len(set(holds)) != len(holds)
+            or tuple(sorted(holds)) != holds
+        ):
+            raise ValueError("execution dependency holds must be sorted and unique")
+        if not isinstance(self.retention_closed, bool):
+            raise TypeError("execution retention_closed must be bool")
+        object.__setattr__(self, "dependency_hold_ids", holds)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
         if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
             if (
@@ -1741,6 +1753,26 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> ExecutionHistorySealRecord | None: ...
+    async def acquire_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> ExecutionRecord: ...
+    async def release_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> ExecutionRecord: ...
+    async def close_retention(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> bool: ...
     async def get_history_head(
         self,
         execution_id: str,
