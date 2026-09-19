@@ -92,16 +92,16 @@ class ExecutionInfo:
     session_id: str | None
     created_at: datetime
     updated_at: datetime
-    started_at: datetime | None
-    terminal_at: datetime | None
-    binding_digest: str
-    input_digest: str
-    output_fingerprint: str
-    output_digest: str | None
-    usage: UsageSummary | None
     error_code: str | None
     safe_error_details: Mapping[str, JsonValue] = field(default_factory=dict)
     error_diagnostics: ErrorDiagnostics | None = None
+    started_at: datetime | None = None
+    terminal_at: datetime | None = None
+    binding_digest: str | None = None
+    input_digest: str | None = None
+    output_fingerprint: str | None = None
+    output_digest: str | None = None
+    usage: UsageSummary | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "safe_error_details", dict(self.safe_error_details))
