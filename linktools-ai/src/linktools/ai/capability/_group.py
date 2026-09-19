@@ -798,7 +798,7 @@ class _BuiltinDeclarationLoader:
                 or entry.key.kind == "skill"
                 and (
                     entry.key.id.endswith("/SKILL.md")
-                    or not _inside_skill_root(entry.key.id, directory_roots)
+                    or not _inside_skill_root(entry.key.id, directory_root_set)
                 )
             )
         )

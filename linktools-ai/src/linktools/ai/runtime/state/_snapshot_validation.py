@@ -597,8 +597,20 @@ def _validate_facts(
     records: Mapping[bytes, StoredRecord],
     values: Mapping[bytes, object],
 ) -> None:
-    previous: dict[bytes, int] = {}
-    for fact in sorted(facts, key=lambda item: (item.stream_digest, item.sequence)):
+    previous_stream: bytes | None = None
+    previous_sequence = 0
+    for fact in facts:
+        if previous_stream is None or fact.stream_digest > previous_stream:
+            if fact.sequence != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous_stream = fact.stream_digest
+            previous_sequence = 1
+        elif fact.stream_digest == previous_stream:
+            if fact.sequence != previous_sequence + 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            previous_sequence = fact.sequence
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         owner = values.get(fact.owner_key_digest)
         if fact.owner_key_digest not in records or owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -606,9 +618,6 @@ def _validate_facts(
             namespace, tenant_id, domain, fact, owner
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if fact.sequence != previous.get(fact.stream_digest, 0) + 1:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        previous[fact.stream_digest] = fact.sequence
         if isinstance(owner, ExecutionRecord) and fact.sequence > owner.event_sequence:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if isinstance(owner, TranscriptHeadRecord) and fact.sequence > owner.chunk_count:
