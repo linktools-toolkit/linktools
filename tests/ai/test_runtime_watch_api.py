@@ -135,12 +135,41 @@ class _TaskGraphService:
         return values()
 
 
+class _HistoryService:
+    async def list_events(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: str | None = None,
+        include_content: bool = False,
+        limit: int = 100,
+    ) -> Page[ExecutionEvent]:
+        assert execution_id == "execution"
+        assert principal.tenant_id == "tenant"
+        assert cursor is None
+        assert include_content is False
+        assert limit == 1
+        return Page(
+            (
+                ExecutionEvent(
+                    execution_id,
+                    1,
+                    ExecutionEventType.EXECUTION_SUCCEEDED.value,
+                    {},
+                ),
+            ),
+            "next",
+        )
+
+
 class _Runtime:
     namespace = "watch-test"
 
     def __init__(self) -> None:
         self.execution = _ExecutionService()
         self.graph = _TaskGraphService()
+        self.history = _HistoryService()
 
 
 def _watch_tree(
@@ -156,6 +185,23 @@ def _watch_tree(
         after_sequences=after_sequences,
         include_content=include_content,
     )
+
+
+@pytest.mark.asyncio
+async def test_execution_list_events_uses_runtime_history_query_surface() -> None:
+    execution = Execution(
+        _Runtime(),
+        "execution",
+        "binding",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+
+    page = await execution.list_events(limit=1)
+
+    assert len(page.items) == 1
+    assert page.items[0].event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value
+    assert page.next_cursor == "next"
 
 
 @pytest.mark.asyncio
