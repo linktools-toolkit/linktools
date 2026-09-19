@@ -63,7 +63,12 @@ def decode_asset_batch_receipt(
     idempotency_key: str | None = None,
     expected_key_digest: str | None = None,
 ) -> StorageBatchResult[AssetInfo, AssetKey]:
-    if not isinstance(payload, Mapping) or payload.get("version") != 2:
+    if not isinstance(payload, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = payload.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != 2:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     key_digest = _sha256(payload.get("idempotency_key_digest"))
     if expected_key_digest is not None and key_digest != expected_key_digest:

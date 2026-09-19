@@ -560,3 +560,78 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
         assert tuple(counts) == (130, 130, 130)
     finally:
         await engine.dispose()
+
+
+def test_sql_asset_info_v2_rejects_old_and_coerced_versions() -> None:
+    from datetime import datetime, timezone
+
+    from linktools.ai.asset import AssetInfo
+    from linktools.ai.asset import _sql as asset_sql
+    from linktools.ai.storage import StorageEntryRevision, StorageEntryStatus, StorageRevision
+
+    info = AssetInfo(
+        AssetKey("sample", "one"),
+        StorageEntryRevision(1),
+        StorageRevision("1"),
+        "a" * 64,
+        0,
+        StorageEntryStatus.NORMAL,
+        "root",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    payload = asset_sql._info_data(info)
+    assert payload["v"] == 2
+    assert asset_sql._info_from_data(payload) == info
+
+    old = dict(payload)
+    old["v"] = 1
+    with pytest.raises(AIError) as old_error:
+        asset_sql._info_from_data(old)
+    assert old_error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+    coerced = dict(payload)
+    coerced["v"] = 2.0
+    with pytest.raises(AIError) as coerced_error:
+        asset_sql._info_from_data(coerced)
+    assert coerced_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    malformed = {
+        **payload,
+        "value": {**payload["value"], "revision": "1"},
+    }
+    with pytest.raises(AIError) as malformed_error:
+        asset_sql._info_from_data(malformed)
+    assert malformed_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_filesystem_asset_v2_rejects_generation_one_manifest(tmp_path: Path) -> None:
+    import json
+
+    root = tmp_path / "asset-v2"
+    backend = FilesystemAssetBackend(root)
+    await backend.initialize()
+    await backend.close()
+
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["generation"] == 2
+    manifest["generation"] = 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    reopened = FilesystemAssetBackend(root)
+    with pytest.raises(AIError) as raised:
+        await reopened.initialize()
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_asset_receipt_rejects_non_integer_version() -> None:
+    from linktools.ai.asset._receipt import decode_asset_batch_receipt
+
+    with pytest.raises(AIError) as raised:
+        decode_asset_batch_receipt({"version": 2.0})
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    with pytest.raises(AIError) as old:
+        decode_asset_batch_receipt({"version": 1})
+    assert old.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED

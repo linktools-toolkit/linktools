@@ -62,3 +62,39 @@ async def test_runtime_snapshot_rejects_coerced_object_ref_fields() -> None:
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_runtime_snapshot_rejects_coerced_format_version() -> None:
+    store = InMemoryObjectStore("snapshot")
+    manifest = {
+        "kind": "runtime-snapshot",
+        "format_version": 2.0,
+        "namespace": "runtime",
+        "tenant_id": "tenant",
+        "state": {
+            "store_id": "snapshot",
+            "key": "state",
+            "digest": "a" * 64,
+            "size": 1,
+        },
+        "workspace": {
+            "present": False,
+            "entries": [],
+        },
+        "metadata": {},
+    }
+    ref = await _put(
+        store,
+        "runtime-snapshot-version",
+        canonical_json_bytes(manifest),
+    )
+
+    with pytest.raises(AIError) as raised:
+        await RuntimeSnapshot.verify(
+            ref,
+            object_store=store,
+            limits=SnapshotLimits(max_entries=10, max_bytes=4096),
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

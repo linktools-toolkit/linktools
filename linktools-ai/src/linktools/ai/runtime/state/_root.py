@@ -626,13 +626,21 @@ class RuntimeState:
             manifest = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if (
-            not isinstance(manifest, dict)
-            or manifest.get("kind") != "runtime-state-snapshot"
-            or manifest.get("format_version") != 2
-            or not isinstance(manifest.get("domains"), dict)
-        ):
+        if not isinstance(manifest, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if manifest.get("kind") != "runtime-state-snapshot":
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        format_version = manifest.get("format_version")
+        if (
+            isinstance(format_version, bool)
+            or not isinstance(format_version, int)
+            or format_version < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if format_version != 2:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if not isinstance(manifest.get("domains"), dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         namespace = manifest.get("namespace")
         tenant_id = manifest.get("tenant_id")
         if not isinstance(namespace, str) or not isinstance(tenant_id, str):

@@ -364,10 +364,19 @@ class TaskCapabilitySnapshotStore:
             manifest = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if not isinstance(manifest, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        format_version = manifest.get("format_version")
         if (
-            not isinstance(manifest, Mapping)
-            or manifest.get("kind") != _KIND
-            or manifest.get("format_version") != _VERSION
+            isinstance(format_version, bool)
+            or not isinstance(format_version, int)
+            or format_version < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if format_version != _VERSION:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if (
+            manifest.get("kind") != _KIND
             or manifest.get("namespace") != self._namespace
             or manifest.get("tenant_id")
             != admission.principal.tenant_id

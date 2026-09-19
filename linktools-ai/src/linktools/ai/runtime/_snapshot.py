@@ -1051,13 +1051,13 @@ def _parse_state_manifest(payload: bytes) -> Mapping[str, object]:
         value = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if (
-        not isinstance(value, Mapping)
-        or value.get("kind") != "runtime-state-snapshot"
-        or value.get("format_version") != 2
-        or not isinstance(value.get("domains"), Mapping)
-    ):
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value.get("kind") != "runtime-state-snapshot":
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    _require_snapshot_format_version(value.get("format_version"))
+    if not isinstance(value.get("domains"), Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
 
@@ -1186,13 +1186,19 @@ async def _read_manifest(
         value = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if (
-        not isinstance(value, Mapping)
-        or value.get("kind") != "runtime-snapshot"
-        or value.get("format_version") != 2
-    ):
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value.get("kind") != "runtime-snapshot":
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    _require_snapshot_format_version(value.get("format_version"))
     return value
+
+
+def _require_snapshot_format_version(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if value != 2:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 def _object_ref_payload(ref: ObjectRef) -> dict[str, JsonValue]:

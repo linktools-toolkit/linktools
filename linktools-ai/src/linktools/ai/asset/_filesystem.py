@@ -47,7 +47,7 @@ from ._receipt import (
 )
 
 _logger = environ.get_logger("ai.asset.filesystem")
-_GENERATION = 1
+_GENERATION = 2
 _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
 
@@ -718,13 +718,27 @@ class FilesystemAssetBackend:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-        if (
-            not isinstance(value, dict)
-            or value.get("format") != "linktools-ai-asset"
-            or value.get("generation") != _GENERATION
-        ):
+        if not isinstance(value, dict) or set(value) != {
+            "format",
+            "generation",
+            "root_digest",
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if value["format"] != "linktools-ai-asset":
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        if value.get("root_digest") != self._root.digest:
+        generation = value["generation"]
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if generation != _GENERATION:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        root_digest = value["root_digest"]
+        if not isinstance(root_digest, str) or not root_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if root_digest != self._root.digest:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def _record(self, info: AssetInfo) -> None:
@@ -944,47 +958,87 @@ def _result(
 
 
 def _info_from_json(raw: object, root: AssetRoot, store_id: str) -> AssetInfo:
-    if not isinstance(raw, Mapping):
+    expected = {
+        "kind",
+        "id",
+        "revision",
+        "store_revision",
+        "etag",
+        "size",
+        "status",
+        "root_digest",
+        "modified_at",
+        "object_store_id",
+        "object_key",
+        "metadata",
+    }
+    if not isinstance(raw, Mapping) or set(raw) != expected:
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
     try:
-        if raw.get("root_digest") != root.digest:
+        root_digest = _fs_text(raw["root_digest"])
+        if root_digest != root.digest:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        persisted_store_id = raw.get("object_store_id")
-        persisted_object_key = raw.get("object_key")
-        normal = raw.get("status") == StorageEntryStatus.NORMAL.value
-        if normal and persisted_store_id != store_id:
-            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-        if normal != all(value is not None for value in (persisted_store_id, persisted_object_key)):
+        status = StorageEntryStatus(_fs_text(raw["status"]))
+        normal = status is StorageEntryStatus.NORMAL
+        persisted_store_id = raw["object_store_id"]
+        persisted_object_key = raw["object_key"]
+        if normal:
+            if not isinstance(persisted_store_id, str) or not persisted_store_id:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            if not isinstance(persisted_object_key, str) or not persisted_object_key:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            if persisted_store_id != store_id:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        elif persisted_store_id is not None or persisted_object_key is not None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        if not normal and any(value is not None for value in (persisted_store_id, persisted_object_key)):
+        key = AssetKey(_fs_text(raw["kind"]), _fs_text(raw["id"]))
+        etag = _fs_text(raw["etag"])
+        if normal and persisted_object_key != AssetObjectKeyFactory(root.locator).key(etag):
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-        key = AssetKey(str(raw["kind"]), str(raw["id"]))
-        if normal and persisted_object_key != AssetObjectKeyFactory(root.locator).key(str(raw["etag"])):
+        metadata = raw["metadata"]
+        if not isinstance(metadata, Mapping):
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         return AssetInfo(
             key,
-            StorageEntryRevision(int(raw["revision"])),
-            StorageRevision(str(raw["store_revision"])),
-            str(raw["etag"]),
-            int(raw["size"]),
-            StorageEntryStatus(str(raw["status"])),
+            StorageEntryRevision(_fs_int(raw["revision"], minimum=1)),
+            StorageRevision(_fs_text(raw["store_revision"])),
+            etag,
+            _fs_int(raw["size"], minimum=0),
+            status,
             root.digest,
-            _utc(raw["modified_at"]),
-            normalize_storage_metadata(raw.get("metadata")),
+            _fs_datetime(raw["modified_at"]),
+            normalize_storage_metadata(metadata),
         )
     except AIError:
         raise
-    except (KeyError, TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-
-
-def _utc(value: object) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(str(value))
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
+
+def _fs_text(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+    return value
+
+
+def _fs_int(value: object, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+    return value
+
+
+def _fs_datetime(value: object) -> datetime:
+    raw = _fs_text(value)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    if (
+        parsed.tzinfo is None
+        or parsed.astimezone(timezone.utc).isoformat() != raw
+    ):
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+    return parsed.astimezone(timezone.utc)
 
 def _etag(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()

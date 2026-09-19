@@ -58,6 +58,13 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ai.asset.sql")
 _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 _RETRY_LIMIT = 8
+_ASSET_INFO_VERSION = 2
+_ASSET_INFO_FIELDS = frozenset(
+    {
+        "kind", "id", "revision", "store_revision", "etag", "size", "status",
+        "root_digest", "modified_at", "metadata", "content",
+    }
+)
 
 
 def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData":
@@ -805,7 +812,7 @@ def _asset_key_digest(namespace_digest: bytes, key: AssetKey) -> bytes:
 
 def _info_data(info: AssetInfo) -> dict[str, JsonValue]:
     return {
-        "v": 1,
+        "v": _ASSET_INFO_VERSION,
         "value": {
             "kind": info.key.kind,
             "id": info.key.id,
@@ -822,26 +829,76 @@ def _info_data(info: AssetInfo) -> dict[str, JsonValue]:
     }
 
 
+def _asset_info_fields(data: Mapping[str, object]) -> Mapping[str, object]:
+    if set(data) != {"v", "value"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = data["v"]
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if version != _ASSET_INFO_VERSION:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    value = data["value"]
+    if not isinstance(value, Mapping) or set(value) != _ASSET_INFO_FIELDS:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _asset_text(value: object) -> str:
+    if not isinstance(value, str) or not value:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _asset_int(value: object, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value
+
+
+def _asset_datetime(value: object) -> datetime:
+    raw = _asset_text(value)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if parsed.tzinfo is None or parsed.isoformat() != raw:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return parsed
+
+
 def _info_from_data(data: Mapping[str, object]) -> AssetInfo:
-    value = data["value"] if isinstance(data.get("value"), Mapping) else data
-    return AssetInfo(
-        AssetKey(str(value["kind"]), str(value["id"])),
-        StorageEntryRevision(int(value["revision"])),
-        StorageRevision(str(value["store_revision"])),
-        str(value["etag"]),
-        int(value["size"]),
-        StorageEntryStatus(str(value["status"])),
-        str(value["root_digest"]),
-        datetime.fromisoformat(str(value["modified_at"])),
-        dict(value.get("metadata", {})),
-        None if value.get("content") is None else StoredPayload.from_json(value["content"]),
-    )
+    if not isinstance(data, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    value = _asset_info_fields(data)
+    metadata = value["metadata"]
+    if not isinstance(metadata, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    content = value["content"]
+    try:
+        return AssetInfo(
+            AssetKey(_asset_text(value["kind"]), _asset_text(value["id"])),
+            StorageEntryRevision(_asset_int(value["revision"], minimum=1)),
+            StorageRevision(_asset_text(value["store_revision"])),
+            _asset_text(value["etag"]),
+            _asset_int(value["size"], minimum=0),
+            StorageEntryStatus(_asset_text(value["status"])),
+            _asset_text(value["root_digest"]),
+            _asset_datetime(value["modified_at"]),
+            dict(metadata),
+            None if content is None else StoredPayload.from_json(content),
+        )
+    except AIError:
+        raise
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _key_from_data(data: Mapping[str, object]) -> AssetKey:
-    value = data["value"]
-    return AssetKey(str(value["kind"]), str(value["id"]))
-
+    value = _asset_info_fields(data)
+    try:
+        return AssetKey(_asset_text(value["kind"]), _asset_text(value["id"]))
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 def _next_info(
     change: StorageChange[AssetKey, bytes], previous: AssetInfo | None, store_revision: int, root: AssetRoot
