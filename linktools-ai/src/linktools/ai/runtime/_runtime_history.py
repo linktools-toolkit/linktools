@@ -108,7 +108,7 @@ def _project_execution_info(record: ExecutionRecord) -> ExecutionInfo:
         updated_at=record.updated_at,
         error_code=record.error_code,
         safe_error_details=record.safe_error_details,
-        error_diagnostics=record.error_diagnostics,
+        error_diagnostics=None,
     )
 
 
@@ -356,12 +356,14 @@ class RuntimeHistory:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[ExecutionHistoryItem]:
         return await self._service.history(
             execution_id,
             principal=principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -371,12 +373,14 @@ class RuntimeHistory:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[ExecutionTraceItem]:
         return await self._service.trace(
             execution_id,
             principal=principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -386,12 +390,14 @@ class RuntimeHistory:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[TranscriptItem]:
         return await self._service.transcript(
             execution_id,
             principal=principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -401,12 +407,14 @@ class RuntimeHistory:
         *,
         principal: Principal,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> Page[ModelInteractionItem]:
         return await self._service.model_interactions(
             execution_id,
             principal=principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
