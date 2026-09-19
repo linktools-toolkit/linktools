@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar, cast
