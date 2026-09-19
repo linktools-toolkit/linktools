@@ -40,6 +40,7 @@ from .service_api import (
 )
 
 if TYPE_CHECKING:
+    from ..agent import AgentDefinition
     from ..task import TaskExpanderRef, TaskNode, TaskResultRef
     from ._runtime_service import Runtime
 
@@ -304,6 +305,7 @@ class Session(Generic[AppT]):
     _agent_digest: str
     session_id: str
     _principal: "Principal | None" = None
+    _definition: "AgentDefinition | None" = None
 
     async def start(
         self,
@@ -331,6 +333,7 @@ class Session(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
 
     async def run(
@@ -386,6 +389,7 @@ class Session(Generic[AppT]):
             planning=True,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -433,6 +437,7 @@ class Session(Generic[AppT]):
             principal=principal or self._principal,
             idempotency_key=idempotency_key,
             cwd=cwd,
+            definition=self._definition,
         )
 
     async def update(
@@ -476,6 +481,7 @@ class Agent(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     id: str
     _agent_digest: str
+    _definition: "AgentDefinition | None" = None
 
     async def start(
         self,
@@ -504,6 +510,7 @@ class Agent(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
 
     async def run(
@@ -562,6 +569,7 @@ class Agent(Generic[AppT]):
             planning=True,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -577,6 +585,7 @@ class Agent(Generic[AppT]):
             self._agent_digest,
             session_id,
             principal,
+            self._definition,
         )
 
     async def create_session(
@@ -602,6 +611,7 @@ class Agent(Generic[AppT]):
             self._agent_digest,
             session_id,
             principal,
+            self._definition,
         )
 
     async def start_evaluation(
@@ -614,6 +624,7 @@ class Agent(Generic[AppT]):
             self._agent_digest,
             request,
             output=output,
+            definition=self._definition,
         )
 
     async def replay_evaluation(
@@ -628,6 +639,7 @@ class Agent(Generic[AppT]):
             snapshot_id,
             request,
             output=output,
+            definition=self._definition,
         )
 
     def task(
@@ -666,6 +678,7 @@ class Agent(Generic[AppT]):
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
+            definition=self._definition,
         )
 
 
