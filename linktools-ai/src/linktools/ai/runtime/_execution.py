@@ -1598,6 +1598,7 @@ class DefaultExecutionService:
         parent_execution_id: str,
         root_execution_id: str,
         parent_invocation_id: str,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1607,6 +1608,7 @@ class DefaultExecutionService:
             parent_invocation_id=parent_invocation_id,
             lineage_kind=ExecutionLineageKind.SUBAGENT,
             scope="execution.subagent",
+            binding_snapshot=binding_snapshot,
         )
 
     async def replay_subagent(
@@ -1665,6 +1667,7 @@ class DefaultExecutionService:
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id,
             parent_invocation_id=parent_invocation_id,
+            binding_snapshot=execution.binding,
         )
 
     async def list_children(
