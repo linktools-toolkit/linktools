@@ -11,6 +11,7 @@ from typing import Protocol, runtime_checkable
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
 from ._graph import TaskDependencyResult, TaskNode
+from ._handler import TaskEffectResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +93,13 @@ class TaskNodeRunner(Protocol):
         invocation: TaskNodeInvocation,
         execution_id: str,
     ) -> TaskNodeRunResult: ...
+
+    async def resolve_effect(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        resolution: TaskEffectResolution,
+    ) -> "TaskNodeRunResult | None": ...
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None: ...
 

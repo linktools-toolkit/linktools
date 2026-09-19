@@ -32,7 +32,7 @@ from ..core import (
     validate_resource_id,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingSnapshot, TaskEvent
+from ..task import TaskBindingSnapshot, TaskEffectResolution, TaskEvent
 from ._input_contract import validate_user_input
 from ._snapshot_contract import RunSnapshot
 from .recovery import (
@@ -1101,6 +1101,14 @@ class ExecutionService(Protocol):
         execution_id: str,
         *,
         principal: Principal,
+    ) -> ExecutionView: ...
+
+    async def resolve_task_effect(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        resolution: TaskEffectResolution,
     ) -> ExecutionView: ...
 
     async def complete_task(

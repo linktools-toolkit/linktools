@@ -393,11 +393,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         node: TaskNode,
         resolution: TaskEffectResolution,
     ) -> None:
-        if resolution.kind == "applied":
-            _validate_task_output(
-                node,
-                normalize_json_value(resolution.value),
-            )
+        del resolution
+        if node.effect != "non_replay_safe":
+            raise AIError(ErrorCode.TASK_NOT_READY)
 
     def validate_recovery(self, snapshot: TaskGraphSnapshot) -> None:
         for node, state in zip(snapshot.nodes, snapshot.node_states, strict=True):
@@ -564,8 +562,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     execution_id,
                     principal=principal,
                 )
-                if result.output is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return await self._complete_output(
                     node,
                     result.output,
@@ -617,8 +613,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         view = await self._execution.inspect(execution_id, principal=principal)
         if view.status is ExecutionStatus.SUCCEEDED:
             result = await self._execution.result(execution_id, principal=principal)
-            if result.output is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return await self._complete_output(
                 node,
                 result.output,
@@ -784,7 +778,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             output=output,
         )
-        if result.status is not ExecutionStatus.SUCCEEDED or result.output is None:
+        if result.status is not ExecutionStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._complete_output(
             node,
@@ -930,8 +924,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             output=output,
         )
-        if result.output is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._complete_output(
             node,
             result.output,
@@ -939,6 +931,56 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             graph_id=graph_id,
         )
+
+    async def resolve_effect(
+        self,
+        invocation: TaskNodeInvocation,
+        execution_id: str,
+        resolution: TaskEffectResolution,
+    ) -> "TaskNodeRunResult | None":
+        view = await self._execution.resolve_task_effect(
+            execution_id,
+            principal=invocation.principal,
+            resolution=resolution,
+        )
+        if view.status is ExecutionStatus.RECOVERY_REQUIRED:
+            return None
+        if view.status is ExecutionStatus.WAITING_RETRY:
+            if view.task_next_attempt_at is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return TaskNodeRunResult(
+                canonical_sha256(
+                    {
+                        "execution_id": execution_id,
+                        "retry_at": view.task_next_attempt_at.isoformat(),
+                    }
+                ),
+                execution_id,
+                retry_at=view.task_next_attempt_at,
+            )
+        if view.status is ExecutionStatus.SUCCEEDED:
+            result = await self._execution.result(
+                execution_id,
+                principal=invocation.principal,
+            )
+            return await self._complete_output(
+                invocation.node,
+                result.output,
+                execution_id=execution_id,
+                principal=invocation.principal,
+                graph_id=invocation.graph_id,
+            )
+        if view.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            result = await self._execution.result(
+                execution_id,
+                principal=invocation.principal,
+            )
+            raise TaskNodeRunError(
+                ErrorCode(result.error_code or ErrorCode.TASK_NODE_FAILED.value),
+                execution_id,
+                safe_details=result.safe_error_details,
+            )
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def wait_bound(
         self,
@@ -1196,10 +1238,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 record.execution_id,
                 principal=principal,
             )
-            if (
-                result.status is not ExecutionStatus.SUCCEEDED
-                or result.output is None
-            ):
+            if result.status is not ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             output = result.output
         elif record.payload is not None:
@@ -1425,7 +1464,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             )
             if (
                 result.status is not ExecutionStatus.SUCCEEDED
-                or result.output is None
                 or canonical_sha256(result.output)
                 != dependency.result_digest
             ):
@@ -1489,7 +1527,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     )
                     if (
                         result.status is not ExecutionStatus.SUCCEEDED
-                        or result.output is None
                         or canonical_sha256(result.output)
                         != reference.result_digest
                     ):

@@ -21,6 +21,7 @@ from ..agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
+    restore_output,
 )
 from ..core import (
     AuthorizationAction,
@@ -52,7 +53,7 @@ from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
-from ..task import TaskBindingSnapshot
+from ..task import TaskBindingSnapshot, TaskEffectResolution
 from ..storage import (
     ObjectStore,
     PayloadPolicy,
@@ -983,6 +984,137 @@ class DefaultExecutionService:
         )
         return _execution_view(updated)
 
+    async def resolve_task_effect(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        resolution: TaskEffectResolution,
+    ) -> ExecutionView:
+        if not isinstance(resolution, TaskEffectResolution):
+            raise TypeError("resolution must be TaskEffectResolution")
+        current = await self._load_authorized(
+            execution_id,
+            principal,
+            AuthorizationAction.EXECUTION_RUN,
+        )
+        binding = current.binding
+        if (
+            not isinstance(binding, TaskBindingSnapshot)
+            or binding.effect != "non_replay_safe"
+        ):
+            raise AIError(ErrorCode.TASK_NOT_READY)
+
+        applied_output = (
+            None
+            if resolution.kind != "applied"
+            else normalize_json_value(resolution.value)
+        )
+        applied_digest = (
+            None
+            if resolution.kind != "applied"
+            else canonical_sha256(applied_output)
+        )
+
+        if current.status is ExecutionStatus.WAITING_RETRY:
+            if resolution.kind != "not_applied":
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return _execution_view(current)
+        if current.status is ExecutionStatus.SUCCEEDED:
+            if resolution.kind != "applied" or applied_digest is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            result = await self.result(execution_id, principal=principal)
+            if canonical_sha256(result.output) != applied_digest:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return _execution_view(current)
+        if current.status is ExecutionStatus.FAILED:
+            if (
+                resolution.kind != "applied"
+                or applied_digest is None
+                or current.error_code != ErrorCode.OUTPUT_CONTRACT_INVALID.value
+                or current.safe_error_details.get("task_effect") != "applied"
+                or current.safe_error_details.get("task_effect_value_digest")
+                != applied_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return _execution_view(current)
+        if current.status is ExecutionStatus.CANCELLED:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if current.status is not ExecutionStatus.RECOVERY_REQUIRED:
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        if resolution.kind == "unknown":
+            return _execution_view(current)
+
+        if resolution.kind == "not_applied":
+            now = datetime.now(timezone.utc)
+            if (
+                current.task_deadline_at is not None
+                and current.task_deadline_at <= now
+            ):
+                await self.fail_task(
+                    execution_id,
+                    principal=principal,
+                    error=AIError(
+                        ErrorCode.EXECUTION_WAIT_TIMEOUT,
+                        retryable=False,
+                        safe_details={
+                            "task_effect": "not_applied",
+                            "reason": "deadline_exceeded",
+                        },
+                    ),
+                )
+                return await self.inspect(execution_id, principal=principal)
+            if current.task_attempt >= binding.max_attempts:
+                await self.fail_task(
+                    execution_id,
+                    principal=principal,
+                    error=AIError(
+                        ErrorCode.TASK_NODE_FAILED,
+                        retryable=False,
+                        safe_details={
+                            "task_effect": "not_applied",
+                            "reason": "attempts_exhausted",
+                        },
+                    ),
+                )
+                return await self.inspect(execution_id, principal=principal)
+            return await self.resume_task_not_applied(
+                execution_id,
+                principal=principal,
+            )
+
+        if applied_digest is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            _validate_task_binding_output(binding, applied_output)
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
+                raise
+            await self.fail_task(
+                execution_id,
+                principal=principal,
+                error=AIError(
+                    ErrorCode.OUTPUT_CONTRACT_INVALID,
+                    retryable=False,
+                    safe_details={
+                        "task_effect": "applied",
+                        "task_effect_value_digest": applied_digest,
+                    },
+                ),
+            )
+            return await self.inspect(execution_id, principal=principal)
+
+        await self._complete_task_output(
+            current,
+            principal=principal,
+            output=applied_output,
+            terminal_event_payload={
+                "task_effect": "applied",
+                "task_effect_value_digest": applied_digest,
+            },
+        )
+        return await self.inspect(execution_id, principal=principal)
+
     async def cancel_task(
         self,
         execution_id: str,
@@ -1062,8 +1194,23 @@ class DefaultExecutionService:
             principal,
             AuthorizationAction.EXECUTION_RUN,
         )
+        return await self._complete_task_output(
+            current,
+            principal=principal,
+            output=output,
+        )
+
+    async def _complete_task_output(
+        self,
+        current: ExecutionRecord,
+        *,
+        principal: Principal,
+        output: JsonValue,
+        terminal_event_payload: "Mapping[str, JsonValue] | None" = None,
+    ) -> ExecutionResult:
         if not isinstance(current.binding, TaskBindingSnapshot):
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        execution_id = current.execution_id
         if current.status is ExecutionStatus.SUCCEEDED:
             return await self.result(execution_id, principal=principal)
         if current.status not in {
@@ -1092,6 +1239,7 @@ class DefaultExecutionService:
             error_code=None,
             safe_error_details={},
             error_diagnostics=None,
+            task_next_attempt_at=None,
             updated_at=now,
         )
         idempotency = await self._task_terminal_idempotency(
@@ -1106,7 +1254,9 @@ class DefaultExecutionService:
                 terminal,
                 result,
                 ExecutionEventType.EXECUTION_SUCCEEDED,
-                {},
+                {}
+                if terminal_event_payload is None
+                else dict(terminal_event_payload),
                 idempotency,
             )
         )
@@ -3250,6 +3400,31 @@ class DefaultExecutionService:
 
 def _execution_view(execution: ExecutionRecord) -> ExecutionView:
     return _project_execution_view(execution)
+
+
+def _validate_task_binding_output(
+    binding: TaskBindingSnapshot,
+    output: JsonValue,
+) -> None:
+    contract = dict(binding.output_contract)
+    if contract == {"kind": "json"}:
+        return
+    if set(contract) != {"mode", "schema"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        restored = restore_output(contract["mode"], contract["schema"])
+    except AIError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    try:
+        restored.validate_payload(output)
+    except AIError as error:
+        if error.code is ErrorCode.OUTPUT_VALIDATION_FAILED:
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                retryable=False,
+            ) from error
+        raise
+
 
 
 def _terminal_error(
