@@ -17,6 +17,7 @@ from ..core import (
     normalize_json_value,
     normalize_correlation,
 )
+from ..errors import AIError, ErrorCode
 from ._graph import TaskExpanderRef, TaskNode, TaskResultRef
 
 AppT = TypeVar("AppT")
@@ -201,7 +202,7 @@ class TaskNodeContext(Generic[AppT]):
         value = await self._dependency_reader(dependency)
         normalized = normalize_json_value(value)
         if canonical_sha256(normalized) != dependency.result_digest:
-            raise RuntimeError("task dependency result digest mismatch")
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return normalized
 
 
