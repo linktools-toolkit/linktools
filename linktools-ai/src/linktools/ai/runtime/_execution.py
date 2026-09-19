@@ -555,7 +555,7 @@ class DefaultExecutionService:
                 raise
             if snapshot.binding_digest != binding_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            binding = self._catalog.register_binding(self._compiler.restore(snapshot))
+            binding = self._compiler.restore(snapshot)
         if snapshot is not None and binding.snapshot != snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
@@ -1463,6 +1463,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
         *,
         dependency_hold_id: "str | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         return await self._start(
             binding_digest,
@@ -1470,6 +1471,7 @@ class DefaultExecutionService:
             scope="execution.run",
             prepare_local_stream=True,
             dependency_hold_id=dependency_hold_id,
+            binding_snapshot=binding_snapshot,
         )
 
     async def resolve_existing(
@@ -1479,7 +1481,7 @@ class DefaultExecutionService:
     ) -> "ExecutionHandle | None":
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = self._binding(binding_digest)
+        binding = self._binding(binding_digest, binding_snapshot)
         context = await self._canonicalize_request(request)
         request = context.request
         scope = "execution.run"
@@ -1573,6 +1575,8 @@ class DefaultExecutionService:
         binding_digest: str,
         session_id: str,
         request: ExecutionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1583,6 +1587,7 @@ class DefaultExecutionService:
             session_agent_id=agent_id,
             scope="session.resume",
             prepare_local_stream=True,
+            binding_snapshot=binding_snapshot,
         )
 
     async def start_subagent(
@@ -1692,6 +1697,7 @@ class DefaultExecutionService:
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -1709,6 +1715,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
+                binding_snapshot=binding_snapshot,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
             return await self._start_unlocked(
@@ -1726,6 +1733,7 @@ class DefaultExecutionService:
                 scope=scope,
                 prepare_local_stream=prepare_local_stream,
                 dependency_hold_id=dependency_hold_id,
+                binding_snapshot=binding_snapshot,
             )
 
     async def _start_unlocked(
@@ -1745,6 +1753,7 @@ class DefaultExecutionService:
         scope: str = "execution.run",
         prepare_local_stream: bool = False,
         dependency_hold_id: "str | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -2653,6 +2662,7 @@ class DefaultExecutionService:
             lineage_kind=ExecutionLineageKind.RETRY,
             base_execution_id=previous.base_execution_id,
             conversation_step_run_id=previous.conversation_step_run_id,
+            binding_snapshot=previous.binding,
         )
 
     async def fork(
@@ -2691,6 +2701,7 @@ class DefaultExecutionService:
             source_execution_id=previous.execution_id,
             lineage_kind=ExecutionLineageKind.FORK,
             base_execution_id=previous.execution_id,
+            binding_snapshot=previous.binding,
         )
 
     async def cancel(
