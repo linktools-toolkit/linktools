@@ -103,9 +103,8 @@ class TaskBindingSnapshot:
 @dataclass(frozen=True, slots=True)
 class TaskDependency:
     node_id: str
-    output: JsonValue
     result_digest: str
-    execution_id: "str | None" = None
+    execution_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.node_id, str) or not self.node_id.strip():
@@ -115,14 +114,8 @@ class TaskDependency:
             or _RESULT_DIGEST.fullmatch(self.result_digest) is None
         ):
             raise ValueError("task dependency result digest is invalid")
-        output = normalize_json_value(self.output)
-        if canonical_sha256(output) != self.result_digest:
-            raise ValueError("task dependency result digest does not match output")
-        if self.execution_id is not None and (
-            not isinstance(self.execution_id, str) or not self.execution_id.strip()
-        ):
-            raise ValueError("task dependency execution id is invalid")
-        object.__setattr__(self, "output", output)
+        if not isinstance(self.execution_id, str) or not self.execution_id.strip():
+            raise ValueError("task dependency execution id is required")
 
 
 class TaskArtifactPublisher(Protocol):
@@ -162,6 +155,10 @@ class TaskNodeContext(Generic[AppT]):
     input: Mapping[str, JsonValue]
     dependencies: Mapping[str, TaskDependency]
     idempotency_key: str
+    _dependency_reader: Callable[[TaskDependency], Awaitable[JsonValue]] = field(
+        repr=False,
+        compare=False,
+    )
     correlation: CorrelationData = field(default_factory=dict)
     artifacts: "TaskArtifactPublisher | None" = None
 
@@ -193,14 +190,19 @@ class TaskNodeContext(Generic[AppT]):
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
-    def read_dependency(self, name: str) -> TaskDependency:
-        """Read one dependency by its declared node identity."""
+    async def read_dependency(self, name: str) -> JsonValue:
+        """Read one dependency body through its authorized Execution owner."""
         if not isinstance(name, str) or not name:
             raise KeyError(name)
         try:
-            return self.dependencies[name]
+            dependency = self.dependencies[name]
         except KeyError as error:
             raise KeyError(name) from error
+        value = await self._dependency_reader(dependency)
+        normalized = normalize_json_value(value)
+        if canonical_sha256(normalized) != dependency.result_digest:
+            raise RuntimeError("task dependency result digest mismatch")
+        return normalized
 
 
 @runtime_checkable
