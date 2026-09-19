@@ -114,7 +114,6 @@ def test_task_event_graph_changed_rejects_node_only_ready_status() -> None:
             owner=None,
             result_digest="a" * 64,
         ),
-        _node_event(execution_id="execution"),
     ),
 )
 def test_task_node_event_semantically_invalid_v1_state_fails_closed(
@@ -124,6 +123,22 @@ def test_task_node_event_semantically_invalid_v1_state_fails_closed(
         _decode_task_event("graph", _fact("NODE_CHANGED", payload))
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_task_node_event_allows_running_execution_binding() -> None:
+    event = _decode_task_event(
+        "graph",
+        _fact(
+            "NODE_CHANGED",
+            _node_event(execution_id="execution"),
+        ),
+    )
+
+    assert event.status.value == "RUNNING"
+    assert event.previous_status.value == "READY"
+    assert event.owner == "worker"
+    assert event.fence == 1
+    assert event.execution_id == "execution"
 
 
 def test_task_node_event_allows_waiting_execution_binding() -> None:
