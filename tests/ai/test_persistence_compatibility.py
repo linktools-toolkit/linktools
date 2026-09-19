@@ -157,7 +157,31 @@ def _decode_custom_wire_values(
 
 def test_custom_wire_v2_round_trips_current_shape() -> None:
     value = _custom_wire_values()
-    assert _decode_custom_wire_values(value) == _decode_custom_wire_values(value)
+    task, idempotency, operation = _decode_custom_wire_values(value)
+
+    assert task == TaskNode(
+        "node",
+        ("dependency",),
+        input={"key": "value"},
+        budget_cost=2,
+    )
+    assert idempotency == IdempotencyTerminalUpdate(
+        scope="scope",
+        idempotency_key_digest="a" * 64,
+        expected_status=IdempotencyStatus.STARTED,
+        next_status=IdempotencyStatus.COMPLETED,
+        request_digest="b" * 64,
+        result_digest="c" * 64,
+        error_code="terminal-error",
+    )
+    assert operation == OperationTerminalUpdate(
+        operation_id="operation",
+        expected_status=OperationStatus.RUNNING,
+        next_status=OperationStatus.SUCCEEDED,
+        result_ref="result",
+        result_digest="d" * 64,
+        error_code="terminal-error",
+    )
 
 
 def test_custom_wire_v1_fixture_is_not_the_current_shape() -> None:

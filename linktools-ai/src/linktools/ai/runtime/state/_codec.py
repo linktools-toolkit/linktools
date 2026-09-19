@@ -9,7 +9,7 @@ import json
 import math
 import types
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from operator import attrgetter
@@ -264,6 +264,103 @@ _V2_ENUM_TYPES = MappingProxyType(
     {wire_id: target for wire_id, target in _V2_ENUM_WIRE_TYPES}
 )
 
+_V2_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "approval_record": ("approval_id", "execution_id", "status", "idempotency_key_digest", "decision", "decided_by", "decision_digest", "created_at", "decided_at", "decision_message", "resolution_metadata"),
+        "agent_attempt_claim": ("execution_id", "expected_execution_revision", "expected_agent_run_sequence", "expected_recovery_revision", "expected_recovery_state"),
+        "artifact_record": ("artifact_id", "execution_id", "producer", "media_type", "object_ref", "created_at"),
+        "conversation_cursor": ("step_run_id", "history_id", "message_count"),
+        "conversation_history_index_node": ("node_id", "segment", "tree_segment_count", "tree_message_count", "left_tree_id", "right_tree_id", "next_forest_id"),
+        "conversation_history": ("history_id", "session_id", "parent_history_id", "prefix_index_head_id", "inherited_message_count"),
+        "conversation_history_segment": ("owner_history_id", "through_local_message_count"),
+        "context_projection": ("items",),
+        "error_diagnostics": ("exception_type", "exception_message", "cause_digest"),
+        "evaluation_record": ("evaluation_id", "execution_id", "dataset_id", "dataset_revision", "evaluator_id", "evaluator_revision", "binding_digest", "artifact_digest", "status", "revision", "metrics", "created_at", "updated_at"),
+        "execution_event": ("execution_id", "sequence", "event_type", "payload"),
+        "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
+        "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),
+        "execution_record": ("execution_id", "session_id", "parent_execution_id", "root_execution_id", "source_execution_id", "base_execution_id", "lineage_kind", "status", "revision", "event_sequence", "agent_run_sequence", "error_code", "safe_error_details", "created_at", "updated_at", "mode", "planning", "thinking", "binding", "principal_id", "principal_kind", "stored_user_input", "parent_invocation_id", "memory_scope", "conversation_step_run_id", "result", "repository_instructions", "error_diagnostics", "correlation", "task_attempt", "task_deadline_at", "task_next_attempt_at", "dependency_hold_ids", "retention_closed", "started_at"),
+        "execution_run_seal_head": ("run_id", "event_count", "snapshot_count", "transcript_message_count", "projection_digest", "interaction_count"),
+        "model_interaction": ("run_id", "step_index", "request_sequence", "purpose", "output_retry_index", "model", "request_context", "request_envelope", "response_context", "status", "error_code", "duration_ns", "usage", "attachments"),
+        "execution_start_claim": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "started_at"),
+        "execution_start_unknown_commit": ("execution_id", "expected_revision", "expected_event_sequence", "scope", "idempotency_key_digest", "request_digest", "occurred_at"),
+        "execution_cancel_request_commit": ("execution_id", "expected_revision", "expected_event_sequence", "operation_id", "requested_at"),
+        "execution_start_reservation": ("execution", "idempotency"),
+        "execution_start_reservation_result": ("execution", "idempotency", "created"),
+        "execution_terminal_commit": ("expected_revision", "expected_event_sequence", "execution", "result", "terminal_event_type", "terminal_event_payload", "idempotency", "operation"),
+        "execution_terminal_commit_result": ("execution", "result"),
+        "execution_event_append": ("event_type", "payload"),
+        "external_call_record": ("call_id", "execution_id", "status", "idempotency_key_digest", "created_at", "supplied_at", "resolution_kind", "result_payload", "resolution_metadata"),
+        "idempotency_record": ("scope", "idempotency_key_digest", "request_digest", "resource_kind", "resource_id", "status", "result_digest", "error_code", "created_at", "updated_at"),
+        "memory_record": ("memory_id", "memory_scope_digest", "content", "metadata", "revision", "created_at", "updated_at"),
+        "operation_ledger_input": ("operation_id", "tenant_id", "resource_kind", "resource_id", "execution_id", "operation_kind", "status", "request_digest", "result_ref", "result_digest", "error_code", "compactable", "created_at", "updated_at"),
+        "operation_ledger_record": ("operation_id", "tenant_id", "resource_kind", "resource_id", "execution_id", "operation_kind", "status", "request_digest", "result_ref", "result_digest", "error_code", "compactable", "sequence", "created_at", "updated_at"),
+        "principal": ("principal_id", "tenant_id", "kind"),
+        "pending_deferred_call": ("tool_call_id", "tool_name", "arguments_payload", "metadata"),
+        "pending_tool_continuation": ("source_step_run_id", "approvals", "calls"),
+        "recovery_checkpoint": ("execution_id", "step_run_id", "state", "revision", "created_at", "updated_at", "pending_tools", "repository_instruction_overlay", "repository_instruction_barriers", "handoff_phase", "terminal_handoff", "pending_operation_id"),
+        "recovery_conversation_intent": ("session_id", "expected_cursor", "next_cursor"),
+        "recovery_terminal_handoff": ("outcome", "source_step_run_id", "conversation"),
+        "recovery_terminal_outcome": ("terminal_status", "error_code", "safe_error_details", "stop_reason", "output", "object_source_domain", "usage", "terminal_event_type", "terminal_event_payload", "result_created_at", "error_diagnostics"),
+        "repository_instruction_barrier": ("step_run_id", "tool_call_id", "arguments_digest", "resulting_overlay_digest"),
+        "resource_ref": ("kind", "id", "tenant_id", "owner_principal_id"),
+        "result_record": ("output", "stop_reason", "usage", "created_at"),
+        "session_record": ("session_id", "owner_principal_id", "status", "revision", "cwd", "metadata", "created_at", "updated_at", "closed_at", "active_execution_id", "agent_id", "continuation", "history_quality", "history_id", "timeline_parent_session_id", "timeline_parent_turn_sequence"),
+        "stored_step_snapshot": ("run_id", "step_index", "timestamp", "state", "projection_digest", "has_context_projection"),
+        "stored_payload": ("kind", "encoding", "digest", "size", "value", "ref"),
+        "inline_context_block": ("content",),
+        "loaded_context_message": ("message", "source"),
+        "loaded_model_context": ("messages",),
+        "runtime_payload_ref": ("payload", "source_domain"),
+        "task_binding_snapshot": ("task_type", "task_version", "effect", "output_contract", "timeout_seconds", "max_attempts", "retry_delay_seconds", "reconcile"),
+        "transcript_chunk": ("owner_id", "first_message_index", "message_count", "origin", "codec", "raw_digest", "raw_size", "content"),
+        "transcript_head": ("owner_domain", "owner_id", "message_count", "chunk_count", "quality"),
+        "transcript_message_ref": ("source_domain", "owner_id", "message_index"),
+        "transcript_seek": ("owner_id", "dimension", "block_start", "fact_sequence", "chunk_first_message_index"),
+        "transcript_span_ref": ("source_domain", "owner_id", "start", "end"),
+        "tool_operation_admission": ("execution_id", "tool_operation_id", "step_run_id", "recovery_step_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "owner", "lease_seconds", "arguments_payload"),
+        "task_graph": ("graph_id", "nodes"),
+        "task_graph_admission": ("version", "graph_id", "principal", "limits", "operation_id", "initial_request_digest", "correlation"),
+        "task_graph_limits": ("max_concurrency", "max_depth", "max_nodes", "max_budget"),
+        "task_lease": ("graph_id", "node_id", "tenant_id", "owner", "fence", "lease_expires_at", "execution_id"),
+        "task_expander_ref": ("id", "version"),
+        "task_terminal": ("node_id", "owner", "fence", "status", "result_digest", "error_code", "error_digest", "completed_at", "execution_id"),
+        "tool_operation": ("tool_operation_id", "execution_id", "step_run_id", "tool_call_id", "idempotency_key_digest", "tool_name", "arguments_digest", "binding_digest", "replay_safe", "status", "owner", "fence", "lease_expires_at", "error_code", "created_at", "updated_at", "arguments_payload", "result_payload", "error_payload"),
+        "usage_metrics": ("model_requests", "tool_calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"),
+        "run_record": ("run_id", "conversation_id", "parent_run_id", "agent_name", "metadata", "started_at", "registration_id"),
+        "step_event": ("run_id", "kind", "step_index", "timestamp", "conversation_id", "parent_run_id", "agent_name", "tool_call_id", "tool_name", "error", "metadata", "idempotency_key", "event_index"),
+    }
+)
+
+_V2_ENUM_VALUES: Mapping[str, frozenset[object]] = MappingProxyType(
+    {
+        "approval_decision": frozenset({"APPROVE", "DENY"}),
+        "approval_status": frozenset({"PENDING", "APPROVED", "DENIED", "CANCELLED"}),
+        "evaluation_status": frozenset({"PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"}),
+        "execution_event_type": frozenset({"EXECUTION_CREATED", "EXECUTION_STARTED", "EXECUTION_START_UNKNOWN", "EXECUTION_RECOVERY_REQUIRED", "EXECUTION_RESUMED", "EXECUTION_RETRY_SCHEDULED", "APPROVAL_REQUESTED", "APPROVAL_DECIDED", "EXTERNAL_REQUESTED", "EXTERNAL_SUPPLIED", "CANCEL_REQUESTED", "EXECUTION_SUCCEEDED", "EXECUTION_FAILED", "EXECUTION_CANCELLED", "ASSISTANT_PART_COMPLETED", "TOOL_CALL_STARTED", "TOOL_CALL_FINISHED"}),
+        "execution_history_state": frozenset({"open", "sealed"}),
+        "execution_lineage_kind": frozenset({"RUN", "SESSION_RESUME", "RETRY", "FORK", "SUBAGENT"}),
+        "execution_status": frozenset({"PENDING_START", "STARTED", "FINALIZING", "START_UNKNOWN", "RECOVERY_REQUIRED", "WAITING_DEFERRED", "WAITING_RETRY", "CANCELLING", "SUCCEEDED", "FAILED", "CANCELLED"}),
+        "external_call_status": frozenset({"PENDING", "SUPPLIED", "CANCELLED"}),
+        "history_quality": frozenset({"complete", "conservative"}),
+        "idempotency_status": frozenset({"RESERVED", "STARTED", "START_UNKNOWN", "COMPLETED", "FAILED", "CANCELLED"}),
+        "operation_kind": frozenset({"EXECUTION_START", "MODEL", "TOOL", "TOOL_EFFECT_RESOLVE", "APPROVAL", "EXTERNAL", "BUDGET", "RESULT", "EVENT", "EXECUTION_CANCEL", "TASK_CANCEL", "TASK_RECOVER", "SESSION_CREATE", "SESSION_FORK", "SESSION_UPDATE", "SESSION_CLOSE", "MEMORY_WRITE", "MEMORY_DELETE", "TASK_NODE", "DOWNLOAD_GRANT"}),
+        "operation_status": frozenset({"PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "EFFECT_UNKNOWN", "COMPACTED"}),
+        "resource_kind": frozenset({"SESSION", "EXECUTION", "TASK_GRAPH", "EVALUATION", "APPROVAL", "EXTERNAL_CALL", "ARTIFACT", "MEMORY", "TOOL_OPERATION", "DOWNLOAD_GRANT"}),
+        "runtime_domain": frozenset({"conversation", "execution", "memory", "artifact", "task", "evaluation", "recovery"}),
+        "runtime_retention_mode": frozenset({"durable", "volatile", "transient"}),
+        "recovery_checkpoint_state": frozenset({"admitted", "active", "waiting", "handoff", "completed"}),
+        "recovery_handoff_phase": frozenset({"none", "prepared", "conversation_resolved", "execution_committed", "completed"}),
+        "session_status": frozenset({"OPEN", "CLOSING", "CLOSED", "CLEANUP_REQUIRED"}),
+        "stop_reason": frozenset({"END_TURN", "REFUSAL", "TURN_LIMIT", "OUTPUT_VALIDATION_FAILED", "CANCELLED", "ERROR"}),
+        "task_status": frozenset({"PENDING", "READY", "RUNNING", "WAITING", "RECOVERY_REQUIRED", "SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED"}),
+        "tool_operation_status": frozenset({"PENDING", "CLAIMED", "COMPLETED", "FAILED", "CANCELLED", "EFFECT_UNKNOWN"}),
+        "transcript_origin": frozenset({"raw", "unknown"}),
+        "transcript_owner_domain": frozenset({"conversation", "execution", "recovery"}),
+        "transcript_seek_dimension": frozenset({"message"}),
+    }
+)
+
 DataclassEncoder = Callable[
     [object, "_VersionCodec", bool],
     Mapping[str, JsonValue],
@@ -281,6 +378,8 @@ class _VersionCodec:
     domain_types: Mapping[str, type[object]]
     enum_wire_ids: Mapping[type[Enum], str]
     enum_types: Mapping[str, type[Enum]]
+    enum_values: Mapping[str, frozenset[object]]
+    dataclass_fields: Mapping[str, tuple[str, ...]]
     dataclass_encoders: Mapping[str, DataclassEncoder]
     dataclass_decoders: Mapping[str, DataclassDecoder]
     external_schema_types: Mapping[type[object], JsonValue]
@@ -366,17 +465,34 @@ def _decode_v2_task_node(
             ),
         )
         try:
+            if name in input_refs:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             input_refs[name] = TaskResultRef(
-                str(raw_reference["namespace"]),
-                str(raw_reference["tenant_id"]),
-                str(raw_reference["graph_id"]),
-                str(raw_reference["node_id"]),
-                str(raw_reference["result_digest"]),
+                cast(str, _decode_domain(raw_reference["namespace"], str, codec)),
+                cast(str, _decode_domain(raw_reference["tenant_id"], str, codec)),
+                cast(str, _decode_domain(raw_reference["graph_id"], str, codec)),
+                cast(str, _decode_domain(raw_reference["node_id"], str, codec)),
+                cast(str, _decode_domain(raw_reference["result_digest"], str, codec)),
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    timeout_seconds = raw_fields.get("timeout_seconds")
+    if timeout_seconds is not None and type(timeout_seconds) is not float:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    max_attempts = raw_fields.get("max_attempts", 1)
+    if isinstance(max_attempts, bool) or not isinstance(max_attempts, int):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    retry_delay_seconds = raw_fields.get("retry_delay_seconds", 0.0)
+    if type(retry_delay_seconds) is not float:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    output_contract = raw_fields.get("output_contract")
+    if output_contract is not None and not isinstance(output_contract, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    effect = raw_fields.get("effect", "none")
+    if not isinstance(effect, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode(
-        str(_decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
+        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
             _decode_domain(
                 raw_fields["dependencies"],
@@ -406,14 +522,14 @@ def _decode_v2_task_node(
             ),
         ),
         input_refs=input_refs,
-        timeout_seconds=cast("float | None", raw_fields.get("timeout_seconds")),
-        max_attempts=int(raw_fields.get("max_attempts", 1)),
-        retry_delay_seconds=float(raw_fields.get("retry_delay_seconds", 0)),
+        timeout_seconds=cast("float | None", timeout_seconds),
+        max_attempts=max_attempts,
+        retry_delay_seconds=retry_delay_seconds,
         output_contract=cast(
             Mapping[str, JsonValue] | None,
-            raw_fields.get("output_contract"),
+            output_contract,
         ),
-        effect=str(raw_fields.get("effect", "none")),
+        effect=effect,
     )
 
 
@@ -822,6 +938,8 @@ _V2_CODEC = _VersionCodec(
     domain_types=_V2_DOMAIN_TYPES,
     enum_wire_ids=_V2_ENUM_WIRE_IDS,
     enum_types=_V2_ENUM_TYPES,
+    enum_values=_V2_ENUM_VALUES,
+    dataclass_fields=_V2_GENERIC_DATACLASS_FIELDS,
     dataclass_encoders=_V2_DATACLASS_ENCODERS,
     dataclass_decoders=_V2_DATACLASS_DECODERS,
     external_schema_types=_V2_EXTERNAL_SCHEMA_TYPES,
@@ -1283,7 +1401,14 @@ def _encode_domain(
         wire_id = codec.enum_wire_ids.get(type(value))
         if wire_id is None:
             raise TypeError(f"unsupported enum type: {type(value).__name__}")
-        return {"$enum": wire_id, "value": _encode_enum_value(value.value)}
+        raw_value = _encode_enum_value(value.value)
+        allowed = codec.enum_values.get(wire_id)
+        if allowed is None or not any(
+            type(raw_value) is type(candidate) and raw_value == candidate
+            for candidate in allowed
+        ):
+            raise ValueError(f"enum value is not supported by Runtime v{codec.version}")
+        return {"$enum": wire_id, "value": raw_value}
     if value is None or isinstance(value, str):
         return value
     if isinstance(value, bool):
@@ -1312,16 +1437,24 @@ def _encode_domain(
         if encoder is not None:
             encoded_fields = encoder(value, codec, persisted)
         else:
-            if any(field.name.startswith("_") for field in fields(value)):
-                raise TypeError("private dataclass fields require an explicit codec")
-            encoded_fields = {
-                field.name: _encode_domain(
-                    attrgetter(field.name)(value),
-                    codec,
-                    persisted=persisted,
+            field_names = codec.dataclass_fields.get(wire_id)
+            if field_names is None:
+                raise TypeError(
+                    f"Runtime v{codec.version} dataclass schema is not frozen: {wire_id}"
                 )
-                for field in fields(value)
-            }
+            try:
+                encoded_fields = {
+                    field_name: _encode_domain(
+                        attrgetter(field_name)(value),
+                        codec,
+                        persisted=persisted,
+                    )
+                    for field_name in field_names
+                }
+            except AttributeError as error:
+                raise TypeError(
+                    f"Runtime v{codec.version} dataclass implementation no longer matches {wire_id}"
+                ) from error
         wire: dict[str, JsonValue] = {
             "$dataclass": wire_id,
             "fields": dict(encoded_fields),
@@ -1329,7 +1462,7 @@ def _encode_domain(
         if persisted:
             wire = {
                 "$dataclass": wire_id,
-                "schema": CURRENT_DATA_VERSION,
+                "schema": codec.version,
                 "fields": dict(encoded_fields),
             }
         return wire
@@ -1736,6 +1869,12 @@ def _decode_enum(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if type(raw) is float:
         _require_finite_wire_float(raw)
+    allowed = codec.enum_values.get(expected_wire_id)
+    if allowed is None or not any(
+        type(raw) is type(candidate) and raw == candidate
+        for candidate in allowed
+    ):
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     try:
         result = target(raw)
     except (TypeError, ValueError) as error:
@@ -1777,7 +1916,7 @@ def _decode_dataclass(
         schema = value["schema"]
         if isinstance(schema, bool) or not isinstance(schema, int) or schema < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if schema != CURRENT_DATA_VERSION:
+        if schema != codec.version:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
     decoder = codec.dataclass_decoders.get(wire_id)
@@ -1789,27 +1928,29 @@ def _decode_dataclass(
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
+    frozen_names = codec.dataclass_fields.get(wire_id)
+    if frozen_names is None:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    required_names = frozenset(frozen_names)
+    if not required_names.issubset(raw_fields) or (
+        not persisted and set(raw_fields) != required_names
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         hints = get_type_hints(target)
     except (NameError, TypeError) as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
-    declared_fields = tuple(fields(target))
-    declared_names = frozenset(field.name for field in declared_fields)
-    if not persisted:
-        _require_exact_keys(raw_fields, declared_names)
+    declared = {field.name: field for field in fields(target)}
     kwargs: dict[str, object] = {}
     post_init_fields: dict[str, object] = {}
-    for field in declared_fields:
-        if field.name not in raw_fields:
-            if field.init and (
-                field.default is MISSING and field.default_factory is MISSING
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            continue
+    for field_name in frozen_names:
+        field = declared.get(field_name)
+        if field is None:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         try:
             decoded = _decode_domain(
-                raw_fields[field.name],
-                hints.get(field.name, Any),
+                raw_fields[field_name],
+                hints.get(field_name, Any),
                 codec,
                 persisted=persisted,
             )
@@ -1818,9 +1959,9 @@ def _decode_dataclass(
         except (KeyError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if field.init:
-            kwargs[field.name] = decoded
+            kwargs[field_name] = decoded
         else:
-            post_init_fields[field.name] = decoded
+            post_init_fields[field_name] = decoded
     try:
         result = target(**kwargs)
     except (KeyError, TypeError, ValueError) as error:
