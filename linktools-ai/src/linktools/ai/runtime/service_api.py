@@ -1274,6 +1274,7 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         timeout_seconds: "float | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionResult: ...
     async def retry(
         self, binding_digest: str, execution_id: str, request: RetryExecutionRequest
