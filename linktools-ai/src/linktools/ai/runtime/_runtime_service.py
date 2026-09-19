@@ -435,7 +435,6 @@ class Runtime(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return Agent(self, derived.spec.id, derived.digest, derived)
 
-    def _definition(self, agent_digest: str) -> AgentDefinition:
         self._ensure_open()
         return self._catalog.definition(agent_digest)
 
@@ -461,7 +460,6 @@ class Runtime(Generic[AppT]):
         resolved = self._agent_definition(agent_digest, definition)
         return self._compiler.bind(resolved, output=output)
 
-    def _restore_binding(self, snapshot: AgentBindingSnapshot) -> AgentBinding:
         self._ensure_open()
         try:
             current = self._catalog.binding(snapshot.binding_digest)
@@ -474,7 +472,6 @@ class Runtime(Generic[AppT]):
             return current
         return self._compiler.restore(snapshot)
 
-    async def _compile_agent(self, agent_id: str) -> AgentDefinition:
         self._ensure_open()
         return self._catalog.root_definition(agent_id)
 
