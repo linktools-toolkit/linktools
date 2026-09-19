@@ -9,6 +9,7 @@ from typing import Protocol, cast
 
 from pydantic_ai.messages import UserContent
 
+from ..agent import AgentBindingSnapshot
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -1149,6 +1150,7 @@ class ExecutionService(Protocol):
         request: ExecutionRequest,
         *,
         dependency_hold_id: "str | None" = None,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
     async def start_task(
         self,
@@ -1365,6 +1367,8 @@ class SessionService(Protocol):
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
     async def fork(
         self, agent_id: str, session_id: str, request: ForkSessionRequest
@@ -1379,7 +1383,11 @@ class SessionService(Protocol):
 
 class EvaluationService(Protocol):
     async def start(
-        self, binding_digest: str, request: StartEvaluationRequest
+        self,
+        binding_digest: str,
+        request: StartEvaluationRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> EvaluationHandle: ...
     async def inspect(
         self, evaluation_id: str, *, principal: Principal
@@ -1391,7 +1399,12 @@ class EvaluationService(Protocol):
         self, evaluation_id: str, *, principal: Principal
     ) -> RunSnapshot: ...
     async def replay(
-        self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest
+        self,
+        binding_digest: str,
+        snapshot_id: str,
+        request: ReplayEvaluationRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
 
 
