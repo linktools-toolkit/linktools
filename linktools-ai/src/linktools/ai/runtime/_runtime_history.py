@@ -48,6 +48,7 @@ from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._runtime_identity import grant_key
 from .service_api import (
+    AttachmentFact,
     ArtifactService,
     ArtifactView,
     ExecutionEvent,
@@ -560,6 +561,21 @@ class RuntimeHistory:
             )
         )
         return Page(tuple(projected), next_cursor)
+
+    async def attachment_facts(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> Page[AttachmentFact]:
+        return await self._service.attachment_facts(
+            execution_id,
+            principal=principal,
+            cursor=cursor,
+            limit=limit,
+        )
 
     async def usage(
         self,
