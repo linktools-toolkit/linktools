@@ -2106,43 +2106,31 @@ class DefaultExecutionService:
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        hold_acquired = await self._acquire_start_dependency_hold(
-            execution,
-            dependency_hold_id,
-        )
         identity = ExecutionStartIdentity(scope, idempotency_key_digest, request_digest)
         try:
-            try:
-                started = await self._backend.prepare_start(
-                    request,
-                    execution,
-                    identity,
-                )
-            except AIError as error:
-                if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
-                    await self._reject_pending_start(
-                        execution,
-                        identity=identity,
-                        error=error,
-                    )
-                raise
-            if started is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._launch_started(
+            started = await self._backend.prepare_start(
                 request,
-                started,
-                scope=scope,
-                idempotency_key_digest=idempotency_key_digest,
-                prepare_local_stream=prepare_local_stream,
+                execution,
+                identity,
             )
-        except BaseException:
-            if hold_acquired:
-                await self.release_dependency_hold(
-                    execution.execution_id,
-                    tenant_id=execution.tenant_id,
-                    hold_id=dependency_hold_id or "",
+        except AIError as error:
+            if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
+                await self._reject_pending_start(
+                    execution,
+                    identity=identity,
+                    error=error,
                 )
             raise
+        if started is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._launch_started(
+            request,
+            started,
+            scope=scope,
+            idempotency_key_digest=idempotency_key_digest,
+            prepare_local_stream=prepare_local_stream,
+            dependency_hold_id=dependency_hold_id,
+        )
 
     async def _acquire_start_dependency_hold(
         self,
