@@ -30,10 +30,14 @@ class _ExecutionService:
         *,
         principal: Principal,
         after_sequences=None,
+        include_content: bool = False,
     ):
-        del principal, after_sequences
+        del principal, include_content
+        after = 0 if after_sequences is None else after_sequences.get(execution_id, 0)
 
         async def values():
+            if after >= 1:
+                return
             yield ExecutionTreeEvent(
                 execution_id,
                 "agent",
@@ -57,8 +61,12 @@ class _TaskGraphService:
     async def snapshot(self, graph_id: str, *, principal: Principal):
         del principal
 
+        class State:
+            node_id = "node"
+            execution_id = "execution"
+
         class Snapshot:
-            node_states = ()
+            node_states = (State(),)
 
         assert graph_id == "graph"
         return Snapshot()
@@ -74,63 +82,77 @@ class _TaskGraphService:
 
         async def values():
             now = datetime.now(timezone.utc)
-            yield TaskEvent(
-                1,
-                graph_id,
-                after_sequence + 1,
-                TaskEventType.GRAPH_ADMITTED,
-                now,
-                TaskStatus.PENDING,
+            events = (
+                TaskEvent(
+                    1,
+                    graph_id,
+                    1,
+                    TaskEventType.GRAPH_ADMITTED,
+                    now,
+                    TaskStatus.PENDING,
+                ),
+                TaskEvent(
+                    1,
+                    graph_id,
+                    2,
+                    TaskEventType.NODE_CHANGED,
+                    now,
+                    TaskStatus.RUNNING,
+                    TaskStatus.READY,
+                    "node",
+                    "worker",
+                    1,
+                ),
+                TaskEvent(
+                    1,
+                    graph_id,
+                    3,
+                    TaskEventType.NODE_CHANGED,
+                    now,
+                    TaskStatus.WAITING,
+                    TaskStatus.RUNNING,
+                    "node",
+                    None,
+                    1,
+                    "execution",
+                ),
+                TaskEvent(
+                    1,
+                    graph_id,
+                    4,
+                    TaskEventType.GRAPH_CHANGED,
+                    now,
+                    TaskStatus.SUCCEEDED,
+                    TaskStatus.RUNNING,
+                ),
             )
-            yield TaskEvent(
-                1,
-                graph_id,
-                after_sequence + 2,
-                TaskEventType.NODE_CHANGED,
-                now,
-                TaskStatus.RUNNING,
-                TaskStatus.READY,
-                "node",
-                "worker",
-                1,
-            )
-            yield TaskEvent(
-                1,
-                graph_id,
-                after_sequence + 3,
-                TaskEventType.NODE_CHANGED,
-                now,
-                TaskStatus.WAITING,
-                TaskStatus.RUNNING,
-                "node",
-                None,
-                1,
-                "execution",
-            )
-            yield TaskEvent(
-                1,
-                graph_id,
-                after_sequence + 4,
-                TaskEventType.GRAPH_CHANGED,
-                now,
-                TaskStatus.SUCCEEDED,
-                TaskStatus.RUNNING,
-            )
+            for event in events:
+                if event.sequence > after_sequence:
+                    yield event
 
         return values()
 
 
 class _Runtime:
+    namespace = "watch-test"
+
     def __init__(self) -> None:
         self.execution = _ExecutionService()
         self.graph = _TaskGraphService()
 
 
-def _watch_tree(execution_id, *, principal, after_sequences=None):
+def _watch_tree(
+    execution_id,
+    *,
+    principal,
+    after_sequences=None,
+    include_content=False,
+):
     return _ExecutionService().stream(
         execution_id,
         principal=principal,
         after_sequences=after_sequences,
+        include_content=include_content,
     )
 
 
@@ -148,6 +170,11 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
     assert len(values) == 1
     assert values[0].execution_id == "execution"
     assert values[0].event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED.value
+    assert values[0].cursor is not None
+    assert [item async for item in execution.watch(cursor=values[0].cursor)] == []
+    with pytest.raises(AIError) as raised:
+        execution.watch(cursor=values[0].cursor, include_content=True)
+    assert raised.value.code is ErrorCode.CURSOR_INVALID
 
 
 @pytest.mark.asyncio
@@ -171,6 +198,12 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
         execution[0].event.event.event_type
         == ExecutionEventType.EXECUTION_SUCCEEDED.value
     )
+    assert all(item.cursor is not None for item in values)
+    assert values[-1].cursor is not None
+    assert [item async for item in run.watch(cursor=values[-1].cursor)] == []
+    with pytest.raises(AIError) as raised:
+        run.watch(cursor=values[-1].cursor, include_content=True)
+    assert raised.value.code is ErrorCode.CURSOR_INVALID
 
 
 @pytest.mark.asyncio
@@ -309,7 +342,10 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
     )
     observed: list[TaskGraphRunEvent] = []
 
-    result = await run.replay(observed.append)
+    async def observer(event: TaskGraphRunEvent) -> None:
+        observed.append(event)
+
+    result = await run.replay(observer)
 
     assert result.status is TaskStatus.WAITING
     assert [
