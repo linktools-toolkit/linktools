@@ -124,7 +124,7 @@ if TYPE_CHECKING:
 from ._capabilities import compose_platform_capabilities
 from ._compaction import RuntimeCompactionPolicy
 from ._harness import HarnessStepStoreAdapter
-from ._input import CanonicalUserInput, execution_input_attachment_views
+from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import materialize_mcp_capabilities
 from ._memory import MemoryStore
@@ -197,6 +197,7 @@ class _RunScope:
     step_store: StepStore
     step_run_id: str
     segment_sequence: int
+    initial_attachments: tuple[Mapping[str, JsonValue], ...] = ()
     history_id: str | None = None
     memory_store: MemoryStore | None = None
     plan_store_resolver: (
@@ -871,11 +872,7 @@ async def _materialize_agent(
         scope.step_store,
         execution_id=scope.context.execution_id,
         step_run_id=scope.step_run_id,
-        initial_attachments=(
-            ()
-            if scope.user_prompt is None
-            else execution_input_attachment_views(scope.user_prompt)
-        ),
+        initial_attachments=scope.initial_attachments,
     )
     if tool_metrics is not None:
         capabilities.append(RuntimeToolMetricsCapability(tool_metrics))
