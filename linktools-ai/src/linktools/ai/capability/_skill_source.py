@@ -21,11 +21,23 @@ from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
 class SkillSourceRef:
     source_id: str
     root: str
+    snapshot: "ObjectRef | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not self.source_id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        object.__setattr__(self, "root", _normalize_relative_path(self.root, field_name="skill root"))
+        if self.snapshot is not None and not isinstance(self.snapshot, ObjectRef):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        object.__setattr__(
+            self,
+            "root",
+            _normalize_relative_path(self.root, field_name="skill root"),
+        )
+
+    def with_snapshot(self, snapshot: ObjectRef) -> "SkillSourceRef":
+        if not isinstance(snapshot, ObjectRef):
+            raise TypeError("snapshot must be ObjectRef")
+        return SkillSourceRef(self.source_id, self.root, snapshot)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +326,7 @@ async def _snapshot_skill_source(
         "source_id": source.id,
         "root": root,
         "revision": expected_revision.value,
+        "sandbox_materialize": view.location.kind == "local",
         "resources": entries,
     }
     payload = canonical_json_bytes(manifest)
@@ -404,6 +417,11 @@ class FrozenSkillResourceSource:
             resources,
         )
 
+    async def sandbox_materialize(self, root: str) -> bool:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        manifest = await self._manifest(logical_root)
+        return bool(manifest.get("sandbox_materialize", False))
+
     async def read(self, root: str, path: str) -> bytes:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         relative = _normalize_resource_path(path)
@@ -460,6 +478,7 @@ class FrozenSkillResourceSource:
             or manifest.get("source_id") != self._id
             or manifest.get("root") != root
             or not isinstance(manifest.get("revision"), str)
+            or not isinstance(manifest.get("sandbox_materialize", False), bool)
             or not isinstance(manifest.get("resources"), list)
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -523,6 +542,21 @@ class SkillSourceRegistry:
                 ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
                 safe_details={"source_id": source_id},
             ) from error
+
+    def with_overrides(
+        self,
+        sources: Sequence[SkillResourceSource],
+    ) -> "SkillSourceRegistry":
+        values = dict(self._sources)
+        seen: set[str] = set()
+        for source in sources:
+            if not isinstance(source, SkillResourceSource):
+                raise TypeError("sources must implement SkillResourceSource")
+            if source.id in seen:
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            seen.add(source.id)
+            values[source.id] = source
+        return SkillSourceRegistry(tuple(values.values()))
 
 
 def normalize_skill_resource_path(path: str) -> str:
