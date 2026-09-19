@@ -27,6 +27,10 @@ from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.workspace import trusted_workspace_principal
 
 
+async def _no_dependency_body(_dependency: object) -> object:
+    raise AssertionError("test does not declare task dependencies")
+
+
 def test_subagent_delegate_contract_requires_mapping_result() -> None:
     return_type = get_type_hints(SubagentDelegate.__call__)["return"]
     args = get_args(return_type)
@@ -187,6 +191,7 @@ async def test_task_runner_cancellation_does_not_business_cancel_running_executi
             principal=trusted_workspace_principal("tenant"),
             correlation={},
             dependencies={},
+            dependency_reader=_no_dependency_body,
             control=control,
         )
     )
@@ -248,6 +253,7 @@ async def test_task_runner_binds_execution_that_finishes_launch_after_caller_can
             principal=trusted_workspace_principal("tenant"),
             correlation={},
             dependencies={},
+            dependency_reader=_no_dependency_body,
             control=control,
         )
     )
@@ -302,6 +308,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
             principal=trusted_workspace_principal("tenant"),
             correlation={},
             dependencies={},
+            dependency_reader=_no_dependency_body,
             control=Control(),
         )
     )
