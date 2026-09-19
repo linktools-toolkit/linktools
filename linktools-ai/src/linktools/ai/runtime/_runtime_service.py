@@ -123,6 +123,7 @@ class _TaskNodeRuntimePort(Protocol):
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> "TaskNode": ...
 
     async def get_result_record(
@@ -432,24 +433,33 @@ class Runtime(Generic[AppT]):
             item.id for item in derived.selected_skills
         }.issubset({item.id for item in root.selected_skills}):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        definition = self._catalog.register_definition(derived)
-        return Agent(self, definition.spec.id, definition.digest)
+        return Agent(self, derived.spec.id, derived.digest, derived)
 
     def _definition(self, agent_digest: str) -> AgentDefinition:
         self._ensure_open()
         return self._catalog.definition(agent_digest)
+
+    def _agent_definition(
+        self,
+        agent_digest: str,
+        definition: "AgentDefinition | None" = None,
+    ) -> AgentDefinition:
+        self._ensure_open()
+        if definition is None:
+            return self._catalog.definition(agent_digest)
+        if definition.digest != agent_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return definition
 
     def _bind_agent(
         self,
         agent_digest: str,
         *,
         output: "type[BaseModel] | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> AgentBinding:
-        self._ensure_open()
-        definition = self._catalog.definition(agent_digest)
-        return self._catalog.register_binding(
-            self._compiler.bind(definition, output=output)
-        )
+        resolved = self._agent_definition(agent_digest, definition)
+        return self._compiler.bind(resolved, output=output)
 
     def _restore_binding(self, snapshot: AgentBindingSnapshot) -> AgentBinding:
         self._ensure_open()
@@ -484,6 +494,7 @@ class Runtime(Generic[AppT]):
         planning: "bool | None",
         thinking: "ThinkingValue | None",
         correlation: "Mapping[str, object] | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
@@ -492,16 +503,14 @@ class Runtime(Generic[AppT]):
             correlation,
         )
         resolved_files = _request_files(files)
-        definition = self._catalog.definition(agent_digest)
+        definition = self._agent_definition(agent_digest, definition)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             definition,
             mode=mode,
             planning=planning,
             thinking=thinking,
         )
-        binding = self._catalog.register_binding(
-            self._compiler.bind(definition, output=output)
-        )
+        binding = self._compiler.bind(definition, output=output)
         request = ExecutionRequest(
             user_prompt=user_prompt,
             principal=resolved_principal,
@@ -514,7 +523,11 @@ class Runtime(Generic[AppT]):
             files=resolved_files,
         )
         if session_id is None:
-            handle = await self.execution.start(binding.digest, request)
+            handle = await self.execution.start(
+                binding.digest,
+                request,
+                binding_snapshot=binding.snapshot,
+            )
         else:
             if not isinstance(session_id, str) or not session_id.strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -535,6 +548,7 @@ class Runtime(Generic[AppT]):
                 binding.digest,
                 session_id,
                 resume_request,
+                binding_snapshot=binding.snapshot,
             )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s "
@@ -666,6 +680,7 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: "str | None",
         cwd: "str | None",
+        definition: "AgentDefinition | None" = None,
     ) -> "Session[AppT]":
         resolved_principal = self._resolve_principal(principal)
         await self.session.fork(
@@ -678,7 +693,14 @@ class Runtime(Generic[AppT]):
                 cwd,
             ),
         )
-        return Session(self, agent_id, agent_digest, new_session_id, resolved_principal)
+        return Session(
+            self,
+            agent_id,
+            agent_digest,
+            new_session_id,
+            resolved_principal,
+            definition,
+        )
 
     async def _update_session(
         self,
@@ -730,9 +752,18 @@ class Runtime(Generic[AppT]):
         request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None",
+        definition: "AgentDefinition | None" = None,
     ) -> EvaluationHandle:
-        binding = self._bind_agent(agent_digest, output=output)
-        return await self.evaluation.start(binding.digest, request)
+        binding = self._bind_agent(
+            agent_digest,
+            output=output,
+            definition=definition,
+        )
+        return await self.evaluation.start(
+            binding.digest,
+            request,
+            binding_snapshot=binding.snapshot,
+        )
 
     async def _replay_evaluation_for_agent(
         self,
@@ -741,12 +772,18 @@ class Runtime(Generic[AppT]):
         request: ReplayEvaluationRequest,
         *,
         output: "type[BaseModel] | None",
+        definition: "AgentDefinition | None" = None,
     ) -> "Execution[AppT]":
-        binding = self._bind_agent(agent_digest, output=output)
+        binding = self._bind_agent(
+            agent_digest,
+            output=output,
+            definition=definition,
+        )
         handle = await self.evaluation.replay(
             binding.digest,
             snapshot_id,
             request,
+            binding_snapshot=binding.snapshot,
         )
         return Execution(
             self,
@@ -775,6 +812,7 @@ class Runtime(Generic[AppT]):
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> TaskNode:
         return self._require_task_node_runtime().build_agent_task(
             agent_digest,
@@ -793,6 +831,7 @@ class Runtime(Generic[AppT]):
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
+            definition=definition,
         )
 
     async def start_graph(
