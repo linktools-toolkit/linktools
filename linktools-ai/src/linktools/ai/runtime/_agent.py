@@ -25,6 +25,7 @@ from .recovery import (
 from .service_api import (
     CancelExecutionResult,
     EvaluationHandle,
+    ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionResult,
     ExecutionTraceItem,
@@ -215,6 +216,24 @@ class Execution(Generic[AppT]):
             principal=self._principal,
             idempotency_key=idempotency_key,
             correlation=correlation,
+        )
+
+    async def list_events(
+        self,
+        *,
+        cursor: "str | None" = None,
+        include_content: bool = False,
+        limit: int = 100,
+    ) -> "Page[ExecutionEvent]":
+        history = self._runtime.history
+        if history is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await history.list_events(
+            self.execution_id,
+            principal=self._principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
         )
 
     async def history(
