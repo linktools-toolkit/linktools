@@ -1362,7 +1362,10 @@ class LocalTaskGraphLauncher:
                 state.execution_id is None
                 or record is None
                 or record.result_digest != state.result_digest
-                or record.execution_id != state.execution_id
+                or (
+                    record.execution_id is not None
+                    and record.execution_id != state.execution_id
+                )
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result[dependency_id] = TaskDependencyResult(

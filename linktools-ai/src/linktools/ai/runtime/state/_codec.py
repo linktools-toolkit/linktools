@@ -602,13 +602,28 @@ def _encode_v1_task_result(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskResultRecord):
         raise TypeError("V1 task_result encoder received the wrong type")
-    return {
+    encoded: dict[str, JsonValue] = {
         "graph_id": _encode_domain(value.graph_id, codec, persisted=persisted),
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
-        "result_digest": _encode_domain(value.result_digest, codec, persisted=persisted),
-        "execution_id": _encode_domain(value.execution_id, codec, persisted=persisted),
-        "payload": _encode_domain(value.payload, codec, persisted=persisted),
+        "result_digest": _encode_domain(
+            value.result_digest,
+            codec,
+            persisted=persisted,
+        ),
     }
+    if value.execution_id is not None:
+        encoded["execution_id"] = _encode_domain(
+            value.execution_id,
+            codec,
+            persisted=persisted,
+        )
+    if value.payload is not None:
+        encoded["payload"] = _encode_domain(
+            value.payload,
+            codec,
+            persisted=persisted,
+        )
+    return encoded
 
 
 def _decode_v1_task_result(
@@ -616,27 +631,32 @@ def _decode_v1_task_result(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskResultRecord:
-    _require_contract_fields(
-        raw_fields,
-        frozenset(
-            {"graph_id", "node_id", "result_digest", "execution_id", "payload"}
-        ),
-        persisted=persisted,
-    )
-    return TaskResultRecord(
-        cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
-        cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
-        cast(
-            str,
-            _decode_domain(raw_fields["result_digest"], str, codec, persisted=persisted),
-        ),
-        cast(
+    keys = frozenset(raw_fields)
+    base = frozenset({"graph_id", "node_id", "result_digest"})
+    supported = {
+        base | {"payload"},
+        base | {"execution_id"},
+        base | {"execution_id", "payload"},
+    }
+    if keys not in supported:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    execution_id = (
+        None
+        if "execution_id" not in raw_fields
+        else cast(
             str,
             _decode_domain(
-                raw_fields["execution_id"], str, codec, persisted=persisted
+                raw_fields["execution_id"],
+                str,
+                codec,
+                persisted=persisted,
             ),
-        ),
-        cast(
+        )
+    )
+    payload = (
+        None
+        if "payload" not in raw_fields
+        else cast(
             StoredPayload,
             _decode_domain(
                 raw_fields["payload"],
@@ -644,7 +664,38 @@ def _decode_v1_task_result(
                 codec,
                 persisted=persisted,
             ),
+        )
+    )
+    return TaskResultRecord(
+        cast(
+            str,
+            _decode_domain(
+                raw_fields["graph_id"],
+                str,
+                codec,
+                persisted=persisted,
+            ),
         ),
+        cast(
+            str,
+            _decode_domain(
+                raw_fields["node_id"],
+                str,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+        cast(
+            str,
+            _decode_domain(
+                raw_fields["result_digest"],
+                str,
+                codec,
+                persisted=persisted,
+            ),
+        ),
+        execution_id,
+        payload,
     )
 
 

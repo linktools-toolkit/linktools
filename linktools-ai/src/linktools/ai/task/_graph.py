@@ -589,27 +589,47 @@ class TaskNodeResult:
     error_digest: "str | None"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class TaskResultRecord:
     graph_id: str
     node_id: str
     result_digest: str
-    execution_id: str
-    payload: StoredPayload
+    execution_id: "str | None"
+    payload: "StoredPayload | None"
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.graph_id, str) or not self.graph_id.strip():
+    def __init__(
+        self,
+        graph_id: str,
+        node_id: str,
+        result_digest: str,
+        execution_id: "str | StoredPayload | None" = None,
+        payload: "StoredPayload | None" = None,
+    ) -> None:
+        if isinstance(execution_id, StoredPayload) and payload is None:
+            payload = execution_id
+            execution_id = None
+        object.__setattr__(self, "graph_id", graph_id)
+        object.__setattr__(self, "node_id", node_id)
+        object.__setattr__(self, "result_digest", result_digest)
+        object.__setattr__(self, "execution_id", execution_id)
+        object.__setattr__(self, "payload", payload)
+        if not isinstance(graph_id, str) or not graph_id.strip():
             raise ValueError("task result graph id is required")
-        if not isinstance(self.node_id, str) or not self.node_id.strip():
+        if not isinstance(node_id, str) or not node_id.strip():
             raise ValueError("task result node id is required")
-        if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", result_digest) is None:
             raise ValueError("task result digest is invalid")
-        if not isinstance(self.execution_id, str) or not self.execution_id.strip():
-            raise ValueError("task result execution id is required")
-        if not isinstance(self.payload, StoredPayload):
-            raise TypeError("task result payload is invalid")
-        if self.payload.digest != self.result_digest:
-            raise ValueError("task result payload digest does not match result")
+        if execution_id is not None and (
+            not isinstance(execution_id, str) or not execution_id.strip()
+        ):
+            raise ValueError("task result execution id is invalid")
+        if payload is not None:
+            if not isinstance(payload, StoredPayload):
+                raise TypeError("task result payload is invalid")
+            if payload.digest != result_digest:
+                raise ValueError("task result payload digest does not match result")
+        if execution_id is None and payload is None:
+            raise ValueError("task result must retain an execution id or payload")
 
 
 @dataclass(frozen=True, slots=True)

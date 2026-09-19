@@ -133,7 +133,12 @@ class _TaskNodeRuntimePort(Protocol):
         tenant_id: str,
     ) -> "TaskResultRecord | None": ...
 
-    async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...
+    async def read_result_record(
+        self,
+        record: "TaskResultRecord",
+        *,
+        principal: "Principal | None" = None,
+    ) -> JsonValue: ...
 
 
 class _RuntimeMetricControl(Protocol):
@@ -909,7 +914,10 @@ class Runtime(Generic[AppT]):
         )
         if record is None or record.result_digest != state.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await task_runtime.read_result_record(record)
+        return await task_runtime.read_result_record(
+            record,
+            principal=resolved_principal,
+        )
 
     def _task_execution(
         self,

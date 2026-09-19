@@ -1201,8 +1201,27 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         )
         return records.get(node_id)
 
-    async def read_result_record(self, record: TaskResultRecord) -> JsonValue:
-        output = await self._read_payload(record.payload)
+    async def read_result_record(
+        self,
+        record: TaskResultRecord,
+        *,
+        principal: "Principal | None" = None,
+    ) -> JsonValue:
+        if record.payload is not None:
+            output = await self._read_payload(record.payload)
+        else:
+            if record.execution_id is None or principal is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result = await self._execution.result(
+                record.execution_id,
+                principal=principal,
+            )
+            if (
+                result.status is not ExecutionStatus.SUCCEEDED
+                or result.output is None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            output = result.output
         if canonical_sha256(output) != record.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return output
@@ -1511,8 +1530,20 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         for dependency_id in sorted(node.dependencies):
             dependency = dependency_results[dependency_id]
             if dependency.result_payload is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            output = await self._read_payload(dependency.result_payload)
+                result = await self._execution.result(
+                    dependency.execution_id,
+                    principal=principal,
+                )
+                if (
+                    result.status is not ExecutionStatus.SUCCEEDED
+                    or result.output is None
+                    or canonical_sha256(result.output)
+                    != dependency.result_digest
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                output = result.output
+            else:
+                output = await self._read_payload(dependency.result_payload)
             values[dependency_id] = TaskDependency(
                 dependency_id,
                 output,
@@ -1553,23 +1584,39 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                         or state.status is not TaskStatus.SUCCEEDED
                         or state.result_digest != reference.result_digest
                         or state.execution_id is None
-                        or record.execution_id != state.execution_id
+                        or (
+                            record.execution_id is not None
+                            and record.execution_id != state.execution_id
+                        )
                     ):
                         raise AIError(ErrorCode.TASK_NOT_READY)
+                    execution_id = state.execution_id
                     execution = await self._execution.inspect(
-                        record.execution_id,
+                        execution_id,
                         principal=principal,
                     )
                     if execution.status is not ExecutionStatus.SUCCEEDED:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    output = await self._read_payload(record.payload)
+                    if record.payload is None:
+                        result = await self._execution.result(
+                            execution_id,
+                            principal=principal,
+                        )
+                        if (
+                            result.status is not ExecutionStatus.SUCCEEDED
+                            or result.output is None
+                        ):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        output = result.output
+                    else:
+                        output = await self._read_payload(record.payload)
                     if canonical_sha256(output) != reference.result_digest:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     values[name] = TaskDependency(
                         reference.node_id,
                         output,
                         reference.result_digest,
-                        record.execution_id,
+                        execution_id,
                     )
         return values
 
