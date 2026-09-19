@@ -171,6 +171,29 @@ def test_user_content_version_rejects_boolean_values() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+@pytest.mark.asyncio
+async def test_external_url_attachment_does_not_claim_size_or_digest() -> None:
+    materializer, _session = _materializer({})
+    content = ImageUrl(
+        url="https://example.com/evidence.png",
+        media_type="image/png",
+    )
+    try:
+        stored = await materializer.store((content,), tenant_id="tenant")
+        assert stored.view is not None
+        attachments = stored.view["attachments"]
+        assert isinstance(attachments, list)
+        assert len(attachments) == 1
+        attachment = attachments[0]
+        assert attachment["source"] == "url"
+        assert attachment["media_type"] == "image/png"
+        assert attachment["size"] is None
+        assert attachment["digest"] is None
+        assert "https://example.com/evidence.png" not in str(attachment)
+    finally:
+        await materializer.close()
+
+
 def test_url_vendor_metadata_must_be_json() -> None:
     content = ImageUrl(
         url="https://example.com/evidence.png",
