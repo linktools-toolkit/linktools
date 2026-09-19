@@ -43,7 +43,7 @@ def input_attachment_views(
             result.append(
                 _accepted_occurrence(
                     descriptor,
-                    source=descriptor["source"],
+                    source=cast(str, descriptor["source"]),
                     position=position,
                 )
             )
@@ -88,47 +88,110 @@ def request_attachment_facts(
 ) -> tuple[dict[str, JsonValue], ...]:
     """Record attachment facts from the exact request handed to the model adapter."""
     user_candidates: list[dict[str, JsonValue]] = []
-    tool_candidates: list[dict[str, JsonValue]] = []
+    tool_facts: list[dict[str, JsonValue]] = []
+    pending_tool: list[dict[str, JsonValue]] = []
     request_position = 0
 
     for message in messages:
         if not isinstance(message, ModelRequest):
             continue
+        pending_tool = []
         for part in message.parts:
-            if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
-                for item in part.content:
-                    descriptor = _content_descriptor(item)
-                    if descriptor is None:
-                        continue
-                    candidate = dict(descriptor)
-                    candidate["request_position"] = request_position
-                    user_candidates.append(candidate)
-                    request_position += 1
-                continue
             if (
                 isinstance(part, BaseToolReturnPart)
                 and part.tool_name == "attach_files"
                 and isinstance(part.tool_call_id, str)
                 and part.tool_call_id
             ):
-                call_position = 0
-                for item in _iter_multimodal(part.content):
+                call_id = part.tool_call_id
+                pending_tool = list(
+                    _attach_file_occurrences(part.content, call_id=call_id)
+                )
+                direct = [
+                    descriptor
+                    for item in _iter_multimodal(part.content)
+                    if (descriptor := _content_descriptor(item)) is not None
+                ]
+                if not pending_tool:
+                    pending_tool = [
+                        _tool_occurrence(
+                            descriptor,
+                            call_id=call_id,
+                            call_position=position,
+                        )
+                        for position, descriptor in enumerate(direct)
+                    ]
+
+                for occurrence in pending_tool:
+                    attachment_id = _require_string(
+                        occurrence.get("attachment_id")
+                    )
+                    if attachment_id not in accepted_attachment_ids:
+                        tool_facts.append(
+                            _request_fact(
+                                occurrence,
+                                fact="accepted",
+                                request_position=_require_non_negative_int(
+                                    occurrence.get("call_position")
+                                ),
+                                call_id=call_id,
+                            )
+                        )
+                        accepted_attachment_ids.add(attachment_id)
+
+                if direct:
+                    remaining = list(pending_tool)
+                    for descriptor in direct:
+                        occurrence = _take_matching_occurrence(
+                            remaining,
+                            descriptor,
+                        )
+                        if occurrence is None:
+                            continue
+                        tool_facts.append(
+                            _request_fact(
+                                occurrence,
+                                fact="included_in_request",
+                                request_position=request_position,
+                                call_id=call_id,
+                            )
+                        )
+                        request_position += 1
+                    pending_tool = remaining
+                continue
+
+            if isinstance(part, UserPromptPart) and not isinstance(part.content, str):
+                remaining = list(pending_tool)
+                for item in part.content:
                     descriptor = _content_descriptor(item)
                     if descriptor is None:
                         continue
-                    candidate = dict(descriptor)
-                    candidate["source"] = "attach_files"
-                    candidate["call_id"] = part.tool_call_id
-                    candidate["call_position"] = call_position
-                    candidate["request_position"] = request_position
-                    tool_candidates.append(candidate)
-                    call_position += 1
+                    occurrence = _take_matching_occurrence(remaining, descriptor)
+                    if occurrence is not None:
+                        call_id = _require_string(occurrence.get("call_id"))
+                        tool_facts.append(
+                            _request_fact(
+                                occurrence,
+                                fact="included_in_request",
+                                request_position=request_position,
+                                call_id=call_id,
+                            )
+                        )
+                    else:
+                        candidate = dict(descriptor)
+                        candidate["request_position"] = request_position
+                        user_candidates.append(candidate)
                     request_position += 1
+                pending_tool = []
+                continue
 
-    facts: list[dict[str, JsonValue]] = []
+            if pending_tool:
+                pending_tool = []
+
+    initial_facts: list[dict[str, JsonValue]] = []
     matched = _match_initial_occurrences(initial, user_candidates)
     for expected, candidate in matched:
-        facts.append(
+        initial_facts.append(
             _request_fact(
                 expected,
                 fact="included_in_request",
@@ -138,50 +201,83 @@ def request_attachment_facts(
                 call_id=None,
             )
         )
+    return tuple((*initial_facts, *tool_facts))
 
-    for candidate in tool_candidates:
-        call_id = candidate.get("call_id")
-        if not isinstance(call_id, str) or not call_id:
+
+def _attach_file_occurrences(
+    value: object,
+    *,
+    call_id: str,
+) -> tuple[dict[str, JsonValue], ...]:
+    if not isinstance(value, Mapping):
+        return ()
+    raw_files = value.get("files")
+    if not isinstance(raw_files, list):
+        return ()
+    result: list[dict[str, JsonValue]] = []
+    for position, raw in enumerate(raw_files):
+        if not isinstance(raw, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        call_position = _require_non_negative_int(candidate.get("call_position"))
-        attachment_id = _attachment_id(
+        media_type = raw.get("media_type")
+        size = raw.get("size")
+        digest = raw.get("sha256")
+        if (
+            not isinstance(media_type, str)
+            or not media_type
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or not _is_digest(digest)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result.append(
+            _tool_occurrence(
+                {
+                    "source": "attach_files",
+                    "media_type": media_type,
+                    "size": size,
+                    "digest": cast(str, digest),
+                    "content_key": cast(str, digest),
+                },
+                call_id=call_id,
+                call_position=position,
+            )
+        )
+    return tuple(result)
+
+
+def _tool_occurrence(
+    descriptor: Mapping[str, JsonValue],
+    *,
+    call_id: str,
+    call_position: int,
+) -> dict[str, JsonValue]:
+    content_key = _require_string(descriptor.get("content_key"))
+    return {
+        "attachment_id": _attachment_id(
             "attach_files",
             call_position,
-            _require_string(candidate.get("content_key")),
+            content_key,
             call_id=call_id,
-        )
-        occurrence = {
-            "attachment_id": attachment_id,
-            "source": "attach_files",
-            "media_type": candidate.get("media_type"),
-            "size": candidate.get("size"),
-            "digest": candidate.get("digest"),
-            "content_key": candidate.get("content_key"),
-        }
-        if attachment_id not in accepted_attachment_ids:
-            facts.append(
-                _request_fact(
-                    occurrence,
-                    fact="accepted",
-                    request_position=_require_non_negative_int(
-                        candidate.get("request_position")
-                    ),
-                    call_id=call_id,
-                )
-            )
-            accepted_attachment_ids.add(attachment_id)
-        facts.append(
-            _request_fact(
-                occurrence,
-                fact="included_in_request",
-                request_position=_require_non_negative_int(
-                    candidate.get("request_position")
-                ),
-                call_id=call_id,
-            )
-        )
+        ),
+        "source": "attach_files",
+        "media_type": descriptor.get("media_type"),
+        "size": descriptor.get("size"),
+        "digest": descriptor.get("digest"),
+        "content_key": content_key,
+        "call_id": call_id,
+        "call_position": call_position,
+    }
 
-    return tuple(facts)
+
+def _take_matching_occurrence(
+    values: list[dict[str, JsonValue]],
+    descriptor: Mapping[str, JsonValue],
+) -> dict[str, JsonValue] | None:
+    for index, value in enumerate(values):
+        if _same_attachment(value, descriptor):
+            return values.pop(index)
+    return None
 
 
 def _accepted_occurrence(
@@ -266,6 +362,8 @@ def _same_attachment(
     if source == "workspace":
         if candidate_source != "binary":
             return False
+    elif source == "attach_files":
+        pass
     elif source != candidate_source:
         return False
     return (
