@@ -727,7 +727,6 @@ class RuntimeState:
                 aliases=aliases,
                 facts=facts,
                 operations=operations,
-                sequences=sequences,
             )
             decoded_domains[domain] = (
                 records,

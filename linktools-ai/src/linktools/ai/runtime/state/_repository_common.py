@@ -96,56 +96,17 @@ class _RepositoryBase:
         parent: bytes | None = None,
         state: str | None = None,
     ) -> StoredRecord:
-        if scope is None:
-            scope = self._default_scope(kind, value)
-        if parent is None:
-            parent = self._default_parent(kind, value)
-        lease_owner, lease_fence, lease_expires_at = _record_lease(value)
-        return StoredRecord(
-            self._key(kind, identity),
-            self._partition(kind),
-            scope,
-            parent,
-            kind,
-            sortable_identity(identity),
-            state,
-            0,
-            lease_owner,
-            lease_fence,
-            lease_expires_at,
-            _domain_data(value),
+        return project_record(
+            namespace=self._namespace,
+            tenant_id=self._tenant_id,
+            domain=self._domain,
+            kind=kind,
+            identity=identity,
+            value=value,
+            scope=scope,
+            parent=parent,
+            state=state,
         )
-
-    def _default_scope(self, kind: str, value: object) -> bytes | None:
-        if isinstance(value, SessionRecord):
-            return self._scope(kind, "owner", value.owner_principal_id)
-        if isinstance(value, ExecutionRecord) and value.session_id is not None:
-            return self._scope(kind, "session", value.session_id)
-        if isinstance(value, IdempotencyRecord):
-            return self._scope(
-                kind,
-                "resource",
-                [value.resource_kind.value, value.resource_id],
-            )
-        if isinstance(
-            value,
-            (EvaluationRecord, ArtifactRecord, ApprovalRecord, ExternalCallRecord),
-        ):
-            return self._scope(kind, "execution", value.execution_id)
-        if isinstance(value, MemoryRecord):
-            return self._scope(kind, "memory_scope", value.memory_scope_digest)
-        if isinstance(value, ToolOperationRecord):
-            return self._scope(kind, "step_run", value.step_run_id)
-        return None
-
-    def _default_parent(self, kind: str, value: object) -> bytes | None:
-        if isinstance(value, TaskNodeView):
-            return self._parent(kind, "graph", value.graph_id)
-        if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
-            return self._parent(kind, "execution", value.parent_execution_id)
-        if isinstance(value, ToolOperationRecord):
-            return self._parent(kind, "execution", value.execution_id)
-        return None
 
     async def _record(self, key: bytes) -> StoredRecord | None:
         return await self._store.read(lambda transaction: transaction.get_record(key))
@@ -607,6 +568,158 @@ class OperationLedgerRepository(_RepositoryBase):
         ).hexdigest()
 
 
+def project_record(
+    *,
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    kind: str,
+    identity: object,
+    value: object,
+    scope: bytes | None = None,
+    parent: bytes | None = None,
+    state: str | None = None,
+    sort_key: str | None = None,
+    storage_version: int = 0,
+) -> StoredRecord:
+    """Project one logical value into its canonical physical Runtime record."""
+    if scope is None:
+        scope = _default_record_scope(
+            namespace,
+            tenant_id,
+            domain,
+            kind,
+            value,
+        )
+    if parent is None:
+        parent = _default_record_parent(
+            namespace,
+            tenant_id,
+            domain,
+            kind,
+            value,
+        )
+    lease_owner, lease_fence, lease_expires_at = _record_lease(value)
+    return StoredRecord(
+        record_key_digest(namespace, tenant_id, domain.value, kind, identity),
+        partition_digest(namespace, tenant_id, domain.value, kind),
+        scope,
+        parent,
+        kind,
+        sortable_identity(identity) if sort_key is None else sort_key,
+        state,
+        storage_version,
+        lease_owner,
+        lease_fence,
+        lease_expires_at,
+        _domain_data(value),
+    )
+
+
+def _default_record_scope(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    kind: str,
+    value: object,
+) -> bytes | None:
+    if isinstance(value, SessionRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "owner",
+            value.owner_principal_id,
+        )
+    if isinstance(value, ExecutionRecord) and value.session_id is not None:
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "session",
+            value.session_id,
+        )
+    if isinstance(value, IdempotencyRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "resource",
+            [value.resource_kind.value, value.resource_id],
+        )
+    if isinstance(
+        value,
+        (EvaluationRecord, ArtifactRecord, ApprovalRecord, ExternalCallRecord),
+    ):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "execution",
+            value.execution_id,
+        )
+    if isinstance(value, MemoryRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "memory_scope",
+            value.memory_scope_digest,
+        )
+    if isinstance(value, ToolOperationRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "step_run",
+            value.step_run_id,
+        )
+    return None
+
+
+def _default_record_parent(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    kind: str,
+    value: object,
+) -> bytes | None:
+    if isinstance(value, TaskNodeView):
+        return parent_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "graph",
+            value.graph_id,
+        )
+    if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
+        return parent_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "execution",
+            value.parent_execution_id,
+        )
+    if isinstance(value, ToolOperationRecord):
+        return parent_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "execution",
+            value.execution_id,
+        )
+    return None
+
+
 def _canonical_record_identity(kind: str, value: object) -> object:
     if isinstance(value, IdempotencyRecord):
         return [value.scope, value.idempotency_key_digest]
@@ -960,6 +1073,7 @@ insert_operation = _insert_operation
 projected_record = _projected_record
 record_cursor = _record_cursor
 record_state = _record_state
+restore_lease_fields = _restore_lease_fields
 replace_checked = _replace_checked
 require_repository_tenant = _require_repository_tenant
 require_tenant = _require_tenant
@@ -980,6 +1094,8 @@ __all__ = [
     "projected_record",
     "record_cursor",
     "record_state",
+    "restore_lease_fields",
+    "project_record",
     "replace_checked",
     "require_repository_tenant",
     "require_tenant",
