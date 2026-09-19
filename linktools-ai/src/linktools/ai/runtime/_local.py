@@ -377,15 +377,11 @@ class LocalExecutionBackend:
         return self._tenant_id
 
     def _execution_binding(self, execution: ExecutionRecord) -> AgentBinding:
-        try:
-            binding = self._catalog.binding(execution.binding_digest)
-        except AIError as error:
-            if (
-                error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-                or self._restore_binding is None
-            ):
-                raise
-            binding = self._restore_binding(execution.binding)
+        binding = (
+            self._catalog.binding(execution.binding_digest)
+            if self._restore_binding is None
+            else self._restore_binding(execution.binding)
+        )
         if (
             binding.digest != execution.binding_digest
             or binding.snapshot != execution.binding
