@@ -1481,7 +1481,7 @@ class DefaultExecutionService:
     ) -> "ExecutionHandle | None":
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        binding = self._binding(binding_digest, binding_snapshot)
+        binding = self._binding(binding_digest)
         context = await self._canonicalize_request(request)
         request = context.request
         scope = "execution.run"
@@ -1763,7 +1763,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         context = await self._canonicalize_request(request)
         request = context.request
-        binding = self._binding(binding_digest)
+        binding = self._binding(binding_digest, binding_snapshot)
         parent: ExecutionRecord | None = None
         if lineage_kind is ExecutionLineageKind.SUBAGENT:
             if parent_execution_id is None or not parent_invocation_id:
