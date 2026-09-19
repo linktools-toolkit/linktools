@@ -74,23 +74,31 @@ def test_native_user_content_is_canonical_and_durable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_binary_content_is_stored_with_workspace_path_and_deduplicated() -> None:
+async def test_binary_content_preserves_duplicate_workspace_occurrences() -> None:
     materializer, session = _materializer({"evidence.txt": b"error"})
     try:
         canonical_files = await materializer.canonicalize_files(
             ("evidence.txt", "evidence.txt")
         )
-        assert canonical_files == ("evidence.txt",)
+        assert canonical_files == ("evidence.txt", "evidence.txt")
         canonical = await materializer.materialize(
             ("Inspect this file",),
             canonical_files,
         )
         stored = await materializer.store(canonical, tenant_id="tenant")
-        assert len(session.reads) == 1
+        assert session.reads == ["evidence.txt", "evidence.txt"]
         assert canonical[0] == "Inspect this file"
         assert canonical[1] == 'Workspace file path: "evidence.txt"'
         assert isinstance(canonical[2], BinaryContent)
+        assert canonical[3] == 'Workspace file path: "evidence.txt"'
+        assert isinstance(canonical[4], BinaryContent)
         assert await materializer.restore(stored) == canonical
+        assert stored.view is not None
+        attachments = stored.view["attachments"]
+        assert isinstance(attachments, list)
+        assert len(attachments) == 2
+        assert attachments[0]["digest"] == attachments[1]["digest"]
+        assert attachments[0]["attachment_id"] != attachments[1]["attachment_id"]
     finally:
         await materializer.close()
 
