@@ -184,12 +184,14 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]":
         return await self._runtime.execution.history(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -197,12 +199,14 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]":
         return await self._runtime.execution.trace(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -210,12 +214,14 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[TranscriptItem]":
         return await self._runtime.execution.transcript(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -223,12 +229,14 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]":
         return await self._runtime.execution.model_interactions(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
