@@ -82,6 +82,53 @@ def _is_sha256(value: object) -> bool:
     )
 
 
+def _normalize_model_attachment_fact(
+    value: Mapping[str, JsonValue],
+) -> Mapping[str, JsonValue]:
+    expected = {
+        "fact",
+        "attachment_id",
+        "source",
+        "media_type",
+        "size",
+        "digest",
+        "content_key",
+        "position",
+        "call_id",
+    }
+    if set(value) != expected:
+        raise ValueError("model attachment fact fields are invalid")
+    fact = value.get("fact")
+    attachment_id = value.get("attachment_id")
+    source = value.get("source")
+    media_type = value.get("media_type")
+    size = value.get("size")
+    digest = value.get("digest")
+    content_key = value.get("content_key")
+    position = value.get("position")
+    call_id = value.get("call_id")
+    if (
+        fact not in {"accepted", "included_in_request"}
+        or not _is_sha256(attachment_id)
+        or not isinstance(source, str)
+        or not source
+        or media_type is not None
+        and (not isinstance(media_type, str) or not media_type)
+        or size is not None
+        and (isinstance(size, bool) or not isinstance(size, int) or size < 0)
+        or digest is not None
+        and not _is_sha256(digest)
+        or not _is_sha256(content_key)
+        or isinstance(position, bool)
+        or not isinstance(position, int)
+        or position < 0
+        or call_id is not None
+        and (not isinstance(call_id, str) or not call_id)
+    ):
+        raise ValueError("model attachment fact is invalid")
+    return dict(value)
+
+
 def _validate_tool_arguments_payload(
     arguments_digest: str,
     payload: StoredPayload | None,
@@ -448,6 +495,7 @@ class ModelInteractionRecord:
     error_code: str | None
     duration_ns: int
     usage: UsageMetrics | None
+    attachments: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -468,6 +516,11 @@ class ModelInteractionRecord:
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
         object.__setattr__(self, "model", dict(self.model))
+        object.__setattr__(
+            self,
+            "attachments",
+            tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
+        )
 
 
 @dataclass(frozen=True, slots=True)
