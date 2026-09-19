@@ -1243,6 +1243,8 @@ class ExecutionService(Protocol):
         self,
         binding_digest: str,
         request: ExecutionRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> "ExecutionHandle | None": ...
     async def inspect(
         self, execution_id: str, *, principal: Principal
