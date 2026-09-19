@@ -718,7 +718,7 @@ class DefaultExecutionService:
                 "principal": principal_identity_payload(principal),
                 "binding_digest": binding.binding_digest,
                 "input_digest": stored_input.digest,
-                "correlation": normalized_correlation,
+                "correlation": dict(normalized_correlation),
             }
         )
         now = datetime.now(timezone.utc)
