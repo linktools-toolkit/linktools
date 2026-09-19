@@ -92,6 +92,13 @@ class ExecutionInfo:
     session_id: str | None
     created_at: datetime
     updated_at: datetime
+    started_at: datetime | None
+    terminal_at: datetime | None
+    binding_digest: str
+    input_digest: str
+    output_fingerprint: str
+    output_digest: str | None
+    usage: UsageSummary | None
     error_code: str | None
     safe_error_details: Mapping[str, JsonValue] = field(default_factory=dict)
     error_diagnostics: ErrorDiagnostics | None = None
@@ -162,7 +169,12 @@ def _project_session_view(record: SessionRecord) -> SessionView:
     )
 
 
-def _project_execution_info(record: ExecutionRecord) -> ExecutionInfo:
+def _project_execution_info(
+    record: ExecutionRecord,
+    *,
+    usage: UsageSummary | None = None,
+) -> ExecutionInfo:
+    result = record.result
     return ExecutionInfo(
         execution_id=record.execution_id,
         binding_kind=record.binding_kind,
@@ -176,6 +188,17 @@ def _project_execution_info(record: ExecutionRecord) -> ExecutionInfo:
         session_id=record.session_id,
         created_at=record.created_at,
         updated_at=record.updated_at,
+        started_at=record.started_at,
+        terminal_at=None if result is None else result.created_at,
+        binding_digest=record.binding_digest,
+        input_digest=record.stored_user_input.digest,
+        output_fingerprint=_output_fingerprint(record),
+        output_digest=(
+            None
+            if result is None or result.output is None
+            else result.output.digest
+        ),
+        usage=usage,
         error_code=record.error_code,
         safe_error_details=record.safe_error_details,
         error_diagnostics=None,
@@ -223,8 +246,13 @@ class RuntimeHistory:
     async def inspect_execution(
         self, execution_id: str, *, principal: Principal
     ) -> ExecutionInfo:
+        record = await self._authorized_record(execution_id, principal)
         return _project_execution_info(
-            await self._authorized_record(execution_id, principal)
+            record,
+            usage=await self._service.usage(
+                execution_id,
+                principal=principal,
+            ),
         )
 
     async def result(
