@@ -127,7 +127,7 @@ async def test_exact_submit_replay_repairs_running_and_terminal_projections() ->
         await state.task.tasks.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-root",
             result_digest="0" * 64,
         )
         terminal = await state.task.admissions.admit(admission, request.graph)
