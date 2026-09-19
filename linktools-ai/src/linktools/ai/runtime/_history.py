@@ -8,7 +8,7 @@ import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 from linktools.core import environ
 from pydantic_ai.messages import ModelRequest, ModelResponse
@@ -41,6 +41,7 @@ from ._journal import (
 )
 from ._model_interaction import project_public_messages
 from .service_api import (
+    AttachmentFact,
     ExecutionHistoryItem,
     ExecutionTraceItem,
     ModelInteractionItem,
@@ -66,6 +67,7 @@ _EXECUTION_HISTORY_PROJECTION_VERSION = 1
 _EXECUTION_TRACE_PROJECTION_VERSION = 1
 _EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1
 _MODEL_INTERACTION_PROJECTION_VERSION = 1
+_ATTACHMENT_FACT_PROJECTION_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +435,117 @@ class StepExecutionHistoryReader:
             execution_id,
             len(selected),
         )
+        return Page(selected, next_cursor)
+
+    async def attachment_facts(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> Page[AttachmentFact]:
+        limit = validate_page_limit(limit)
+        record = await self._executions.get(execution_id, tenant_id=tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+
+        cursor_state = _decode_attachment_fact_cursor(
+            cursor,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+            signer=self._cursor_signer,
+        )
+        offset = 0 if cursor_state is None else cursor_state[0]
+        fixed_cutoffs = None if cursor_state is None else dict(cursor_state[1])
+
+        facts: list[AttachmentFact] = []
+        accepted_ids: set[str] = set()
+        view = record.stored_user_input.view
+        if view is not None:
+            raw_attachments = view.get("attachments", [])
+            if not isinstance(raw_attachments, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for raw in raw_attachments:
+                if not isinstance(raw, Mapping):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                fact = _project_attachment_fact(record.execution_id, raw)
+                if fact.fact != "accepted":
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                facts.append(fact)
+                accepted_ids.add(fact.attachment_id)
+
+        cutoffs: list[tuple[int, int]] = []
+        if record.binding_kind != "task":
+            current_sequences = await self._segment_sequences(record, tenant_id)
+            if fixed_cutoffs is None:
+                sequences = current_sequences
+            else:
+                if any(
+                    sequence not in current_sequences
+                    for sequence in fixed_cutoffs
+                ):
+                    raise AIError(ErrorCode.CURSOR_INVALID)
+                sequences = tuple(sorted(fixed_cutoffs))
+
+            for segment_sequence in sequences:
+                run_id = step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=record.execution_id,
+                    segment_sequence=segment_sequence,
+                )
+                values = await self._store.list_model_interactions(run_id=run_id)
+                interactions: list[ModelInteractionRecord] = []
+                for value in values:
+                    if (
+                        not isinstance(value, ModelInteractionRecord)
+                        or value.run_id != run_id
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    interactions.append(value)
+                current_high_water = max(
+                    (value.request_sequence for value in interactions),
+                    default=0,
+                )
+                high_water = (
+                    current_high_water
+                    if fixed_cutoffs is None
+                    else fixed_cutoffs[segment_sequence]
+                )
+                if high_water > current_high_water:
+                    raise AIError(ErrorCode.CURSOR_INVALID)
+                cutoffs.append((segment_sequence, high_water))
+                for interaction in interactions:
+                    if interaction.request_sequence > high_water:
+                        continue
+                    for raw in interaction.attachments:
+                        fact = _project_attachment_fact(
+                            record.execution_id,
+                            raw,
+                            segment_sequence=segment_sequence,
+                            request_sequence=interaction.request_sequence,
+                            step_index=interaction.step_index,
+                        )
+                        if fact.fact == "accepted":
+                            if fact.attachment_id in accepted_ids:
+                                continue
+                            accepted_ids.add(fact.attachment_id)
+                        facts.append(fact)
+
+        if offset > len(facts):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        page = facts[offset : offset + limit + 1]
+        selected = tuple(page[:limit])
+        next_cursor = None
+        if len(page) > limit:
+            next_cursor = _attachment_fact_cursor(
+                tenant_id,
+                execution_id,
+                offset + limit,
+                tuple(cutoffs),
+                self._cursor_signer,
+            )
         return Page(selected, next_cursor)
 
     async def usage(
@@ -1198,6 +1311,117 @@ def _execution_filter_digest(execution_id: str, projection_version: int) -> str:
             "projection_version": projection_version,
         }
     )
+
+
+def _attachment_fact_filter_digest(execution_id: str) -> str:
+    return _execution_filter_digest(execution_id, _ATTACHMENT_FACT_PROJECTION_VERSION)
+
+
+def _decode_attachment_fact_cursor(
+    cursor: str | None,
+    *,
+    tenant_id: str,
+    execution_id: str,
+    signer: CursorSigner,
+) -> tuple[int, tuple[tuple[int, int], ...]] | None:
+    if cursor is None:
+        return None
+    payload = decode_runtime_cursor(
+        cursor,
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="attachment_facts",
+        filter_digest=_attachment_fact_filter_digest(execution_id),
+    )
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if (
+        payload.revision != 0
+        or not isinstance(value, dict)
+        or set(value) != {"offset", "cutoffs"}
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    offset = value.get("offset")
+    raw_cutoffs = value.get("cutoffs")
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or offset < 0
+        or not isinstance(raw_cutoffs, list)
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    cutoffs: list[tuple[int, int]] = []
+    previous = 0
+    for raw in raw_cutoffs:
+        if (
+            not isinstance(raw, list)
+            or len(raw) != 2
+            or isinstance(raw[0], bool)
+            or not isinstance(raw[0], int)
+            or raw[0] < 1
+            or raw[0] <= previous
+            or isinstance(raw[1], bool)
+            or not isinstance(raw[1], int)
+            or raw[1] < 0
+        ):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        cutoffs.append((raw[0], raw[1]))
+        previous = raw[0]
+    return offset, tuple(cutoffs)
+
+
+def _attachment_fact_cursor(
+    tenant_id: str,
+    execution_id: str,
+    offset: int,
+    cutoffs: tuple[tuple[int, int], ...],
+    signer: CursorSigner,
+) -> str:
+    return encode_runtime_cursor(
+        signer,
+        tenant_id=tenant_id,
+        resource_kind="attachment_facts",
+        filter_digest=_attachment_fact_filter_digest(execution_id),
+        position=json.dumps(
+            {
+                "offset": offset,
+                "cutoffs": [list(value) for value in cutoffs],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
+def _project_attachment_fact(
+    execution_id: str,
+    value: Mapping[str, JsonValue],
+    *,
+    segment_sequence: int | None = None,
+    request_sequence: int | None = None,
+    step_index: int | None = None,
+) -> AttachmentFact:
+    try:
+        return AttachmentFact(
+            execution_id=execution_id,
+            attachment_id=cast(str, value.get("attachment_id")),
+            fact=cast(str, value.get("fact")),
+            source=cast(str, value.get("source")),
+            media_type=cast("str | None", value.get("media_type")),
+            size=cast("int | None", value.get("size")),
+            digest=cast("str | None", value.get("digest")),
+            position=cast(int, value.get("position")),
+            processing_status="unknown",
+            segment_sequence=segment_sequence,
+            request_sequence=request_sequence,
+            step_index=step_index,
+            call_id=cast("str | None", value.get("call_id")),
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _model_interaction_filter_digest(execution_id: str) -> str:
