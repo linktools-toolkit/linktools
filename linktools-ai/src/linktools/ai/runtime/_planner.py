@@ -496,7 +496,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 if (
                     header.kind is not ResourceKind.TASK_GRAPH
-                    or header.resource_id != source_graph_id
+                    or header.id != source_graph_id
                     or header.tenant_id != resolved_tenant
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
