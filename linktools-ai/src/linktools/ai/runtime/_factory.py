@@ -552,6 +552,7 @@ async def _build_local_components(
             state.steps,
             executor,
             catalog,
+            restore_binding=compiler.restore,
             tenant_id=tenant_id,
             workspace=workspace,
             limits=limits,
