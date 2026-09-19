@@ -334,13 +334,11 @@ class RuntimeHistory:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             projected.append(
-                event
-                if include_content
-                else ExecutionEvent(
+                ExecutionEvent(
                     event.execution_id,
                     event.sequence,
                     event.event_type,
-                    {},
+                    event.payload if include_content else {},
                 )
             )
         if len(projected) != page_limit:
