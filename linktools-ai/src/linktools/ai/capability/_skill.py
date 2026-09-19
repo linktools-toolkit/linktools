@@ -12,6 +12,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
+from ..storage import ObjectRef
 from ..spec import SkillSpec
 from ._context import AgentContext
 from ._skill_source import (
@@ -49,10 +50,18 @@ class SkillDefinition:
         if self.spec.description is not None:
             contract["description"] = self.spec.description
         if self.source_ref is not None:
-            contract["source"] = {
+            source: dict[str, JsonValue] = {
                 "source_id": self.source_ref.source_id,
                 "root": self.source_ref.root,
             }
+            if self.source_ref.snapshot is not None:
+                source["snapshot"] = {
+                    "store_id": self.source_ref.snapshot.store_id,
+                    "key": self.source_ref.snapshot.key,
+                    "digest": self.source_ref.snapshot.digest,
+                    "size": self.source_ref.snapshot.size,
+                }
+            contract["source"] = source
         return contract
 
     @classmethod
@@ -76,10 +85,24 @@ class SkillDefinition:
         elif isinstance(source, Mapping):
             source_id = source.get("source_id")
             root = source.get("root")
+            snapshot = source.get("snapshot")
             if not isinstance(source_id, str) or not isinstance(root, str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            snapshot_ref = None
+            if snapshot is not None:
+                if not isinstance(snapshot, Mapping):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                try:
+                    snapshot_ref = ObjectRef(
+                        str(snapshot["store_id"]),
+                        str(snapshot["key"]),
+                        str(snapshot["digest"]),
+                        int(snapshot["size"]),
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             try:
-                source_ref = SkillSourceRef(source_id, root)
+                source_ref = SkillSourceRef(source_id, root, snapshot_ref)
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:
