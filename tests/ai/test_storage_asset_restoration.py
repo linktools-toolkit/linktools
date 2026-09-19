@@ -611,6 +611,7 @@ async def test_filesystem_asset_v2_rejects_generation_one_manifest(tmp_path: Pat
     root = tmp_path / "asset-v2"
     backend = FilesystemAssetBackend(root)
     await backend.initialize()
+    await backend.put(AssetKey("sample", "one"), b"value")
     await backend.close()
 
     manifest_path = root / "manifest.json"

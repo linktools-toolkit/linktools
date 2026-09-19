@@ -63,14 +63,27 @@ def test_persisted_session_allows_additive_unknown_fields() -> None:
     assert _decode_enveloped_domain(_envelope(additive), SessionRecord) == session
 
 
-def test_persisted_session_rejects_missing_frozen_v2_field() -> None:
-    payload = copy.deepcopy(_encode_persisted_domain(_session()))
+def test_persisted_session_uses_frozen_v2_default_for_missing_optional_field() -> None:
+    session = _session()
+    payload = copy.deepcopy(_encode_persisted_domain(session))
     payload["fields"].pop("history_id")
 
-    with pytest.raises(AIError) as raised:
-        _decode_enveloped_domain(_envelope(payload), SessionRecord)
+    decoded = _decode_enveloped_domain(_envelope(payload), SessionRecord)
 
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert decoded.history_id is None
+    assert decoded == SessionRecord(
+        session_id=session.session_id,
+        owner_principal_id=session.owner_principal_id,
+        agent_id=session.agent_id,
+        status=session.status,
+        revision=session.revision,
+        cwd=session.cwd,
+        metadata=session.metadata,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        closed_at=session.closed_at,
+        active_execution_id=session.active_execution_id,
+    )
 
 
 def test_persisted_session_v2_field_set_is_stable() -> None:
@@ -189,7 +202,7 @@ def test_persisted_custom_dataclass_allows_additive_field() -> None:
     ) == node
 
 
-def test_persisted_model_interaction_rejects_missing_frozen_v2_field() -> None:
+def test_persisted_model_interaction_uses_frozen_v2_default_for_attachments() -> None:
     interaction = ModelInteractionRecord(
         run_id="run",
         step_index=1,
@@ -212,14 +225,28 @@ def test_persisted_model_interaction_rejects_missing_frozen_v2_field() -> None:
     payload = copy.deepcopy(_encode_persisted_domain(interaction))
     payload["fields"].pop("attachments")
 
+    decoded = _decode_enveloped_domain(
+        _envelope(payload, wire_id="model_interaction"),
+        ModelInteractionRecord,
+    )
+
+    assert decoded == interaction
+
+
+
+def test_dynamic_v2_default_remains_required() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    run = RunRecord(run_id="run", started_at=now)
+    payload = copy.deepcopy(_encode_persisted_domain(run))
+    payload["fields"].pop("started_at")
+
     with pytest.raises(AIError) as raised:
         _decode_enveloped_domain(
-            _envelope(payload, wire_id="model_interaction"),
-            ModelInteractionRecord,
+            _envelope(payload, wire_id="run_record"),
+            RunRecord,
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
 
 def test_step_persistence_reads_current_payload() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)

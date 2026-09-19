@@ -332,6 +332,136 @@ _V2_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     }
 )
 
+_V2_GENERIC_DATACLASS_DEFAULTS: Mapping[
+    str, Mapping[str, object]
+] = MappingProxyType(
+    {
+        "principal": MappingProxyType({"kind": "user"}),
+        "resource_ref": MappingProxyType({"owner_principal_id": None}),
+        "usage_metrics": MappingProxyType(
+            {
+                "model_requests": 0,
+                "tool_calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+            }
+        ),
+        "stored_payload": MappingProxyType({"value": None, "ref": None}),
+        "task_graph_limits": MappingProxyType(
+            {
+                "max_concurrency": 8,
+                "max_depth": 8,
+                "max_nodes": 128,
+                "max_budget": 1000,
+            }
+        ),
+        "task_lease": MappingProxyType({"execution_id": None}),
+        "task_terminal": MappingProxyType({"execution_id": None}),
+        "task_graph_admission": MappingProxyType({"correlation": {}}),
+        "task_binding_snapshot": MappingProxyType({"reconcile": False}),
+        "conversation_cursor": MappingProxyType(
+            {"history_id": None, "message_count": None}
+        ),
+        "model_interaction": MappingProxyType({"attachments": ()}),
+        "stored_step_snapshot": MappingProxyType(
+            {"has_context_projection": False}
+        ),
+        "session_record": MappingProxyType(
+            {
+                "continuation": None,
+                "history_quality": "complete",
+                "history_id": None,
+                "timeline_parent_session_id": None,
+                "timeline_parent_turn_sequence": 0,
+            }
+        ),
+        "execution_run_seal_head": MappingProxyType(
+            {"interaction_count": 0}
+        ),
+        "execution_record": MappingProxyType(
+            {
+                "parent_invocation_id": None,
+                "memory_scope": None,
+                "conversation_step_run_id": None,
+                "result": None,
+                "repository_instructions": None,
+                "error_diagnostics": None,
+                "correlation": {},
+                "task_attempt": 0,
+                "task_deadline_at": None,
+                "task_next_attempt_at": None,
+                "dependency_hold_ids": (),
+                "retention_closed": False,
+                "started_at": None,
+            }
+        ),
+        "execution_terminal_commit": MappingProxyType(
+            {"idempotency": None, "operation": None}
+        ),
+        "approval_record": MappingProxyType(
+            {"decision_message": None, "resolution_metadata": {}}
+        ),
+        "external_call_record": MappingProxyType(
+            {
+                "resolution_kind": None,
+                "result_payload": None,
+                "resolution_metadata": {},
+            }
+        ),
+        "pending_deferred_call": MappingProxyType({"metadata": {}}),
+        "pending_tool_continuation": MappingProxyType(
+            {"approvals": (), "calls": ()}
+        ),
+        "recovery_checkpoint": MappingProxyType(
+            {
+                "pending_tools": None,
+                "repository_instruction_overlay": None,
+                "repository_instruction_barriers": (),
+                "handoff_phase": RecoveryHandoffPhase.NONE,
+                "terminal_handoff": None,
+                "pending_operation_id": None,
+            }
+        ),
+        "recovery_terminal_outcome": MappingProxyType(
+            {"error_diagnostics": None}
+        ),
+        "tool_operation_admission": MappingProxyType(
+            {"arguments_payload": None}
+        ),
+        "tool_operation": MappingProxyType(
+            {
+                "arguments_payload": None,
+                "result_payload": None,
+                "error_payload": None,
+            }
+        ),
+        "run_record": MappingProxyType(
+            {
+                "conversation_id": None,
+                "parent_run_id": None,
+                "agent_name": None,
+                "metadata": {},
+                "registration_id": None,
+            }
+        ),
+        "step_event": MappingProxyType(
+            {
+                "conversation_id": None,
+                "parent_run_id": None,
+                "agent_name": None,
+                "tool_call_id": None,
+                "tool_name": None,
+                "error": None,
+                "metadata": {},
+                "idempotency_key": None,
+                "event_index": 0,
+            }
+        ),
+    }
+)
+
 _V2_ENUM_VALUES: Mapping[str, frozenset[object]] = MappingProxyType(
     {
         "approval_decision": frozenset({"APPROVE", "DENY"}),
@@ -380,6 +510,7 @@ class _VersionCodec:
     enum_types: Mapping[str, type[Enum]]
     enum_values: Mapping[str, frozenset[object]]
     dataclass_fields: Mapping[str, tuple[str, ...]]
+    dataclass_defaults: Mapping[str, Mapping[str, object]]
     dataclass_encoders: Mapping[str, DataclassEncoder]
     dataclass_decoders: Mapping[str, DataclassDecoder]
     external_schema_types: Mapping[type[object], JsonValue]
@@ -940,6 +1071,7 @@ _V2_CODEC = _VersionCodec(
     enum_types=_V2_ENUM_TYPES,
     enum_values=_V2_ENUM_VALUES,
     dataclass_fields=_V2_GENERIC_DATACLASS_FIELDS,
+    dataclass_defaults=_V2_GENERIC_DATACLASS_DEFAULTS,
     dataclass_encoders=_V2_DATACLASS_ENCODERS,
     dataclass_decoders=_V2_DATACLASS_DECODERS,
     external_schema_types=_V2_EXTERNAL_SCHEMA_TYPES,
@@ -1931,10 +2063,15 @@ def _decode_dataclass(
     frozen_names = codec.dataclass_fields.get(wire_id)
     if frozen_names is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-    required_names = frozenset(frozen_names)
-    if not required_names.issubset(raw_fields) or (
-        not persisted and set(raw_fields) != required_names
-    ):
+    frozen_name_set = frozenset(frozen_names)
+    defaults = codec.dataclass_defaults.get(wire_id, {})
+    if not set(defaults).issubset(frozen_name_set):
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+    if persisted:
+        required_names = frozen_name_set.difference(defaults)
+        if not required_names.issubset(raw_fields):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    elif set(raw_fields) != frozen_name_set:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         hints = get_type_hints(target)
@@ -1947,17 +2084,20 @@ def _decode_dataclass(
         field = declared.get(field_name)
         if field is None:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        try:
-            decoded = _decode_domain(
-                raw_fields[field_name],
-                hints.get(field_name, Any),
-                codec,
-                persisted=persisted,
-            )
-        except AIError:
-            raise
-        except (KeyError, TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if field_name not in raw_fields:
+            decoded = _copy_frozen_default(defaults[field_name])
+        else:
+            try:
+                decoded = _decode_domain(
+                    raw_fields[field_name],
+                    hints.get(field_name, Any),
+                    codec,
+                    persisted=persisted,
+                )
+            except AIError:
+                raise
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if field.init:
             kwargs[field_name] = decoded
         else:
@@ -1974,6 +2114,14 @@ def _decode_dataclass(
         if actual != expected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return result
+
+
+def _copy_frozen_default(value: object) -> object:
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, tuple):
+        return tuple(value)
+    return value
 
 
 def _decode_any(

@@ -50,6 +50,7 @@ def test_agent_binding_snapshot_persists_only_semantic_inputs() -> None:
     payload = snapshot.to_payload()
 
     assert set(payload) == {
+        "version",
         "agent_spec",
         "base_model",
         "selected",

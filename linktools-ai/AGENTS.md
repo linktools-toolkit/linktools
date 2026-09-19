@@ -65,7 +65,7 @@ These describe the current architecture and may evolve; they are not rules by th
 | `task` | Task graph, DAG, lease, launcher contracts |
 | `agent` | Agent compilation, definitions, output contracts, execution binding |
 | `runtime` | Composition root, execution, persistence contracts, service APIs |
-| `workspace` | Workspace identity, paths, policy, configuration, sandbox contracts |
+| `workspace` | Workspace paths, policy, configuration, sandbox contracts |
 | `migrate` | Explicit database schema provisioning |
 
 Repository-level checks under `scripts/check/ai` are release tooling, not another runtime architecture layer.

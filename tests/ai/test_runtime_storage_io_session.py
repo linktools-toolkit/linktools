@@ -179,7 +179,7 @@ async def test_session_fork_batches_known_record_sql(tmp_path: Path) -> None:
             if " IN " in statement
         ]
         assert len(batched) == 1
-        assert _parameter_count(batched[0]) == 4
+        assert _parameter_count(batched[0]) == 5
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
         await state.close()
@@ -221,7 +221,7 @@ async def test_session_fork_replay_batches_known_record_sql(tmp_path: Path) -> N
             if " IN " in statement
         ]
         assert len(batched) == 1
-        assert _parameter_count(batched[0]) == 4
+        assert _parameter_count(batched[0]) == 5
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
         await state.close()
