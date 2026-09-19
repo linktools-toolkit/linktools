@@ -4,12 +4,13 @@
 
 import asyncio
 import hashlib
+import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from ..asset import AssetKey, AssetStore
 from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_json_bytes
@@ -484,11 +485,22 @@ class FrozenSkillResourceSource:
             if not isinstance(content, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
-                key = str(content["key"])
-                digest = str(content["digest"])
-                size = int(content["size"])
-            except (KeyError, TypeError, ValueError) as error:
+                key = content["key"]
+                digest = content["digest"]
+                size = content["size"]
+            except KeyError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if (
+                not isinstance(key, str)
+                or not key
+                or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or size < 0
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return await read_object(
                 self._object_store,
                 key,
