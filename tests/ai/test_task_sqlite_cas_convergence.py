@@ -114,7 +114,10 @@ async def _digest_run(
     payload = StoredPayload.inline_json(
         {"graph_id": invocation.graph_id, "node_id": invocation.node.node_id}
     )
-    return TaskNodeRunResult(payload.digest, result_payload=payload)
+    return TaskNodeRunResult(
+        payload.digest,
+        execution_id=f"execution-{invocation.graph_id}-{invocation.node.node_id}",
+    )
 
 
 async def _noop_cancel(
