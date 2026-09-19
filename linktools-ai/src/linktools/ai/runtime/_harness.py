@@ -391,31 +391,6 @@ class HarnessStepStoreAdapter:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._interrupted_runs.add(run_id)
 
-    async def save_interrupted_snapshot(
-        self,
-        *,
-        run_id: str,
-        step_index: int,
-        messages: Sequence[ModelMessage],
-        conversation_id: str | None,
-        parent_run_id: str | None,
-        agent_name: str | None,
-    ) -> None:
-        values = list(messages)
-        await self._save_step_snapshot(
-            ContinuableSnapshot(
-                run_id=run_id,
-                step_index=step_index,
-                messages=values,
-                conversation_id=conversation_id,
-                parent_run_id=parent_run_id,
-                agent_name=agent_name,
-                state="interrupted",
-                idempotency_key=f"pause:{step_index}:{len(values)}",
-                context_messages=self.snapshot_context_messages(values),
-            )
-        )
-
     async def _append_step_event(self, event: StepEvent) -> None:
         if self._execution_id is None:
             await self._store.append_event(event)
