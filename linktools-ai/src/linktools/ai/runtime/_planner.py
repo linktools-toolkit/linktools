@@ -172,6 +172,13 @@ class _TaskArtifactPublisher:
 
 
 class _TaskStateReader(Protocol):
+    async def get_header(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+    ) -> ResourceRef | None: ...
+
     async def snapshot_graph(
         self,
         graph_id: str,
@@ -481,14 +488,22 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             if authorize:
                 if principal is None:
                     raise TypeError("principal is required for authorization")
+                header = await self._task_state.get_header(
+                    source_graph_id,
+                    tenant_id=resolved_tenant,
+                )
+                if header is None:
+                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                if (
+                    header.kind is not ResourceKind.TASK_GRAPH
+                    or header.resource_id != source_graph_id
+                    or header.tenant_id != resolved_tenant
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self._authorization.authorize(
                     principal,
                     AuthorizationAction.TASK_READ,
-                    ResourceRef(
-                        ResourceKind.TASK_GRAPH,
-                        source_graph_id,
-                        resolved_tenant,
-                    ),
+                    header,
                 )
             node_ids = tuple(
                 dict.fromkeys(
