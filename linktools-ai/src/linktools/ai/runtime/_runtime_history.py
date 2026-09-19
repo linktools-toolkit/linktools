@@ -23,6 +23,7 @@ from ..core import (
     ResourceKind,
     ResourceRef,
     TenantAuthorizationPolicy,
+    canonical_sha256,
     validate_page_limit,
     validate_persistence_namespace,
     validate_tenant_id,
