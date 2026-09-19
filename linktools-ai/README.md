@@ -276,9 +276,11 @@ result = await agent.run(
 )
 ```
 
-The Sandbox canonicalizes and deduplicates logical paths before reading them. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
+The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, reads the current Workspace contents, and sends those files only to the next model request. A later complete model response consumes them under the same transient rule. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same explicit `files=` execution input.
+If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same explicit `files=` execution input.
+
+Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose only known media type/size/digest and request association, and keep `processing_status="unknown"` unless Runtime has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 
 ### Runtime context and execution queries
 
@@ -315,15 +317,28 @@ page = await runtime.execution.list(
 
 `RuntimeHistory.open()` provides the same read-only execution metadata and
 history projections without loading a ModelRegistry or compiling Agents.
-`RuntimeHistory.inspect_execution()` and `list_executions()` use the same
-authorization and filters as `Runtime.execution`. Execution list cursors are
-HMAC-protected, ordered weak-consistency continuations: they do not provide a
-cross-page MVCC snapshot, and a caller needing a closed set should query after
-the target set is stable or restart from the first page.
+`inspect_execution()` returns safe durable summaries for binding, input,
+output, timestamps, usage, and errors; it does not return prompt/output bodies
+or raw error diagnostics. `result()`, `history()/trace()`,
+`transcript()/model_interactions()`, `task_graph()`, `list_events()`,
+`usage()/graph_usage()`, `attachment_facts()`,
+`task_result()/task_result_ref()`, and `artifacts()` are owned by the same
+authorized query composition. Execution list and detail cursors are
+HMAC-protected continuations. Paged detail queries fix the committed high-water
+captured by the first page; restarting from the first page can observe newer
+facts.
+
+Execution and TaskGraph watch events carry opaque resumable cursors. The cursor
+is bound to namespace, tenant, resource identity, content mode, and the durable
+positions of the relevant execution streams. A cursor produced with
+`include_content=False` cannot be reused with `include_content=True`.
+TaskGraph replay captures a fixed durable prefix and emits the same event model
+with resumable cursors; it does not invoke models, task handlers, or external
+systems.
 
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
-private repositories directly. No durable schema or data migration is part of
-this Runtime query surface.
+private repositories directly. The added persistence fields are additive and
+defaulted for existing v1 records; no database migration is required.
 
 ## 7. Runtime state
 
