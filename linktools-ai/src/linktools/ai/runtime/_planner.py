@@ -23,9 +23,13 @@ from ..agent import (
 )
 from ..capability import TaskExpander, TaskExpansionContext
 from ..core import (
+    AuthorizationAction,
+    AuthorizationPolicy,
     ExecutionStatus,
     JsonValue,
     Principal,
+    ResourceKind,
+    ResourceRef,
     TaskStatus,
     ThinkingValue,
     canonical_json_bytes,
@@ -283,6 +287,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         session: SessionService | None = None,
         namespace: str,
         app: AppT,
+        authorization: AuthorizationPolicy,
         task_state: _TaskStateReader,
         task_objects: ObjectStore,
         artifact_state: ArtifactState | None = None,
@@ -297,6 +302,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     ) -> None:
         self._app = app
         self._namespace = namespace
+        self._authorization = authorization
         self._catalog = catalog
         self._compiler = compiler
         self._execution = execution
@@ -330,6 +336,206 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._task_durable = task_durable
         self._execution_durable = execution_durable
         self._recovery_durable = recovery_durable
+
+    async def prepare_node(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+        principal: Principal,
+    ) -> None:
+        self._validate_durability(
+            node,
+            graph_id=graph_id,
+            request=False,
+        )
+        acquired: list[tuple[str, str]] = []
+        try:
+            for execution_id in await self._input_ref_execution_ids(
+                node,
+                principal=principal,
+                authorize=True,
+            ):
+                hold_id = _task_dependency_hold_id(graph_id, execution_id)
+                await self._execution.acquire_dependency_hold(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                    hold_id=hold_id,
+                )
+                acquired.append((execution_id, hold_id))
+        except BaseException:
+            for execution_id, hold_id in reversed(acquired):
+                try:
+                    await self._execution.release_dependency_hold(
+                        execution_id,
+                        tenant_id=principal.tenant_id,
+                        hold_id=hold_id,
+                    )
+                except BaseException as cleanup_error:  # noqa: BLE001
+                    _logger.warning(
+                        "task dependency hold rollback failed: graph=%s "
+                        "execution=%s error=%s",
+                        graph_id,
+                        execution_id,
+                        type(cleanup_error).__name__,
+                    )
+            raise
+
+    async def prepare_graph(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        principal: Principal,
+    ) -> None:
+        if snapshot.graph_id == "":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        prepared: list[TaskNode] = []
+        try:
+            for node, state in zip(
+                snapshot.nodes,
+                snapshot.node_states,
+                strict=True,
+            ):
+                if state.node_id != node.node_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await self.prepare_node(
+                    node,
+                    graph_id=snapshot.graph_id,
+                    principal=principal,
+                )
+                prepared.append(node)
+        except BaseException:
+            await self._release_nodes_dependencies(
+                snapshot.graph_id,
+                prepared,
+                tenant_id=principal.tenant_id,
+            )
+            raise
+
+    async def release_graph_dependencies(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        tenant_id: str,
+    ) -> None:
+        await self._release_nodes_dependencies(
+            snapshot.graph_id,
+            snapshot.nodes,
+            tenant_id=tenant_id,
+        )
+
+    async def _release_nodes_dependencies(
+        self,
+        graph_id: str,
+        nodes: Sequence[TaskNode],
+        *,
+        tenant_id: str,
+    ) -> None:
+        releases: set[tuple[str, str]] = set()
+        for node in nodes:
+            for execution_id in await self._input_ref_execution_ids(
+                node,
+                tenant_id=tenant_id,
+                authorize=False,
+            ):
+                releases.add(
+                    (
+                        execution_id,
+                        _task_dependency_hold_id(graph_id, execution_id),
+                    )
+                )
+        for execution_id, hold_id in sorted(releases):
+            await self._execution.release_dependency_hold(
+                execution_id,
+                tenant_id=tenant_id,
+                hold_id=hold_id,
+            )
+
+    async def _input_ref_execution_ids(
+        self,
+        node: TaskNode,
+        *,
+        principal: "Principal | None" = None,
+        tenant_id: "str | None" = None,
+        authorize: bool,
+    ) -> tuple[str, ...]:
+        resolved_tenant = (
+            principal.tenant_id
+            if principal is not None
+            else tenant_id
+        )
+        if resolved_tenant is None:
+            raise TypeError("tenant identity is required")
+        grouped: dict[str, list[TaskResultRef]] = {}
+        for reference in node.input_refs.values():
+            if (
+                reference.namespace != self._namespace
+                or reference.tenant_id != resolved_tenant
+            ):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            grouped.setdefault(reference.graph_id, []).append(reference)
+
+        execution_ids: set[str] = set()
+        for source_graph_id, references in sorted(grouped.items()):
+            if authorize:
+                if principal is None:
+                    raise TypeError("principal is required for authorization")
+                await self._authorization.authorize(
+                    principal,
+                    AuthorizationAction.TASK_READ,
+                    ResourceRef(
+                        ResourceKind.TASK_GRAPH,
+                        source_graph_id,
+                        resolved_tenant,
+                    ),
+                )
+            node_ids = tuple(
+                dict.fromkeys(
+                    reference.node_id
+                    for reference in references
+                )
+            )
+            records = await self._task_state.get_results(
+                source_graph_id,
+                node_ids,
+                tenant_id=resolved_tenant,
+            )
+            snapshot = await self._task_state.snapshot_graph(
+                source_graph_id,
+                tenant_id=resolved_tenant,
+            )
+            if snapshot is None:
+                raise AIError(ErrorCode.TASK_NOT_READY)
+            states = {
+                state.node_id: state
+                for state in snapshot.node_states
+            }
+            for reference in references:
+                record = records.get(reference.node_id)
+                state = states.get(reference.node_id)
+                if (
+                    record is None
+                    or state is None
+                    or state.status is not TaskStatus.SUCCEEDED
+                    or state.result_digest != reference.result_digest
+                    or state.execution_id is None
+                    or (
+                        record.execution_id is not None
+                        and record.execution_id != state.execution_id
+                    )
+                ):
+                    raise AIError(ErrorCode.TASK_NOT_READY)
+                execution_id = state.execution_id
+                if authorize:
+                    assert principal is not None
+                    execution = await self._execution.inspect(
+                        execution_id,
+                        principal=principal,
+                    )
+                    if execution.status is not ExecutionStatus.SUCCEEDED:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                execution_ids.add(execution_id)
+        return tuple(sorted(execution_ids))
 
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[object], ...]:
@@ -1440,6 +1646,18 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         graph_id: str,
         request: bool,
     ) -> None:
+        if node.input_refs and not (
+            self._task_durable and self._execution_durable
+        ):
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                safe_details={
+                    "phase": "task_dependency_durability",
+                    "graph_id": graph_id,
+                    "node_id": node.node_id,
+                    "request": request,
+                },
+            )
         task_type = node.input.get("type")
         if not self._task_durable or task_type != self._agent.type:
             return
@@ -1663,6 +1881,18 @@ def _normalize_handler_body(value: Mapping[str, JsonValue]) -> dict[str, JsonVal
     if "type" in normalized or "version" in normalized:
         raise ValueError("task handler normalize returned reserved fields")
     return normalized
+
+
+def _task_dependency_hold_id(
+    graph_id: str,
+    execution_id: str,
+) -> str:
+    return "task-ref:" + canonical_sha256(
+        {
+            "graph_id": graph_id,
+            "source_execution_id": execution_id,
+        }
+    )
 
 
 def _custom_idempotency_key(
