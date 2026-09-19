@@ -344,7 +344,7 @@ async def test_sqlite_terminal_nodes_leave_recovery_index_after_reconcile(
         await state.task.tasks.complete(
             lease,
             tenant_id="tenant",
-            execution_id=None,
+            execution_id="execution-root",
             result_digest=canonical_sha256({"result": "done"}),
         )
         page = await state.task.admissions.list_recoverable_page(
@@ -686,7 +686,7 @@ async def test_task_complete_conflict_reads_back_without_retry(
             await repository.complete(
                 lease,
                 tenant_id="tenant",
-                execution_id=None,
+                execution_id="execution-root",
                 result_digest=canonical_sha256({"result": True}),
             )
         assert raised.value.code is ErrorCode.STORAGE_CONFLICT
@@ -859,7 +859,7 @@ async def test_task_terminal_conflict_preserves_cancelled_state(
             await repository.complete(
                 lease,
                 tenant_id="tenant",
-                execution_id=None,
+                execution_id="execution-root",
                 result_digest=canonical_sha256({"result": True}),
             )
         assert raised.value.code is ErrorCode.TASK_TERMINAL_CONFLICT
@@ -889,7 +889,7 @@ async def test_task_reconcile_conflict_uses_readback_without_retry(
     await repository.complete(
         lease,
         tenant_id="tenant",
-        execution_id=None,
+        execution_id="execution-a",
         result_digest=canonical_sha256({"result": "a"}),
     )
     original = repository._mutate_with_event_retry
