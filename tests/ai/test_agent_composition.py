@@ -119,11 +119,14 @@ class _CaptureSessionExecution:
         binding_digest: str,
         session_id: str,
         request: ExecutionRequest,
+        *,
+        binding_snapshot: object | None = None,
     ) -> ExecutionHandle:
         self.agent_id = agent_id
         self.binding_digest = binding_digest
         self.session_id = session_id
         self.request = request
+        self.binding_snapshot = binding_snapshot
         return ExecutionHandle("execution")
 
 
@@ -197,14 +200,8 @@ async def test_missing_recovery_execution_fails_closed() -> None:
         execution=SimpleNamespace(executions=SimpleNamespace(get=_get_execution)),
     )
     compiler = SimpleNamespace(restore=lambda value: value)
-    catalog = SimpleNamespace(
-        register_definition=lambda value: value,
-        register_binding=lambda value: value,
-    )
-
     with pytest.raises(AIError) as error:
         await _restore_recovery_bindings(
-            catalog,
             compiler,
             state,
             tenant_id="tenant",
@@ -222,8 +219,6 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
         )
         for execution_id in ("available", "unavailable")
     )
-    registered: list[str] = []
-
     snapshots = {
         execution_id: SimpleNamespace(
             agent_spec=SimpleNamespace(id=execution_id),
@@ -261,6 +256,7 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return SimpleNamespace(
             digest=snapshot.binding_digest,
+            snapshot=snapshot,
             definition=SimpleNamespace(spec=SimpleNamespace(id=execution_id)),
         )
 
@@ -270,20 +266,13 @@ async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -
         ),
         execution=SimpleNamespace(executions=SimpleNamespace(get=_get_execution)),
     )
-    catalog = SimpleNamespace(
-        register_definition=lambda value: value,
-        register_binding=lambda value: registered.append(value.digest) or value,
-    )
     compiler = SimpleNamespace(restore=_restore)
 
     await _restore_recovery_bindings(
-        catalog,
         compiler,
         state,
         tenant_id="tenant",
     )
-
-    assert registered == ["a" * 64]
 
 
 @pytest.mark.asyncio
@@ -322,7 +311,6 @@ async def test_workspace_mismatch_blocks_startup_recovery() -> None:
 
     with pytest.raises(AIError) as raised:
         await _restore_recovery_bindings(
-            SimpleNamespace(),
             SimpleNamespace(restore=_restore),
             state,
             tenant_id="tenant",
