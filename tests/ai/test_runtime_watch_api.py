@@ -8,6 +8,7 @@ import pytest
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
+    ExecutionStatus,
     Page,
     Principal,
     TaskStatus,
@@ -255,7 +256,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
             return ExecutionView(
                 "execution",
                 "agent",
-                TaskStatus.RUNNING,  # type: ignore[arg-type]
+                ExecutionStatus.RUNNING,
                 ExecutionLineageKind.RUN,
                 None,
                 "execution",
