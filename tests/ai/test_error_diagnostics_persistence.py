@@ -279,6 +279,21 @@ def test_execution_without_defaulted_diagnostics_field_uses_default() -> None:
     assert decoded.error_code == ErrorCode.INTERNAL_ERROR.value
 
 
+def test_execution_without_defaulted_started_at_field_uses_default() -> None:
+    now = datetime.now(timezone.utc)
+    current = replace(_started_execution(now), started_at=now)
+    payload = _encode_persisted_domain(current)
+    payload["fields"].pop("started_at")
+
+    decoded = _decode_enveloped_domain(
+        encode_envelope({"type": "execution_record", "payload": payload}),
+        ExecutionRecord,
+    )
+
+    assert decoded.started_at is None
+    assert decoded.status is ExecutionStatus.STARTED
+
+
 @pytest.mark.asyncio
 async def test_standalone_recovery_finalization_keeps_started_execution() -> None:
     backend = object.__new__(LocalExecutionBackend)
