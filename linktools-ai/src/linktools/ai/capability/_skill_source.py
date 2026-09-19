@@ -84,6 +84,8 @@ class SkillResourceSource(Protocol):
 class SnapshotSkillResourceSource(SkillResourceSource, Protocol):
     async def current_revision(self, root: str) -> StorageRevision: ...
 
+    async def resource_mode(self, root: str, path: str) -> int: ...
+
     async def snapshot(
         self,
         root: str,
@@ -116,6 +118,20 @@ class LocalSkillResourceSource:
     async def current_revision(self, root: str) -> StorageRevision:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         return await _skill_source_revision(self, logical_root)
+
+    async def resource_mode(self, root: str, path: str) -> int:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        relative = _normalize_resource_path(path)
+        package = await asyncio.to_thread(self._package_path, logical_root)
+        resolved = await asyncio.to_thread(
+            _resolve_contained_file,
+            package,
+            package / relative,
+        )
+        try:
+            return (await asyncio.to_thread(resolved.stat)).st_mode & 0o111
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     async def snapshot(
         self,
@@ -232,6 +248,11 @@ class AssetSkillResourceSource:
         _normalize_relative_path(root, field_name="skill root")
         return await self._store.current_revision()
 
+    async def resource_mode(self, root: str, path: str) -> int:
+        _normalize_relative_path(root, field_name="skill root")
+        _normalize_resource_path(path)
+        return 0
+
     async def snapshot(
         self,
         root: str,
@@ -307,9 +328,18 @@ async def _snapshot_skill_source(
             value,
             digest=digest,
         )
+        mode = await source.resource_mode(root, relative)
+        if (
+            isinstance(mode, bool)
+            or not isinstance(mode, int)
+            or mode < 0
+            or mode > 0o111
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         entries.append(
             {
                 "path": relative,
+                "mode": mode,
                 "content": {
                     "key": key,
                     "digest": digest,
@@ -422,6 +452,25 @@ class FrozenSkillResourceSource:
         manifest = await self._manifest(logical_root)
         return bool(manifest.get("sandbox_materialize", False))
 
+    async def resource_mode(self, root: str, path: str) -> int:
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        relative = _normalize_resource_path(path)
+        manifest = await self._manifest(logical_root)
+        entries = manifest["resources"]
+        assert isinstance(entries, list)
+        for raw in entries:
+            if isinstance(raw, Mapping) and raw.get("path") == relative:
+                mode = raw.get("mode", 0)
+                if (
+                    isinstance(mode, bool)
+                    or not isinstance(mode, int)
+                    or mode < 0
+                    or mode > 0o111
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return mode
+        raise AIError(ErrorCode.ASSET_NOT_FOUND)
+
     async def read(self, root: str, path: str) -> bytes:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         relative = _normalize_resource_path(path)
@@ -489,9 +538,14 @@ class FrozenSkillResourceSource:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             relative = raw.get("path")
             content = raw.get("content")
+            mode = raw.get("mode", 0)
             if (
                 not isinstance(relative, str)
                 or not isinstance(content, Mapping)
+                or isinstance(mode, bool)
+                or not isinstance(mode, int)
+                or mode < 0
+                or mode > 0o111
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             relative = _normalize_resource_path(relative)
