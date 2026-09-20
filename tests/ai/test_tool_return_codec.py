@@ -17,6 +17,7 @@ from linktools.ai.capability import SkillSourceRegistry
 from linktools.ai.core import PromptLimits
 from linktools.ai.runtime import _agent_executor as agent_executor
 from linktools.ai.runtime._agent_executor import AgentExecutor, _RunScope
+from linktools.ai.runtime.state._contracts import LoadedModelContext
 from linktools.ai.runtime._tool_return_codec import (
     decode_tool_return_content,
     encode_tool_return_content,
@@ -108,6 +109,10 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
             assert run_id == "step-run"
             return object()
 
+        async def model_interaction_count(self, *, run_id: str) -> int:
+            assert run_id == "step-run"
+            return 0
+
     definition = SimpleNamespace(
         digest="definition",
         model=SimpleNamespace(materialize=lambda: TestModel()),
@@ -138,6 +143,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         mcp_cwd="",
         user_prompt=None,
         history=[],
+        initial_context=LoadedModelContext(()),
         conversation_id="conversation",
         step_store=_StepStore(),  # type: ignore[arg-type]
         step_run_id="step-run",
