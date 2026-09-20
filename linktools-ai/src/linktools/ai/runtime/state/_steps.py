@@ -11,6 +11,7 @@ from uuid import uuid4
 from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
+from .._model_interaction import StagedModelInteraction
 from ._contracts import (
     ExecutionRunSealHead,
     LoadedContextMessage,
