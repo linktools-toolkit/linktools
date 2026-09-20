@@ -31,6 +31,7 @@ from linktools.ai.runtime._attachment import (
 )
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._journal import ModelRequestJournal
+from linktools.ai.runtime._message import decode_model_messages
 from linktools.ai.runtime._model_interaction import (
     StagedContextInline,
     StagedContextProjection,
@@ -393,6 +394,70 @@ async def test_failed_request_inlines_context_only_after_failure() -> None:
     request = staged[0].request_context  # type: ignore[union-attr]
     assert all(isinstance(item, StagedContextSpan) for item in request.items)
     assert len(store._payloads["run"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> None:
+    store = ModelInteractionStagingStepStore()
+    await store.initialize()
+    await store.register_run(RunRecord("run"))
+    capture = RuntimeCaptureStore(store, execution_id="execution", step_run_id="run")
+    business = {"timestamp": "before", "nested": {"value": 1}}
+    request = ModelRequest(
+        parts=[
+            UserPromptPart("hello"),
+            ToolReturnPart("tool", business, tool_call_id="call-1"),
+        ],
+        instructions="before",
+    )
+    capture.append_transcript_message(request)
+    journal = _journal()
+    fact = journal.begin(1)
+    capture.begin_model_interaction(
+        fact,
+        TestModel(),
+        (request,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+
+    request.instructions = "after"
+    business["timestamp"] = "after"
+    business["nested"]["value"] = 2  # type: ignore[index]
+    request.parts = [UserPromptPart("mutated")]
+    response = ModelResponse(parts=[TextPart("done")])
+    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    capture.finish_model_interaction(
+        finished,
+        model=TestModel(),
+        response=response,
+        status="SUCCEEDED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+    )
+    response.parts = [TextPart("mutated response")]
+
+    frozen_request = capture.transcript_messages[0]
+    assert isinstance(frozen_request, ModelRequest)
+    assert frozen_request.instructions == "before"
+    assert frozen_request.parts[0].content == "hello"  # type: ignore[attr-defined]
+    frozen_tool = frozen_request.parts[1]
+    assert isinstance(frozen_tool, ToolReturnPart)
+    assert frozen_tool.content == {
+        "timestamp": "before",
+        "nested": {"value": 1},
+    }
+
+    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    assert interaction.response_context is not None  # type: ignore[union-attr]
+    response_item = interaction.response_context.items[0]  # type: ignore[union-attr]
+    assert isinstance(response_item, StagedContextInline)
+    frozen_response = decode_model_messages(
+        store.staged_payload("run", response_item.payload_digest)
+    )
+    assert frozen_response[0].parts[0].content == "done"  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
