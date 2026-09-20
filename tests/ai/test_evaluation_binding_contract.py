@@ -204,7 +204,7 @@ async def test_evaluation_binding_projection_mismatch_fails_closed() -> None:
             execution_id=source.execution_id,
             dataset_digest="dataset",
             binding_digest="b" * 64,
-            status=EvaluationStatus.PENDING,
+            status=status,
             revision=0,
             created_at=now,
             updated_at=now,
@@ -227,8 +227,14 @@ async def test_evaluation_binding_projection_mismatch_fails_closed() -> None:
         await state.close()
 
 
+@pytest.mark.parametrize(
+    "status",
+    (EvaluationStatus.PENDING, EvaluationStatus.SUCCEEDED),
+)
 @pytest.mark.asyncio
-async def test_evaluation_missing_source_execution_fails_closed() -> None:
+async def test_evaluation_missing_source_execution_fails_closed(
+    status: EvaluationStatus,
+) -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
     now = datetime.now(timezone.utc)
