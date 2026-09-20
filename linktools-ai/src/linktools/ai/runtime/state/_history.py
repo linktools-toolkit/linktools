@@ -851,6 +851,54 @@ class TranscriptRepository:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return LoadedModelContext(())
 
+    async def load_session_raw_model_context(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        message_count: int,
+    ) -> LoadedModelContext:
+        require_no_run_history_lock(
+            "TranscriptRepository.load_session_raw_model_context"
+        )
+        if (
+            isinstance(message_count, bool)
+            or not isinstance(message_count, int)
+            or message_count < 0
+        ):
+            raise ValueError("session message count must be a non-negative integer")
+        resolution = await self._history_message_segments(
+            history_id,
+            tenant_id=tenant_id,
+            start=0,
+            end=message_count,
+        )
+        values: list[LoadedContextMessage] = []
+        for segment in resolution.segments:
+            index = segment.start
+            async for message in self._iter_range(
+                self.history_stream(segment.history_id),
+                start=segment.start,
+                end=segment.end,
+                seek_owner_id=segment.history_id,
+            ):
+                values.append(
+                    LoadedContextMessage(
+                        message,
+                        TranscriptMessageRef(
+                            RuntimeDomain.CONVERSATION,
+                            segment.history_id,
+                            index,
+                        ),
+                    )
+                )
+                index += 1
+            if index != segment.end:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if len(values) != message_count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return LoadedModelContext(tuple(values))
+
     async def iter_session_messages(
         self,
         history_id: str,
