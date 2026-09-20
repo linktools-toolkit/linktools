@@ -247,6 +247,19 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
 
     assert decoded == current
 
+    fields["evaluator_id"] = runtime_codec._encode_persisted_domain("custom")
+    with pytest.raises(AIError) as raised:
+        runtime_codec._decode_enveloped_domain(
+            runtime_codec.encode_envelope(
+                {
+                    "type": runtime_codec.wire_type_id(current),
+                    "payload": cast(JsonValue, payload),
+                }
+            ),
+            EvaluationRecord,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
 
 def test_generic_v1_envelope_round_trips_current_shape() -> None:
     value = ContextProjection(())
