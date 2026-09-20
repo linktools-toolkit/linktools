@@ -3,6 +3,7 @@
 """Execution history projection for claimed and materialized attempts."""
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,6 +118,61 @@ def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
     assert _overlap_signature(old) != _overlap_signature(new)
     assert len(old.parts) == 2
     assert len(new.parts) == 2
+
+
+@pytest.mark.asyncio
+async def test_transcript_overlap_ignores_framework_stamped_fields() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="history-stamping", tenant_id="tenant")
+    try:
+        archive = state.steps.read_store(RuntimeDomain.RECOVERY)
+        assert isinstance(archive, StateStepArchive)
+        run = RunRecord("run")
+        await archive.register_run(run)
+        source = ModelRequest(
+            parts=[UserPromptPart(content="hello")],
+            timestamp=None,
+        )
+        await archive.materialize_snapshot(
+            run,
+            ContinuableSnapshot(
+                run_id="run",
+                step_index=1,
+                messages=[source],
+            ),
+        )
+        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        stamped = replace(
+            source,
+            timestamp=timestamp,
+            run_id="run",
+            conversation_id="conversation",
+            instructions="instruction",
+        )
+        response = ModelResponse(
+            parts=[TextPart(content="done")],
+            timestamp=timestamp,
+            run_id="run",
+            conversation_id="conversation",
+        )
+        await archive.materialize_snapshot(
+            run,
+            ContinuableSnapshot(
+                run_id="run",
+                step_index=2,
+                messages=[stamped, response],
+            ),
+        )
+
+        messages = [message async for message in archive.iter_messages(run_id="run")]
+
+        assert len(messages) == 2
+        assert isinstance(messages[0], ModelRequest)
+        assert isinstance(messages[1], ModelResponse)
+        assert messages[0].parts[0].content == "hello"
+        assert messages[1].parts[0].content == "done"
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
