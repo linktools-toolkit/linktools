@@ -2428,6 +2428,9 @@ class StateStepArchive(StepStore):
         run = await self.get_run(run_id=run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        context_messages = (
+            list(messages) if latest.has_context_projection else None
+        )
         latest = ContinuableSnapshot(
             run_id=latest.run_id,
             step_index=latest.step_index,
@@ -2437,9 +2440,8 @@ class StateStepArchive(StepStore):
             agent_name=run.agent_name,
             timestamp=latest.timestamp,
             state=latest.state,
-            context_messages=(
-                list(messages) if latest.has_context_projection else None
-            ),
+            context_messages=context_messages,
+            pending_request_index=latest.pending_request_index,
         )
         return latest if include_interrupted or latest.state == "complete" else None
 
