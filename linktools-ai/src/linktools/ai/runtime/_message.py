@@ -139,24 +139,16 @@ def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
 
 def model_message_identity_bytes(message: ModelMessage) -> bytes:
     """Serialize logical identity across Pydantic AI message stamping."""
+    value = json.loads(encode_model_messages((message,)).decode("utf-8"))
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise RuntimeError("model message identity dump is invalid")
+    encoded = value[0]
+    encoded.pop("timestamp", None)
+    encoded.pop("run_id", None)
+    encoded.pop("conversation_id", None)
     if isinstance(message, ModelRequest):
-        value = replace(
-            message,
-            timestamp=None,
-            run_id=None,
-            conversation_id=None,
-            instructions=None,
-        )
-    elif isinstance(message, ModelResponse):
-        value = replace(
-            message,
-            timestamp=None,  # type: ignore[arg-type]
-            run_id=None,
-            conversation_id=None,
-        )
-    else:
-        raise TypeError("model message is invalid")
-    return encode_model_messages((value,))
+        encoded.pop("instructions", None)
+    return canonical_json_bytes(value)
 
 
 def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
