@@ -55,7 +55,6 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         workspace = _load_workspace(args.project)
-        models = _local_runtime_models(args)
         memory_scope = args.memory if args.memory is not None else "default"
         _logger.info(
             "ai run session selected: namespace=%s session=%s memory_scope=%s",
@@ -65,7 +64,10 @@ class Command(BaseCommand):
         )
 
         async def execute() -> int:
-            async with _open_local_runtime(workspace, models=models) as runtime:
+            async with _open_local_runtime(
+                workspace,
+                models=_local_runtime_models(workspace, args),
+            ) as runtime:
                 return await _emit_result(
                     runtime,
                     args.prompt,

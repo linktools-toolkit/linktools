@@ -48,17 +48,6 @@ def _add_local_runtime_arguments(parser: "CommandParser") -> None:
     )
 
 
-def _local_runtime_models(args: Namespace) -> ModelRegistry:
-    if not isinstance(args.model, str) or not args.model.strip():
-        raise CommandError("--model is required")
-    return ModelRegistry.openai(
-        model=args.model,
-        vision=args.vision,
-        base_url=args.base_url,
-        api_key=args.api_key,
-    )
-
-
 def _load_workspace(root: "Path | None" = None) -> Workspace:
     start = Path.cwd()
     try:
@@ -89,33 +78,65 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     return Metrics.sqlite(path, namespace="default")
 
 
-def _local_models(workspace: Workspace) -> ModelRegistry:
+def _local_models(
+    workspace: Workspace,
+    *,
+    model: "str | None" = None,
+    vision: "bool | None" = None,
+    base_url: "str | None" = None,
+    api_key: "str | None" = None,
+) -> ModelRegistry:
     configured = workspace.config.get("model")
-    model = (
-        configured.strip()
+    selected_model = (
+        model.strip()
+        if isinstance(model, str) and model.strip()
+        else configured.strip()
         if isinstance(configured, str) and configured.strip()
         else os.getenv("OPENAI_MODEL", "").strip()
     )
-    if not model:
+    if not selected_model:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
-    raw_vision = os.getenv("OPENAI_VISION")
-    try:
-        vision = (
-            False
-            if raw_vision is None or not raw_vision.strip()
-            else environ.config.cast(raw_vision, bool)
-        )
-    except (TypeError, ValueError) as error:
-        raise AIError(
-            ErrorCode.MODEL_CONFIG_INVALID,
-            retryable=False,
-            safe_details={"provider": "openai", "field": "vision"},
-        ) from error
+
+    if vision is None:
+        raw_vision = os.getenv("OPENAI_VISION")
+        try:
+            selected_vision = (
+                False
+                if raw_vision is None or not raw_vision.strip()
+                else environ.config.cast(raw_vision, bool)
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(
+                ErrorCode.MODEL_CONFIG_INVALID,
+                retryable=False,
+                safe_details={"provider": "openai", "field": "vision"},
+            ) from error
+    else:
+        selected_vision = vision
+
     return ModelRegistry.openai(
-        model=model,
-        vision=vision,
-        base_url=os.getenv("OPENAI_BASE_URL", "").strip() or None,
-        api_key=os.getenv("OPENAI_API_KEY", "").strip() or None,
+        model=selected_model,
+        vision=selected_vision,
+        base_url=(
+            base_url
+            if base_url is not None
+            else os.getenv("OPENAI_BASE_URL", "").strip() or None
+        ),
+        api_key=(
+            api_key
+            if api_key is not None
+            else os.getenv("OPENAI_API_KEY", "").strip() or None
+        ),
+    )
+
+
+def _local_runtime_models(workspace: Workspace, args: Namespace) -> ModelRegistry:
+    return _local_models(
+        workspace,
+        model=args.model,
+        vision=args.vision,
+        base_url=args.base_url,
+        api_key=args.api_key,
     )
 
 

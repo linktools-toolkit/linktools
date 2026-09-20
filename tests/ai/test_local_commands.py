@@ -12,8 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.workspace import Workspace
+from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
 import linktools.commands.ai.acp as acp_module
+from linktools.commands.ai._common import _local_runtime_models
 from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
 
@@ -53,7 +55,11 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     opened: list[tuple[Workspace, object]] = []
 
     monkeypatch.setattr(acp_module, "_load_workspace", lambda _root: workspace)
-    monkeypatch.setattr(acp_module, "_local_runtime_models", lambda _args: models)
+    monkeypatch.setattr(
+        acp_module,
+        "_local_runtime_models",
+        lambda _workspace, _args: models,
+    )
 
     @asynccontextmanager
     async def open_local_runtime(
@@ -74,6 +80,32 @@ def test_ai_acp_uses_shared_local_runtime_composition(
 
     assert acp_command.run(acp_command.create_parser().parse_args([])) == 0
     assert opened == [(workspace, models)]
+
+
+def test_ai_local_runtime_models_fall_back_to_workspace_model(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path, {"model": "workspace/model"})
+    args = run_command.create_parser().parse_args(["hello"])
+
+    binding = _local_runtime_models(workspace, args).snapshot().resolve("default")
+
+    assert binding.model_identity == "openai:workspace/model"
+
+
+def test_ai_run_translates_invalid_model_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace(tmp_path, {})
+    monkeypatch.setattr(
+        "linktools.commands.ai.run._load_workspace",
+        lambda _root: workspace,
+    )
+    args = run_command.create_parser().parse_args(
+        ["hello", "--model", "testing/model", "--base-url", "not-a-url"]
+    )
+
+    with pytest.raises(CommandError):
+        run_command.run(args)
 
 
 def test_ai_asset_command_is_removed() -> None:
