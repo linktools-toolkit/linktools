@@ -9,6 +9,7 @@ import os
 import posixpath
 import shutil
 import secrets
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Mapping, cast
@@ -57,7 +58,7 @@ class RestoredRuntime:
     workspace_root: Path | None
     generation: str
 
-    def open_history(self) -> RuntimeHistory:
+    def open_history(self) -> AbstractAsyncContextManager[RuntimeHistory]:
         """Return a read-only RuntimeHistory context for this generation."""
         return RuntimeHistory.open(
             self.namespace,

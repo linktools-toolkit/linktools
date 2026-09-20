@@ -145,7 +145,7 @@ async with Runtime.open(
 
 For caller-owned declaration storage independent of a Workspace, `CapabilityGroup(..., assets=...)` performs discovery over one borrowed immutable `AssetStore` snapshot.
 
-A store-backed group reads metadata, batch-loads the corresponding bytes, verifies content identity, runs its loaders, and verifies that the store revision did not change during the freeze. Conflicting identities or layouts fail closed.
+A store-backed group captures the declaration metadata visible when freeze starts. Assets added afterward are ignored for that freeze; assets actually read by a loader must still match their captured metadata through verification. Conflicting identities or layouts fail closed.
 
 For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it for its input Asset kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or `mcp` replaces only that built-in parser slot. The loader receives one `CapabilityLoadContext`, can inspect the captured metadata and read captured keys with `read()` / `read_many()`, and returns normal `CapabilityContribution` values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP declarations. No additional Registry/Provider abstraction is required.
 

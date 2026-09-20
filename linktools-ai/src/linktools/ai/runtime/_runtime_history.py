@@ -380,7 +380,7 @@ class RuntimeHistory:
         principal: Principal,
         limit: int = 20,
     ) -> tuple[ExecutionInfo, ...]:
-        """Return the exact newest executions with O(limit) memory."""
+        """Scan visible executions and return the newest; O(N) time, O(limit) memory."""
         validate_page_limit(limit)
         executions, authorization = self._require_direct_reader()
         recent: list[tuple[datetime, str, ExecutionInfo]] = []
@@ -675,6 +675,7 @@ class RuntimeHistory:
         principal: Principal,
         limit: int = 20,
     ) -> tuple[SessionView, ...]:
+        """Scan visible sessions and return the newest; O(N) time, O(limit) memory."""
         validate_page_limit(limit)
         sessions, authorization = self._require_session_reader()
         recent: list[tuple[datetime, str, SessionView]] = []
