@@ -1,4 +1,4 @@
--- linktools-ai persistence v2. Provisioning is intentionally explicit.
+-- linktools-ai persistence v1. Provisioning is intentionally explicit.
 -- This file is manually reviewed DBA input, not an application bootstrap.
 
 CREATE TABLE ai_state_records (
