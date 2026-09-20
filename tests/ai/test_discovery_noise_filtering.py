@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Automatic discovery ignores environment noise without restricting direct reads."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,46 @@ async def test_virtual_skill_resource_discovery_applies_the_same_noise_policy() 
         assert await source.read("review", "scripts/helper.PYC") == b"\xff"
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_virtual_skill_revision_ignores_unrelated_asset_changes() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        await store.put(AssetKey("skill", "review/references/rules.md"), b"rules")
+        source = AssetSkillResourceSource("virtual", store)
+        revision = await source.current_revision("review")
+
+        await store.put(AssetKey("agent", "unrelated"), b"agent")
+        await store.put(AssetKey("skill", "other/reference.md"), b"other")
+
+        assert await source.current_revision("review") == revision
+
+        await store.put(
+            AssetKey("skill", "review/references/rules.md"),
+            b"changed",
+        )
+        assert await source.current_revision("review") != revision
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_local_skill_revision_tracks_executable_mode(tmp_path: Path) -> None:
+    package = tmp_path / "skills" / "review"
+    package.mkdir(parents=True)
+    script = package / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(script, 0o644)
+    source = LocalSkillResourceSource("local", tmp_path / "skills")
+
+    before = await source.current_revision("review")
+    os.chmod(script, 0o755)
+    after = await source.current_revision("review")
+
+    assert after != before
 
 
 @pytest.mark.asyncio
