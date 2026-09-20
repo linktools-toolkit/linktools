@@ -38,8 +38,6 @@ class _RuntimeBindingFreezer:
             raise TypeError("compiler must be AgentCompiler")
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
-        if not isinstance(object_store, ObjectStore):
-            raise TypeError("object_store must implement ObjectStore")
         self._catalog = catalog
         self._compiler = compiler
         self._skill_sources = skill_sources
