@@ -344,35 +344,27 @@ async def _snapshot_skill_source(
 ) -> ObjectRef:
     if not isinstance(expected_revision, StorageRevision):
         raise TypeError("expected_revision must be StorageRevision")
+    if await source.current_revision(root) != expected_revision:
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     view = await source.inspect(root)
     if not isinstance(view, SkillResourceView):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     states: list[dict[str, JsonValue]] = []
-    payloads: list[bytes] = []
+    entries: list[dict[str, JsonValue]] = []
     for relative in view.resources:
         value = await source.read(root, relative)
         mode = await source.resource_mode(root, relative)
         _validate_resource_mode(mode)
-        states.append(
-            {
-                "path": relative,
-                "digest": hashlib.sha256(value).hexdigest(),
-                "size": len(value),
-                "mode": mode,
-            }
-        )
-        payloads.append(value)
-    captured_revision = _skill_revision(
-        states,
-        sandbox_materialize=view.location.kind == "local",
-    )
-    if captured_revision != expected_revision:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-
-    entries: list[dict[str, JsonValue]] = []
-    for state, value in zip(states, payloads, strict=True):
-        digest = cast(str, state["digest"])
+        digest = hashlib.sha256(value).hexdigest()
+        size = len(value)
+        state: dict[str, JsonValue] = {
+            "path": relative,
+            "digest": digest,
+            "size": size,
+            "mode": mode,
+        }
+        states.append(state)
         key = f"v1/skill-source-content/{digest}"
         await _put_skill_snapshot_object(
             object_store,
@@ -382,15 +374,21 @@ async def _snapshot_skill_source(
         )
         entries.append(
             {
-                "path": cast(str, state["path"]),
-                "mode": cast(int, state["mode"]),
+                "path": relative,
+                "mode": mode,
                 "content": {
                     "key": key,
                     "digest": digest,
-                    "size": cast(int, state["size"]),
+                    "size": size,
                 },
             }
         )
+    captured_revision = _skill_revision(
+        states,
+        sandbox_materialize=view.location.kind == "local",
+    )
+    if captured_revision != expected_revision:
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     if await source.current_revision(root) != expected_revision:
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     manifest: dict[str, JsonValue] = {
