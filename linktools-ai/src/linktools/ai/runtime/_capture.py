@@ -81,10 +81,15 @@ class RuntimeCaptureStore:
         baseline = initial_context or LoadedModelContext(())
         baseline_messages = baseline.model_messages()
         baseline_refs: tuple[TranscriptMessageRef | None, ...]
-        if (
-            len(baseline_messages) == len(frozen_initial)
-            and freeze_model_messages(baseline_messages) == frozen_initial
-        ):
+        if baseline.messages:
+            if (
+                len(baseline_messages) != len(frozen_initial)
+                or freeze_model_messages(baseline_messages) != frozen_initial
+            ):
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "initial model context does not match initial messages",
+                )
             baseline_refs = tuple(
                 value.source
                 if value.source is not None
@@ -100,7 +105,7 @@ class RuntimeCaptureStore:
         )
         self._transcript_messages: list[ModelMessage] = []
 
-        self._projection_source: tuple[ModelMessage, ...] | None = None
+        self._projection_source_count: int | None = None
         self._projection_messages: tuple[ModelMessage, ...] | None = None
 
         self._interaction_projections: dict[int, StagedContextProjection] = {}
@@ -194,10 +199,10 @@ class RuntimeCaptureStore:
         projected: Sequence[ModelMessage] | None,
     ) -> None:
         if projected is None:
-            self._projection_source = None
+            self._projection_source_count = None
             self._projection_messages = None
             return
-        self._projection_source = freeze_model_messages(source)
+        self._projection_source_count = len(tuple(source))
         self._projection_messages = freeze_model_messages(projected)
 
     def snapshot_context(
@@ -207,15 +212,15 @@ class RuntimeCaptureStore:
         pending: ModelMessage | None = None,
     ) -> tuple[list[ModelMessage], int | None]:
         current = freeze_model_messages(messages)
-        source = self._projection_source
+        source_count = self._projection_source_count
         projected = self._projection_messages
-        if (
-            source is not None
-            and projected is not None
-            and len(source) <= len(current)
-            and current[: len(source)] == source
-        ):
-            current = (*projected, *current[len(source) :])
+        if source_count is not None and projected is not None:
+            if source_count > len(current):
+                raise AIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "captured context projection exceeds live history",
+                )
+            current = (*projected, *current[source_count:])
         pending_index = None
         if pending is not None:
             frozen_pending = freeze_model_messages((pending,))[0]
