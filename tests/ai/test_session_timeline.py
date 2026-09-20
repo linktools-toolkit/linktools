@@ -372,6 +372,14 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
         restored_text = repr(restored)
         assert "visible answer" in restored_text
         assert "stale answer" not in restored_text
+
+        model_context = await service.load_model_context(
+            "session",
+            principal=principal,
+        )
+        model_context_text = repr(model_context)
+        assert "visible answer" in model_context_text
+        assert "stale answer" not in model_context_text
     finally:
         await state.close()
 
