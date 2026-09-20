@@ -2499,15 +2499,20 @@ class StateStepArchive(StepStore):
         latest = _decode_step(values[0].data)
         if not isinstance(latest, StoredStepSnapshot):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        messages = (await self._history.load_model_context(run_id)).model_messages()
-        raw_messages = tuple(
-            [message async for message in self._history.iter_raw_messages(run_id)]
-        )
-        if not raw_messages:
-            raw_messages = tuple(messages)
         run = await self.get_run(run_id=run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run_id
+        )
+        messages = (await self._history.load_model_context(owner_id)).model_messages()
+        raw_messages = tuple(
+            [message async for message in self._history.iter_raw_messages(owner_id)]
+        )
+        if not raw_messages and not latest.has_context_projection:
+            raw_messages = tuple(messages)
         context_messages = (
             list(messages) if latest.has_context_projection else None
         )
