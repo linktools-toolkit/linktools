@@ -2455,6 +2455,57 @@ class StateStepArchive(StepStore):
             )
         ).model_messages()
 
+    async def load_committed_session_model_context(
+        self,
+        history_id: str,
+        *,
+        step_run_id: str,
+        message_count: int,
+        tenant_id: str,
+    ) -> LoadedModelContext:
+        require_no_run_history_lock(
+            "StateStepArchive.load_committed_session_model_context"
+        )
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if (
+            isinstance(message_count, bool)
+            or not isinstance(message_count, int)
+            or message_count < 0
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        total = await self._history.history_message_count(
+            history_id,
+            tenant_id=tenant_id,
+        )
+        if message_count > total:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        values = await self._facts(step_run_id, "snapshot", latest=True)
+        if not values:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        stored = _decode_step(values[0].data)
+        if (
+            not isinstance(stored, StoredStepSnapshot)
+            or stored.run_id != step_run_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if stored.state != "complete":
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        projection = await self._history.load_projection(history_id)
+        if (
+            projection is not None
+            and projection.digest == stored.projection_digest
+        ):
+            return await self._history.load_projected_context(
+                history_id,
+                projection,
+            )
+        return await self._history.load_session_raw_model_context(
+            history_id,
+            tenant_id=tenant_id,
+            message_count=message_count,
+        )
+
     async def verify_snapshot_projection(
         self,
         *,
@@ -2470,10 +2521,18 @@ class StateStepArchive(StepStore):
         stored = _decode_step(values[0].data)
         if not isinstance(stored, StoredStepSnapshot):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        projection = await self._history.load_projection(run_id)
+        run = await self.get_run(run_id=run_id)
+        if run is None:
+            return False
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run_id
+        )
+        projection = await self._history.load_projection(owner_id)
         if projection is None or projection.digest != stored.projection_digest:
             return False
-        context = await self._history.load_model_context(run_id)
+        context = await self._history.load_model_context(owner_id)
         expected_messages = (
             snapshot.messages
             if snapshot.context_messages is None
