@@ -399,6 +399,10 @@ class TaskGraphRun(Generic[AppT]):
                         if event.sequence <= cursor_graph_sequence:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         cursor_graph_sequence = event.sequence
+                        if event.execution_id is not None:
+                            if event.node_id is None:
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            start_execution(event.node_id, event.execution_id)
                         yield TaskGraphRunEvent(
                             self.graph_id,
                             event.node_id,
@@ -412,10 +416,6 @@ class TaskGraphRun(Generic[AppT]):
                                 execution_sequences=cursor_execution_sequences,
                             ),
                         )
-                        if event.execution_id is not None:
-                            if event.node_id is None:
-                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                            start_execution(event.node_id, event.execution_id)
                         graph_task = asyncio.create_task(
                             graph_stream.__anext__(),
                             name=f"task-run-graph-{self.graph_id}",
