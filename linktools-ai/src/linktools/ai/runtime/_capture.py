@@ -245,25 +245,13 @@ class RuntimeCaptureStore:
         by_key: dict[bytes, list[int]] = {}
         for index, key in enumerate(known_keys):
             by_key.setdefault(key, []).append(index)
-        requested_counts: dict[bytes, int] = {}
-        for key in requested_keys:
-            requested_counts[key] = requested_counts.get(key, 0) + 1
-        used: dict[bytes, int] = {}
         refs: list[TranscriptMessageRef | int | None] = []
         for key in requested_keys:
             candidates = by_key.get(key, ())
-            if not candidates or (
-                len(candidates) > 1
-                and requested_counts.get(key, 0) != len(candidates)
-            ):
+            if len(candidates) != 1:
                 refs.append(None)
                 continue
-            offset = used.get(key, 0)
-            if offset >= len(candidates):
-                refs.append(None)
-                continue
-            used[key] = offset + 1
-            refs.append(self._source_refs[candidates[offset]])
+            refs.append(self._source_refs[candidates[0]])
         return tuple(refs)
 
     def begin_model_interaction(
