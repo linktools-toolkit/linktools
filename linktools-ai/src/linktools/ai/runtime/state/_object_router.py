@@ -111,6 +111,7 @@ def build_runtime_object_router(
 ) -> _RuntimeObjectRouter:
     values: dict[RuntimeDomain, ObjectStore] = {}
     close_guard_stores: list[ObjectStore] = []
+    filesystem_objects: dict[Path, FilesystemObjectStore] = {}
     sql_objects: dict[int, SqlObjectStore] = {}
     for domain in RuntimeDomain:
         if not runtime_domain_uses_object_store(domain):
@@ -127,9 +128,13 @@ def build_runtime_object_router(
             values[domain] = store
             close_guard_stores.append(store)
         elif route.kind == "filesystem" and route.path is not None:
-            store = FilesystemObjectStore(route.path / "objects")
+            object_root = (route.path / "objects").resolve()
+            store = filesystem_objects.get(object_root)
+            if store is None:
+                store = FilesystemObjectStore(object_root)
+                filesystem_objects[object_root] = store
+                close_guard_stores.append(store)
             values[domain] = store
-            close_guard_stores.append(store)
         elif route.kind in {"sqlite", "sql"} and domain in contexts:
             context = contexts[domain]
             context_key = id(context)
