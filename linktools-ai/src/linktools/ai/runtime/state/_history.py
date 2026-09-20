@@ -12,11 +12,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
-from .._message import (
-    decode_model_messages,
-    encode_model_messages,
-    model_message_match_bytes,
-)
+from .._message import decode_model_messages, encode_model_messages
 from ._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -67,8 +63,8 @@ _TRANSCRIPT_SEEK_BLOCK = 128
 
 
 def _overlap_signature(message: ModelMessage) -> bytes:
-    """Framework-stamp-ignoring signature used for overlap matching."""
-    return model_message_match_bytes(message)
+    """Canonical signature used only by the legacy snapshot merge path."""
+    return encode_model_messages((message,))
 
 
 def _conversation_overlap_signature(message: ModelMessage) -> bytes:
