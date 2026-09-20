@@ -2616,18 +2616,17 @@ class DefaultExecutionService:
         )
 
     async def retry(
-        self, binding_digest: str, execution_id: str, request: RetryExecutionRequest
+        self, execution_id: str, request: RetryExecutionRequest
     ) -> ExecutionHandle:
         previous = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
         if previous.parent_execution_id is not None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if previous.binding_digest != binding_digest:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        binding = self._binding(previous.binding_digest, previous.binding)
+        binding_digest = previous.binding_digest
+        binding = self._binding(binding_digest, previous.binding)
         if binding.digest != binding_digest:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,
@@ -2656,18 +2655,17 @@ class DefaultExecutionService:
         )
 
     async def fork(
-        self, binding_digest: str, execution_id: str, request: ForkExecutionRequest
+        self, execution_id: str, request: ForkExecutionRequest
     ) -> ExecutionHandle:
         previous = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
         if previous.parent_execution_id is not None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if previous.binding_digest != binding_digest:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        binding = self._binding(previous.binding_digest, previous.binding)
+        binding_digest = previous.binding_digest
+        binding = self._binding(binding_digest, previous.binding)
         if binding.digest != binding_digest:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,
             principal=request.principal,
