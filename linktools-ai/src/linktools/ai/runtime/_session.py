@@ -217,6 +217,7 @@ class _SessionTranscriptStore(Protocol):
         history_id: str | None,
         step_run_id: str,
         tenant_id: str,
+        message_count: int | None = None,
     ) -> tuple[object, ...]: ...
 
 
@@ -656,6 +657,7 @@ class DefaultSessionService:
                 history_id=history_id,
                 step_run_id=record.continuation.step_run_id,
                 tenant_id=self._conversation.sessions.tenant_id,
+                message_count=record.continuation.message_count,
             )
 
     async def _iter_session_messages(
@@ -671,11 +673,22 @@ class DefaultSessionService:
             if self._transcript_store is None or record.continuation is None:
                 return
             history_id = record.continuation.history_id or record.history_id
-            async for message in self._transcript_store.iter_conversation_messages(
-                history_id=history_id,
-                step_run_id=record.continuation.step_run_id,
-                tenant_id=self._conversation.sessions.tenant_id,
-            ):
+            message_count = record.continuation.message_count
+            if message_count is None:
+                messages = self._transcript_store.iter_conversation_messages(
+                    history_id=history_id,
+                    step_run_id=record.continuation.step_run_id,
+                    tenant_id=self._conversation.sessions.tenant_id,
+                )
+            else:
+                messages = self._transcript_store.iter_conversation_message_range(
+                    history_id=history_id,
+                    step_run_id=record.continuation.step_run_id,
+                    tenant_id=self._conversation.sessions.tenant_id,
+                    start=0,
+                    end=message_count,
+                )
+            async for message in messages:
                 yield message
 
     def iter_session_messages(
