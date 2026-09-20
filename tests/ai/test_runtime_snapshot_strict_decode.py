@@ -45,7 +45,6 @@ from linktools.ai.runtime.state._store import (
     StoredRecord,
     alias_digest,
     operation_key,
-    partition_digest,
     scope_digest,
     sequence_key,
     sortable_identity,
@@ -232,7 +231,6 @@ async def test_runtime_state_restore_rejects_mismatched_logical_record_key_befor
     )
     record = StoredRecord(
         b"x" * 32,
-        partition_digest(namespace, tenant_id, "conversation", "session"),
         scope_digest(
             namespace,
             tenant_id,
@@ -471,7 +469,6 @@ def test_snapshot_rejects_truncated_execution_event_stream() -> None:
     execution = _execution_stub(event_sequence=2)
     owner_record = StoredRecord(
         owner_key,
-        b"p" * 32,
         None,
         None,
         "execution",
