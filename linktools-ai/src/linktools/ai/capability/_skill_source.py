@@ -273,9 +273,6 @@ class AssetSkillResourceSource:
         object_store: ObjectStore,
     ) -> ObjectRef:
         logical_root = _normalize_relative_path(root, field_name="skill root")
-        current = await self.current_revision(logical_root)
-        if current != expected_revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         return await _snapshot_skill_source(
             self,
             logical_root,
