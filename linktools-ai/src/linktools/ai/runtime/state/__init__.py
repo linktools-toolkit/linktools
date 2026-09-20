@@ -9,9 +9,8 @@ from ._plan import (
     RuntimeStateRoute,
     runtime_domain_uses_object_store,
 )
-from ._snapshot import SnapshotLimits
+from ._snapshot import OfflineExclusiveStorage, SnapshotLimits
 from ._root import RuntimeState
-from ._offline_maintenance import OfflineExclusiveStorage
 from ._contracts import ArtifactRecord, ArtifactState
 
 __all__ = [
