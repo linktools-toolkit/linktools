@@ -873,26 +873,15 @@ class _SqlTransaction:
         limit: int,
     ) -> tuple[StoredRecord, ...]:
         _require_scan_limit(limit)
-        from sqlalchemy import and_, or_, select
+        from sqlalchemy import select
 
         table = self._table("ai_state_records")
-        conditions = [table.c.store_digest == self._store_hex]
+        statement = select(table).where(table.c.store_digest == self._store_hex)
         if after is not None:
-            conditions.append(
-                or_(
-                    table.c.kind > after.kind,
-                    and_(
-                        table.c.kind == after.kind,
-                        table.c.key_digest > _hex(after.key_digest),
-                    ),
-                )
+            statement = statement.where(
+                table.c.key_digest > _hex(after.key_digest)
             )
-        statement = (
-            select(table)
-            .where(*conditions)
-            .order_by(table.c.kind, table.c.key_digest)
-            .limit(limit)
-        )
+        statement = statement.order_by(table.c.key_digest).limit(limit)
         rows = (await self._session.execute(statement)).mappings().all()
         values = tuple(_record_from_row(row) for row in rows)
         self._record_cache.update({value.key_digest: value for value in values})
