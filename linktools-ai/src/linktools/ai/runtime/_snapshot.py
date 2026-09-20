@@ -1384,6 +1384,7 @@ __all__ = [
     "RestoredRuntime",
     "RunSnapshot",
     "RuntimeSnapshot",
+    "SnapshotExclusiveGuard",
     "SnapshotLimits",
     "SnapshotTargetInspection",
     "snapshot_digest",
