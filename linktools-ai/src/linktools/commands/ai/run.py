@@ -5,7 +5,6 @@
 import asyncio
 import json
 from argparse import Namespace
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rich import get_console
@@ -13,22 +12,22 @@ from rich.console import Console
 from rich.text import Text
 
 from linktools.cli import BaseCommand, CommandError
-from linktools.cli.argparse import ConfigAction
-from linktools.core import ConfigField, environ
+from linktools.core import environ
 
 from linktools.ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
-from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Execution, ExecutionResult, Runtime
 
-from ._common import _load_workspace, _open_local_runtime, _run_async
+from ._common import (
+    _add_local_runtime_arguments,
+    _load_workspace,
+    _local_runtime_models,
+    _open_local_runtime,
+    _run_async,
+)
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
 
-OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
-OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
-OPENAI_API_KEY = ConfigField(name="OPENAI_API_KEY", cast=str, default=None, secret=True)
-OPENAI_VISION = ConfigField(name="OPENAI_VISION", cast=bool, default=False)
 _logger = environ.get_logger("commands.ai.run")
 
 
@@ -37,13 +36,7 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", help="the prompt")
-        parser.add_argument(
-            "--project", type=Path, default=None, help="working directory"
-        )
-        parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
-        parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
-        parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
-        parser.add_argument("--vision", action=ConfigAction, config=OPENAI_VISION)
+        _add_local_runtime_arguments(parser)
         parser.add_argument(
             "--planning",
             action="store_true",
@@ -62,30 +55,22 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         workspace = _load_workspace(args.project)
-        if not isinstance(args.model, str) or not args.model.strip():
-            raise CommandError("--model is required")
+        models = _local_runtime_models(args)
+        memory_scope = args.memory if args.memory is not None else "default"
         _logger.info(
             "ai run session selected: namespace=%s session=%s memory_scope=%s",
             "default",
             "default",
-            "default",
+            memory_scope,
         )
 
         async def execute() -> int:
-            async with _open_local_runtime(
-                workspace,
-                models=ModelRegistry.openai(
-                    model=args.model,
-                    vision=args.vision,
-                    base_url=args.base_url,
-                    api_key=args.api_key,
-                ),
-            ) as runtime:
+            async with _open_local_runtime(workspace, models=models) as runtime:
                 return await _emit_result(
                     runtime,
                     args.prompt,
                     "default",
-                    "default",
+                    memory_scope,
                     args.json,
                     args.planning,
                     args.thinking,

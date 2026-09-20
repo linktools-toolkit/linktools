@@ -4,15 +4,17 @@
 
 import asyncio
 import os
+from argparse import Namespace
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from filelock import FileLock
 
 from linktools.cli import CommandError
-from linktools.core import environ
+from linktools.cli.argparse import ConfigAction
+from linktools.core import ConfigField, environ
 
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.errors import AIError, ErrorCode
@@ -23,6 +25,38 @@ from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.workspace import Workspace
 
 ResultT = TypeVar("ResultT")
+
+if TYPE_CHECKING:
+    from linktools.cli import CommandParser
+
+OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
+OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
+OPENAI_API_KEY = ConfigField(name="OPENAI_API_KEY", cast=str, default=None, secret=True)
+OPENAI_VISION = ConfigField(name="OPENAI_VISION", cast=bool, default=False)
+
+
+def _add_local_runtime_arguments(parser: "CommandParser") -> None:
+    parser.add_argument("--project", type=Path, default=None, help="working directory")
+    parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
+    parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
+    parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
+    parser.add_argument("--vision", action=ConfigAction, config=OPENAI_VISION)
+    parser.add_argument(
+        "--memory",
+        default=None,
+        help="caller-owned memory scope (default: default)",
+    )
+
+
+def _local_runtime_models(args: Namespace) -> ModelRegistry:
+    if not isinstance(args.model, str) or not args.model.strip():
+        raise CommandError("--model is required")
+    return ModelRegistry.openai(
+        model=args.model,
+        vision=args.vision,
+        base_url=args.base_url,
+        api_key=args.api_key,
+    )
 
 
 def _load_workspace(root: "Path | None" = None) -> Workspace:

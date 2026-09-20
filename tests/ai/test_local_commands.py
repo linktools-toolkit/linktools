@@ -18,24 +18,30 @@ from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
 
 
-def test_ai_run_exposes_model_configuration_but_not_storage_selection() -> None:
-    parser = run_command.create_parser()
-    actions = {action.dest: action for action in parser._actions}
-    assert all(
-        isinstance(actions[name], ConfigAction)
-        for name in ("api_key", "base_url", "model")
-    )
-    assert not any(
-        action.dest
-        in {"assets", "asset_root", "asset_store", "storage", "storage_root"}
-        for action in parser._actions
-    )
+def test_ai_local_commands_share_runtime_arguments() -> None:
+    common = {"project", "api_key", "base_url", "model", "vision", "memory"}
+    for command in (run_command, acp_command):
+        parser = command.create_parser()
+        actions = {action.dest: action for action in parser._actions}
+        assert common <= set(actions)
+        assert all(
+            isinstance(actions[name], ConfigAction)
+            for name in ("api_key", "base_url", "model", "vision")
+        )
+        assert not any(
+            action.dest
+            in {"assets", "asset_root", "asset_store", "storage", "storage_root"}
+            for action in parser._actions
+        )
 
 
-def test_ai_acp_memory_scope_defaults_to_workspace() -> None:
-    args = acp_command.create_parser().parse_args([])
-    assert args.memory is None
-    assert acp_command.create_parser().parse_args(["--memory", "custom"]).memory == "custom"
+def test_ai_local_memory_scope_argument_is_consistent() -> None:
+    for command in (run_command, acp_command):
+        assert command.create_parser().parse_args([]).memory is None
+        assert (
+            command.create_parser().parse_args(["--memory", "custom"]).memory
+            == "custom"
+        )
 
 
 def test_ai_acp_uses_shared_local_runtime_composition(
@@ -48,7 +54,12 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     monkeypatch.setattr(acp_module, "_load_workspace", lambda _root: workspace)
 
     @asynccontextmanager
-    async def open_local_runtime(runtime_workspace: Workspace):
+    async def open_local_runtime(
+        runtime_workspace: Workspace,
+        *,
+        models: object,
+    ):
+        del models
         opened.append(runtime_workspace)
         yield SimpleNamespace(default_principal=object())
 
