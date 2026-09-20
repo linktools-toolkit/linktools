@@ -81,7 +81,7 @@ async def test_runtime_state_snapshot_identity_ignores_target_store(
     tmp_path,
 ) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeState.filesystem(root)
+    writable = RuntimeState.from_root(root)
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
 
@@ -104,7 +104,7 @@ async def test_runtime_state_snapshot_identity_ignores_target_store(
 @pytest.mark.asyncio
 async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     root = tmp_path / "runtime"
-    writable = RuntimeState.filesystem(root)
+    writable = RuntimeState.from_root(root)
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
     workspace_root = tmp_path / "workspace"
