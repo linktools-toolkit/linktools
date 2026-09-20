@@ -67,3 +67,15 @@ async def test_filesystem_execution_and_recovery_share_object_store(tmp_path) ->
         )
     finally:
         await state.close()
+
+
+def test_durable_evaluation_requires_durable_execution(tmp_path) -> None:
+    plan = RuntimeStatePlan(
+        evaluation=RuntimeStateRoute.filesystem(tmp_path / "evaluation"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="durable evaluation requires durable execution",
+    ):
+        RuntimeState.from_plan(plan)
