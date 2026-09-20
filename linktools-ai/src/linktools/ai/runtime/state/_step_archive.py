@@ -17,7 +17,7 @@ from pydantic_ai.messages import ModelMessage
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStore, StoredPayload
-from .._message import decode_model_messages
+from .._message import decode_model_messages, encode_model_messages
 from .._model_interaction import (
     StagedContextSpan,
     StagedModelInteraction,
@@ -705,6 +705,55 @@ class InMemoryStepArchive(StagingStepStore):
         snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
         return () if snapshot is None else tuple(snapshot.messages)
 
+    async def prepare_relocated_interactions(
+        self,
+        interactions: Sequence[ModelInteractionRecord],
+        resolved: Sequence[
+            tuple[
+                tuple[ModelMessage, ...],
+                tuple[ModelMessage, ...] | None,
+                bytes,
+            ]
+        ],
+    ) -> tuple[ModelInteractionRecord, ...]:
+        if len(interactions) != len(resolved):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        def inline_context(messages: Sequence[ModelMessage]) -> ContextProjection:
+            return ContextProjection(
+                (
+                    InlineContextBlock(
+                        RuntimePayloadRef(
+                            StoredPayload.inline_bytes(
+                                encode_model_messages(tuple(messages))
+                            ),
+                            self._runtime_domain,
+                        )
+                    ),
+                )
+            )
+
+        values: list[ModelInteractionRecord] = []
+        for interaction, (request, response, envelope) in zip(
+            interactions,
+            resolved,
+            strict=True,
+        ):
+            values.append(
+                replace(
+                    interaction,
+                    request_context=inline_context(request),
+                    request_envelope=RuntimePayloadRef(
+                        StoredPayload.inline_bytes(envelope),
+                        self._runtime_domain,
+                    ),
+                    response_context=(
+                        None if response is None else inline_context(response)
+                    ),
+                )
+            )
+        return tuple(values)
+
     async def resolve_model_interaction(
         self,
         interaction: object,
@@ -902,6 +951,67 @@ class StateStepArchive(StepStore):
                 interaction_count,
             )
         return result
+
+    async def prepare_relocated_interactions(
+        self,
+        interactions: Sequence[ModelInteractionRecord],
+        resolved: Sequence[
+            tuple[
+                tuple[ModelMessage, ...],
+                tuple[ModelMessage, ...] | None,
+                bytes,
+            ]
+        ],
+    ) -> tuple[ModelInteractionRecord, ...]:
+        if len(interactions) != len(resolved):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        async def inline_context(
+            run_id: str,
+            messages: Sequence[ModelMessage],
+        ) -> ContextProjection:
+            projection = ContextProjection(
+                (
+                    InlineContextBlock(
+                        RuntimePayloadRef(
+                            StoredPayload.inline_bytes(
+                                encode_model_messages(tuple(messages))
+                            ),
+                            self._runtime_domain,
+                        )
+                    ),
+                )
+            )
+            return await self._history.prepare_projection(run_id, projection)
+
+        values: list[ModelInteractionRecord] = []
+        for interaction, (request, response, envelope) in zip(
+            interactions,
+            resolved,
+            strict=True,
+        ):
+            values.append(
+                replace(
+                    interaction,
+                    request_context=await inline_context(
+                        interaction.run_id,
+                        request,
+                    ),
+                    request_envelope=await self._prepare_inline_payload(
+                        interaction.run_id,
+                        RuntimePayloadRef(
+                            StoredPayload.inline_bytes(envelope),
+                            self._runtime_domain,
+                        ),
+                    ),
+                    response_context=(
+                        None
+                        if response is None
+                        else await inline_context(interaction.run_id, response)
+                    ),
+                )
+            )
+        return tuple(values)
 
     async def resolve_model_interaction(
         self,
