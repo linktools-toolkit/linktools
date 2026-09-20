@@ -752,6 +752,8 @@ class StartEvaluationRequest:
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.dataset_digest, str) or not self.dataset_digest.strip():
+            raise ValueError("evaluation dataset identity is required")
         validate_memory_scope(self.memory_scope)
         validate_idempotency_key(self.idempotency_key)
 
