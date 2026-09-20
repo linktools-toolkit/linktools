@@ -761,14 +761,15 @@ class CompareEvaluationRequest:
     principal: Principal
     baseline_id: str
     candidate_id: str
-    dataset_id: "str | None" = None
-    dataset_revision: "int | None" = None
-    evaluator_contract_id: "str | None" = None
-    evaluator_contract_revision: "int | None" = None
-    target_kind: "str | None" = None
-    metric_contract_revision: "int | None" = None
-    snapshot_digest: "str | None" = None
-    artifact_digest: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.baseline_id, str)
+            or not self.baseline_id.strip()
+            or not isinstance(self.candidate_id, str)
+            or not self.candidate_id.strip()
+        ):
+            raise ValueError("evaluation ids are required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -798,32 +799,16 @@ class EvaluationComparison:
     baseline_id: str
     candidate_id: str
     compatible: bool
-    pass_rate: float = 0.0
-    error_rate: float = 0.0
-    refusal_rate: float = 0.0
-    retry_count: int = 0
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_cost: float = 0.0
-    latency_p50: float = 0.0
-    latency_p95: float = 0.0
 
     def __post_init__(self) -> None:
         if (
-            not self.baseline_id.strip()
+            not isinstance(self.baseline_id, str)
+            or not self.baseline_id.strip()
+            or not isinstance(self.candidate_id, str)
             or not self.candidate_id.strip()
-            or min(
-                self.pass_rate,
-                self.error_rate,
-                self.refusal_rate,
-                self.total_cost,
-                self.latency_p50,
-                self.latency_p95,
-            )
-            < 0
-            or min(self.retry_count, self.input_tokens, self.output_tokens) < 0
+            or not isinstance(self.compatible, bool)
         ):
-            raise ValueError("evaluation comparison contains invalid metrics")
+            raise ValueError("evaluation comparison is invalid")
 
 
 @dataclass(frozen=True, slots=True)
