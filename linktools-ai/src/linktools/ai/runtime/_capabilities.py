@@ -92,6 +92,18 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         repr=False,
         compare=False,
     )
+    _last_snapshot_state: SnapshotState | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _last_snapshot_pending_index: int | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
     _live_messages: Sequence[ModelMessage] | None = field(
         default=None,
         init=False,
@@ -280,7 +292,8 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         if (
             self._last_snapshot_context == frozen_context
             and self._last_snapshot_transcript_count == len(raw)
-            and pending_index is None
+            and self._last_snapshot_state == state
+            and self._last_snapshot_pending_index == pending_index
         ):
             return
         await self.capture.save_snapshot(
@@ -299,6 +312,8 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         )
         self._last_snapshot_transcript_count = len(raw)
         self._last_snapshot_context = frozen_context
+        self._last_snapshot_state = state
+        self._last_snapshot_pending_index = pending_index
 
 
 async def compose_platform_capabilities(
