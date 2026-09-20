@@ -54,6 +54,7 @@ from ._codec import (
     encode_operation,
     encode_record,
     iter_runtime_object_refs,
+    _iter_runtime_object_dependencies,
 )
 
 if TYPE_CHECKING:
@@ -434,52 +435,72 @@ class RuntimeState:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
             return value
 
-        async def copy_references(encoded: object, domain: RuntimeDomain) -> None:
+        async def copy_reference(
+            source_domain: RuntimeDomain,
+            reference: ObjectRef,
+        ) -> None:
             nonlocal entry_count, object_bytes
+            identity = (
+                source_domain.value,
+                reference.key,
+                reference.digest,
+                reference.size,
+            )
+            if identity in copied_objects:
+                return
+            entry_count += 1
+            object_bytes += reference.size
+            if (
+                entry_count > limits.max_entries
+                or object_bytes > limits.max_bytes
+            ):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            source_store = self.object_store(source_domain)
+            key = (
+                "v1/runtime-state-object/"
+                f"{source_domain.value}/{reference.digest}"
+            )
+            await object_store.put(
+                key,
+                source_store.open(reference.key),
+                expected_size=reference.size,
+                expected_digest=reference.digest,
+            )
+            objects.append(
+                {
+                    "domain": source_domain.value,
+                    "source": _object_ref_payload(reference),
+                    "content": _object_ref_payload(
+                        ObjectRef(
+                            object_store.store_id,
+                            key,
+                            reference.digest,
+                            reference.size,
+                        )
+                    ),
+                }
+            )
+            copied_objects.add(identity)
+            if reference.key.startswith("v1/skill-source-snapshot/"):
+                payload = await read_object(
+                    source_store,
+                    reference.key,
+                    expected_digest=reference.digest,
+                    expected_size=reference.size,
+                )
+                for nested_domain, nested in _iter_runtime_object_dependencies(
+                    reference,
+                    payload,
+                    default_domain=source_domain,
+                ):
+                    await copy_reference(nested_domain, nested)
+
+        async def copy_references(encoded: object, domain: RuntimeDomain) -> None:
             for source_domain, reference in iter_runtime_object_refs(
                 encoded,
                 default_domain=domain,
             ):
-                identity = (
-                    source_domain.value,
-                    reference.key,
-                    reference.digest,
-                    reference.size,
-                )
-                if identity in copied_objects:
-                    continue
-                entry_count += 1
-                object_bytes += reference.size
-                if (
-                    entry_count > limits.max_entries
-                    or object_bytes > limits.max_bytes
-                ):
-                    raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
-                key = (
-                    "v1/runtime-state-object/"
-                    f"{source_domain.value}/{reference.digest}"
-                )
-                await object_store.put(
-                    key,
-                    self.object_store(source_domain).open(reference.key),
-                    expected_size=reference.size,
-                    expected_digest=reference.digest,
-                )
-                objects.append(
-                    {
-                        "domain": source_domain.value,
-                        "source": _object_ref_payload(reference),
-                        "content": _object_ref_payload(
-                            ObjectRef(
-                                object_store.store_id,
-                                key,
-                                reference.digest,
-                                reference.size,
-                            )
-                        ),
-                    }
-                )
-                copied_objects.add(identity)
+                await copy_reference(source_domain, reference)
 
         for domain in sorted(self._plan.durable_domains, key=lambda item: item.value):
             store = self._stores[domain]
