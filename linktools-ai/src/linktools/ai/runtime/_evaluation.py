@@ -51,13 +51,6 @@ _TERMINAL_EVALUATION_STATUSES = frozenset(
         EvaluationStatus.CANCELLED,
     }
 )
-_TERMINAL_EXECUTION_STATUSES = frozenset(
-    {
-        ExecutionStatus.SUCCEEDED,
-        ExecutionStatus.FAILED,
-        ExecutionStatus.CANCELLED,
-    }
-)
 _EXECUTION_EVALUATION_STATUS = {
     ExecutionStatus.PENDING_START: EvaluationStatus.PENDING,
     ExecutionStatus.START_UNKNOWN: EvaluationStatus.RUNNING,
