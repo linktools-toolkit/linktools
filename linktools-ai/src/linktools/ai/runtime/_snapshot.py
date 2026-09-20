@@ -356,8 +356,7 @@ class RuntimeSnapshot:
                 )
                 try:
                     await asyncio.to_thread(
-                        _write_bytes_durable,
-                        staging / "snapshot.json",
+                        (staging / "snapshot.json").write_bytes,
                         snapshot_payload,
                     )
                     await asyncio.to_thread(_fsync_tree, staging)
@@ -396,6 +395,7 @@ class RuntimeSnapshot:
                                 _fsync_directory,
                                 generation_root.parent,
                             )
+                            await asyncio.to_thread(_fsync_directory, root)
                         except OSError as error:
                             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
                         value = {
