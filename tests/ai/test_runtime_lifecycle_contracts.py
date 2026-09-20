@@ -28,6 +28,7 @@ class _Components:
     artifact = object()
     task_node_runtime = None
     tree_streamer = None
+    binding_freezer = None
 
     def __init__(self, close_callback) -> None:
         self.close_callback = close_callback
