@@ -989,7 +989,6 @@ def _decode_v1_evaluation_record(
         }
     )
     legacy_only = {
-        "tenant_id": str,
         "dataset_revision": int,
         "evaluator_id": str,
         "evaluator_revision": int,
@@ -1018,7 +1017,8 @@ def _decode_v1_evaluation_record(
         )
 
     if dataset_field == "dataset_id":
-        decode("tenant_id", str)
+        if "tenant_id" in raw_fields:
+            decode("tenant_id", str)
         if (
             decode("dataset_revision", int) != 1
             or decode("evaluator_id", str) != "default"
