@@ -1225,6 +1225,20 @@ class StateStepArchive(StepStore):
     ) -> None:
         self._context_baselines[step_run_id] = context
 
+    async def transcript_message_count_for_run(
+        self,
+        run: RunRecord,
+    ) -> int:
+        require_no_run_history_lock(
+            "StateStepArchive.transcript_message_count_for_run"
+        )
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run.run_id
+        )
+        return await self._history.transcript_message_count(owner_id)
+
     async def prepare_snapshots(
         self,
         run: RunRecord,
