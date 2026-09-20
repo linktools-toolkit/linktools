@@ -39,7 +39,7 @@ async def test_builtin_loader_freezes_agent_skill_and_mcp_declarations() -> None
     await store.put(AssetKey("skill", "skill"), SkillSpecCodec().encode(skill))
     await store.put(AssetKey("mcp", "server"), MCPServerSpecCodec().encode(mcp))
 
-    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
     assert [(item.kind, item.id) for item in frozen] == [
         ("agent", "agent"),
@@ -59,7 +59,7 @@ async def test_builtin_loader_rejects_declaration_identity_mismatch() -> None:
     )
 
     with pytest.raises(AIError) as error:
-        await CapabilityGroup.from_store("workspace", store).freeze()
+        await CapabilityGroup("workspace", assets=store).freeze()
 
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
 
@@ -70,7 +70,7 @@ async def test_store_group_requires_initialized_asset_store() -> None:
     store = AssetStore(StorageOverlay(backend, writer=backend))
 
     with pytest.raises(AIError) as error:
-        await CapabilityGroup.from_store("workspace", store).freeze()
+        await CapabilityGroup("workspace", assets=store).freeze()
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
 
@@ -101,13 +101,33 @@ async def test_custom_loader_receives_frozen_metadata_and_reads_explicit_keys_on
     await store.put(AssetKey("custom", "a"), b"a")
     await store.put(AssetKey("custom", "b"), b"b")
     loader = _CapturingLoader()
-    group = CapabilityGroup.from_store("workspace", store)
-    group.loader(loader)
+    group = CapabilityGroup("workspace", assets=store)
+    group.loader("custom", loader)
 
     assert await group.freeze() == ()
     assert loader.calls == 1
     assert [entry.key for entry in loader.entries] == [AssetKey("custom", "a"), AssetKey("custom", "b")]
     assert loader.read_value == b"a"
+
+
+class _NoopLoader:
+    async def load(
+        self,
+        context: CapabilityLoadContext,
+    ) -> "Sequence[CapabilityContribution[object]]":
+        del context
+        return ()
+
+
+@pytest.mark.asyncio
+async def test_replacing_skill_loader_disables_builtin_skill_layout_validation() -> None:
+    store = await _store()
+    await store.put(AssetKey("skill", "a/SKILL.md"), b"custom")
+    await store.put(AssetKey("skill", "a/x/SKILL.md"), b"custom")
+    group = CapabilityGroup("workspace", assets=store)
+    group.loader("skill", _NoopLoader())
+
+    assert await group.freeze() == ()
 
 
 class _OutsideSnapshotLoader:
@@ -127,8 +147,8 @@ class _OutsideSnapshotLoader:
 async def test_custom_loader_cannot_read_key_outside_frozen_metadata() -> None:
     store = await _store()
     await store.put(AssetKey("custom", "a"), b"a")
-    group = CapabilityGroup.from_store("workspace", store)
-    group.loader(_OutsideSnapshotLoader())
+    group = CapabilityGroup("workspace", assets=store)
+    group.loader("custom", _OutsideSnapshotLoader())
 
     with pytest.raises(AIError) as error:
         await group.freeze()
@@ -165,8 +185,8 @@ async def test_duplicate_candidate_identity_is_rejected_after_all_loaders_finish
         AssetKey("agent", "agent"),
         AgentSpecCodec().encode(AgentSpec("agent", model="model")),
     )
-    group = CapabilityGroup.from_store("workspace", store)
-    group.loader(_DuplicateAgentLoader())
+    group = CapabilityGroup("workspace", assets=store)
+    group.loader("custom", _DuplicateAgentLoader())
 
     with pytest.raises(AIError) as error:
         await group.freeze()
@@ -197,7 +217,7 @@ async def test_freeze_ignores_assets_added_after_the_captured_snapshot() -> None
     await store.initialize()
     await store.put(AssetKey("skill", "first"), SkillSpecCodec().encode(SkillSpec("first", "first")))
 
-    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
     assert [item.id for item in frozen] == ["first"]
 
@@ -242,15 +262,15 @@ async def test_builtin_loader_batches_declaration_body_reads() -> None:
         SkillSpecCodec().encode(SkillSpec("skill", "instructions")),
     )
 
-    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
     assert [item.id for item in frozen] == ["agent", "server", "skill"]
-    assert len(store.batch_reads) == 1
-    assert set(store.batch_reads[0]) == {
-        AssetKey("agent", "agent"),
-        AssetKey("mcp", "server"),
-        AssetKey("skill", "skill"),
-    }
+    assert len(store.batch_reads) == 3
+    assert tuple(store.batch_reads) == (
+        (AssetKey("agent", "agent"),),
+        (AssetKey("skill", "skill"),),
+        (AssetKey("mcp", "server"),),
+    )
     assert store.individual_reads == 0
 
 

@@ -76,6 +76,9 @@ class SqlObjectStore:
     def store_id(self) -> str:
         return self._store_id
 
+    def local_paths(self) -> tuple[Path, ...]:
+        return ()
+
     @property
     def pending_background_tasks(self) -> tuple[asyncio.Task[Any], ...]:
         return tuple(task for task in self._background_tasks if not task.done())

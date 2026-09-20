@@ -361,7 +361,7 @@ class _RecoveryCoordinator:
             return overlay, False
         checkpoint = await self._port.load_recovery_checkpoint(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._port.tenant_id,
         )
         if (
             checkpoint is None
@@ -450,11 +450,11 @@ class _RecoveryCoordinator:
     ) -> None:
         current = await self._port.load_execution(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._port.tenant_id,
         )
         checkpoint = await self._port.load_recovery_checkpoint(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._port.tenant_id,
         )
         if current is None or checkpoint is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -503,13 +503,12 @@ class _RecoveryCoordinator:
             ApprovalRecord(
                 _deferred_id(
                     "approval-v1",
-                    current.tenant_id,
+                    self._port.tenant_id,
                     current.execution_id,
                     step_run_id,
                     item.tool_call_id,
                 ),
                 current.execution_id,
-                current.tenant_id,
                 ApprovalStatus.PENDING,
                 None,
                 None,
@@ -524,13 +523,12 @@ class _RecoveryCoordinator:
             ExternalCallRecord(
                 _deferred_id(
                     "external-call-v1",
-                    current.tenant_id,
+                    self._port.tenant_id,
                     current.execution_id,
                     step_run_id,
                     item.tool_call_id,
                 ),
                 current.execution_id,
-                current.tenant_id,
                 ExternalCallStatus.PENDING,
                 None,
                 paused_at,
@@ -581,7 +579,7 @@ class _RecoveryCoordinator:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         tool = await self._port._get_tool_operation(
             request.operation_id,
-            tenant_id=current.tenant_id,
+            tenant_id=self._port.tenant_id,
         )
         if tool is None or tool.execution_id != execution_id:
             raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
@@ -625,7 +623,7 @@ class _RecoveryCoordinator:
         resolution_operation_id = canonical_sha256(
             {
                 "scope": "execution.tool_effect.resolve",
-                "tenant_id": current.tenant_id,
+                "tenant_id": self._port.tenant_id,
                 "execution_id": execution_id,
                 "idempotency_key_digest": idempotency_key_digest(
                     request.idempotency_key
@@ -643,7 +641,7 @@ class _RecoveryCoordinator:
         now = datetime.now(timezone.utc)
         ledger = OperationLedgerInput(
             resolution_operation_id,
-            current.tenant_id,
+            self._port.tenant_id,
             ResourceKind.TOOL_OPERATION,
             request.operation_id,
             execution_id,
@@ -683,7 +681,7 @@ class _RecoveryCoordinator:
     async def reconcile_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         execution = await self._port.load_execution(
             checkpoint.execution_id,
-            tenant_id=checkpoint.tenant_id,
+            tenant_id=self._port.tenant_id,
         )
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -711,7 +709,7 @@ class _RecoveryCoordinator:
         ):
             effects = await self._port._recovery_failure_effects(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._port.tenant_id,
             )
             if effects:
                 first = effects[0]
@@ -731,7 +729,7 @@ class _RecoveryCoordinator:
                 return
         principal = Principal(
             execution.principal_id,
-            execution.tenant_id,
+            self._port.tenant_id,
             execution.principal_kind,
         )
         if checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
@@ -821,7 +819,7 @@ class _RecoveryCoordinator:
         await self._port.launch(request, execution, resume=resume)
         _logger.info(
             "local recovery execution relaunched: tenant=%s execution=%s",
-            checkpoint.tenant_id,
+            self._port.tenant_id,
             checkpoint.execution_id,
         )
 
@@ -900,11 +898,11 @@ class _RecoveryCoordinator:
     ) -> _DeferredResume | None:
         current = await self._port.load_execution(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._port.tenant_id,
         )
         recovery = await self._port.load_recovery_checkpoint(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._port.tenant_id,
         )
         if current is None or recovery is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -921,14 +919,14 @@ class _RecoveryCoordinator:
         for pending in recovery.pending_tools.approvals:
             approval_id = _deferred_id(
                 "approval-v1",
-                current.tenant_id,
+                self._port.tenant_id,
                 current.execution_id,
                 recovery.pending_tools.source_step_run_id,
                 pending.tool_call_id,
             )
             record = await self._port.load_approval(
                 approval_id,
-                tenant_id=current.tenant_id,
+                tenant_id=self._port.tenant_id,
             )
             if record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -956,14 +954,14 @@ class _RecoveryCoordinator:
         for pending in recovery.pending_tools.calls:
             call_id = _deferred_id(
                 "external-call-v1",
-                current.tenant_id,
+                self._port.tenant_id,
                 current.execution_id,
                 recovery.pending_tools.source_step_run_id,
                 pending.tool_call_id,
             )
             record = await self._port.load_external_call(
                 call_id,
-                tenant_id=current.tenant_id,
+                tenant_id=self._port.tenant_id,
             )
             if record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1045,6 +1043,8 @@ class _RecoveryCoordinator:
                     await self.reconcile_checkpoint(checkpoint)
                 except AIError as error:
                     if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                        raise
+                    if error.safe_details.get("reason") == "workspace_mismatch":
                         raise
                     _logger.warning(
                         "recovery reconciliation deferred: execution=%s",

@@ -318,6 +318,10 @@ async def test_runtime_object_preflight_ignores_external_filesystem_work(
 async def test_execution_retention_releases_staging_after_execution_lookup() -> None:
     calls: list[str] = []
 
+    async def close_retention(execution_id: str, *, tenant_id: str) -> bool:
+        calls.append(f"retention:{execution_id}:{tenant_id}")
+        return True
+
     async def execution_get(execution_id: str, *, tenant_id: str) -> object:
         calls.append(f"execution:{execution_id}:{tenant_id}")
         return SimpleNamespace(session_id=None, agent_run_sequence=0)
@@ -331,7 +335,10 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
 
     controller = object.__new__(RuntimeRetentionController)
     controller._execution = SimpleNamespace(
-        executions=SimpleNamespace(get=execution_get),
+        executions=SimpleNamespace(
+            close_retention=close_retention,
+            get=execution_get,
+        ),
     )
     controller._conversation = SimpleNamespace()
     controller._namespace = "runtime"
@@ -342,6 +349,7 @@ async def test_execution_retention_releases_staging_after_execution_lookup() -> 
     await controller.release_execution_handoff("execution", tenant_id="tenant")
 
     assert calls == [
+        "retention:execution:tenant",
         "execution:execution:tenant",
         "staging:execution:()",
     ]

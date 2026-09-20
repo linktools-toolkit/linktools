@@ -39,7 +39,7 @@ class Command(BaseCommand):
         table = Table.grid(padding=(0, 2))
         table.add_column(style="bold")
         table.add_column()
-        table.add_row("Workspace ID", workspace.workspace_id)
+        table.add_row("Workspace", str(workspace.root))
         table.add_row("Workspace Root", str(workspace.root))
         table.add_row("Asset Root", str(workspace.storage_root))
         table.add_row("Runtime DB", _path_state(runtime_root / "runtime.db"))

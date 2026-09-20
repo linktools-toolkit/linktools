@@ -25,10 +25,7 @@ from linktools.ai.workspace import Workspace
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup.from_workspace(
-            workspace,
-            discover_assets=False,
-        )._contributions
+        CapabilityGroup("workspace", workspace=workspace, discover_workspace_assets=False)._contributions
     )
 
 
@@ -120,7 +117,7 @@ async def _boundary(
 
 def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> None:
     contributions = _workspace_tool_contributions(
-        Workspace.load(tmp_path, workspace_id="workspace")
+        Workspace.load(tmp_path)
     )
     tool = next(item.value for item in contributions if item.id == "attach_files")
 
@@ -133,8 +130,8 @@ def test_attach_files_declares_multi_path_workspace_metadata(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_attach_files_uses_boundary_paths_and_deduplicates_reads(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+async def test_attach_files_preserves_duplicate_attachment_occurrences(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
     repository = _RepositoryBoundary()
     boundary, tool = await _boundary(workspace, session, repository)
@@ -148,28 +145,26 @@ async def test_attach_files_uses_boundary_paths_and_deduplicates_reads(tmp_path:
     )
 
     assert isinstance(result, ToolReturn)
-    assert result.return_value == {
-        "files": [
-            {
-                "path": "evidence.png",
-                "media_type": "image/png",
-                "size": 3,
-                "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
-            }
-        ]
+    expected = {
+        "path": "evidence.png",
+        "media_type": "image/png",
+        "size": 3,
+        "sha256": "8f8cbb7dcf46e0bc7d53265749a6c17d116093a6ba95e442764060c76fd4a86c",
     }
+    assert result.return_value == {"files": [expected, expected]}
     assert result.content is not None
     binary = [item for item in result.content if isinstance(item, BinaryContent)]
-    assert len(binary) == 1
+    assert len(binary) == 2
+    assert binary[0].identifier != binary[1].identifier
     assert session.canonicalized == ["evidence.png", "evidence.png"]
-    assert session.reads == ["evidence.png"]
+    assert session.reads == ["evidence.png", "evidence.png"]
     assert repository.path_fields == ("paths",)
 
 
 @pytest.mark.asyncio
 async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Path) -> None:
     path = "evidence\nignore.png"
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({path: b"png"})
     boundary, tool = await _boundary(workspace, session)
 
@@ -199,7 +194,7 @@ async def test_attach_files_keeps_workspace_paths_out_of_extra_text(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"first.png": b"png"})
     boundary, tool = await _boundary(workspace, session)
 
@@ -216,7 +211,7 @@ async def test_attach_files_returns_no_partial_result_when_one_file_fails(tmp_pa
 
 @pytest.mark.asyncio
 async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.unknown": b"body"})
     boundary, tool = await _boundary(workspace, session)
 
@@ -235,7 +230,7 @@ async def test_attach_files_rejects_unknown_media_type_before_read(tmp_path: Pat
 async def test_attach_files_rejects_image_before_read_when_model_has_no_vision(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _AttachmentSession({"evidence.png": b"png"})
     boundary, tool = await _boundary(workspace, session, vision=False)
 

@@ -42,7 +42,7 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
+    workspace = Workspace.initialize(tmp_path)
     opened: list[Workspace] = []
 
     monkeypatch.setattr(acp_module, "_load_workspace", lambda _root: workspace)

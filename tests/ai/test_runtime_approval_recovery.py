@@ -51,7 +51,6 @@ def _execution(now: datetime) -> ExecutionRecord:
     binding = _binding()
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -96,7 +95,6 @@ def _continuation() -> PendingToolContinuation:
 def _checkpoint(now: datetime) -> RecoveryCheckpoint:
     return RecoveryCheckpoint(
         execution_id="execution",
-        tenant_id="tenant",
         step_run_id="step-1",
         state=RecoveryCheckpointState.ACTIVE,
         revision=0,
@@ -114,13 +112,12 @@ def _approval(
     pending = continuation.approvals[0]
     return ApprovalRecord(
         approval_id=approval_id_for_call(
-            execution.tenant_id,
+            "tenant",
             execution.execution_id,
             continuation.source_step_run_id,
             pending.tool_call_id,
         ),
         execution_id=execution.execution_id,
-        tenant_id=execution.tenant_id,
         status=ApprovalStatus.PENDING,
         idempotency_key_digest=None,
         decision=None,
@@ -170,7 +167,7 @@ async def _enter_waiting(
     commands = _commands(state, namespace)
     await commands.commit_deferred_checkpoint(
         execution_id=execution.execution_id,
-        tenant_id=execution.tenant_id,
+        tenant_id="tenant",
         expected_execution_revision=execution.revision,
         expected_event_sequence=execution.event_sequence,
         expected_recovery_revision=checkpoint.revision,
@@ -190,20 +187,20 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
     try:
         current = await state.execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
         )
         checkpoint = await state.recovery.checkpoints.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
         )
         approval = await state.recovery.approvals.get(
             approval_id_for_call(
-                execution.tenant_id,
+                "tenant",
                 execution.execution_id,
                 continuation.source_step_run_id,
                 continuation.approvals[0].tool_call_id,
             ),
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
         )
         assert current is not None
         assert current.status is ExecutionStatus.WAITING_DEFERRED
@@ -213,7 +210,7 @@ async def test_deferred_checkpoint_persists_approval_frontier_atomically() -> No
         assert approval is not None and approval.status is ApprovalStatus.PENDING
         events = await state.execution.events.list(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
             after_sequence=0,
             limit=10,
         )
@@ -231,7 +228,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
     )
     try:
         approval_id = approval_id_for_call(
-            execution.tenant_id,
+            "tenant",
             execution.execution_id,
             continuation.source_step_run_id,
             continuation.approvals[0].tool_call_id,
@@ -239,7 +236,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         now = datetime.now(timezone.utc)
         await state.recovery.approvals.decide(
             approval_id,
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
             expected_status=ApprovalStatus.PENDING,
             idempotency_key_digest=idempotency_key_digest("decision"),
             decision=ApprovalDecision.APPROVE,
@@ -249,7 +246,7 @@ async def test_deferred_resume_clears_frontier_and_advances_attempt_once() -> No
         )
         resumed, active = await commands.claim_deferred_resume_checkpoint(
             execution_id=execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
             expected_execution_revision=execution.revision + 1,
             expected_event_sequence=execution.event_sequence + 1,
             expected_recovery_revision=checkpoint.revision + 1,
@@ -273,14 +270,13 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
     try:
         current = await state.execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
         )
         assert current is not None
         committed = await commands.commit_deferred_cancel_checkpoint(
-            ExecutionCancelRequestCommit(
-                execution.execution_id,
-                execution.tenant_id,
-                current.revision,
+                ExecutionCancelRequestCommit(
+                    execution.execution_id,
+                    current.revision,
                 current.event_sequence,
                 "cancel-operation",
                 datetime.now(timezone.utc),
@@ -291,16 +287,16 @@ async def test_deferred_cancel_cancels_pending_approval_and_clears_frontier() ->
         assert committed.status is ExecutionStatus.CANCELLING
         approval = await state.recovery.approvals.get(
             approval_id_for_call(
-                execution.tenant_id,
+                "tenant",
                 execution.execution_id,
                 continuation.source_step_run_id,
                 continuation.approvals[0].tool_call_id,
             ),
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
         )
         active = await state.recovery.checkpoints.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id="tenant",
         )
         assert approval is not None and approval.status is ApprovalStatus.CANCELLED
         assert active is not None

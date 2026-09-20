@@ -63,7 +63,6 @@ def _execution(
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -210,6 +209,205 @@ async def test_live_durable_terminal_publication_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_stream_emits_pending_semantic_event_immediately() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    service = _service(_execution(), _EventReader({}), broker)
+    principal = Principal("user", "tenant", "user")
+    iterator = service.stream(
+        "execution",
+        principal=principal,
+    ).__aiter__()
+
+    pending = asyncio.create_task(anext(iterator))
+    await asyncio.sleep(0)
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.TOOL_CALL_STARTED,
+        {"call_id": "call", "tool_name": "tool"},
+        durable_sequence=None,
+    )
+    event = await asyncio.wait_for(pending, timeout=1.0)
+    assert event.durable_sequence is None
+    assert event.event_type == ExecutionEventType.TOOL_CALL_STARTED
+
+    await iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    events = _EventReader({})
+    service = _service(
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=260, event_sequence=260),
+        events,
+        broker,
+    )
+    principal = Principal("user", "tenant", "user")
+    iterator = service.stream(
+        "execution",
+        principal=principal,
+    ).__aiter__()
+
+    first_task = asyncio.create_task(anext(iterator))
+    await asyncio.sleep(0)
+    first_payload = {"call_id": "call-1", "tool_name": "tool"}
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.TOOL_CALL_STARTED,
+        first_payload,
+        durable_sequence=None,
+    )
+    first = await asyncio.wait_for(first_task, timeout=1.0)
+    assert first.durable_sequence is None
+    assert first.payload == first_payload
+
+    broker.confirm_events("execution", first_sequence=1, count=1)
+    durable = tuple(
+        ExecutionEvent(
+            "execution",
+            sequence,
+            ExecutionEventType.EXECUTION_SUCCEEDED
+            if sequence == 260
+            else ExecutionEventType.TOOL_CALL_STARTED,
+            {}
+            if sequence == 260
+            else {"call_id": f"call-{sequence}", "tool_name": "tool"},
+        )
+        for sequence in range(1, 261)
+    )
+    events.pages[0] = durable
+    for event in durable[1:]:
+        broker.publish_event(
+            event.execution_id,
+            event.event_type,
+            event.payload,
+            durable_sequence=event.sequence,
+        )
+    broker.complete("execution")
+
+    remaining = [item async for item in iterator]
+    assert [item.durable_sequence for item in remaining] == list(range(2, 261))
+    assert remaining[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_live_broker_durable_overflow_switches_to_repository_replay() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    for sequence in range(1, 300):
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": f"call-{sequence}", "tool_name": "tool"},
+            durable_sequence=sequence,
+        )
+
+    assert "execution" in broker._replay_required
+    assert "execution" not in broker._buffers
+
+
+@pytest.mark.asyncio
+async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    first = broker.claim_local_producer("execution")
+    second = broker.subscribe("execution")
+    assert first is not None
+
+    for index in range(300):
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": f"call-{index}", "tool_name": "tool"},
+            durable_sequence=None,
+        )
+
+    assert first.replay_required
+    assert second.replay_required
+    assert len(first._queue) == 1
+    assert len(second._queue) == 1
+    assert broker._pending_event_counts["execution"] == 300
+
+    await broker.wait_for_activity("execution")
+    broker.publish(
+        ExecutionDelta(
+            "execution",
+            ExecutionDeltaType.ASSISTANT_TEXT_DELTA,
+            "discarded-after-replay",
+        )
+    )
+    assert not broker._activity["execution"].is_set()
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.TOOL_CALL_STARTED,
+        {"call_id": "late-call", "tool_name": "tool"},
+        durable_sequence=None,
+    )
+    assert not broker._activity["execution"].is_set()
+
+    broker.confirm_events("execution", first_sequence=1, count=301)
+    assert broker._activity["execution"].is_set()
+    assert "execution" not in broker._pending_event_counts
+    await first.close()
+    await second.close()
+
+
+@pytest.mark.asyncio
+async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    durable = tuple(
+        ExecutionEvent(
+            "execution",
+            sequence,
+            ExecutionEventType.EXECUTION_SUCCEEDED
+            if sequence == 300
+            else ExecutionEventType.TOOL_CALL_STARTED,
+            {}
+            if sequence == 300
+            else {"call_id": f"call-{sequence}", "tool_name": "tool"},
+        )
+        for sequence in range(1, 301)
+    )
+    for event in durable:
+        broker.publish_event(
+            event.execution_id,
+            event.event_type,
+            event.payload,
+            durable_sequence=event.sequence,
+        )
+    broker.complete("execution")
+
+    service = _service(
+        _execution(
+            status=ExecutionStatus.SUCCEEDED,
+            revision=300,
+            event_sequence=300,
+        ),
+        _EventReader({0: durable}),
+        broker,
+    )
+    principal = Principal("user", "tenant", "user")
+    streamed = [
+        item
+        async for item in service.stream(
+            "execution",
+            principal=principal,
+        )
+    ]
+
+    assert [item.durable_sequence for item in streamed] == list(range(1, 301))
+    assert streamed[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+
+
+@pytest.mark.asyncio
 async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
     state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="stream-order", tenant_id="tenant")
@@ -227,7 +425,7 @@ async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path:
             ),
         )
         committed = await state.execution.executions.request_cancel(
-            ExecutionCancelRequestCommit("execution", "tenant", 0, 0, "cancel-op", now),
+            ExecutionCancelRequestCommit("execution", 0, 0, "cancel-op", now),
             pending_events=pending,
         )
         after = int(generation.read_text(encoding="utf-8"))
@@ -256,6 +454,8 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
     terminal = _execution(status=ExecutionStatus.SUCCEEDED, revision=1, event_sequence=1)
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -296,7 +496,6 @@ async def test_cancel_terminal_race_is_conflict_not_integrity() -> None:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
                 "execution",
-                "tenant",
                 0,
                 0,
                 "cancel-op",
@@ -344,6 +543,7 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._tenant_id = "tenant"
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
@@ -354,7 +554,6 @@ async def test_cancel_local_bookkeeping_survives_caller_cancellation() -> None:
     backend._metric_recorder = None
     commit = ExecutionCancelRequestCommit(
         "execution",
-        "tenant",
         0,
         0,
         "cancel-op",
@@ -407,8 +606,6 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
         safe_error_details={},
     )
     result = ResultRecord(
-        execution_id="execution",
-        tenant_id="tenant",
         output=None,
         stop_reason=StopReason.ERROR,
         usage=UsageMetrics(),
@@ -449,6 +646,7 @@ async def test_terminal_local_bookkeeping_survives_caller_cancellation() -> None
 
     commands = _Commands()
     backend = object.__new__(LocalExecutionBackend)
+    backend._tenant_id = "tenant"
     backend._pending_audit_events = {"execution": [pending]}
     backend._pending_audit_locks = {}
     backend._checkpoint_tasks = set()
@@ -724,6 +922,8 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
     )
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -769,7 +969,6 @@ async def test_concurrent_cancel_winner_is_conflict_not_integrity() -> None:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
                 "execution",
-                "tenant",
                 0,
                 0,
                 "our-cancel",
@@ -789,6 +988,8 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
     )
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -824,7 +1025,6 @@ async def test_revision_only_cancel_race_is_conflict_not_integrity() -> None:
         await commands.commit_cancel_checkpoint(
             ExecutionCancelRequestCommit(
                 "execution",
-                "tenant",
                 0,
                 0,
                 "cancel-op",
@@ -844,6 +1044,8 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
     )
 
     class _ExecutionRepo:
+        tenant_id = "tenant"
+
         async def request_cancel(
             self,
             commit: ExecutionCancelRequestCommit,
@@ -888,7 +1090,6 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
     committed = await commands.commit_cancel_checkpoint(
         ExecutionCancelRequestCommit(
             "execution",
-            "tenant",
             0,
             0,
             "cancel-op",

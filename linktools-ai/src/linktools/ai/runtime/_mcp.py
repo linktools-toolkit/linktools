@@ -86,8 +86,6 @@ async def materialize_mcp_capabilities(
     from fastmcp.client.transports import StdioTransport
     from pydantic_ai.mcp import MCPToolset
 
-    if principal.tenant_id != execution.tenant_id:
-        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
     if servers and execution_root is None:
         raise AIError(
             ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,

@@ -7,10 +7,17 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.capability import CapabilityGroup
-from linktools.ai.core import JsonValue, Principal, TaskStatus
+from linktools.ai.core import (
+    JsonValue,
+    Principal,
+    TaskStatus,
+    canonical_json_bytes,
+    canonical_sha256,
+)
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.task import (
     TaskFunction,
     TaskGraph,
@@ -41,10 +48,10 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
 
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     capabilities: CapabilityGroup[None] = CapabilityGroup("application")
     handler = TaskFunction[None]("test.recovery", 1, _recover_node)
-    capabilities.task(handler)
+    capabilities.task(handler, effect="none")
     graph = TaskGraph("reopen-expired", (handler.node("root"),))
     request = TaskGraphRequest(
         graph,
@@ -57,13 +64,48 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     await state.initialize(
-        namespace=workspace.workspace_id,
+        namespace="default",
         tenant_id="default",
     )
     try:
+        admission = TaskGraphAdmission.from_request(request)
         await state.task.admissions.admit(
-            TaskGraphAdmission.from_request(request),
+            admission,
             graph,
+        )
+        snapshot_manifest: dict[str, JsonValue] = {
+            "kind": "task-capability-snapshot",
+                "format_version": 1,
+            "namespace": "default",
+            "tenant_id": admission.principal.tenant_id,
+            "graph_id": admission.graph_id,
+            "request_digest": admission.initial_request_digest,
+            "roots": {},
+            "bindings": {},
+        }
+        snapshot_payload = canonical_json_bytes(snapshot_manifest)
+        snapshot_digest = canonical_sha256(snapshot_manifest)
+        snapshot_key = (
+            "v1/task-capability-snapshot/"
+            + canonical_sha256(
+                {
+                    "version": 1,
+                    "namespace": "default",
+                    "tenant_id": admission.principal.tenant_id,
+                    "graph_id": admission.graph_id,
+                    "request_digest": admission.initial_request_digest,
+                }
+            )
+        )
+
+        async def snapshot_chunks():
+            yield snapshot_payload
+
+        await state.object_store(RuntimeDomain.TASK).put(
+            snapshot_key,
+            snapshot_chunks(),
+            expected_size=len(snapshot_payload),
+            expected_digest=snapshot_digest,
         )
         await state.task.tasks.claim(
             graph.graph_id,
@@ -82,7 +124,7 @@ async def test_sqlite_runtime_open_recovers_expired_task_lease(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=ModelRegistry.openai(model="gpt-test"),
         state=reopened,
         capabilities=(capabilities,),

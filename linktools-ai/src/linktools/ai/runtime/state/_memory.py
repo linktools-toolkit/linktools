@@ -52,8 +52,9 @@ class _MemoryGroupTransaction:
 class MemoryStateStorageGroup:
     """Atomic group coordinator for independent in-memory logical stores."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, read_only: bool = False) -> None:
         self._lock = asyncio.Lock()
+        self._read_only = read_only
 
     async def read(
         self,
@@ -86,6 +87,8 @@ class MemoryStateStorageGroup:
         stores: Sequence["MemoryStateStore"],
         fn: StateGroupCallback[ValueT],
     ) -> ValueT:
+        if self._read_only:
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
         members = tuple(dict.fromkeys(stores))
         if not members:
             raise ValueError("StateStorageGroup mutation requires a store")

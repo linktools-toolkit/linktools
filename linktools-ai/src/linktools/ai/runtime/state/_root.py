@@ -3,14 +3,22 @@
 """RuntimeState lifecycle owner."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import hashlib
+import json
+from collections.abc import Awaitable, Callable, Mapping
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ...core import validate_persistence_namespace
+from ...core import (
+    canonical_json_bytes,
+    validate_persistence_namespace,
+    validate_tenant_id,
+)
 from ...errors import AIError, ErrorCode
-from ...storage import FilesystemObjectStore, ObjectStore
+from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_object
+from ...task import TaskGraphAdmission
+from .._runtime_identity import task_capability_snapshot_key
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -27,11 +35,34 @@ from ._plan import (
     RuntimeStateRoute,
     runtime_domain_uses_object_store,
 )
+from ._store import (
+    FactScanCursor,
+    OperationScanCursor,
+    RecordScanCursor,
+    StateStore,
+    StateTransaction,
+    StoredAlias,
+    StoredFact,
+    StoredOperation,
+    StoredRecord,
+)
+from ._snapshot import SnapshotLimits
+from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
+from ._codec import (
+    _decode_enveloped_domain,
+    iter_runtime_object_dependencies,
+    decode_fact,
+    decode_operation,
+    decode_record,
+    encode_fact,
+    encode_operation,
+    encode_record,
+    iter_runtime_object_refs,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from ._maintenance import RuntimeStorageInspection
     from ._materializer import _MaterializedRuntimeState
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
@@ -77,7 +108,8 @@ class RuntimeState:
         self._objects: _RuntimeObjectRouter | None = None
         self._steps: RuntimeStepStore | None = None
         self._retention: RuntimeRetentionController | None = None
-        self._maintenance: RuntimeStorageInspection | None = None
+        self._stores: dict[RuntimeDomain, StateStore] = {}
+        self._read_only = False
 
     @classmethod
     def in_memory(cls) -> "RuntimeState":
@@ -95,10 +127,11 @@ class RuntimeState:
             RuntimeStatePlan(
                 **{
                     domain.value: RuntimeStateRoute.filesystem(
-                        base / domain.value,
+                        base if domain is RuntimeDomain.EXECUTION else base / domain.value,
                         transaction_root=base,
                     )
                     for domain in RuntimeDomain
+                    if domain is not RuntimeDomain.RECOVERY
                 }
             ),
             object_store=object_store,
@@ -114,7 +147,11 @@ class RuntimeState:
         route = RuntimeStateRoute.sqlite(path)
         return cls(
             RuntimeStatePlan(
-                **{domain.value: route for domain in RuntimeDomain}
+                **{
+                    domain.value: route
+                    for domain in RuntimeDomain
+                    if domain is not RuntimeDomain.RECOVERY
+                }
             ),
             object_store=object_store,
         )
@@ -137,7 +174,11 @@ class RuntimeState:
         route = RuntimeStateRoute.sql(engine)
         return cls(
             RuntimeStatePlan(
-                **{domain.value: route for domain in RuntimeDomain}
+                **{
+                    domain.value: route
+                    for domain in RuntimeDomain
+                    if domain is not RuntimeDomain.RECOVERY
+                }
             ),
             object_store=object_store,
         )
@@ -158,6 +199,10 @@ class RuntimeState:
     @property
     def ready(self) -> bool:
         return self._lifecycle is _RuntimeStateLifecycle.READY
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
 
     @property
     def namespace(self) -> str:
@@ -209,7 +254,13 @@ class RuntimeState:
     def retention(self) -> "RuntimeRetentionController":
         return self._require_state(self._retention)
 
-    async def initialize(self, *, namespace: str, tenant_id: str) -> None:
+    async def initialize(
+        self,
+        *,
+        namespace: str,
+        tenant_id: str,
+        read_only: bool = False,
+    ) -> None:
         async with self._lock:
             if self._lifecycle is not _RuntimeStateLifecycle.NEW:
                 raise AIError(
@@ -219,6 +270,8 @@ class RuntimeState:
             validate_persistence_namespace(namespace)
             if not tenant_id.strip():
                 raise ValueError("tenant_id is required")
+            if not isinstance(read_only, bool):
+                raise TypeError("read_only must be bool")
             self._lifecycle = _RuntimeStateLifecycle.INITIALIZING
             try:
                 from ._materializer import materialize_runtime_state
@@ -228,12 +281,14 @@ class RuntimeState:
                     namespace=namespace,
                     tenant_id=tenant_id,
                     object_store=self._external_object_store,
+                    read_only=read_only,
                 )
                 self._assign_materialized(
                     materialized,
                     namespace,
                     tenant_id,
                 )
+                self._read_only = read_only
                 self._lifecycle = _RuntimeStateLifecycle.READY
             except BaseException:
                 self._lifecycle = _RuntimeStateLifecycle.CLOSED
@@ -293,7 +348,7 @@ class RuntimeState:
         self._objects = value.objects
         self._steps = value.steps
         self._retention = value.retention
-        self._maintenance = value.maintenance
+        self._stores = dict(value.stores)
         self._close_actions = value.close_actions
         self._namespace = namespace
         self._tenant_id = tenant_id
@@ -338,6 +393,528 @@ class RuntimeState:
             owner_scope=owner_scope,
         )
 
+    def local_paths(self) -> tuple[Path, ...]:
+        """Return local physical paths owned by this state instance."""
+        self._require_ready()
+        paths: list[Path] = []
+        for domain in RuntimeDomain:
+            route = self._plan.route(domain)
+            if route.path is not None:
+                paths.append(route.path.resolve())
+            if route.transaction_root is not None:
+                paths.append(route.transaction_root.resolve())
+        if self._objects is not None:
+            paths.extend(self._objects.local_paths())
+        return tuple(dict.fromkeys(paths))
+
+    async def export_snapshot(
+        self,
+        *,
+        object_store: ObjectStore,
+        limits: SnapshotLimits,
+    ) -> ObjectRef:
+        """Export this initialized read-only state as one bounded logical snapshot."""
+        self._require_ready()
+        if not self._read_only:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        if not isinstance(limits, SnapshotLimits):
+            raise TypeError("limits must be SnapshotLimits")
+        if not self._plan.durable_domains:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+        domains: dict[str, dict[str, list[object]]] = {}
+        objects: list[dict[str, object]] = []
+        copied_objects: set[tuple[str, str, str, int]] = set()
+        entry_count = 0
+        object_bytes = 0
+
+        def accept(value: object) -> object:
+            nonlocal entry_count
+            entry_count += 1
+            if entry_count > limits.max_entries:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            return value
+
+        async def copy_reference(
+            source_domain: RuntimeDomain,
+            reference: ObjectRef,
+        ) -> None:
+            nonlocal entry_count, object_bytes
+            identity = (
+                source_domain.value,
+                reference.key,
+                reference.digest,
+                reference.size,
+            )
+            if identity in copied_objects:
+                return
+            entry_count += 1
+            object_bytes += reference.size
+            if (
+                entry_count > limits.max_entries
+                or object_bytes > limits.max_bytes
+            ):
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+            source_store = self.object_store(source_domain)
+            key = (
+                "v1/runtime-state-object/"
+                f"{source_domain.value}/{reference.digest}"
+            )
+            await object_store.put(
+                key,
+                source_store.open(reference.key),
+                expected_size=reference.size,
+                expected_digest=reference.digest,
+            )
+            objects.append(
+                {
+                    "domain": source_domain.value,
+                    "source": _object_ref_payload(reference),
+                    "content": _object_ref_payload(
+                        ObjectRef(
+                            object_store.store_id,
+                            key,
+                            reference.digest,
+                            reference.size,
+                        )
+                    ),
+                }
+            )
+            copied_objects.add(identity)
+            if reference.key.startswith(
+                ("v1/skill-source-snapshot/", "v1/task-capability-snapshot/")
+            ):
+                payload = await read_object(
+                    source_store,
+                    reference.key,
+                    expected_digest=reference.digest,
+                    expected_size=reference.size,
+                )
+                for nested_domain, nested in iter_runtime_object_dependencies(
+                    reference,
+                    payload,
+                    default_domain=source_domain,
+                ):
+                    await copy_reference(nested_domain, nested)
+
+        async def copy_references(encoded: object, domain: RuntimeDomain) -> None:
+            for source_domain, reference in iter_runtime_object_refs(
+                encoded,
+                default_domain=domain,
+            ):
+                await copy_reference(source_domain, reference)
+
+        for domain in sorted(self._plan.durable_domains, key=lambda item: item.value):
+            store = self._stores[domain]
+            raw_domain: dict[str, list[object]] = {
+                "records": [],
+                "aliases": [],
+                "facts": [],
+                "operations": [],
+                "sequences": [],
+            }
+            domain_records: list[StoredRecord] = []
+            domain_facts: list[StoredFact] = []
+            domain_operations: list[StoredOperation] = []
+
+            record_cursor: RecordScanCursor | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=record_cursor: transaction.scan_records_page(
+                        after=cursor,
+                        limit=128,
+                    )
+                )
+                if not page:
+                    break
+                for value in page:
+                    domain_records.append(value)
+                    encoded = encode_record(value)
+                    raw_domain["records"].append(accept(encoded))
+                    await copy_references(encoded, domain)
+                    if (
+                        domain is RuntimeDomain.TASK
+                        and value.kind == "task_admission"
+                    ):
+                        admission = _decode_enveloped_domain(
+                            value.data,
+                            TaskGraphAdmission,
+                        )
+                        key = task_capability_snapshot_key(
+                            self.namespace,
+                            admission.principal.tenant_id,
+                            admission.graph_id,
+                            admission.initial_request_digest,
+                        )
+                        stat = await self.object_store(RuntimeDomain.TASK).stat(key)
+                        if stat is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        await copy_reference(
+                            RuntimeDomain.TASK,
+                            ObjectRef(
+                                self.object_store(RuntimeDomain.TASK).store_id,
+                                stat.key,
+                                stat.digest,
+                                stat.size,
+                            ),
+                        )
+                last = page[-1]
+                record_cursor = RecordScanCursor(last.kind, last.key_digest)
+                if len(page) < 128:
+                    break
+
+            fact_cursor: FactScanCursor | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=fact_cursor: transaction.scan_facts_page(
+                        after=cursor,
+                        limit=128,
+                    )
+                )
+                if not page:
+                    break
+                for value in page:
+                    domain_facts.append(value)
+                    encoded = encode_fact(value)
+                    raw_domain["facts"].append(accept(encoded))
+                    await copy_references(encoded, domain)
+                last = page[-1]
+                fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
+                if len(page) < 128:
+                    break
+
+            operation_cursor: OperationScanCursor | None = None
+            while True:
+                page = await store.read(
+                    lambda transaction, cursor=operation_cursor: transaction.scan_operations_page(
+                        after=cursor,
+                        limit=128,
+                    )
+                )
+                if not page:
+                    break
+                for value in page:
+                    domain_operations.append(value)
+                    encoded = encode_operation(value)
+                    raw_domain["operations"].append(accept(encoded))
+                    await copy_references(encoded, domain)
+                operation_cursor = OperationScanCursor(page[-1].key_digest)
+                if len(page) < 128:
+                    break
+
+            aliases, sequences = canonical_snapshot_indexes(
+                namespace=self.namespace,
+                tenant_id=self.tenant_id,
+                domain=domain,
+                records=tuple(domain_records),
+                facts=tuple(domain_facts),
+                operations=tuple(domain_operations),
+            )
+            for value in aliases:
+                raw_domain["aliases"].append(
+                    accept(
+                        {
+                            "alias_digest": value.alias_digest.hex(),
+                            "record_key_digest": value.record_key_digest.hex(),
+                        }
+                    )
+                )
+            for key in sorted(sequences):
+                raw_domain["sequences"].append(
+                    accept({"key_digest": key.hex(), "value": sequences[key]})
+                )
+
+            domains[domain.value] = raw_domain
+
+        manifest = {
+            "kind": "runtime-state-snapshot",
+            "format_version": 1,
+            "namespace": self.namespace,
+            "tenant_id": self.tenant_id,
+            "domains": domains,
+            "objects": objects,
+        }
+        payload = canonical_json_bytes(manifest)
+        if len(payload) + object_bytes > limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        digest = hashlib.sha256(payload).hexdigest()
+        key = f"v1/runtime-state-snapshot/{digest}"
+        await _put_snapshot_object(object_store, key, payload)
+        return ObjectRef(object_store.store_id, key, digest, len(payload))
+
+    @classmethod
+    async def restore_snapshot(
+        cls,
+        ref: ObjectRef,
+        *,
+        object_store: ObjectStore,
+        root: str | Path,
+        limits: SnapshotLimits,
+    ) -> None:
+        """Restore a bounded logical state snapshot into a new local RuntimeState."""
+        if not isinstance(limits, SnapshotLimits):
+            raise TypeError("limits must be SnapshotLimits")
+        if ref.size > limits.max_bytes:
+            raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+        payload = await read_object(
+            object_store,
+            ref.key,
+            expected_digest=ref.digest,
+            expected_size=ref.size,
+        )
+        try:
+            manifest = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if not isinstance(manifest, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if manifest.get("kind") != "runtime-state-snapshot":
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        format_version = manifest.get("format_version")
+        if (
+            isinstance(format_version, bool)
+            or not isinstance(format_version, int)
+            or format_version < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if format_version != 1:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if not isinstance(manifest.get("domains"), dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        namespace = manifest.get("namespace")
+        tenant_id = manifest.get("tenant_id")
+        if not isinstance(namespace, str) or not isinstance(tenant_id, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        namespace = validate_persistence_namespace(namespace)
+        tenant_id = validate_tenant_id(tenant_id)
+
+        raw_domains = manifest["domains"]
+        raw_objects = manifest.get("objects", [])
+        if not isinstance(raw_objects, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        entry_count = len(raw_objects)
+        object_bytes = 0
+        expected_objects: set[tuple[str, str, str, int]] = set()
+        expected_task_object_keys: set[str] = set()
+        decoded_domains: dict[
+            RuntimeDomain,
+            tuple[
+                tuple[object, ...],
+                tuple[StoredAlias, ...],
+                tuple[object, ...],
+                tuple[object, ...],
+                Mapping[bytes, int],
+            ],
+        ] = {}
+
+        for domain_name, raw_domain in raw_domains.items():
+            try:
+                domain = RuntimeDomain(domain_name)
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            expected_domain_fields = {
+                "records",
+                "aliases",
+                "facts",
+                "operations",
+                "sequences",
+            }
+            if (
+                not isinstance(raw_domain, Mapping)
+                or set(raw_domain) != expected_domain_fields
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raw_records = raw_domain["records"]
+            raw_aliases = raw_domain["aliases"]
+            raw_facts = raw_domain["facts"]
+            raw_operations = raw_domain["operations"]
+            raw_sequences = raw_domain["sequences"]
+            if not all(
+                isinstance(value, list)
+                for value in (
+                    raw_records,
+                    raw_aliases,
+                    raw_facts,
+                    raw_operations,
+                    raw_sequences,
+                )
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            entry_count += sum(
+                len(value)
+                for value in (
+                    raw_records,
+                    raw_aliases,
+                    raw_facts,
+                    raw_operations,
+                    raw_sequences,
+                )
+            )
+            if entry_count > limits.max_entries:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+            records = tuple(decode_record(value) for value in raw_records)
+            aliases = _decode_snapshot_aliases(raw_aliases)
+            facts = tuple(decode_fact(value) for value in raw_facts)
+            operations = tuple(decode_operation(value) for value in raw_operations)
+            sequences = _decode_snapshot_sequences(raw_sequences)
+            validate_snapshot_domain(
+                namespace=namespace,
+                tenant_id=tenant_id,
+                domain=domain,
+                records=records,
+                aliases=aliases,
+                facts=facts,
+                operations=operations,
+                sequences=sequences,
+            )
+            decoded_domains[domain] = (
+                records,
+                aliases,
+                facts,
+                operations,
+                sequences,
+            )
+            if domain is RuntimeDomain.TASK:
+                for record in records:
+                    if record.kind != "task_admission":
+                        continue
+                    admission = _decode_enveloped_domain(
+                        record.data,
+                        TaskGraphAdmission,
+                    )
+                    expected_task_object_keys.add(
+                        task_capability_snapshot_key(
+                            namespace,
+                            admission.principal.tenant_id,
+                            admission.graph_id,
+                            admission.initial_request_digest,
+                        )
+                    )
+            for encoded in (*raw_records, *raw_facts, *raw_operations):
+                for source_domain, reference in iter_runtime_object_refs(
+                    encoded,
+                    default_domain=domain,
+                ):
+                    expected_objects.add(
+                        (
+                            source_domain.value,
+                            reference.key,
+                            reference.digest,
+                            reference.size,
+                        )
+                    )
+
+        actual_objects: set[tuple[str, str, str, int]] = set()
+        decoded_objects: list[tuple[RuntimeDomain, ObjectRef, ObjectRef]] = []
+        decoded_by_identity: dict[
+            tuple[str, str, str, int],
+            tuple[RuntimeDomain, ObjectRef, ObjectRef],
+        ] = {}
+        for raw_object in raw_objects:
+            if not isinstance(raw_object, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                domain = RuntimeDomain(raw_object["domain"])
+                source = _object_ref_from_payload(raw_object["source"])
+                content_ref = _object_ref_from_payload(raw_object["content"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if source.digest != content_ref.digest or source.size != content_ref.size:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            identity = (domain.value, source.key, source.digest, source.size)
+            if identity in actual_objects:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            actual_objects.add(identity)
+            decoded = (domain, source, content_ref)
+            decoded_objects.append(decoded)
+            decoded_by_identity[identity] = decoded
+            object_bytes += content_ref.size
+            if len(payload) + object_bytes > limits.max_bytes:
+                raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+        for key in expected_task_object_keys:
+            matches = tuple(
+                identity
+                for identity in actual_objects
+                if identity[0] == RuntimeDomain.TASK.value
+                and identity[1] == key
+            )
+            if len(matches) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            expected_objects.add(matches[0])
+
+        pending_objects = list(expected_objects)
+        while pending_objects:
+            identity = pending_objects.pop()
+            decoded = decoded_by_identity.get(identity)
+            if decoded is None:
+                continue
+            domain, source, content_ref = decoded
+            if not source.key.startswith(
+                ("v1/skill-source-snapshot/", "v1/task-capability-snapshot/")
+            ):
+                continue
+            dependency_payload = await read_object(
+                object_store,
+                content_ref.key,
+                expected_digest=content_ref.digest,
+                expected_size=content_ref.size,
+            )
+            for nested_domain, nested in iter_runtime_object_dependencies(
+                source,
+                dependency_payload,
+                default_domain=domain,
+            ):
+                nested_identity = (
+                    nested_domain.value,
+                    nested.key,
+                    nested.digest,
+                    nested.size,
+                )
+                if nested_identity not in expected_objects:
+                    expected_objects.add(nested_identity)
+                    pending_objects.append(nested_identity)
+
+        if actual_objects != expected_objects:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        target = Path(root).expanduser().resolve(strict=False)
+        if target.exists() and any(target.iterdir()):
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        state = cls.from_root(root)
+        await state.initialize(namespace=namespace, tenant_id=tenant_id)
+        try:
+            for domain, source, content_ref in decoded_objects:
+                destination = state.object_store(domain)
+                current = await destination.stat(source.key)
+                if current is not None:
+                    if current.digest != source.digest or current.size != source.size:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                else:
+                    await destination.put(
+                        source.key,
+                        object_store.open(content_ref.key),
+                        expected_size=source.size,
+                        expected_digest=source.digest,
+                    )
+
+            for domain, values in decoded_domains.items():
+                records, aliases, facts, operations, sequences = values
+                await state._stores[domain].mutate(
+                    lambda transaction, records=records, aliases=aliases, facts=facts, operations=operations, sequences=sequences: _insert_snapshot_values(
+                        transaction,
+                        records,
+                        aliases,
+                        facts,
+                        operations,
+                        sequences,
+                    )
+                )
+        finally:
+            await state.close()
+
 
 def _validate_state_configuration(
     plan: RuntimeStatePlan,
@@ -367,12 +944,157 @@ def _validate_state_configuration(
             is not RuntimeRetentionMode.DURABLE
         ):
             raise ValueError("durable conversation requires durable recovery")
+    if (
+        plan.route(RuntimeDomain.EVALUATION).retention
+        is RuntimeRetentionMode.DURABLE
+        and plan.route(RuntimeDomain.EXECUTION).retention
+        is not RuntimeRetentionMode.DURABLE
+    ):
+        raise ValueError("durable evaluation requires durable execution")
 
 
 def _normalize_path(value: "str | Path") -> Path:
     if not isinstance(value, (str, Path)) or not str(value).strip():
         raise ValueError("RuntimeState path is required")
     return Path(value).expanduser().resolve(strict=False)
+
+
+def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
+    return {
+        "store_id": "runtime",
+        "key": ref.key,
+        "digest": ref.digest,
+        "size": ref.size,
+    }
+
+
+def _object_ref_from_payload(value: object) -> ObjectRef:
+    required = {"key", "digest", "size"}
+    if not isinstance(value, Mapping) or not required.issubset(value):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    store_id = value.get("store_id", "runtime")
+    key = value["key"]
+    digest = value["digest"]
+    size = value["size"]
+    if (
+        not isinstance(store_id, str)
+        or not store_id
+        or not isinstance(key, str)
+        or not key
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return ObjectRef(store_id, key, digest, size)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _decode_snapshot_digest(value: object) -> bytes:
+    if not isinstance(value, str) or len(value) != 64:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if len(decoded) != 32:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return decoded
+
+
+def _decode_snapshot_aliases(value: object) -> tuple[StoredAlias, ...]:
+    if not isinstance(value, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    aliases: list[StoredAlias] = []
+    seen: set[bytes] = set()
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "alias_digest",
+            "record_key_digest",
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        alias = StoredAlias(
+            _decode_snapshot_digest(raw["alias_digest"]),
+            _decode_snapshot_digest(raw["record_key_digest"]),
+        )
+        if alias.alias_digest in seen:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        seen.add(alias.alias_digest)
+        aliases.append(alias)
+    return tuple(sorted(aliases, key=lambda item: item.alias_digest))
+
+
+def _decode_snapshot_sequences(value: object) -> Mapping[bytes, int]:
+    if not isinstance(value, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    sequences: dict[bytes, int] = {}
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {"key_digest", "value"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = _decode_snapshot_digest(raw["key_digest"])
+        sequence = raw["value"]
+        if (
+            key in sequences
+            or isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence < 1
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        sequences[key] = sequence
+    return sequences
+
+
+async def _insert_snapshot_values(
+    transaction: StateTransaction,
+    records: tuple[object, ...],
+    aliases: tuple[StoredAlias, ...],
+    facts: tuple[object, ...],
+    operations: tuple[object, ...],
+    sequences: Mapping[bytes, int],
+) -> None:
+    await transaction.insert_records(records)
+    await transaction.insert_aliases(aliases)
+    await transaction.insert_facts(facts)
+    for operation in operations:
+        await transaction.insert_operation(operation)
+    if sequences:
+        restored = await transaction.reserve_sequences(sequences)
+        if dict(restored) != dict(sequences):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+async def _snapshot_chunk(value: bytes):
+    yield value
+
+
+async def _put_snapshot_object(
+    object_store: ObjectStore,
+    key: str,
+    value: bytes,
+) -> None:
+    digest = hashlib.sha256(value).hexdigest()
+    current = await object_store.stat(key)
+    if current is not None:
+        if current.digest != digest or current.size != len(value):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await read_object(
+            object_store,
+            key,
+            expected_digest=digest,
+            expected_size=len(value),
+        )
+        return
+    await object_store.put(
+        key,
+        _snapshot_chunk(value),
+        expected_size=len(value),
+        expected_digest=digest,
+    )
 
 
 __all__ = ["RuntimeState"]

@@ -23,7 +23,7 @@ from pydantic_ai.tools import (
     DeferredToolRequests,
 )
 
-from ..agent import AgentBinding, AgentCatalog, SubagentRef
+from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
 from ..workspace import (
     RepositoryInstructionResolver,
@@ -36,7 +36,11 @@ from ._agent_executor import (
     LiveDelta,
 )
 from ._harness_memory import select_harness_memory_tools
-from ._input import CanonicalUserInput, ExecutionInputMaterializer
+from ._input import (
+    CanonicalUserInput,
+    ExecutionInputMaterializer,
+    stored_input_attachment_views,
+)
 from ._plan import RuntimePlanStore
 from ..core import (
     ExecutionEventType,
@@ -150,7 +154,9 @@ class _SubagentDispatcher(Protocol):
         memory_scope: "str | None",
         principal: Principal,
         refs: "tuple[SubagentRef, ...]",
+        binding: AgentBindingSnapshot,
         mode: ExecutionMode,
+        require_frozen_bindings: bool = False,
     ) -> SubagentDelegate: ...
 
     def descriptions_for(
@@ -248,6 +254,7 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         catalog: AgentCatalog,
         *,
+        restore_binding: "Callable[[AgentBindingSnapshot], AgentBinding] | None" = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
         mcp_cwd: "str | None",
@@ -277,6 +284,7 @@ class LocalExecutionBackend:
         self._executor = executor
         self._segment_runner = _AgentSegmentRunner(executor)
         self._catalog = catalog
+        self._restore_binding = restore_binding
         self._workspace = workspace
         self._limits = limits
         self._mcp_cwd = mcp_cwd
@@ -369,10 +377,21 @@ class LocalExecutionBackend:
     def tenant_id(self) -> str:
         return self._tenant_id
 
-    def validate_binding(self, execution: ExecutionRecord) -> None:
-        binding = self._catalog.binding(execution.binding_digest)
-        if execution.binding != binding.snapshot:
+    def _execution_binding(self, execution: ExecutionRecord) -> AgentBinding:
+        binding = (
+            self._catalog.binding(execution.binding_digest)
+            if self._restore_binding is None
+            else self._restore_binding(execution.binding)
+        )
+        if (
+            binding.digest != execution.binding_digest
+            or binding.snapshot != execution.binding
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return binding
+
+    def validate_binding(self, execution: ExecutionRecord) -> None:
+        self._execution_binding(execution)
 
     async def load_execution(
         self,
@@ -415,7 +434,7 @@ class LocalExecutionBackend:
             return
         await self._conversation.sessions.release_execution(
             execution.session_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
             execution_id=execution.execution_id,
         )
 
@@ -433,7 +452,6 @@ class LocalExecutionBackend:
         return await self._runtime_commands.commit_start_checkpoint(
             ExecutionStartClaim(
                 execution.execution_id,
-                execution.tenant_id,
                 execution.revision,
                 execution.event_sequence,
                 identity.scope,
@@ -455,7 +473,7 @@ class LocalExecutionBackend:
         ).commit_resumed(execution)
         checkpoint = await self.load_recovery_checkpoint(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if checkpoint is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -484,25 +502,21 @@ class LocalExecutionBackend:
     ) -> None:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if (
-            request.principal.tenant_id != self._tenant_id
-            or execution.tenant_id != self._tenant_id
-        ):
+        if request.principal.tenant_id != self._tenant_id:
             _logger.warning(
                 "local execution tenant rejected: expected=%s request=%s execution=%s",
                 self._tenant_id,
                 request.principal.tenant_id,
-                execution.tenant_id,
+                self._tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if request.correlation != execution.correlation:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        binding = self._catalog.binding(execution.binding_digest)
+        self._execution_binding(execution)
         if (
             request.mode != execution.mode
             or request.planning is not execution.planning
             or request.thinking != execution.thinking
-            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -602,6 +616,7 @@ class LocalExecutionBackend:
         _record_execution_terminal(
             recorder,
             source_namespace=self._namespace,
+            tenant_id=self._tenant_id,
             result=committed,
             session_id=session_id,
         )
@@ -672,7 +687,7 @@ class LocalExecutionBackend:
         async with self._audit_lock(commit.execution_id):
             current = await self._execution.executions.get(
                 commit.execution_id,
-                tenant_id=commit.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -689,7 +704,7 @@ class LocalExecutionBackend:
             ):
                 checkpoint = await self._recovery.checkpoints.get(
                     commit.execution_id,
-                    tenant_id=commit.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if (
                     checkpoint is None
@@ -784,13 +799,10 @@ class LocalExecutionBackend:
         await self._validate_start(request, execution)
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        binding = self._catalog.binding(execution.binding_digest)
-        if execution.binding != binding.snapshot:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._execution_binding(execution)
         now = datetime.now(timezone.utc)
         candidate = RecoveryCheckpoint(
             execution_id=execution.execution_id,
-            tenant_id=execution.tenant_id,
             step_run_id=None,
             state=RecoveryCheckpointState.ADMITTED,
             revision=0,
@@ -808,7 +820,6 @@ class LocalExecutionBackend:
         started = await self._runtime_commands.commit_start_attempt_checkpoint(
             ExecutionStartClaim(
                 execution.execution_id,
-                execution.tenant_id,
                 execution.revision,
                 execution.event_sequence,
                 identity.scope,
@@ -832,7 +843,7 @@ class LocalExecutionBackend:
             return False
         session = await self._conversation.sessions.get(
             execution.session_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if session is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -870,7 +881,7 @@ class LocalExecutionBackend:
         for _ in range(2):
             session = await self._conversation.sessions.get(
                 execution.session_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if session is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -890,13 +901,12 @@ class LocalExecutionBackend:
             if owner_id is not None:
                 owner = await self._execution.executions.get(
                     owner_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if owner is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (
                     owner.execution_id != owner_id
-                    or owner.tenant_id != execution.tenant_id
                     or owner.session_id != execution.session_id
                     or owner.parent_execution_id is not None
                 ):
@@ -913,7 +923,7 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.SESSION_BUSY)
                 await self._conversation.sessions.release_execution(
                     execution.session_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=owner_id,
                 )
                 _logger.info(
@@ -927,7 +937,7 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.SESSION_BUSY)
             await self._conversation.sessions.admit_execution(
                 execution.session_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=execution.execution_id,
                 expected=expected,
             )
@@ -949,7 +959,7 @@ class LocalExecutionBackend:
         await self._validate_start(request, execution)
         checkpoint = await self._recovery.checkpoints.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if checkpoint is None or checkpoint.state is RecoveryCheckpointState.COMPLETED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -962,13 +972,12 @@ class LocalExecutionBackend:
         )
         current = await self._execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if (
-            current.tenant_id != execution.tenant_id
-            or current.binding_digest != execution.binding_digest
+            current.binding_digest != execution.binding_digest
             or current.mode != execution.mode
             or current.planning is not execution.planning
             or current.thinking != execution.thinking
@@ -989,7 +998,7 @@ class LocalExecutionBackend:
         if current.session_id is not None:
             session = await self._conversation.sessions.get(
                 current.session_id,
-                tenant_id=current.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if session is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1038,7 +1047,7 @@ class LocalExecutionBackend:
     async def abort_start(self, execution: ExecutionRecord) -> None:
         current = await self._execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1050,12 +1059,12 @@ class LocalExecutionBackend:
         if current.session_id is not None:
             await self._conversation.sessions.release_execution(
                 current.session_id,
-                tenant_id=current.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=current.execution_id,
             )
         checkpoint = await self._recovery.checkpoints.get(
             current.execution_id,
-            tenant_id=current.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if checkpoint is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1209,7 +1218,7 @@ class LocalExecutionBackend:
         self._worker_shutdown_requests.discard(execution.execution_id)
         current = await self._execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is not None and current.status is ExecutionStatus.FINALIZING:
             _logger.debug(
@@ -1231,7 +1240,7 @@ class LocalExecutionBackend:
         await self._drain_worker_task(execution.execution_id, task)
         current = await self._execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is not None and current.status in {
             ExecutionStatus.SUCCEEDED,
@@ -1340,7 +1349,7 @@ class LocalExecutionBackend:
         current = decision.execution
         principal = Principal(
             current.principal_id,
-            current.tenant_id,
+            self._tenant_id,
             current.principal_kind,
         )
         request = ExecutionRequest(
@@ -1406,7 +1415,7 @@ class LocalExecutionBackend:
                 self._recovery_objects,
                 RuntimeObjectKeyFactory(self._namespace),
                 RuntimeDomain.RECOVERY,
-                execution.tenant_id,
+                self._tenant_id,
                 canonical_json_bytes(arguments),
             )
             arguments_payload = StoredPayload.object(reference)
@@ -1432,7 +1441,7 @@ class LocalExecutionBackend:
         committed, committed_checkpoint = (
             await self._runtime_commands.commit_deferred_checkpoint(
                 execution_id=execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_execution_revision=execution.revision,
                 expected_event_sequence=execution.event_sequence,
                 expected_recovery_revision=checkpoint.revision,
@@ -1523,7 +1532,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._runtime_commands.claim_deferred_resume_checkpoint(
             execution_id=execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
             expected_execution_revision=execution.revision,
             expected_event_sequence=execution.event_sequence,
             expected_recovery_revision=checkpoint.revision,
@@ -1560,7 +1569,7 @@ class LocalExecutionBackend:
             return True
         session = await self._conversation.sessions.get(
             execution.session_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if session is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1608,7 +1617,7 @@ class LocalExecutionBackend:
                         {
                             "type": "linktools.ai.session-close-recovery-cancel",
                             "version": 1,
-                            "tenant_id": execution.tenant_id,
+                            "tenant_id": self._tenant_id,
                             "session_id": execution.session_id,
                             "execution_id": execution.execution_id,
                         }
@@ -1616,7 +1625,7 @@ class LocalExecutionBackend:
                     committed = await self.commit_cancel_checkpoint(
                         ExecutionCancelRequestCommit(
                             execution.execution_id,
-                            execution.tenant_id,
+                            self._tenant_id,
                             execution.revision,
                             execution.event_sequence,
                             operation_id,
@@ -1628,7 +1637,7 @@ class LocalExecutionBackend:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     fresh_checkpoint = await self._recovery.checkpoints.get(
                         execution.execution_id,
-                        tenant_id=execution.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if (
                         fresh_checkpoint is None
@@ -1762,7 +1771,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         execution = await self._execution.executions.get(
             checkpoint.execution_id,
-            tenant_id=checkpoint.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1844,7 +1853,7 @@ class LocalExecutionBackend:
             if execution.session_id is not None:
                 await self._conversation.sessions.release_execution(
                     execution.session_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=execution.execution_id,
                 )
             await self._complete_handoff(checkpoint)
@@ -1870,7 +1879,7 @@ class LocalExecutionBackend:
             if execution.session_id is not None:
                 await self._conversation.sessions.release_execution(
                     execution.session_id,
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=execution.execution_id,
                 )
                 _logger.info(
@@ -1898,7 +1907,7 @@ class LocalExecutionBackend:
         records = await self._execution.idempotency.list_by_resource(
             ResourceKind.EXECUTION,
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if len(records) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1906,7 +1915,6 @@ class LocalExecutionBackend:
         if (
             identity.resource_kind is not ResourceKind.EXECUTION
             or identity.resource_id != execution.execution_id
-            or identity.tenant_id != execution.tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return identity
@@ -1934,7 +1942,6 @@ class LocalExecutionBackend:
         if (
             identity.resource_kind is not ResourceKind.EXECUTION
             or identity.resource_id != execution.execution_id
-            or identity.tenant_id != execution.tenant_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if identity.status is expected_status:
@@ -1946,7 +1953,7 @@ class LocalExecutionBackend:
             return await self._execution.idempotency.compare_and_swap(
                 identity.scope,
                 identity.idempotency_key_digest,
-                tenant_id=identity.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_status=identity.status,
                 next_record=replace(
                     identity,
@@ -1963,7 +1970,7 @@ class LocalExecutionBackend:
         if intent is None:
             return
         session = await self._conversation.sessions.get(
-            intent.session_id, tenant_id=checkpoint.tenant_id
+            intent.session_id, tenant_id=self._tenant_id
         )
         if session is None:
             if self._conversation_durable:
@@ -1992,7 +1999,7 @@ class LocalExecutionBackend:
         end_message_index = await self._steps.conversation_message_count(
             history_id=history_id,
             step_run_id=intent.next_cursor.step_run_id,
-            tenant_id=checkpoint.tenant_id,
+            tenant_id=self._tenant_id,
         )
         effective_next_cursor = replace(
             intent.next_cursor,
@@ -2014,7 +2021,7 @@ class LocalExecutionBackend:
             current = await self._conversation.sessions.get_in_transaction(
                 transaction,
                 intent.session_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current.continuation == effective_next_cursor:
                 return
@@ -2028,7 +2035,7 @@ class LocalExecutionBackend:
             await self._conversation.sessions.advance_continuation_in_transaction(
                 transaction,
                 intent.session_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=checkpoint.execution_id,
                 expected=intent.expected_cursor,
                 next_cursor=effective_next_cursor,
@@ -2038,7 +2045,7 @@ class LocalExecutionBackend:
             await self._conversation.sessions.commit_timeline_turn_in_transaction(
                 transaction,
                 intent.session_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=checkpoint.execution_id,
                 start_message_index=start_message_index,
                 end_message_index=end_message_index,
@@ -2051,7 +2058,7 @@ class LocalExecutionBackend:
                 raise
             latest = await self._conversation.sessions.get(
                 intent.session_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if latest is None or latest.continuation != effective_next_cursor:
                 raise
@@ -2084,7 +2091,7 @@ class LocalExecutionBackend:
         try:
             return await self._recovery.checkpoints.compare_and_swap(
                 checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
                 next_record=updated,
             )
@@ -2092,7 +2099,7 @@ class LocalExecutionBackend:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
             current = await self._recovery.checkpoints.get(
-                checkpoint.execution_id, tenant_id=checkpoint.tenant_id
+                checkpoint.execution_id, tenant_id=self._tenant_id
             )
             if current is None:
                 raise
@@ -2121,7 +2128,7 @@ class LocalExecutionBackend:
         try:
             await self._recovery.checkpoints.compare_and_swap(
                 checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
                 next_record=completed,
             )
@@ -2130,7 +2137,7 @@ class LocalExecutionBackend:
                 raise
             current = await self._recovery.checkpoints.get(
                 checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if (
                 current is None
@@ -2208,7 +2215,7 @@ class LocalExecutionBackend:
         try:
             result = await self._recovery.checkpoints.compare_and_swap(
                 checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
                 next_record=updated,
             )
@@ -2217,7 +2224,7 @@ class LocalExecutionBackend:
                 raise
             current = await self._recovery.checkpoints.get(
                 checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2241,7 +2248,7 @@ class LocalExecutionBackend:
         outcome = handoff.outcome
         current = await self._execution.executions.get(
             checkpoint.execution_id,
-            tenant_id=checkpoint.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2271,7 +2278,7 @@ class LocalExecutionBackend:
                         self._execution_objects,
                         RuntimeObjectKeyFactory(self._namespace),
                         RuntimeDomain.EXECUTION,
-                        current.tenant_id,
+                        self._tenant_id,
                         payload,
                     )
                 )
@@ -2312,8 +2319,6 @@ class LocalExecutionBackend:
             error_diagnostics=outcome.error_diagnostics,
         )
         result = ResultRecord(
-            current.execution_id,
-            current.tenant_id,
             execution_ref,
             outcome.stop_reason,
             outcome.usage,
@@ -2324,7 +2329,7 @@ class LocalExecutionBackend:
             if terminal_run_id is None and current.agent_run_sequence > 0:
                 terminal_run_id = step_run_id(
                     namespace=self._namespace,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=current.execution_id,
                     segment_sequence=current.agent_run_sequence,
                 )
@@ -2349,7 +2354,7 @@ class LocalExecutionBackend:
                 raise
             latest = await self._execution.executions.get(
                 current.execution_id,
-                tenant_id=current.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if latest is None or latest.status is not outcome.terminal_status:
                 raise
@@ -2370,7 +2375,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         execution = await self._execution.executions.get(
             checkpoint.execution_id,
-            tenant_id=checkpoint.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if (
             execution is None
@@ -2383,7 +2388,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result = await self._execution.executions.get_result(
             checkpoint.execution_id,
-            tenant_id=checkpoint.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2405,7 +2410,7 @@ class LocalExecutionBackend:
         records = await self._execution.idempotency.list_by_resource(
             ResourceKind.EXECUTION,
             checkpoint.execution_id,
-            tenant_id=checkpoint.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if len(records) != 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2656,13 +2661,13 @@ class LocalExecutionBackend:
         claimed_from_admitted = False
         try:
             current = await self._execution.executions.get(
-                execution_id, tenant_id=original.tenant_id
+                execution_id, tenant_id=self._tenant_id
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             checkpoint = await self._recovery.checkpoints.get(
                 execution_id,
-                tenant_id=current.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2671,7 +2676,6 @@ class LocalExecutionBackend:
                     await self._runtime_commands.commit_agent_attempt_checkpoint(
                         AgentAttemptClaim(
                             execution_id=execution_id,
-                            tenant_id=current.tenant_id,
                             expected_execution_revision=current.revision,
                             expected_agent_run_sequence=current.agent_run_sequence,
                             expected_recovery_revision=checkpoint.revision,
@@ -2703,9 +2707,7 @@ class LocalExecutionBackend:
                 or checkpoint.step_run_id is None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            binding = self._catalog.binding(current.binding_digest)
-            if current.binding != binding.snapshot:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            binding = self._execution_binding(current)
             definition = binding.definition
             initial_repository_instructions = await self.load_repository_instructions(
                 current.repository_instructions
@@ -2717,7 +2719,7 @@ class LocalExecutionBackend:
             run_id = checkpoint.step_run_id
             conversation_id = step_conversation_id(
                 namespace=self._namespace,
-                tenant_id=current.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=execution_id,
             )
             session = (
@@ -2725,7 +2727,7 @@ class LocalExecutionBackend:
                 if current.session_id is None
                 else await self._conversation.sessions.get(
                     current.session_id,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
             )
             history_id = (
@@ -2763,7 +2765,7 @@ class LocalExecutionBackend:
                         operation
                         for operation in await self._tool_operations.list_by_step_run(
                             recovery_history_run_id,
-                            tenant_id=current.tenant_id,
+                            tenant_id=self._tenant_id,
                         )
                         if operation.status
                         not in {
@@ -2775,7 +2777,7 @@ class LocalExecutionBackend:
                         await self._reconcile_unresolved_tool_operations(
                             recovery_history_run_id,
                             unresolved,
-                            tenant_id=current.tenant_id,
+                            tenant_id=self._tenant_id,
                         )
             tool_repository = self._tool_operations
             tool_operations = (
@@ -2783,7 +2785,7 @@ class LocalExecutionBackend:
                     tool_repository,
                     self._recovery_objects,
                     namespace=self._namespace,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=execution_id,
                     step_run_id=run_id,
                     binding_digest=current.binding_digest,
@@ -2874,7 +2876,7 @@ class LocalExecutionBackend:
                 if self._memory_store_factory is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 memory = self._memory_store_factory(
-                    current.tenant_id,
+                    self._tenant_id,
                     current.execution_id,
                     current.memory_scope or "default",
                 )
@@ -2882,7 +2884,7 @@ class LocalExecutionBackend:
             if current.session_id is not None:
                 session = await self._conversation.sessions.get(
                     current.session_id,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if session is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2902,7 +2904,7 @@ class LocalExecutionBackend:
                 if current.session_id is not None
                 else self._execution_state_store,
                 namespace=self._namespace,
-                tenant_id=current.tenant_id,
+                tenant_id=self._tenant_id,
                 owner_kind="session" if current.session_id is not None else "execution",
                 owner_id=current.session_id or current.execution_id,
             )
@@ -2915,6 +2917,9 @@ class LocalExecutionBackend:
                         limits=self._limits,
                         mcp_cwd=self._mcp_cwd,
                         user_prompt=run_user_prompt,
+                        initial_attachments=stored_input_attachment_views(
+                            current.stored_user_input
+                        ),
                         history=history,
                         conversation_id=conversation_id,
                         step_store=self._steps,
@@ -2944,7 +2949,9 @@ class LocalExecutionBackend:
                                 memory_scope=current.memory_scope,
                                 principal=request.principal,
                                 refs=subagent_refs,
+                                binding=binding.snapshot,
                                 mode=current.mode,
+                                require_frozen_bindings=self._execution_objects_durable,
                             )
                         ),
                         event_sink=sink,
@@ -2975,7 +2982,7 @@ class LocalExecutionBackend:
                     raise
                 current = await self._execution.executions.get(
                     execution_id,
-                    tenant_id=original.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2997,7 +3004,7 @@ class LocalExecutionBackend:
                         try:
                             persisted = await self._execution.executions.get(
                                 execution_id,
-                                tenant_id=original.tenant_id,
+                                tenant_id=self._tenant_id,
                             )
                         except asyncio.CancelledError:
                             raise
@@ -3063,7 +3070,7 @@ class LocalExecutionBackend:
                 )
             current = await self._execution.executions.get(
                 execution_id,
-                tenant_id=original.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current is not None and current.status is ExecutionStatus.FINALIZING:
                 metric_status = "CANCELLED"
@@ -3121,7 +3128,7 @@ class LocalExecutionBackend:
                 observation_id=metric_id,
                 started_at_ns=metric_started,
                 source_namespace=self._namespace,
-                tenant_id=original.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=execution_id,
                 session_id=original.session_id,
                 correlation=original.correlation,
@@ -3147,7 +3154,7 @@ class LocalExecutionBackend:
         try:
             await self._recovery.checkpoints.compare_and_swap(
                 checkpoint.execution_id,
-                tenant_id=checkpoint.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
                 next_record=updated,
             )
@@ -3155,7 +3162,7 @@ class LocalExecutionBackend:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
             current = await self._recovery.checkpoints.get(
-                checkpoint.execution_id, tenant_id=checkpoint.tenant_id
+                checkpoint.execution_id, tenant_id=self._tenant_id
             )
             if (
                 current is None
@@ -3195,7 +3202,7 @@ class LocalExecutionBackend:
             if execution.session_id is None
             else await self._conversation.sessions.get(
                 execution.session_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
         )
         if (
@@ -3215,7 +3222,7 @@ class LocalExecutionBackend:
                     message
                     async for message in self._steps.iter_session_messages(
                         history_id,
-                        tenant_id=execution.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                 ]
             except AIError as error:
@@ -3236,13 +3243,13 @@ class LocalExecutionBackend:
         if execution.base_execution_id is None:
             return []
         base = await self._execution.executions.get(
-            execution.base_execution_id, tenant_id=execution.tenant_id
+            execution.base_execution_id, tenant_id=self._tenant_id
         )
         if base is None or base.agent_run_sequence < 1:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
         run_id = step_run_id(
             namespace=self._namespace,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
             execution_id=base.execution_id,
             segment_sequence=base.agent_run_sequence,
         )
@@ -3320,7 +3327,7 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         current = await self._execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3338,7 +3345,7 @@ class LocalExecutionBackend:
                 self._execution_objects,
                 RuntimeObjectKeyFactory(self._namespace),
                 RuntimeDomain.EXECUTION,
-                execution.tenant_id,
+                self._tenant_id,
                 payload,
             )
             output_payload = StoredPayload.object(object_ref)
@@ -3362,7 +3369,7 @@ class LocalExecutionBackend:
         if execution.session_id is not None:
             session = await self._conversation.sessions.get(
                 execution.session_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if session is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3387,7 +3394,7 @@ class LocalExecutionBackend:
             return None
         base = await self._execution.executions.get(
             execution.base_execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if base is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3396,7 +3403,7 @@ class LocalExecutionBackend:
         return ConversationCursor(
             step_run_id(
                 namespace=self._namespace,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=base.execution_id,
                 segment_sequence=base.agent_run_sequence,
             ),
@@ -3429,7 +3436,7 @@ class LocalExecutionBackend:
         try:
             updated = await self._execution.executions.compare_and_swap(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=execution.revision,
                 next_record=finalizing,
             )
@@ -3443,7 +3450,7 @@ class LocalExecutionBackend:
                 raise
             current = await self._execution.executions.get(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3469,7 +3476,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         session = await self._conversation.sessions.get(
             execution.session_id or "",
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if session is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3490,7 +3497,7 @@ class LocalExecutionBackend:
             try:
                 await self._conversation_commands.commit_snapshot_and_advance(
                     execution.session_id or "",
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._tenant_id,
                     execution_id=execution.execution_id,
                     expected=expected_cursor,
                     next_cursor=next_cursor,
@@ -3502,7 +3509,7 @@ class LocalExecutionBackend:
                     raise
                 current = await self._conversation.sessions.get(
                     execution.session_id or "",
-                    tenant_id=execution.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if current is None or current.continuation != next_cursor:
                     raise
@@ -3530,7 +3537,7 @@ class LocalExecutionBackend:
         try:
             await self._conversation.sessions.advance_continuation(
                 execution.session_id or "",
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=execution.execution_id,
                 expected=expected_cursor,
                 next_cursor=next_cursor,
@@ -3543,7 +3550,7 @@ class LocalExecutionBackend:
                 raise
             latest = await self._conversation.sessions.get(
                 execution.session_id or "",
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if latest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3583,7 +3590,7 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         current = await self._execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3814,7 +3821,7 @@ class LocalExecutionBackend:
     ) -> None:
         current = await self._execution.operations.get(
             operation.operation_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -3830,7 +3837,7 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         updated = OperationLedgerRecord(
             current.operation_id,
-            current.tenant_id,
+            self._tenant_id,
             current.resource_kind,
             current.resource_id,
             current.execution_id,
@@ -3848,7 +3855,7 @@ class LocalExecutionBackend:
         try:
             await self._execution.operations.compare_and_swap(
                 current.operation_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_status=current.status,
                 next_record=updated,
             )
@@ -3860,7 +3867,7 @@ class LocalExecutionBackend:
                 raise
             latest = await self._execution.operations.get(
                 current.operation_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if (
                 latest is not None
@@ -3922,7 +3929,7 @@ class LocalExecutionBackend:
                 self._recovery_objects,
                 RuntimeObjectKeyFactory(self._namespace),
                 RuntimeDomain.RECOVERY,
-                execution.tenant_id,
+                self._tenant_id,
                 data,
             )
         )
@@ -3943,7 +3950,7 @@ class LocalExecutionBackend:
                 self._recovery_objects,
                 RuntimeObjectKeyFactory(self._namespace),
                 RuntimeDomain.RECOVERY,
-                execution.tenant_id,
+                self._tenant_id,
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
@@ -3971,7 +3978,7 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             current = await self._recovery.checkpoints.get(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4002,14 +4009,14 @@ class LocalExecutionBackend:
         try:
             return await self._recovery.checkpoints.compare_and_swap(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 expected_revision=checkpoint.revision,
                 next_record=next_checkpoint,
             )
         except AIError as error:
             current = await self._recovery.checkpoints.get(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -4045,7 +4052,7 @@ class LocalExecutionBackend:
         if unknown is not None:
             effects = await self._recovery_failure_effects(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if effects:
                 return await self._commit_recovery_required(
@@ -4089,7 +4096,7 @@ class LocalExecutionBackend:
     ) -> ExecutionRecord:
         current = await self._execution.executions.get(
             execution.execution_id,
-            tenant_id=execution.tenant_id,
+            tenant_id=self._tenant_id,
         )
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4113,7 +4120,7 @@ class LocalExecutionBackend:
         if recovery_checkpoint is None:
             recovery_checkpoint = await self._recovery.checkpoints.get(
                 current.execution_id,
-                tenant_id=current.tenant_id,
+                tenant_id=self._tenant_id,
             )
             if recovery_checkpoint is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4163,7 +4170,7 @@ class LocalExecutionBackend:
                                 self._recovery_objects,
                                 RuntimeObjectKeyFactory(self._namespace),
                                 RuntimeDomain.RECOVERY,
-                                current.tenant_id,
+                                self._tenant_id,
                                 content,
                             )
                         )
@@ -4176,7 +4183,7 @@ class LocalExecutionBackend:
                 ):
                     session = await self._conversation.sessions.get(
                         current.session_id,
-                        tenant_id=current.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if session is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4239,7 +4246,7 @@ class LocalExecutionBackend:
                     recovery_checkpoint = (
                         await self._recovery.checkpoints.compare_and_swap(
                             current.execution_id,
-                            tenant_id=current.tenant_id,
+                            tenant_id=self._tenant_id,
                             expected_revision=recovery_checkpoint.revision,
                             next_record=prepared,
                         )
@@ -4249,7 +4256,7 @@ class LocalExecutionBackend:
                         raise
                     recovery_checkpoint = await self._recovery.checkpoints.get(
                         current.execution_id,
-                        tenant_id=current.tenant_id,
+                        tenant_id=self._tenant_id,
                     )
                     if recovery_checkpoint is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4277,8 +4284,6 @@ class LocalExecutionBackend:
             current.event_sequence,
             terminal,
             ResultRecord(
-                current.execution_id,
-                current.tenant_id,
                 output if status is ExecutionStatus.SUCCEEDED else None,
                 stop_reason,
                 captured_usage,
@@ -4408,8 +4413,6 @@ class LocalExecutionBackend:
             current.event_sequence,
             terminal,
             ResultRecord(
-                current.execution_id,
-                current.tenant_id,
                 output if status is ExecutionStatus.SUCCEEDED else None,
                 stop_reason,
                 usage,
@@ -4499,7 +4502,7 @@ class LocalExecutionBackend:
                         candidate_run_ids = tuple(
                             step_run_id(
                                 namespace=self._namespace,
-                                tenant_id=current.tenant_id,
+                                tenant_id=self._tenant_id,
                                 execution_id=current.execution_id,
                                 segment_sequence=sequence,
                             )
@@ -4633,7 +4636,7 @@ class LocalExecutionBackend:
             if current.session_id is not None:
                 session = await self._conversation.sessions.get(
                     current.session_id,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._tenant_id,
                 )
                 if session is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -4680,7 +4683,7 @@ class LocalExecutionBackend:
         candidates = tuple(
             step_run_id(
                 namespace=self._namespace,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._tenant_id,
                 execution_id=execution.execution_id,
                 segment_sequence=sequence,
             )
@@ -4740,7 +4743,6 @@ def _admission_matches(
 ) -> bool:
     return (
         existing.execution_id == candidate.execution_id
-        and existing.tenant_id == candidate.tenant_id
         and existing.step_run_id is None
         and existing.state is RecoveryCheckpointState.ADMITTED
         and existing.handoff_phase is RecoveryHandoffPhase.NONE

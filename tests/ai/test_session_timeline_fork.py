@@ -42,7 +42,6 @@ def _session(session_id: str) -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
         session_id=session_id,
-        tenant_id="tenant",
         owner_principal_id="owner",
         status=SessionStatus.OPEN,
         revision=0,
@@ -65,7 +64,6 @@ def _execution(
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id=execution_id,
-        tenant_id="tenant",
         session_id="source",
         parent_execution_id=None,
         root_execution_id=execution_id,

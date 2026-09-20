@@ -4,6 +4,7 @@
 
 import asyncio
 import secrets
+from dataclasses import replace
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, overload
@@ -22,12 +23,14 @@ from ..capability import CapabilityGroup
 from ..core import (
     CorrelationData,
     ExecutionMode,
+    ExecutionStatus,
     JsonValue,
     Principal,
     PrincipalKind,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
+    UsageMetrics,
     PromptLimits,
     normalize_correlation,
     normalize_execution_mode,
@@ -45,16 +48,20 @@ from ..model import ModelRegistry
 if TYPE_CHECKING:
     from ..observe import Metrics
     from ..task import TaskResultRecord
+    from ._runtime_history import RuntimeHistory
 from ..task import (
+    CancelGraphRequest,
     TaskGraph,
     TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphService,
+    TaskResultRef,
     TaskNode,
     TaskExpanderRef,
 )
 from ._agent import Agent, Execution, Session
+from ._binding_freeze import _RuntimeBindingFreezer
 from ._task import TaskGraphRun
 from ._context import RuntimeContext
 from ._input import CanonicalUserInput
@@ -75,6 +82,7 @@ from .service_api import (
     EventService,
     ExternalService,
     ExecutionRequest,
+    ExecutionResult,
     ExecutionService,
     ForkExecutionRequest,
     ForkSessionRequest,
@@ -86,6 +94,7 @@ from .service_api import (
     StartEvaluationRequest,
     UpdateSessionRequest,
     ExecutionTreeEvent,
+    TaskGraphRunEvent,
 )
 from .state import RuntimeState
 
@@ -108,6 +117,14 @@ class _TaskNodeRuntimePort(Protocol):
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
+        files: Sequence[str] = (),
+        session_id: "str | None" = None,
+        memory_scope: "str | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> "TaskNode": ...
 
     async def get_result_record(
@@ -118,7 +135,12 @@ class _TaskNodeRuntimePort(Protocol):
         tenant_id: str,
     ) -> "TaskResultRecord | None": ...
 
-    async def read_result_record(self, record: "TaskResultRecord") -> JsonValue: ...
+    async def read_result_record(
+        self,
+        record: "TaskResultRecord",
+        *,
+        principal: "Principal | None" = None,
+    ) -> JsonValue: ...
 
 
 class _RuntimeMetricControl(Protocol):
@@ -138,6 +160,7 @@ class _ExecutionTreeStreamer(Protocol):
         *,
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -185,6 +208,7 @@ class Runtime(Generic[AppT]):
         external: ExternalService,
         event: EventService,
         artifact: ArtifactService,
+        history: "RuntimeHistory | None",
         *,
         namespace: str,
         context: RuntimeContext[AppT],
@@ -192,6 +216,7 @@ class Runtime(Generic[AppT]):
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_RuntimeMetricControl | None" = None,
+        _binding_freezer: "_RuntimeBindingFreezer | None" = None,
     ) -> None:
         if any(
             value is None
@@ -221,6 +246,7 @@ class Runtime(Generic[AppT]):
         self.external = external
         self.event = event
         self.artifact = artifact
+        self.history = history
         self._namespace = validate_persistence_namespace(namespace)
         self._context = context
         self._default_principal = Principal(
@@ -232,6 +258,7 @@ class Runtime(Generic[AppT]):
         self._task_node_runtime = task_node_runtime
         self._tree_streamer = tree_streamer
         self._metric_control = metric_control
+        self._binding_freezer = _binding_freezer
         self._closed = False
         self._closing = False
         self._close_lock = asyncio.Lock()
@@ -310,6 +337,7 @@ class Runtime(Generic[AppT]):
         *,
         principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]:
         if self._tree_streamer is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -317,6 +345,7 @@ class Runtime(Generic[AppT]):
             execution_id,
             principal=principal,
             after_sequences=after_sequences,
+            include_content=include_content,
         )
 
     @property
@@ -352,46 +381,89 @@ class Runtime(Generic[AppT]):
             return RuntimeMetricFlushResult(True, _disabled_metric_status())
         return await control.flush(timeout_seconds=timeout_seconds)
 
-    def agent(self, agent_id: str = "default") -> "Agent[AppT]":
-        """Resolve one frozen root Agent by id."""
+    def agent(
+        self,
+        agent_id: str = "default",
+        *,
+        model: "str | None" = None,
+        system_prompt: "str | None" = None,
+        instructions: "Sequence[str] | None" = None,
+        allow_tools: "Sequence[str] | None" = None,
+        allow_skills: "Sequence[str] | None" = None,
+    ) -> "Agent[AppT]":
+        """Resolve one root Agent, optionally deriving narrower call semantics."""
         self._ensure_open()
         validate_agent_id(agent_id)
-        definition = self._catalog.root_definition(agent_id)
-        return Agent(self, definition.spec.id, definition.digest)
+        root = self._catalog.root_definition(agent_id)
+        if all(
+            value is None
+            for value in (
+                model,
+                system_prompt,
+                instructions,
+                allow_tools,
+                allow_skills,
+            )
+        ):
+            return Agent(self, root.spec.id, root.digest)
+        changes: dict[str, object] = {}
+        if model is not None:
+            changes["model"] = model
+        if system_prompt is not None:
+            changes["system_prompt"] = system_prompt
+        if instructions is not None:
+            changes["instructions"] = tuple(instructions)
+        if allow_tools is not None:
+            changes["allow_tools"] = tuple(allow_tools)
+        if allow_skills is not None:
+            changes["allow_skills"] = tuple(allow_skills)
+        try:
+            spec = replace(root.spec, **changes)
+            derived = self._compiler.compile(spec)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        root_tools = {
+            (item.kind, item.id)
+            for item in (*root.selected_tools, *root.selected_mcp)
+        }
+        derived_tools = {
+            (item.kind, item.id)
+            for item in (*derived.selected_tools, *derived.selected_mcp)
+        }
+        if not derived_tools.issubset(root_tools):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if not {
+            item.id for item in derived.selected_skills
+        }.issubset({item.id for item in root.selected_skills}):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return Agent(self, derived.spec.id, derived.digest, derived)
 
-    def _definition(self, agent_digest: str) -> AgentDefinition:
+    def _agent_definition(
+        self,
+        agent_digest: str,
+        definition: "AgentDefinition | None" = None,
+    ) -> AgentDefinition:
         self._ensure_open()
-        return self._catalog.definition(agent_digest)
+        if definition is None:
+            return self._catalog.definition(agent_digest)
+        if definition.digest != agent_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return definition
 
     def _bind_agent(
         self,
         agent_digest: str,
         *,
         output: "type[BaseModel] | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> AgentBinding:
-        self._ensure_open()
-        definition = self._catalog.definition(agent_digest)
-        return self._catalog.register_binding(
-            self._compiler.bind(definition, output=output)
-        )
+        resolved = self._agent_definition(agent_digest, definition)
+        return self._compiler.bind(resolved, output=output)
 
-    def _restore_binding(self, snapshot: AgentBindingSnapshot) -> AgentBinding:
-        self._ensure_open()
-        try:
-            current = self._catalog.binding(snapshot.binding_digest)
-        except AIError as error:
-            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
-                raise
-        else:
-            if current.snapshot != snapshot:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return current
-        restored = self._compiler.restore(snapshot)
-        return self._catalog.register_binding(restored)
-
-    async def _compile_agent(self, agent_id: str) -> AgentDefinition:
-        self._ensure_open()
-        return self._catalog.root_definition(agent_id)
+    async def _freeze_agent_binding(self, binding: AgentBinding) -> AgentBinding:
+        if self._binding_freezer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await self._binding_freezer.freeze(binding)
 
     async def _start_for_agent(
         self,
@@ -408,19 +480,23 @@ class Runtime(Generic[AppT]):
         planning: "bool | None",
         thinking: "ThinkingValue | None",
         correlation: "Mapping[str, object] | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
+        effective_correlation = _overlay_request_correlation(
+            self.correlation,
+            correlation,
+        )
         resolved_files = _request_files(files)
-        definition = self._catalog.definition(agent_digest)
+        definition = self._agent_definition(agent_digest, definition)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             definition,
             mode=mode,
             planning=planning,
             thinking=thinking,
         )
-        binding = self._catalog.register_binding(
+        binding = await self._freeze_agent_binding(
             self._compiler.bind(definition, output=output)
         )
         request = ExecutionRequest(
@@ -435,7 +511,11 @@ class Runtime(Generic[AppT]):
             files=resolved_files,
         )
         if session_id is None:
-            handle = await self.execution.start(binding.digest, request)
+            handle = await self.execution.start(
+                binding.digest,
+                request,
+                binding_snapshot=binding.snapshot,
+            )
         else:
             if not isinstance(session_id, str) or not session_id.strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -456,9 +536,11 @@ class Runtime(Generic[AppT]):
                 binding.digest,
                 session_id,
                 resume_request,
+                binding_snapshot=binding.snapshot,
             )
         _logger.info(
-            "runtime execution admitted: execution=%s agent=%s session=%s mode=%s planning=%s thinking=%s",
+            "runtime execution admitted: execution=%s agent=%s session=%s "
+            "mode=%s planning=%s thinking=%s",
             handle.execution_id,
             definition.spec.id,
             session_id,
@@ -469,14 +551,12 @@ class Runtime(Generic[AppT]):
         return Execution(
             self,
             handle.execution_id,
-            binding.digest,
             resolved_principal,
             self._watch_execution_tree,
         )
 
     async def _retry_execution(
         self,
-        binding_digest: str,
         execution_id: str,
         user_prompt: CanonicalUserInput,
         *,
@@ -493,18 +573,16 @@ class Runtime(Generic[AppT]):
             correlation=_request_correlation(correlation),
             files=_request_files(files),
         )
-        handle = await self.execution.retry(binding_digest, execution_id, request)
+        handle = await self.execution.retry(execution_id, request)
         return Execution(
             self,
             handle.execution_id,
-            binding_digest,
             principal,
             self._watch_execution_tree,
         )
 
     async def _fork_execution(
         self,
-        binding_digest: str,
         execution_id: str,
         user_prompt: CanonicalUserInput,
         *,
@@ -521,11 +599,10 @@ class Runtime(Generic[AppT]):
             correlation=_request_correlation(correlation),
             files=_request_files(files),
         )
-        handle = await self.execution.fork(binding_digest, execution_id, request)
+        handle = await self.execution.fork(execution_id, request)
         return Execution(
             self,
             handle.execution_id,
-            binding_digest,
             principal,
             self._watch_execution_tree,
         )
@@ -586,6 +663,7 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: "str | None",
         cwd: "str | None",
+        definition: "AgentDefinition | None" = None,
     ) -> "Session[AppT]":
         resolved_principal = self._resolve_principal(principal)
         await self.session.fork(
@@ -598,7 +676,14 @@ class Runtime(Generic[AppT]):
                 cwd,
             ),
         )
-        return Session(self, agent_id, agent_digest, new_session_id, resolved_principal)
+        return Session(
+            self,
+            agent_id,
+            agent_digest,
+            new_session_id,
+            resolved_principal,
+            definition,
+        )
 
     async def _update_session(
         self,
@@ -650,28 +735,35 @@ class Runtime(Generic[AppT]):
         request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None",
+        definition: "AgentDefinition | None" = None,
     ) -> EvaluationHandle:
-        binding = self._bind_agent(agent_digest, output=output)
-        return await self.evaluation.start(binding.digest, request)
+        binding = await self._freeze_agent_binding(
+            self._bind_agent(
+                agent_digest,
+                output=output,
+                definition=definition,
+            )
+        )
+        return await self.evaluation.start(
+            binding.digest,
+            request,
+            binding_snapshot=binding.snapshot,
+        )
 
     async def _replay_evaluation_for_agent(
         self,
-        agent_digest: str,
+        agent_id: str,
         snapshot_id: str,
         request: ReplayEvaluationRequest,
-        *,
-        output: "type[BaseModel] | None",
     ) -> "Execution[AppT]":
-        binding = self._bind_agent(agent_digest, output=output)
         handle = await self.evaluation.replay(
-            binding.digest,
+            agent_id,
             snapshot_id,
             request,
         )
         return Execution(
             self,
             handle.execution_id,
-            binding.digest,
             request.principal,
             self._watch_execution_tree,
         )
@@ -688,6 +780,14 @@ class Runtime(Generic[AppT]):
         planning: "bool | None",
         thinking: "ThinkingValue | None",
         expander: "TaskExpanderRef | None",
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
+        files: Sequence[str] = (),
+        session_id: "str | None" = None,
+        memory_scope: "str | None" = None,
+        definition: "AgentDefinition | None" = None,
     ) -> TaskNode:
         return self._require_task_node_runtime().build_agent_task(
             agent_digest,
@@ -699,6 +799,14 @@ class Runtime(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            files=files,
+            session_id=session_id,
+            memory_scope=memory_scope,
+            definition=definition,
         )
 
     async def start_graph(
@@ -725,6 +833,22 @@ class Runtime(Generic[AppT]):
             self._watch_execution_tree,
         )
 
+    def graph_run(
+        self,
+        graph_id: str,
+        *,
+        principal: "Principal | None" = None,
+    ) -> TaskGraphRun[AppT]:
+        """Return a durable graph handle without starting another scheduler."""
+        self._ensure_open()
+        validate_resource_id(graph_id)
+        return TaskGraphRun(
+            self,
+            graph_id,
+            self._resolve_principal(principal),
+            self._watch_execution_tree,
+        )
+
     async def run_graph(
         self,
         graph: TaskGraph,
@@ -734,6 +858,7 @@ class Runtime(Generic[AppT]):
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
         correlation: "Mapping[str, object] | None" = None,
+        observer: "Callable[[TaskGraphRunEvent], Awaitable[None]] | None" = None,
     ) -> TaskGraphResult:
         run = await self.start_graph(
             graph,
@@ -742,7 +867,10 @@ class Runtime(Generic[AppT]):
             limits=limits,
             correlation=correlation,
         )
-        return await run.wait(timeout_seconds=timeout_seconds)
+        return await run.wait(
+            timeout_seconds=timeout_seconds,
+            observer=observer,
+        )
 
     async def read_task_result(
         self,
@@ -800,7 +928,91 @@ class Runtime(Generic[AppT]):
         )
         if record is None or record.result_digest != state.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await task_runtime.read_result_record(record)
+        return await task_runtime.read_result_record(
+            record,
+            principal=resolved_principal,
+        )
+
+    def _task_execution(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        principal: Principal,
+    ) -> Execution[AppT]:
+        self._ensure_open()
+        return Execution(
+            self,
+            execution_id,
+            principal,
+            self._watch_execution_tree,
+            None,
+            lambda idempotency_key, force: self._cancel_task_execution(
+                graph_id,
+                node_id,
+                execution_id,
+                principal,
+                idempotency_key,
+                force,
+            ),
+        )
+
+    async def _cancel_task_execution(
+        self,
+        graph_id: str,
+        node_id: str,
+        execution_id: str,
+        principal: Principal,
+        idempotency_key: str | None,
+        force: bool,
+    ) -> CancelExecutionResult:
+        view = await self.execution.inspect(
+            execution_id,
+            principal=principal,
+        )
+        key = idempotency_key or secrets.token_urlsafe(32)
+        try:
+            if view.binding_kind == "task":
+                cancelled = await self.execution.cancel_task(
+                    execution_id,
+                    principal=principal,
+                )
+            else:
+                cancelled = await self.execution.cancel(
+                    execution_id,
+                    CancelExecutionRequest(
+                        principal,
+                        key,
+                        force,
+                    ),
+                )
+        except AIError as error:
+            if error.code is ErrorCode.TASK_EFFECT_UNKNOWN:
+                await self.graph.cancel_node(
+                    graph_id,
+                    node_id,
+                    execution_id,
+                    CancelGraphRequest(
+                        principal,
+                        key,
+                        force,
+                    ),
+                )
+            raise
+
+        if cancelled.cancelled:
+            await self.graph.cancel_node(
+                graph_id,
+                node_id,
+                execution_id,
+                CancelGraphRequest(
+                    principal,
+                    key,
+                    force,
+                ),
+            )
+        return cancelled
+
 
     async def _admit_graph(
         self,
@@ -813,7 +1025,10 @@ class Runtime(Generic[AppT]):
     ) -> TaskGraphRequest:
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
-        effective_correlation = _overlay_request_correlation(self.correlation, correlation)
+        effective_correlation = _overlay_request_correlation(
+            self.correlation,
+            correlation,
+        )
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -1008,12 +1223,14 @@ async def _open_runtime(
             components.external,
             components.event,
             components.artifact,
+            getattr(components, "history", None),
             namespace=namespace,
             context=context,
             close_callback=components.close_callback,
             task_node_runtime=components.task_node_runtime,
             tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
+            _binding_freezer=components.binding_freezer,
         )
     except BaseException:
         try:

@@ -30,6 +30,7 @@ from ..capability import (
 from ..core import canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..workspace import SandboxSession, WorkspaceToolPermissionPolicy
+from ._attachment import bind_tool_return_attachments
 from ._tool import ToolOperationBridge
 from ._tool_metrics import (
     TOOL_METRICS_MANAGED_METADATA_KEY,
@@ -296,12 +297,13 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
             )
             raise
         if descriptor.effect_owner == "none":
-            return await self._invoke(
+            result = await self._invoke(
                 call,
                 tool.tool_def,
                 final_args,
                 lambda args: raw_toolset.call_tool(name, args, ctx, raw_tool),
             )
+            return bind_tool_return_attachments(name, call_id, result)
         bridge = self._tool_operations
         if bridge is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)

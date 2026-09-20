@@ -388,7 +388,6 @@ def test_durable_pure_task_graph_does_not_require_durable_execution(tmp_path) ->
     state = RuntimeState.from_plan(
         RuntimeStatePlan(
             task=task,
-            recovery=RuntimeStateRoute.transient(),
             execution=RuntimeStateRoute.transient(),
         )
     )

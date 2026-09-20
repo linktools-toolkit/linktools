@@ -19,7 +19,7 @@ def test_default_runtime_reads_openai_vision(
     monkeypatch.setenv("OPENAI_VISION", "true")
 
     binding = _local_models(
-        Workspace.load(tmp_path, workspace_id="workspace")
+        Workspace.load(tmp_path)
     ).snapshot().resolve("default")
 
     assert binding.vision is True
@@ -33,7 +33,7 @@ def test_default_runtime_rejects_invalid_openai_vision(
     monkeypatch.setenv("OPENAI_VISION", "sometimes")
 
     with pytest.raises(AIError) as raised:
-        _local_models(Workspace.load(tmp_path, workspace_id="workspace"))
+        _local_models(Workspace.load(tmp_path))
 
     assert raised.value.code is ErrorCode.MODEL_CONFIG_INVALID
     assert raised.value.safe_details == {"provider": "openai", "field": "vision"}

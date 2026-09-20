@@ -30,6 +30,7 @@ from ..storage import (
     normalize_storage_metadata,
 )
 from ._domain import AssetInfo, AssetKey, AssetRoot
+from ._receipt import validate_batch_receipt_identity
 
 _logger = environ.get_logger("ai.asset.backend")
 
@@ -39,7 +40,6 @@ class InMemoryAssetBackend:
 
     def __init__(self, root: "AssetRoot | None" = None, *, writable: bool = True) -> None:
         self._root = root or AssetRoot(
-            "memory:default",
             "memory",
             "memory",
             hashlib.sha256(b"memory:default").hexdigest(),
@@ -48,6 +48,7 @@ class InMemoryAssetBackend:
         self._entries: dict[AssetKey, tuple[AssetInfo, bytes]] = {}
         self._versions: dict[AssetKey, list[tuple[AssetInfo, bytes]]] = {}
         self._revision = 0
+        self._batch_receipts: dict[str, StorageBatchResult[AssetInfo, AssetKey]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -202,9 +203,18 @@ class InMemoryAssetBackend:
         changes: "Sequence[StorageChange[AssetKey, bytes]]",
         *,
         expected_revision: "StorageRevision | None" = None,
+        idempotency_key: "str | None" = None,
+        request_digest: "str | None" = None,
     ) -> "StorageBatchResult[AssetInfo, AssetKey]":
+        validate_batch_receipt_identity(idempotency_key, request_digest)
         async with self._lock:
             self._require_writable()
+            if idempotency_key is not None:
+                previous_receipt = self._batch_receipts.get(idempotency_key)
+                if previous_receipt is not None:
+                    if previous_receipt.request_digest != request_digest:
+                        raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    return previous_receipt
             if expected_revision is not None and expected_revision != self._store_revision():
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if len({change.key for change in changes}) != len(changes):
@@ -261,9 +271,25 @@ class InMemoryAssetBackend:
                     )
                     self._record(info, b"")
                     results.append(StorageResetResult(change.key, True, store_revision))
+            result = StorageBatchResult(
+                store_revision,
+                True,
+                tuple(results),
+                request_digest,
+                idempotency_key,
+            )
+            if idempotency_key is not None:
+                self._batch_receipts[idempotency_key] = result
             if mutates:
                 _logger.debug("asset batch committed: changes=%s revision=%s", len(changes), self._revision)
-            return StorageBatchResult(store_revision, True, tuple(results))
+            return result
+
+    async def batch_result(
+        self,
+        idempotency_key: str,
+    ) -> "StorageBatchResult[AssetInfo, AssetKey] | None":
+        async with self._lock:
+            return self._batch_receipts.get(idempotency_key)
 
     async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
         async with self._lock:
@@ -342,7 +368,6 @@ class InMemoryAssetBackend:
             _etag(value),
             len(value),
             status,
-            self._root.root_id,
             self._root.digest,
             datetime.now(timezone.utc),
             normalize_storage_metadata(metadata),
@@ -407,7 +432,6 @@ def _decode_entry(raw: object, root: AssetRoot) -> "tuple[AssetInfo, bytes]":
             str(raw["etag"]),
             int(raw["size"]),
             StorageEntryStatus(str(raw["status"])),
-            root.root_id,
             root.digest,
             datetime.fromisoformat(str(raw["modified_at"])),
             normalize_storage_metadata(raw.get("metadata")),

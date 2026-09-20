@@ -18,6 +18,7 @@ from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.runtime._input import (
     ExecutionInputMaterializer,
+    stored_input_attachment_views,
     stored_user_input_view,
 )
 from linktools.ai.runtime._tool_boundary import (
@@ -131,6 +132,7 @@ async def test_text_materialization_keeps_text_codec() -> None:
             "version": 1,
             "prompt": {"kind": "text", "text": "plain text"},
             "files": [],
+            "attachments": [],
         }
     finally:
         await materializer.close()
@@ -167,26 +169,42 @@ async def test_execution_freezes_materialized_input_once() -> None:
         assert prepared.stored_user_input is not None
         assert isinstance(prepared.request.user_prompt, tuple)
         assert session.reads == ["evidence.txt"]
-        assert prepared.stored_user_input.view == {
-            "version": 1,
-            "prompt": {"kind": "text", "text": "inspect"},
-            "files": [
-                {
-                    "path": "evidence.txt",
-                    "media_type": "text/plain",
-                    "size": 8,
-                    "digest": (
-                        "ee8250fb76e094b34b471f13a73dbbe51d1ae142e9df59d7c0d31ec20f0a0a8e"
-                    ),
-                }
-            ],
-        }
+        view = prepared.stored_user_input.view
+        assert view is not None
+        assert view["version"] == 1
+        assert view["prompt"] == {"kind": "text", "text": "inspect"}
+        assert view["files"] == [
+            {
+                "path": "evidence.txt",
+                "media_type": "text/plain",
+                "size": 8,
+                "digest": (
+                    "ee8250fb76e094b34b471f13a73dbbe51d1ae142e9df59d7c0d31ec20f0a0a8e"
+                ),
+            }
+        ]
+        attachments = view["attachments"]
+        assert isinstance(attachments, list)
+        assert len(attachments) == 1
+        assert attachments[0]["fact"] == "accepted"
+        assert attachments[0]["source"] == "workspace"
+        assert attachments[0]["media_type"] == "text/plain"
+        assert attachments[0]["size"] == 8
+        assert attachments[0]["digest"] == (
+            "ee8250fb76e094b34b471f13a73dbbe51d1ae142e9df59d7c0d31ec20f0a0a8e"
+        )
+        assert attachments[0]["position"] == 0
+        assert attachments[0]["call_id"] is None
         view_text = str(prepared.stored_user_input.view)
         assert "Workspace file path" not in view_text
         assert "ZXZpZGVuY2U=" not in view_text
 
+        attachment_id = attachments[0]["attachment_id"]
         replay = await materializer.restore(prepared.stored_user_input)
         assert replay == prepared.request.user_prompt
+        assert stored_input_attachment_views(prepared.stored_user_input)[0][
+            "attachment_id"
+        ] == attachment_id
         assert session.reads == ["evidence.txt"]
     finally:
         await materializer.close()

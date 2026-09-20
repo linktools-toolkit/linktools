@@ -8,18 +8,15 @@ from types import SimpleNamespace
 import pytest
 from linktools import ai
 from linktools.ai.agent import AgentBindingSnapshot, SemanticPin
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     Agent,
     ExecutionHandle,
     ExecutionRequest,
     ResumeSessionRequest,
 )
-from linktools.ai.runtime._factory import _restore_recovery_bindings
 from linktools.ai.runtime._session import DefaultSessionService
-from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
 from linktools.ai.spec import AgentSpec
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 def test_top_level_public_surface_is_exact() -> None:
@@ -53,6 +50,7 @@ def test_agent_binding_snapshot_persists_only_semantic_inputs() -> None:
     payload = snapshot.to_payload()
 
     assert set(payload) == {
+        "version",
         "agent_spec",
         "base_model",
         "selected",
@@ -119,11 +117,14 @@ class _CaptureSessionExecution:
         binding_digest: str,
         session_id: str,
         request: ExecutionRequest,
+        *,
+        binding_snapshot: object | None = None,
     ) -> ExecutionHandle:
         self.agent_id = agent_id
         self.binding_digest = binding_digest
         self.session_id = session_id
         self.request = request
+        self.binding_snapshot = binding_snapshot
         return ExecutionHandle("execution")
 
 
@@ -155,7 +156,7 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
         "b" * 64,
         "session",
         ResumeSessionRequest(
-            principal=trusted_workspace_principal("tenant"),
+            principal=Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
             user_prompt="prompt",
             idempotency_key="resume-modes",
             memory_scope=None,
@@ -174,159 +175,3 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     assert capture.request.thinking == "high"
     assert capture.request.user_prompt == "prompt"
 
-
-@pytest.mark.asyncio
-async def test_missing_recovery_execution_fails_closed() -> None:
-    checkpoint = SimpleNamespace(
-        execution_id="execution",
-        state=RecoveryCheckpointState.ADMITTED,
-    )
-
-    async def _list_recoverable_page(**kwargs: object) -> object:
-        del kwargs
-        return SimpleNamespace(items=(checkpoint,), next_cursor=None)
-
-    async def _get_execution(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        return None
-
-    state = SimpleNamespace(
-        recovery=SimpleNamespace(
-            checkpoints=SimpleNamespace(list_recoverable_page=_list_recoverable_page)
-        ),
-        execution=SimpleNamespace(executions=SimpleNamespace(get=_get_execution)),
-    )
-    compiler = SimpleNamespace(restore=lambda value: value)
-    catalog = SimpleNamespace(
-        register_definition=lambda value: value,
-        register_binding=lambda value: value,
-    )
-
-    with pytest.raises(AIError) as error:
-        await _restore_recovery_bindings(
-            catalog,
-            compiler,
-            state,
-            tenant_id="tenant",
-        )
-
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-@pytest.mark.asyncio
-async def test_unavailable_recovery_binding_does_not_block_other_checkpoints() -> None:
-    checkpoints = tuple(
-        SimpleNamespace(
-            execution_id=execution_id,
-            state=RecoveryCheckpointState.ADMITTED,
-        )
-        for execution_id in ("available", "unavailable")
-    )
-    registered: list[str] = []
-
-    snapshots = {
-        execution_id: SimpleNamespace(
-            agent_spec=SimpleNamespace(id=execution_id),
-            binding_digest=digest,
-        )
-        for execution_id, digest in (
-            ("available", "a" * 64),
-            ("unavailable", "b" * 64),
-        )
-    }
-    executions = {
-        execution_id: SimpleNamespace(
-            execution_id=execution_id,
-            binding_digest=snapshot.binding_digest,
-            binding=snapshot,
-        )
-        for execution_id, snapshot in snapshots.items()
-    }
-
-    async def _list_recoverable_page(**kwargs: object) -> object:
-        del kwargs
-        return SimpleNamespace(items=checkpoints, next_cursor=None)
-
-    async def _get_execution(
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> object:
-        del tenant_id
-        return executions[execution_id]
-
-    def _restore(snapshot: object) -> object:
-        execution_id = snapshot.agent_spec.id
-        if execution_id == "unavailable":
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-        return SimpleNamespace(
-            digest=snapshot.binding_digest,
-            definition=SimpleNamespace(spec=SimpleNamespace(id=execution_id)),
-        )
-
-    state = SimpleNamespace(
-        recovery=SimpleNamespace(
-            checkpoints=SimpleNamespace(list_recoverable_page=_list_recoverable_page)
-        ),
-        execution=SimpleNamespace(executions=SimpleNamespace(get=_get_execution)),
-    )
-    catalog = SimpleNamespace(
-        register_definition=lambda value: value,
-        register_binding=lambda value: registered.append(value.digest) or value,
-    )
-    compiler = SimpleNamespace(restore=_restore)
-
-    await _restore_recovery_bindings(
-        catalog,
-        compiler,
-        state,
-        tenant_id="tenant",
-    )
-
-    assert registered == ["a" * 64]
-
-
-@pytest.mark.asyncio
-async def test_workspace_mismatch_blocks_startup_recovery() -> None:
-    checkpoint = SimpleNamespace(
-        execution_id="execution",
-        state=RecoveryCheckpointState.ADMITTED,
-    )
-    snapshot = SimpleNamespace(binding_digest="a" * 64)
-    execution = SimpleNamespace(
-        execution_id="execution",
-        binding_digest="a" * 64,
-        binding=snapshot,
-    )
-
-    async def _list_recoverable_page(**kwargs: object) -> object:
-        del kwargs
-        return SimpleNamespace(items=(checkpoint,), next_cursor=None)
-
-    async def _get_execution(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        return execution
-
-    def _restore(_snapshot: object) -> object:
-        raise AIError(
-            ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-            safe_details={"reason": "workspace_mismatch"},
-        )
-
-    state = SimpleNamespace(
-        recovery=SimpleNamespace(
-            checkpoints=SimpleNamespace(list_recoverable_page=_list_recoverable_page)
-        ),
-        execution=SimpleNamespace(executions=SimpleNamespace(get=_get_execution)),
-    )
-
-    with pytest.raises(AIError) as raised:
-        await _restore_recovery_bindings(
-            SimpleNamespace(),
-            SimpleNamespace(restore=_restore),
-            state,
-            tenant_id="tenant",
-        )
-
-    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-    assert raised.value.safe_details == {"reason": "workspace_mismatch"}

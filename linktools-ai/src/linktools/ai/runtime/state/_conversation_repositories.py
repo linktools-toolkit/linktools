@@ -256,7 +256,6 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=session_id,
-                tenant_id=tenant_id,
                 parent_history_id=source_history_id,
                 prefix_index_head_id=prefix_head,
                 inherited_message_count=inherited_messages,
@@ -334,7 +333,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         identity = [value.session_id, value.sequence]
         return StoredRecord(
             self._timeline_commit_key(value.session_id, value.sequence),
-            self._partition("session_turn_commit"),
             self._scope("session_turn_commit", "session", value.session_id),
             None,
             "session_turn_commit",
@@ -379,7 +377,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> SessionTurnCommitRef:
         if (
             record.key_digest != self._timeline_commit_key(session_id, sequence)
-            or record.partition_digest != self._partition("session_turn_commit")
             or record.scope_digest
             != self._scope("session_turn_commit", "session", session_id)
             or record.parent_digest is not None
@@ -444,7 +441,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     async def create(self, value: SessionRecord) -> SessionRecord:
         _require_tenant(value, self._tenant_id)
         _require_explicit_session_agent_id(value)
-        value = _ensure_session_history(value)
+        value = _ensure_session_history(value, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
             await transaction.insert_records(
@@ -484,7 +481,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         _require_tenant(record, self._tenant_id)
         _require_tenant(operation, self._tenant_id)
         _require_explicit_session_agent_id(record)
-        record = _ensure_session_history(record)
+        record = _ensure_session_history(record, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             _, replayed = await _append_operation(transaction, self, operation)
@@ -547,7 +544,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if expected_source_revision < 0:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        target = _ensure_session_history(replace(target, history_id=None))
+        target = _ensure_session_history(
+            replace(target, history_id=None),
+            self._tenant_id,
+        )
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             _, replayed = await _append_operation(
@@ -567,8 +567,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             if source_stored is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             source = await self._decode(source_stored, SessionRecord)
-            if source.tenant_id != self._tenant_id:
-                raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
             if source.revision != expected_source_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if source.history_id is None:
@@ -602,7 +600,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             source_history = await self._decode_history(source_history_stored)
             if (
                 source_history.session_id != source.session_id
-                or source_history.tenant_id != self._tenant_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             target_stored = related.get(target_key)
@@ -659,7 +656,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             child = ConversationHistoryRecord(
                 history_id=child_history_id,
                 session_id=target.session_id,
-                tenant_id=self._tenant_id,
                 parent_history_id=source.history_id,
                 prefix_index_head_id=prefix_head,
                 inherited_message_count=inherited,
@@ -753,15 +749,12 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         child = await self._decode_history(child_stored)
         if (
             source.session_id != source_session_id
-            or source.tenant_id != self._tenant_id
             or source.history_id is None
             or existing_target.session_id != target.session_id
             or existing_target.history_id != target_history_id
-            or existing_target.tenant_id != self._tenant_id
             or existing_target.owner_principal_id != target.owner_principal_id
             or existing_target.agent_id != target.agent_id
             or child.session_id != target.session_id
-            or child.tenant_id != self._tenant_id
             or child.parent_history_id != source.history_id
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -929,9 +922,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         async def read(transaction: StateTransaction) -> tuple[SessionRecord, ...]:
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=self._partition("session")
-                    if scope is None
-                    else None,
                     scope_digest=scope,
                     kind="session",
                 )
@@ -975,9 +965,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             after_sort_key, after_key_digest = _decode_record_cursor(cursor)
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=self._partition("session")
-                    if scope is None
-                    else None,
                     scope_digest=scope,
                     kind="session",
                     after_sort_key=after_sort_key,
@@ -989,11 +976,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 last = records[-1]
                 probe = await transaction.list_records(
                     RecordQuery(
-                        partition_digest=(
-                            self._partition("session")
-                            if scope is None
-                            else None
-                        ),
                         scope_digest=scope,
                         kind="session",
                         after_sort_key=last.sort_key,
@@ -1391,12 +1373,12 @@ def _session_history_id(session_id: str, tenant_id: str) -> str:
     )
 
 
-def _ensure_session_history(value: SessionRecord) -> SessionRecord:
+def _ensure_session_history(value: SessionRecord, tenant_id: str) -> SessionRecord:
     if value.history_id is not None:
         return value
     return replace(
         value,
-        history_id=_session_history_id(value.session_id, value.tenant_id),
+        history_id=_session_history_id(value.session_id, tenant_id),
     )
 
 
@@ -1406,7 +1388,6 @@ def _new_session_history(value: SessionRecord) -> ConversationHistoryRecord:
     return ConversationHistoryRecord(
         history_id=value.history_id,
         session_id=value.session_id,
-        tenant_id=value.tenant_id,
         parent_history_id=None,
         prefix_index_head_id=None,
         inherited_message_count=0,

@@ -9,7 +9,13 @@ import pytest
 from ._task_test_helpers import admit_graph
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.capability import CapabilityGroup, TaskExpansionContext
-from linktools.ai.core import JsonValue, TaskStatus
+from linktools.ai.core import (
+    JsonValue,
+    Principal,
+    PrincipalKind,
+    TaskStatus,
+    canonical_sha256,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.storage import StoredPayload
@@ -24,11 +30,14 @@ from linktools.ai.task import (
     TaskNode,
     TaskNodeContext,
     TaskNodeInvocation,
+    TaskEffectResolution,
+    TaskInputSupplyRequest,
     TaskExpanderRef,
     TaskNodeRunControl,
     TaskNodeRunResult,
 )
-from linktools.ai.workspace import Workspace, trusted_workspace_principal
+from linktools.ai.workspace import Workspace
+from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 
 
@@ -69,12 +78,23 @@ class _TaskTestModels:
         return _TaskTestModelBinding()
 
 
+def test_task_registration_returns_original_handler() -> None:
+    group = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.echo", 1, _echo_task)
+
+    registered = group.task(handler, effect="none")
+
+    assert registered is handler
+    assert registered.node("node").node_id == "node"
+
+
 async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
     if not context.dependencies:
         return {"value": context.input.get("value")}
-    dependency = next(iter(context.dependencies.values()))
+    name = next(iter(context.dependencies))
+    dependency = context.dependencies[name]
     return {
-        "upstream": dependency.output,
+        "upstream": await context.read_dependency(name),
         "execution_id": dependency.execution_id,
     }
 
@@ -149,8 +169,8 @@ async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed(
     v1 = TaskFunction[None]("example.echo", 1, _echo_task)
     v2 = TaskFunction[None]("example.echo", 2, _echo_task)
 
-    group.task(v1)
-    group.task(v2)
+    group.task(v1, effect="none")
+    group.task(v2, effect="none")
     frozen = await group.freeze()
 
     assert {(item.kind, item.id) for item in frozen} == {
@@ -196,7 +216,6 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
             tenant_id="tenant",
             execution_id="execution",
             result_digest=payload.digest,
-            result_payload=payload,
             graph_id=graph.graph_id,
             node_id="node",
         )
@@ -212,7 +231,7 @@ async def test_task_result_commit_preserves_early_execution_binding() -> None:
             ("node",),
             tenant_id="tenant",
         )
-        assert results["node"].payload == payload
+        assert results["node"].execution_id == "execution"
     finally:
         await state.close()
 
@@ -223,10 +242,10 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler)
+    application.task(handler, effect="none")
     application.agent(
         "default",
         model="default",
@@ -237,10 +256,10 @@ async def test_runtime_executes_custom_agent_custom_graph_and_persists_each_resu
     state = RuntimeState.in_memory()
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace), application),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         first = handler.node("custom-first", input={"value": "seed"})
         agent = runtime.agent("default").task(
@@ -280,10 +299,10 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.echo", 1, _echo_task)
-    application.task(handler)
+    application.task(handler, effect="none")
     application.task_expander(_ApplicationGraphExpander(handler))
     application.task_expander(_AgentGraphExpander())
     application.agent(
@@ -305,10 +324,10 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
     state = RuntimeState.in_memory()
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace), application),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         graph = TaskGraph(
             "dynamic-expansion",
@@ -357,12 +376,16 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         binding = AgentBindingSnapshot.from_payload(agent_child.input["binding"])
         assert binding.agent_spec.id == "worker"
         assert snapshot.node_states[-1].status is TaskStatus.SUCCEEDED
+        child_a_state = next(
+            state for state in snapshot.node_states if state.node_id == "child-a"
+        )
+        assert child_a_state.execution_id is not None
         assert await runtime.read_task_result(
             graph.graph_id,
             "grandchild",
         ) == {
             "upstream": await runtime.read_task_result(graph.graph_id, "child-a"),
-            "execution_id": None,
+            "execution_id": child_a_state.execution_id,
         }
         events = await state.task.tasks.list_events(
             graph.graph_id,
@@ -382,6 +405,288 @@ async def test_runtime_expands_application_and_agent_tasks_across_batches(
         }
 
 
+
+class _EffectOutput(BaseModel):
+    value: str
+
+
+async def _invalid_effect_output(context: TaskNodeContext[None]) -> JsonValue:
+    del context
+    return {"wrong": True}
+
+
+@pytest.mark.asyncio
+async def test_non_replay_safe_applied_resolution_is_owned_by_execution(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace = Workspace.load(workspace_root)
+    application = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.effect-applied", 1, _invalid_effect_output)
+    application.task(
+        handler,
+        effect="non_replay_safe",
+        output=_EffectOutput,
+    )
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    state = RuntimeState.in_memory()
+
+    async with Runtime.open(
+        "default",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        state=state,
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+    ) as runtime:
+        run = await runtime.start_graph(
+            TaskGraph("effect-applied", (handler.node("node"),)),
+            idempotency_key="effect-applied-run-0001",
+        )
+        initial = await run.wait(timeout_seconds=10)
+        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+
+        snapshot = await runtime.graph.snapshot(
+            run.graph_id,
+            principal=runtime.default_principal,
+        )
+        node_state = snapshot.node_states[0]
+        assert node_state.status is TaskStatus.RECOVERY_REQUIRED
+        assert node_state.execution_id is not None
+
+        resolved = await run.resolve_effect(
+            "node",
+            node_state.fence,
+            TaskEffectResolution("applied", {"value": "recovered"}),
+            idempotency_key="effect-applied-resolution-0001",
+        )
+
+        assert resolved.status is TaskStatus.SUCCEEDED
+        assert await run.result("node") == {"value": "recovered"}
+        execution = await runtime.execution.result(
+            node_state.execution_id,
+            principal=runtime.default_principal,
+        )
+        assert execution.status.value == "SUCCEEDED"
+        events = await state.execution.events.list(
+            node_state.execution_id,
+            tenant_id="default",
+            after_sequence=0,
+            limit=100,
+        )
+        assert events.items[-1].payload["task_effect"] == "applied"
+        assert events.items[-1].payload["task_effect_value_digest"] == canonical_sha256(
+            {"value": "recovered"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_replay_safe_invalid_applied_value_preserves_effect_fact(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace = Workspace.load(workspace_root)
+    application = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.effect-invalid", 1, _invalid_effect_output)
+    application.task(
+        handler,
+        effect="non_replay_safe",
+        output=_EffectOutput,
+    )
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+
+    async with Runtime.open(
+        "default",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+    ) as runtime:
+        run = await runtime.start_graph(
+            TaskGraph("effect-invalid", (handler.node("node"),)),
+            idempotency_key="effect-invalid-run-0001",
+        )
+        initial = await run.wait(timeout_seconds=10)
+        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        snapshot = await runtime.graph.snapshot(
+            run.graph_id,
+            principal=runtime.default_principal,
+        )
+        node_state = snapshot.node_states[0]
+        assert node_state.execution_id is not None
+
+        resolved = await run.resolve_effect(
+            "node",
+            node_state.fence,
+            TaskEffectResolution("applied", {"wrong": True}),
+            idempotency_key="effect-invalid-resolution-0001",
+        )
+
+        assert resolved.status is TaskStatus.FAILED
+        execution = await runtime.execution.result(
+            node_state.execution_id,
+            principal=runtime.default_principal,
+        )
+        assert execution.error_code == ErrorCode.OUTPUT_CONTRACT_INVALID.value
+        assert execution.safe_error_details["task_effect"] == "applied"
+        assert execution.safe_error_details["task_effect_value_digest"] == canonical_sha256(
+            {"wrong": True}
+        )
+
+
+@pytest.mark.asyncio
+async def test_not_applied_retries_same_execution_once(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace = Workspace.load(workspace_root)
+    calls = 0
+
+    async def flaky_effect(context: TaskNodeContext[None]) -> JsonValue:
+        nonlocal calls
+        del context
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("effect outcome is unknown")
+        return {"ok": True}
+
+    application = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.effect-retry", 1, flaky_effect)
+    application.task(handler, effect="non_replay_safe")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+
+    async with Runtime.open(
+        "default",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+    ) as runtime:
+        run = await runtime.start_graph(
+            TaskGraph(
+                "effect-retry",
+                (handler.node("node", max_attempts=2, retry_delay_seconds=0),),
+            ),
+            idempotency_key="effect-retry-run-0001",
+        )
+        initial = await run.wait(timeout_seconds=10)
+        assert initial.status is TaskStatus.RECOVERY_REQUIRED
+        before = await runtime.graph.snapshot(
+            run.graph_id,
+            principal=runtime.default_principal,
+        )
+        state_before = before.node_states[0]
+        assert state_before.execution_id is not None
+
+        resumed = await run.resolve_effect(
+            "node",
+            state_before.fence,
+            TaskEffectResolution("not_applied"),
+            idempotency_key="effect-retry-resolution-0001",
+        )
+        assert resumed.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+        final = await run.wait(timeout_seconds=10)
+
+        assert final.status is TaskStatus.SUCCEEDED
+        assert calls == 2
+        after = await runtime.graph.snapshot(
+            run.graph_id,
+            principal=runtime.default_principal,
+        )
+        assert after.node_states[0].execution_id == state_before.execution_id
+        execution = await runtime.execution.inspect(
+            state_before.execution_id,
+            principal=runtime.default_principal,
+        )
+        assert execution.task_attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_deferred_input_is_committed_by_execution_and_allows_json_null(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    workspace = Workspace.load(workspace_root)
+    application = CapabilityGroup[None]("application")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+
+    async with Runtime.open(
+        "default",
+        models=_TaskTestModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+    ) as runtime:
+        run = await runtime.start_graph(
+            TaskGraph(
+                "deferred-input",
+                (
+                    TaskNode(
+                        "input",
+                        input={"type": "linktools.ai.input", "version": 1},
+                    ),
+                ),
+            ),
+            idempotency_key="deferred-input-run-0001",
+        )
+        waiting = await run.wait(timeout_seconds=10)
+        node_result = waiting.node_results[0]
+        assert node_result.status is TaskStatus.WAITING
+        assert node_result.execution_id is not None
+
+        request = TaskInputSupplyRequest(
+            runtime.default_principal,
+            node_result.execution_id,
+            None,
+            "deferred-input-value-0001",
+        )
+        resolved = await run.resume("input", request)
+
+        assert resolved.status is TaskStatus.SUCCEEDED
+        assert await run.result("input") is None
+
+        replay = await run.resume("input", request)
+        assert replay.status is TaskStatus.SUCCEEDED
+
+        same = await runtime.execution.supply_task_input(
+            node_result.execution_id,
+            principal=runtime.default_principal,
+            value=None,
+        )
+        assert same.status.value == "SUCCEEDED"
+
+        with pytest.raises(AIError) as raised:
+            await runtime.execution.supply_task_input(
+                node_result.execution_id,
+                principal=runtime.default_principal,
+                value={"different": True},
+            )
+        assert raised.value.code is ErrorCode.STORAGE_CONFLICT
+
+
 class _BindingRunner:
     def __init__(self) -> None:
         self.entered = asyncio.Event()
@@ -399,7 +704,7 @@ class _BindingRunner:
         self.entered.set()
         await self.release.wait()
         payload = StoredPayload.inline_json({"done": True})
-        return TaskNodeRunResult(payload.digest, result_payload=payload)
+        return TaskNodeRunResult(payload.digest)
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
         del invocation
@@ -413,7 +718,7 @@ async def test_local_activity_generation_does_not_lose_pre_wait_handoff_signal()
     try:
         graph = TaskGraph("observation-graph", (TaskNode("node"),))
         repository = state.task.tasks
-        principal = trusted_workspace_principal("tenant")
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
         request = TaskGraphRequest(
             graph,
             principal,
@@ -462,7 +767,7 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
     calls: list[str] = []
     try:
         graph = TaskGraph("waiting-hold", (TaskNode("node"),))
-        principal = trusted_workspace_principal("tenant")
+        principal = Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value)
         request = TaskGraphRequest(
             graph,
             principal,
@@ -507,7 +812,6 @@ async def test_waiting_recovery_reestablishes_hold_until_task_commit() -> None:
                 return TaskNodeRunResult(
                     payload.digest,
                     execution_id=execution_id,
-                    result_payload=payload,
                 )
 
             async def cancel(self, invocation: TaskNodeInvocation) -> None:
@@ -577,7 +881,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 ) -> None:
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
-    workspace = Workspace.load(workspace_root, workspace_id="workspace")
+    workspace = Workspace.load(workspace_root)
     state_root = tmp_path / "state"
     entered = asyncio.Event()
     cancelled = asyncio.Event()
@@ -593,7 +897,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     application = CapabilityGroup[None]("application")
     handler = TaskFunction[None]("example.block", 1, blocking_task)
-    application.task(handler)
+    application.task(handler, effect="none")
     application.agent(
         "default",
         model="default",
@@ -605,10 +909,10 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
     graph = TaskGraph("shutdown-graph", (handler.node("node"),))
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup.from_workspace(workspace), application),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         await runtime.start_graph(
             graph,
@@ -623,7 +927,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
 
     assert cancelled.is_set()
     probe = RuntimeState.filesystem(state_root)
-    await probe.initialize(namespace=workspace.workspace_id, tenant_id="default")
+    await probe.initialize(namespace="default", tenant_id="default")
     try:
         snapshot = await probe.task.tasks.snapshot_graph(
             graph.graph_id,

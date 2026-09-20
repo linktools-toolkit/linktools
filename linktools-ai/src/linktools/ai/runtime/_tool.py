@@ -321,7 +321,6 @@ class RuntimeToolOperationBridge:
             }
         )
         admission = ToolOperationAdmission(
-            tenant_id=self._tenant_id,
             execution_id=self._execution_id,
             tool_operation_id=operation_id,
             step_run_id=self._run_id(ctx),

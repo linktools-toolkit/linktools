@@ -15,12 +15,13 @@ from linktools.ai.agent import (
     AgentCompiler,
 )
 from linktools.ai.agent._output import bind_output
+from linktools.ai.capability import SkillDefinition, SkillSourceRef
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
-from linktools.ai.spec import AgentSpec
-from linktools.ai.storage import StoredPayload
+from linktools.ai.spec import AgentSpec, SkillSpec
+from linktools.ai.storage import ObjectRef, StoredPayload
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -93,7 +94,6 @@ def _execution(
     snapshot = _snapshot() if binding is None else binding
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -127,6 +127,57 @@ def _compiler() -> AgentCompiler:
         candidates=(),
         agents={"agent": AgentSpec("agent")},
     )
+
+
+def test_skill_snapshot_semantics_ignore_physical_store_id() -> None:
+    specification = SkillSpec("review", "review instructions")
+    first = SkillDefinition(
+        specification,
+        SkillSourceRef(
+            "application",
+            "review",
+            ObjectRef("store-a", "skill/snapshot", "a" * 64, 1),
+        ),
+    )
+    second = SkillDefinition(
+        specification,
+        SkillSourceRef(
+            "application",
+            "review",
+            ObjectRef("store-b", "skill/snapshot", "a" * 64, 1),
+        ),
+    )
+
+    assert first.semantic_contract == second.semantic_contract
+    snapshot = first.semantic_contract["source"]["snapshot"]
+    assert snapshot["store_id"] == "runtime"
+    restored = SkillDefinition.from_semantic_contract(first.semantic_contract)
+    assert restored.source_ref is not None
+    assert restored.source_ref.snapshot is not None
+    assert restored.source_ref.snapshot.store_id == "runtime"
+
+
+def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
+    with pytest.raises(AIError) as raised:
+        SkillDefinition.from_semantic_contract(
+            {
+                "version": 1,
+                "id": "review",
+                "content": "instructions",
+                "source": {
+                    "source_id": "application",
+                    "root": "review",
+                    "snapshot": {
+                        "store_id": 1,
+                        "key": "snapshot",
+                        "digest": "a" * 64,
+                        "size": "1",
+                    },
+                },
+            }
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
@@ -178,6 +229,7 @@ def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
     snapshot = _snapshot()
 
     assert set(snapshot.to_payload()) == {
+        "version",
         "agent_spec",
         "base_model",
         "selected",
@@ -257,7 +309,6 @@ def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
 
     with pytest.raises(AIError) as raised:
         AgentBinding(
-            binding.digest,
             mismatched_definition,
             binding.output_binding,
             binding.snapshot,
@@ -281,7 +332,6 @@ def test_binding_preserves_selected_pin_version_error() -> None:
 
     with pytest.raises(AIError) as raised:
         AgentBinding(
-            binding.digest,
             invalid_definition,
             binding.output_binding,
             binding.snapshot,

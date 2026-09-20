@@ -7,6 +7,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
     CapabilityGroup,
     ToolCallFailed,
@@ -14,6 +15,8 @@ from linktools.ai.capability import (
     workspace_capabilities,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.storage import StorageOverlay
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -36,10 +39,7 @@ from pydantic_ai.usage import RunUsage
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup.from_workspace(
-            workspace,
-            discover_assets=False,
-        )._contributions
+        CapabilityGroup("workspace", workspace=workspace, discover_workspace_assets=False)._contributions
     )
 
 
@@ -193,7 +193,7 @@ def _semantic_contract(tool: object) -> dict[str, object]:
 
 
 def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)
 
     assert tuple(item.id for item in contributions) == (
@@ -236,12 +236,49 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
     )
 
 
+@pytest.mark.asyncio
+async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path / "workspace")
+    declaration_root = tmp_path / "declarations"
+    agent_dir = declaration_root / "custom-agents"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "audit").write_bytes(
+        AgentSpecCodec().encode(AgentSpec("audit", model="default"))
+    )
+    backend = DirectoryAssetBackend(
+        str(declaration_root),
+        path_adapter=PrefixAssetPathAdapter(
+            {
+                "agent": "custom-agents",
+                "skill": "custom-skills",
+                "mcp": "custom-mcp",
+            }
+        ),
+        kinds=("agent", "skill", "mcp"),
+    )
+    store = AssetStore(StorageOverlay(backend))
+    await store.initialize()
+    try:
+        frozen = await CapabilityGroup(
+            "workspace",
+            workspace=workspace,
+            assets=store,
+        ).freeze()
+    finally:
+        await store.close()
+
+    identities = {(item.kind, item.id) for item in frozen}
+    assert ("agent", "audit") in identities
+    assert ("tool", "read_file") in identities
+    assert ("tool", "run_command") in identities
+
+
 def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspaces = (
-        Workspace.load(tmp_path, workspace_id="workspace"),
-        Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox),
-        Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox()),
+        Workspace.load(tmp_path),
+        Workspace.load(tmp_path, sandbox=sandbox),
+        Workspace.load(tmp_path, sandbox=DisabledSandbox()),
     )
     projected = tuple(
         tuple((item.id, item.fingerprint, item.semantic_contract) for item in _workspace_tool_contributions(workspace))
@@ -252,7 +289,7 @@ def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path
 
 
 def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
 
     with pytest.raises(AIError) as raised:
         workspace_capabilities(workspace, ("read_file", "run_command"))
@@ -262,13 +299,13 @@ def test_workspace_capabilities_materialize_one_sandbox_group(tmp_path: Path) ->
 
 def test_workspace_capabilities_with_no_selected_tools_do_not_open_sandbox(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    assert workspace_capabilities(Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox), ()) == ()
+    assert workspace_capabilities(Workspace.load(tmp_path, sandbox=sandbox), ()) == ()
     assert sandbox.sessions == []
 
 
 def test_workspace_capabilities_reject_unknown_tool_names(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown workspace tools"):
-        workspace_capabilities(Workspace.load(tmp_path, workspace_id="workspace"), ("missing_tool",))
+        workspace_capabilities(Workspace.load(tmp_path), ("missing_tool",))
 
 
 def test_workspace_sandbox_capability_id_is_reserved() -> None:
@@ -281,7 +318,7 @@ def test_workspace_sandbox_capability_id_is_reserved() -> None:
 @pytest.mark.asyncio
 async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     contributions = _workspace_tool_contributions(workspace)
     expected = {item.id: item.semantic_contract for item in contributions}
     capability = workspace_capabilities(
@@ -315,7 +352,7 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
 @pytest.mark.asyncio
 async def test_workspace_capability_uses_the_caller_owned_session(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     capability = workspace_capabilities(
         workspace,
         ("read_file", "start_command", "check_command", "stop_command"),
@@ -350,7 +387,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
     expected_error: type[BaseException],
 ) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -398,7 +435,7 @@ async def test_permission_rejection_has_no_sandbox_operation_side_effect(
 @pytest.mark.asyncio
 async def test_custom_sandbox_does_not_fallback_to_host_filesystem(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=sandbox)
+    workspace = Workspace.load(tmp_path, sandbox=sandbox)
     session = await sandbox.open(root=workspace.root)
     capability = workspace_capabilities(
         workspace,
@@ -441,7 +478,7 @@ async def test_workspace_sandbox_close_is_completed_during_cancellation(tmp_path
 
 @pytest.mark.asyncio
 async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: Path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
+    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
 
     with pytest.raises(AIError) as raised:
         await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
@@ -459,14 +496,11 @@ async def test_workspace_group_can_disable_default_asset_discovery(
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(
         tmp_path,
-        workspace_id="workspace",
+
         sandbox=sandbox,
     )
 
-    group = CapabilityGroup.from_workspace(
-        workspace,
-        discover_assets=False,
-    )
+    group = CapabilityGroup("workspace", workspace=workspace, discover_workspace_assets=False)
     frozen = await group.freeze()
 
     assert group.workspace is workspace

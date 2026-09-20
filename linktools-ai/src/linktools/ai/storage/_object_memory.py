@@ -5,6 +5,7 @@
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from pathlib import Path
 
 from ..errors import AIError, ErrorCode
 from ._object import (
@@ -26,6 +27,9 @@ class InMemoryObjectStore:
     @property
     def store_id(self) -> str:
         return self._store_id
+
+    def local_paths(self) -> tuple[Path, ...]:
+        return ()
 
     async def put(
         self,
@@ -112,6 +116,9 @@ class _ScopedObjectStore:
     @property
     def store_id(self) -> str:
         return self._parent.store_id
+
+    def local_paths(self) -> tuple[Path, ...]:
+        return self._parent.local_paths()
 
     async def put(
         self,

@@ -10,13 +10,20 @@ from typing import cast
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, SemanticPin, bind_output, restore_output
 from linktools.ai.capability import CapabilityGroup, workspace_capabilities
-from linktools.ai.core import IdempotencyStatus, JsonValue, OperationStatus, canonical_json_bytes
+from linktools.ai.core import (
+    EvaluationStatus,
+    IdempotencyStatus,
+    JsonValue,
+    OperationStatus,
+    canonical_json_bytes,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import (
     ContextProjection,
+    EvaluationRecord,
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
 )
@@ -28,10 +35,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup.from_workspace(
-            workspace,
-            discover_assets=False,
-        )._contributions
+        CapabilityGroup("workspace", workspace=workspace, discover_workspace_assets=False)._contributions
     )
 
 
@@ -54,7 +58,7 @@ def _binding_fixture_value() -> AgentBindingSnapshot:
     )
 
 
-def test_agent_binding_fixture_matches_current_contract() -> None:
+def test_agent_binding_v1_fixture_matches_current_contract() -> None:
     value = _load_json("runtime_agent_binding_snapshot_v1.json")
     expected = _binding_fixture_value()
     assert value == expected.to_payload()
@@ -72,6 +76,15 @@ def test_agent_binding_ignores_unknown_fields() -> None:
     assert decoded == _binding_fixture_value()
     assert "future_metadata" not in decoded.to_payload()
 
+
+
+
+def test_agent_binding_future_version_is_rejected() -> None:
+    value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v1.json"))
+    value["version"] = 2
+    with pytest.raises(AIError) as raised:
+        AgentBindingSnapshot.from_payload(value)
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 def test_output_binding_round_trips_from_durable_semantics() -> None:
     binding = bind_output()
@@ -158,12 +171,95 @@ def _decode_custom_wire_values(
     return task, idempotency, operation
 
 
-def test_custom_wire_v1_fixture() -> None:
+def test_custom_wire_v1_round_trips_current_shape() -> None:
+    value = _custom_wire_values()
+    task, idempotency, operation = _decode_custom_wire_values(value)
+
+    assert task == TaskNode(
+        "node",
+        ("dependency",),
+        input={"key": "value"},
+        budget_cost=2,
+    )
+    assert idempotency == IdempotencyTerminalUpdate(
+        scope="scope",
+        idempotency_key_digest="a" * 64,
+        expected_status=IdempotencyStatus.STARTED,
+        next_status=IdempotencyStatus.COMPLETED,
+        request_digest="b" * 64,
+        result_digest="c" * 64,
+        error_code="terminal-error",
+    )
+    assert operation == OperationTerminalUpdate(
+        operation_id="operation",
+        expected_status=OperationStatus.RUNNING,
+        next_status=OperationStatus.SUCCEEDED,
+        result_ref="result",
+        result_digest="d" * 64,
+        error_code="terminal-error",
+    )
+
+
+def test_custom_wire_v1_fixture_matches_current_shape() -> None:
     value = _load_json("runtime_custom_wire_v1.json")
     assert isinstance(value, Mapping)
-    expected = _custom_wire_values()
-    assert value == expected
-    assert _decode_custom_wire_values(value) == _decode_custom_wire_values(expected)
+    assert value == _custom_wire_values()
+
+
+def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    current = EvaluationRecord(
+        evaluation_id="evaluation",
+        execution_id="execution",
+        dataset_digest="dataset-digest",
+        status=EvaluationStatus.SUCCEEDED,
+        revision=2,
+        created_at=now,
+        updated_at=now,
+    )
+    payload = cast(
+        dict[str, object],
+        runtime_codec._encode_persisted_domain(current),
+    )
+    fields = cast(dict[str, object], payload["fields"])
+    fields["binding_digest"] = runtime_codec._encode_persisted_domain("a" * 64)
+
+    def decode() -> EvaluationRecord:
+        return runtime_codec._decode_enveloped_domain(
+            runtime_codec.encode_envelope(
+                {
+                    "type": runtime_codec.wire_type_id(current),
+                    "payload": cast(JsonValue, payload),
+                }
+            ),
+            EvaluationRecord,
+        )
+
+    # The convergence branch previously wrote dataset_digest plus a redundant
+    # binding projection. New readers accept and discard that derived field.
+    assert decode() == current
+
+    dataset = fields.pop("dataset_digest")
+    fields.update(
+        {
+            "dataset_id": dataset,
+            "dataset_revision": runtime_codec._encode_persisted_domain(1),
+            "evaluator_id": runtime_codec._encode_persisted_domain("default"),
+            "evaluator_revision": runtime_codec._encode_persisted_domain(1),
+            "artifact_digest": runtime_codec._encode_persisted_domain(None),
+            "metrics": runtime_codec._encode_persisted_domain({}),
+        }
+    )
+
+    assert decode() == current
+
+    fields["tenant_id"] = runtime_codec._encode_persisted_domain("tenant")
+    assert decode() == current
+
+    fields["evaluator_id"] = runtime_codec._encode_persisted_domain("custom")
+    with pytest.raises(AIError) as raised:
+        decode()
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
 def test_generic_v1_envelope_round_trips_current_shape() -> None:
@@ -183,7 +279,7 @@ def test_generic_v1_envelope_round_trips_current_shape() -> None:
 
 
 def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
-    contribution = _workspace_tool_contributions(Workspace.load(tmp_path, workspace_id="workspace"))[0]
+    contribution = _workspace_tool_contributions(Workspace.load(tmp_path))[0]
     pin = SemanticPin(
         "tool",
         contribution.id,
@@ -199,7 +295,7 @@ def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
 async def test_workspace_tool_binding_restores_before_disabled_sandbox_materialization(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace", sandbox=DisabledSandbox())
+    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
     candidates = _workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",
@@ -240,76 +336,5 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
-def _environment_compiler(
-    workspace_ref: "Mapping[str, JsonValue] | None",
-) -> tuple[AgentCompiler, AgentSpec]:
-    spec = AgentSpec(
-        "environment",
-        model="default",
-        allow_tools=(),
-        allow_skills=(),
-        allow_subagents=(),
-        allow_capabilities=(),
-    )
-    return (
-        AgentCompiler(
-            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
-            candidates=(),
-            agents={spec.id: spec},
-            namespace="runtime",
-            workspace_ref=workspace_ref,
-        ),
-        spec,
-    )
-
-
-def test_workspace_ref_distinguishes_legacy_workspace_and_workspace_less() -> None:
-    legacy_compiler, spec = _environment_compiler(None)
-    legacy = legacy_compiler.bind(legacy_compiler.compile(spec))
-    assert legacy.snapshot.workspace_ref is None
-    assert "workspace_ref" not in legacy.snapshot.to_payload()
-    assert legacy_compiler.restore(legacy.snapshot).digest == legacy.digest
-
-    no_workspace_compiler, spec = _environment_compiler({"id": None})
-    no_workspace = no_workspace_compiler.bind(no_workspace_compiler.compile(spec))
-    assert no_workspace.snapshot.to_payload()["workspace_ref"] == {"id": None}
-    assert no_workspace_compiler.restore(no_workspace.snapshot).digest == no_workspace.digest
-
-    with pytest.raises(AIError) as missing_workspace:
-        no_workspace_compiler.restore(legacy.snapshot)
-    assert missing_workspace.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-    assert missing_workspace.value.safe_details == {"reason": "workspace_mismatch"}
-
-    with pytest.raises(AIError) as extra_workspace:
-        legacy_compiler.restore(no_workspace.snapshot)
-    assert extra_workspace.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-    assert extra_workspace.value.safe_details == {"reason": "workspace_mismatch"}
-
-
-def test_workspace_ref_requires_exact_stable_workspace_id() -> None:
-    project_compiler, spec = _environment_compiler({"id": "project-a"})
-    binding = project_compiler.bind(project_compiler.compile(spec))
-    assert binding.snapshot.to_payload()["workspace_ref"] == {"id": "project-a"}
-    assert project_compiler.restore(binding.snapshot).digest == binding.digest
-
-    other_compiler, _ = _environment_compiler({"id": "project-b"})
-    with pytest.raises(AIError) as mismatch:
-        other_compiler.restore(binding.snapshot)
-    assert mismatch.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
-    assert mismatch.value.safe_details == {"reason": "workspace_mismatch"}
-
-
-@pytest.mark.parametrize(
-    "workspace_ref",
-    ({}, {"id": 1}),
-)
-def test_workspace_ref_rejects_invalid_durable_shape(
-    workspace_ref: Mapping[str, object],
-) -> None:
-    payload = _binding_fixture_value().to_payload()
-    payload["workspace_ref"] = cast(JsonValue, dict(workspace_ref))
-
-    with pytest.raises(AIError) as raised:
-        AgentBindingSnapshot.from_payload(payload)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+def test_binding_snapshot_has_no_workspace_identity() -> None:
+    assert "workspace_ref" not in _binding_fixture_value().to_payload()

@@ -64,7 +64,7 @@ def _workspace(path: Path) -> Workspace:
             AgentSpec("default", model="default", allow_tools=())
         )
     )
-    return Workspace.load(path, workspace_id="workspace")
+    return Workspace.load(path)
 
 
 @pytest.mark.asyncio
@@ -101,10 +101,10 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     try:
         for workspace, state, label in cases:
             async with Runtime.open(
-                workspace.workspace_id,
+                "default",
                 models=_Models(),  # type: ignore[arg-type]
                 state=state,
-                capabilities=(CapabilityGroup.from_workspace(workspace),),
+                capabilities=(CapabilityGroup("workspace", workspace=workspace),),
                 metrics=metrics,
             ) as runtime:
                 result = await runtime.agent("default").run(

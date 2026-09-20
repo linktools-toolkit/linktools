@@ -69,14 +69,14 @@ async def test_existing_workspace_cwd_requires_workspace_for_new_turn(
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
-    workspace = Workspace.load(project, workspace_id="workspace")
+    workspace = Workspace.load(project)
     state_root = tmp_path / "runtime"
 
     async with Runtime.open(
         "workspace",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.from_root(state_root),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         await runtime.agent("default").create_session(
             "cwd-session",

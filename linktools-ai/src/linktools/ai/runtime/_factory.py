@@ -3,7 +3,6 @@
 """Runtime composition and local service graph construction."""
 
 import asyncio
-import hashlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -41,6 +40,7 @@ from ..workspace import (
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
+from ._binding_freeze import _RuntimeBindingFreezer
 from ._artifact import DefaultArtifactService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
@@ -56,11 +56,13 @@ from ._memory import MemoryStore, RuntimeMemoryStore
 from ._metrics import _RuntimeMetricBuffer
 from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
+from ._runtime_history import RuntimeHistory
+from ._task_capability_snapshot import TaskCapabilitySnapshotStore
+from ._runtime_identity import token_seed
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import RuntimeDomain, RuntimeRetentionMode, RuntimeState
-from .state._contracts import RecoveryCheckpointState
 
 AppT = TypeVar("AppT")
 _logger = environ.get_logger("ai.runtime.factory")
@@ -83,6 +85,8 @@ class _RuntimeComponents:
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
     metric_control: _RuntimeMetricBuffer | None
+    binding_freezer: _RuntimeBindingFreezer
+    history: object
 
 
 async def compose_runtime_components(
@@ -151,17 +155,15 @@ async def compose_runtime_components(
             for candidate in frozen
             if candidate.kind == "agent"
         }
-        if "default" not in agents:
-            agents["default"] = AgentSpec("default")
         resolver = models.snapshot()
-        workspace_ref = (
-            None
-            if workspace is not None
-            and workspace.workspace_id == resolved_namespace
-            else {
-                "id": None if workspace is None else workspace.workspace_id
-            }
-        )
+        if "default" not in agents:
+            try:
+                resolver.resolve("default")
+            except AIError as error:
+                if error.code is not ErrorCode.MODEL_CONNECTION_NOT_FOUND:
+                    raise
+            else:
+                agents["default"] = AgentSpec("default")
         compiler = AgentCompiler(
             model_resolver=resolver,
             candidates=tuple(
@@ -170,8 +172,6 @@ async def compose_runtime_components(
                 if candidate.kind not in {"agent", "task", "task_expander"}
             ),
             agents=agents,
-            namespace=resolved_namespace,
-            workspace_ref=workspace_ref,
         )
         definitions = {
             agent_id: compiler.compile(agents[agent_id])
@@ -210,15 +210,15 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
-        grant_key = _grant_key(resolved_namespace)
+        runtime_token_seed = token_seed(resolved_namespace)
         history_reader = _execution_history_reader(
             resolved_namespace,
             selected_state,
-            grant_key,
+            runtime_token_seed,
         )
         session_history_reader = StepSessionHistoryReader(
             store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
-            cursor_signer=HmacCursorSigner("session-history", grant_key),
+            cursor_signer=HmacCursorSigner("session-history", runtime_token_seed),
         )
         memory_store_factory = _memory_store_factory(
             resolved_namespace,
@@ -243,7 +243,7 @@ async def compose_runtime_components(
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
-            grant_key=grant_key,
+            runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
@@ -348,13 +348,13 @@ def _validate_candidate_uniqueness(
 def _execution_history_reader(
     namespace: str,
     state: RuntimeState,
-    grant_key: bytes,
+    runtime_token_seed: bytes,
 ) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace=namespace,
         executions=state.execution.executions,
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
-        cursor_signer=HmacCursorSigner("execution-history", grant_key),
+        cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
     )
 
 
@@ -380,10 +380,6 @@ def _memory_store_factory(
         )
 
     return build
-
-
-def _grant_key(namespace: str) -> bytes:
-    return hashlib.sha256(f"workspace:{namespace}".encode()).digest()
 
 
 def _capture_host_cwd() -> "str | None":
@@ -421,7 +417,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
-    grant_key: bytes,
+    runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
@@ -461,7 +457,17 @@ async def _build_local_components(
             state.execution.executions,
             authorization,
             history_reader,
-            HmacCursorSigner("execution", grant_key),
+            HmacCursorSigner("execution", runtime_token_seed),
+        )
+        binding_freezer = _RuntimeBindingFreezer(
+            catalog,
+            compiler,
+            skill_sources,
+            state.object_store(RuntimeDomain.EXECUTION),
+            freeze_dependencies=(
+                state.plan.route(RuntimeDomain.EXECUTION).retention
+                is RuntimeRetentionMode.DURABLE
+            ),
         )
         execution = DefaultExecutionService(
             state.execution,
@@ -490,6 +496,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
+            skill_snapshot_store=state.object_store(RuntimeDomain.EXECUTION),
             metrics=metric_buffer,
         )
     except BaseException:
@@ -542,6 +549,7 @@ async def _build_local_components(
             state.steps,
             executor,
             catalog,
+            restore_binding=compiler.restore,
             tenant_id=tenant_id,
             workspace=workspace,
             limits=limits,
@@ -579,21 +587,33 @@ async def _build_local_components(
             state.execution.executions,
             authorization,
             execution,
-            HmacCursorSigner("session", grant_key),
+            HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
             transcript_store=state.steps,
             release_terminal=state.retention.release_session,
             workspace_access=input_materializer.access,
         )
+        task_capability_snapshots = TaskCapabilitySnapshotStore(
+            namespace,
+            compiler,
+            binding_freezer,
+            state.object_store(RuntimeDomain.TASK),
+            agent_task_type="linktools.ai.agent",
+        )
         task_runner = RuntimeTaskNodeRunner(
             execution,
             catalog,
             compiler,
+            session=session,
+            namespace=namespace,
             app=app,
+            authorization=authorization,
             task_state=state.task.tasks,
             task_objects=state.object_store(RuntimeDomain.TASK),
+            artifact_state=state.artifact,
+            artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
-            payload_policy=payload_policy,
+            capability_snapshots=task_capability_snapshots,
             handlers=task_handlers,
             expanders=task_expanders,
             release_dependency_hold=execution.release_dependency_hold,
@@ -631,10 +651,6 @@ async def _build_local_components(
             state.execution.executions,
             authorization,
             execution,
-            release_terminal=state.retention.release_evaluation,
-            acquire_execution_hold=execution.acquire_dependency_hold,
-            release_execution_hold=execution.release_dependency_hold,
-            request_execution_handoff=execution.request_terminal_handoff,
         )
         approval = DefaultApprovalService(
             state.recovery.approvals,
@@ -664,8 +680,8 @@ async def _build_local_components(
         artifact = DefaultArtifactService(
             state.artifact,
             authorization,
-            grant_key=grant_key,
-            cursor_signer=HmacCursorSigner("artifact", grant_key),
+            token_seed=runtime_token_seed,
+            cursor_signer=HmacCursorSigner("artifact", runtime_token_seed),
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
         tree_streamer = ExecutionTreeStreamer(
@@ -685,7 +701,6 @@ async def _build_local_components(
         coordinator = _RuntimeCloseCoordinator(
             tuple(action for _, action in close_actions)
         )
-        await _restore_recovery_bindings(catalog, compiler, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
         await graph_service.recover_pending()
@@ -721,53 +736,42 @@ async def _build_local_components(
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
+        binding_freezer=binding_freezer,
+        history=_borrowed_runtime_history(
+            history_service,
+            tenant_id=tenant_id,
+            state=state,
+            authorization=authorization,
+            artifact=artifact,
+        ),
     )
 
 
-async def _restore_recovery_bindings(
-    catalog: AgentCatalog,
-    compiler: AgentCompiler,
-    state: RuntimeState,
+def _borrowed_runtime_history(
+    service: DefaultExecutionHistoryService,
     *,
     tenant_id: str,
-) -> None:
-    cursor: str | None = None
-    while True:
-        page = await state.recovery.checkpoints.list_recoverable_page(
-            tenant_id=tenant_id,
-            cursor=cursor,
-            limit=128,
-        )
-        for checkpoint in page.items:
-            if checkpoint.state is RecoveryCheckpointState.COMPLETED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution = await state.execution.executions.get(
-                checkpoint.execution_id,
-                tenant_id=tenant_id,
-            )
-            if execution is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                binding = compiler.restore(execution.binding)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    raise
-                if error.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
-                    if error.safe_details.get("reason") == "workspace_mismatch":
-                        raise
-                    _logger.warning(
-                        "recovery binding unavailable: execution=%s",
-                        checkpoint.execution_id,
-                    )
-                    continue
-                raise
-            if binding.digest != execution.binding_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            catalog.register_definition(binding.definition)
-            catalog.register_binding(binding)
-        if page.next_cursor is None:
-            return
-        cursor = page.next_cursor
+    state: RuntimeState,
+    authorization: object,
+    artifact: DefaultArtifactService,
+) -> "RuntimeHistory":
+    return RuntimeHistory(
+        service,
+        tenant_id=tenant_id,
+        executions=state.execution.executions,
+        events=state.execution.events,
+        sessions=state.conversation.sessions,
+        tasks=state.task.tasks,
+        authorization=authorization,
+        namespace=state.namespace,
+        execution_objects=state.object_store(RuntimeDomain.EXECUTION),
+        task_objects=state.object_store(RuntimeDomain.TASK),
+        artifacts=artifact,
+        cursor_signer=HmacCursorSigner(
+            "runtime-history",
+            token_seed(state.namespace),
+        ),
+    )
 
 
 class _RuntimeCloseCoordinator:

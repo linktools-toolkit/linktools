@@ -12,6 +12,7 @@ from linktools.ai.asset import (
     AssetRoot,
     AssetStore,
     DirectoryAssetBackend,
+    FilesystemAssetBackend,
     InMemoryAssetBackend,
     SqlAssetBackend,
     StrictConfigReader,
@@ -141,7 +142,7 @@ def test_asset_path_adapter_and_config_are_available() -> None:
 @pytest.mark.asyncio
 async def test_local_directory_asset_backend_maps_single_files(tmp_path: Path) -> None:
     backend = DirectoryAssetBackend(
-        AssetRoot("file:directory", "file", str(tmp_path), "directory"),
+        AssetRoot("file", str(tmp_path), "directory"),
         path_adapter=_MappedPathAdapter(),
     )
     await backend.initialize()
@@ -164,9 +165,9 @@ async def test_local_directory_asset_layer_stat_has_integer_revision(tmp_path: P
     path = tmp_path / "mapped" / "mcp" / "one.json"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"one")
-    primary = InMemoryAssetBackend(AssetRoot("memory:primary", "memory", "primary", "primary"))
+    primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
     builtin = DirectoryAssetBackend(
-        AssetRoot("file:directory", "file", str(tmp_path), "directory"),
+        AssetRoot("file", str(tmp_path), "directory"),
         path_adapter=_MappedPathAdapter(),
     )
     store = AssetStore(
@@ -237,14 +238,86 @@ async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) 
         tables = metadata.tables
         backend = SqlAssetBackend(engine, namespace="test")
         assert backend.root.scheme == "sql"
-        assert tuple(table.name for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_asset_heads"])) == (
+        assert tuple(
+            table.name
+            for table in (
+                tables["ai_asset_entries"],
+                tables["ai_asset_changes"],
+                tables["ai_asset_batch_receipts"],
+                tables["ai_asset_heads"],
+            )
+        ) == (
             "ai_asset_entries",
             "ai_asset_changes",
+            "ai_asset_batch_receipts",
             "ai_asset_heads",
         )
     finally:
         await engine.dispose()
 
+
+
+@pytest.mark.asyncio
+async def test_filesystem_asset_batch_receipt_survives_reopen(tmp_path: Path) -> None:
+    root = tmp_path / "asset-receipts"
+    key = AssetKey("prompt", "one")
+    changes = (
+        StorageChange(StorageOperation.PUT, key, b"one", None),
+    )
+
+    first_backend = FilesystemAssetBackend(root)
+    first = AssetStore(StorageOverlay(first_backend, writer=first_backend))
+    await first.initialize()
+    result = await first.apply_batch(changes, idempotency_key="batch-one")
+    await first.close()
+
+    second_backend = FilesystemAssetBackend(root)
+    second = AssetStore(StorageOverlay(second_backend, writer=second_backend))
+    await second.initialize()
+    try:
+        assert await second.batch_result("batch-one") == result
+        assert await second.apply_batch(
+            changes,
+            idempotency_key="batch-one",
+        ) == result
+        await second.put(key, b"two")
+        assert await second.batch_result("batch-one") == result
+    finally:
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_asset_batch_receipt_survives_reopen(tmp_path: Path) -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset-receipts.db'}")
+    key = AssetKey("prompt", "one")
+    changes = (
+        StorageChange(StorageOperation.PUT, key, b"one", None),
+    )
+    try:
+        await provision_asset_database(engine)
+        first_backend = SqlAssetBackend(engine, namespace="receipts")
+        first = AssetStore(StorageOverlay(first_backend, writer=first_backend))
+        await first.initialize()
+        result = await first.apply_batch(changes, idempotency_key="batch-one")
+        await first.close()
+
+        second_backend = SqlAssetBackend(engine, namespace="receipts")
+        second = AssetStore(StorageOverlay(second_backend, writer=second_backend))
+        await second.initialize()
+        try:
+            assert await second.batch_result("batch-one") == result
+            assert await second.apply_batch(
+                changes,
+                idempotency_key="batch-one",
+            ) == result
+            await second.put(key, b"two")
+            assert await second.batch_result("batch-one") == result
+        finally:
+            await second.close()
+    finally:
+        await engine.dispose()
 
 @pytest.mark.asyncio
 async def test_sql_asset_namespace_matches_the_persisted_column_limit() -> None:
@@ -358,7 +431,12 @@ async def test_sql_asset_backend_provisions_its_owner_schema(tmp_path: Path) -> 
         await backend.initialize()
         async with engine.connect() as connection:
             tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
-        assert {"ai_asset_entries", "ai_asset_changes", "ai_asset_heads"} <= set(tables)
+        assert {
+            "ai_asset_entries",
+            "ai_asset_changes",
+            "ai_asset_batch_receipts",
+            "ai_asset_heads",
+        } <= set(tables)
     finally:
         await engine.dispose()
 
@@ -482,3 +560,118 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
         assert tuple(counts) == (130, 130, 130)
     finally:
         await engine.dispose()
+
+
+def test_sql_asset_info_v1_rejects_future_and_coerced_versions() -> None:
+    from datetime import datetime, timezone
+
+    from linktools.ai.asset import AssetInfo
+    from linktools.ai.asset import _sql as asset_sql
+    from linktools.ai.storage import StorageEntryRevision, StorageEntryStatus, StorageRevision
+
+    info = AssetInfo(
+        AssetKey("sample", "one"),
+        StorageEntryRevision(1),
+        StorageRevision("1"),
+        "a" * 64,
+        0,
+        StorageEntryStatus.NORMAL,
+        "root",
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    payload = asset_sql._info_data(info)
+    assert payload["v"] == 1
+    assert asset_sql._info_from_data(payload) == info
+
+    future = dict(payload)
+    future["v"] = 2
+    with pytest.raises(AIError) as future_error:
+        asset_sql._info_from_data(future)
+    assert future_error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+    coerced = dict(payload)
+    coerced["v"] = 1.0
+    with pytest.raises(AIError) as coerced_error:
+        asset_sql._info_from_data(coerced)
+    assert coerced_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    malformed = {
+        **payload,
+        "value": {**payload["value"], "revision": "1"},
+    }
+    with pytest.raises(AIError) as malformed_error:
+        asset_sql._info_from_data(malformed)
+    assert malformed_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_filesystem_asset_v1_rejects_generation_two_manifest(tmp_path: Path) -> None:
+    import json
+
+    root = tmp_path / "asset-v1"
+    backend = FilesystemAssetBackend(root)
+    await backend.initialize()
+    await backend.put(AssetKey("sample", "one"), b"value")
+    await backend.close()
+
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["generation"] == 1
+    manifest["generation"] = 2
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    reopened = FilesystemAssetBackend(root)
+    with pytest.raises(AIError) as raised:
+        await reopened.initialize()
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_asset_receipt_rejects_non_integer_version() -> None:
+    from linktools.ai.asset._receipt import decode_asset_batch_receipt
+
+    with pytest.raises(AIError) as raised:
+        decode_asset_batch_receipt({"version": 1.0})
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+    with pytest.raises(AIError) as future:
+        decode_asset_batch_receipt({"version": 2})
+    assert future.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+
+@pytest.mark.asyncio
+async def test_asset_snapshot_uses_v1_manifest_and_object_namespace() -> None:
+    import json
+
+    from linktools.ai.storage import InMemoryObjectStore, read_object
+
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    objects = InMemoryObjectStore("snapshot")
+    key = AssetKey("sample", "one")
+    await store.initialize()
+    try:
+        await store.put(key, b"value")
+        ref = await store.snapshot((key,), object_store=objects)
+
+        assert ref.key.startswith("v1/asset-snapshot/")
+        payload = await read_object(
+            objects,
+            ref.key,
+            expected_digest=ref.digest,
+            expected_size=ref.size,
+        )
+        manifest = json.loads(payload.decode("utf-8"))
+        assert manifest["format_version"] == 1
+        assert manifest["entries"][0]["content"]["key"].startswith(
+            "v1/asset-content/"
+        )
+
+        restored = AssetStore.from_snapshot(ref, object_store=objects)
+        await restored.initialize()
+        try:
+            assert await restored.get(key) == b"value"
+        finally:
+            await restored.close()
+    finally:
+        await store.close()

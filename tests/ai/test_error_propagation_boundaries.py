@@ -215,6 +215,71 @@ def test_subagent_background_failure_preserves_classified_ai_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recovery_reconcile_defers_unavailable_definition_per_execution() -> None:
+    checkpoints = (
+        SimpleNamespace(
+            execution_id="unavailable",
+            state=RecoveryCheckpointState.ADMITTED,
+        ),
+        SimpleNamespace(
+            execution_id="available",
+            state=RecoveryCheckpointState.ADMITTED,
+        ),
+    )
+
+    class Port:
+        async def _list_recoverable_checkpoints(self, *, cursor: str | None):
+            assert cursor is None
+            return SimpleNamespace(items=checkpoints, next_cursor=None)
+
+    class Coordinator(_RecoveryCoordinator):
+        def __init__(self) -> None:
+            super().__init__(Port(), None)  # type: ignore[arg-type]
+            self.seen: list[str] = []
+
+        async def reconcile_checkpoint(self, checkpoint: object) -> None:
+            execution_id = checkpoint.execution_id  # type: ignore[attr-defined]
+            self.seen.append(execution_id)
+            if execution_id == "unavailable":
+                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+
+    coordinator = Coordinator()
+    await coordinator.reconcile()
+
+    assert coordinator.seen == ["unavailable", "available"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_reconcile_rejects_workspace_mismatch() -> None:
+    checkpoint = SimpleNamespace(
+        execution_id="execution",
+        state=RecoveryCheckpointState.ADMITTED,
+    )
+
+    class Port:
+        async def _list_recoverable_checkpoints(self, *, cursor: str | None):
+            assert cursor is None
+            return SimpleNamespace(items=(checkpoint,), next_cursor=None)
+
+    class Coordinator(_RecoveryCoordinator):
+        def __init__(self) -> None:
+            super().__init__(Port(), None)  # type: ignore[arg-type]
+
+        async def reconcile_checkpoint(self, checkpoint: object) -> None:
+            del checkpoint
+            raise AIError(
+                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                safe_details={"reason": "workspace_mismatch"},
+            )
+
+    with pytest.raises(AIError) as raised:
+        await Coordinator().reconcile()
+
+    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert raised.value.safe_details == {"reason": "workspace_mismatch"}
+
+
+@pytest.mark.asyncio
 async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
     execution = SimpleNamespace(
         execution_id="execution",
@@ -239,7 +304,14 @@ async def test_recovery_start_unknown_uses_execution_error_domain() -> None:
     )
 
     class Port:
-        async def load_execution(self, execution_id: str, *, tenant_id: str) -> object:
+        tenant_id = "tenant"
+
+        async def load_execution(
+            self,
+            execution_id: str,
+            *,
+            tenant_id: str,
+        ) -> object:
             assert execution_id == "execution"
             assert tenant_id == "tenant"
             return execution

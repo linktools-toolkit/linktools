@@ -25,12 +25,12 @@ class Command(BaseCommand):
         parser.add_argument(
             "--memory",
             default=None,
-            help="caller-owned memory scope (default: workspace id)",
+            help="caller-owned memory scope (default: default)",
         )
 
     def run(self, args: Namespace) -> int:
         workspace = _load_workspace(args.project)
-        memory_scope = args.memory if args.memory is not None else workspace.workspace_id
+        memory_scope = args.memory if args.memory is not None else "default"
 
         async def execute() -> int:
             async with _open_local_runtime(workspace) as runtime:

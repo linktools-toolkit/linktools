@@ -146,7 +146,11 @@ class DefaultExternalService:
             execution_id,
             tenant_id=request.principal.tenant_id,
         )
-        pending = _pending_call(checkpoint, request.call_id)
+        pending = _pending_call(
+            checkpoint,
+            request.call_id,
+            tenant_id=request.principal.tenant_id,
+        )
         if pending is None:
             raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
         record = await self._calls.get(
@@ -259,12 +263,14 @@ def external_call_id_for_call(
 def _pending_call(
     checkpoint: RecoveryCheckpoint | None,
     call_id: str,
+    *,
+    tenant_id: str,
 ) -> PendingDeferredCall | None:
     if checkpoint is None or checkpoint.pending_tools is None:
         return None
     for pending in checkpoint.pending_tools.calls:
         candidate = external_call_id_for_call(
-            checkpoint.tenant_id,
+            tenant_id,
             checkpoint.execution_id,
             checkpoint.pending_tools.source_step_run_id,
             pending.tool_call_id,

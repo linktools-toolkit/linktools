@@ -35,7 +35,6 @@ def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
     binding = _binding()
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -67,7 +66,8 @@ def _execution(*, correlation: dict[str, str | int]) -> ExecutionRecord:
 def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     backend = object.__new__(LocalExecutionBackend)
     backend._accepting = True
-    backend._tenant_id = execution.tenant_id
+    backend._tenant_id = "tenant"
+    backend._restore_binding = None
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
             snapshot=execution.binding,

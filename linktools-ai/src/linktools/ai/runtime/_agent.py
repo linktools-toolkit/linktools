@@ -3,14 +3,19 @@
 """Runtime-bound Agent, Session, and Execution behavior objects."""
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
 from ..core import JsonValue, Page, Principal, ThinkingValue
+from ..errors import AIError, ErrorCode
 from ._input import validate_user_input
+from ._watch_cursor import (
+    decode_execution_watch_cursor,
+    encode_execution_watch_cursor,
+)
 from .recovery import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -20,6 +25,7 @@ from .recovery import (
 from .service_api import (
     CancelExecutionResult,
     EvaluationHandle,
+    ExecutionEvent,
     ExecutionHistoryItem,
     ExecutionResult,
     ExecutionTraceItem,
@@ -34,7 +40,8 @@ from .service_api import (
 )
 
 if TYPE_CHECKING:
-    from ..task import TaskExpanderRef, TaskNode
+    from ..agent import AgentDefinition
+    from ..task import TaskExpanderRef, TaskNode, TaskResultRef
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
@@ -47,6 +54,7 @@ class _ExecutionTreeWatcher(Protocol):
         *,
         principal: Principal,
         after_sequences: "Mapping[str, int] | None" = None,
+        include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]: ...
 
 
@@ -54,11 +62,16 @@ class _ExecutionTreeWatcher(Protocol):
 class Execution(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     execution_id: str
-    _binding_digest: str
     _principal: Principal
     _watch_tree: _ExecutionTreeWatcher
+    _task_wait: Callable[[float | None], Awaitable[ExecutionResult]] | None = None
+    _task_cancel: Callable[
+        [str | None, bool], Awaitable[CancelExecutionResult]
+    ] | None = None
 
     async def wait(self, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        if self._task_wait is not None:
+            return await self._task_wait(timeout_seconds)
         return await self._runtime.execution.wait(
             self.execution_id,
             principal=self._principal,
@@ -68,13 +81,59 @@ class Execution(Generic[AppT]):
     def watch(
         self,
         *,
+        cursor: "str | None" = None,
+        include_content: bool = False,
         after_sequences: "Mapping[str, int] | None" = None,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        return self._watch_tree(
+        if not isinstance(include_content, bool):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if cursor is not None:
+            if after_sequences is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            after_sequences = decode_execution_watch_cursor(
+                self._runtime.namespace,
+                self._principal.tenant_id,
+                self.execution_id,
+                cursor,
+                include_content=include_content,
+            )
+        stream = self._watch_tree(
             self.execution_id,
             principal=self._principal,
             after_sequences=after_sequences,
+            include_content=include_content,
         )
+        return self._watch_with_cursor(
+            stream,
+            after_sequences=after_sequences,
+            include_content=include_content,
+        )
+
+    async def _watch_with_cursor(
+        self,
+        stream: AsyncIterator[ExecutionTreeEvent],
+        *,
+        after_sequences: "Mapping[str, int] | None",
+        include_content: bool,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        sequences = dict(after_sequences or {})
+        async for event in stream:
+            durable_sequence = event.event.durable_sequence
+            if durable_sequence is not None:
+                previous = sequences.get(event.execution_id, 0)
+                if durable_sequence <= previous:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                sequences[event.execution_id] = durable_sequence
+            yield replace(
+                event,
+                cursor=encode_execution_watch_cursor(
+                    self._runtime.namespace,
+                    self._principal.tenant_id,
+                    self.execution_id,
+                    include_content=include_content,
+                    sequences=sequences,
+                ),
+            )
 
     async def cancel(
         self,
@@ -82,6 +141,8 @@ class Execution(Generic[AppT]):
         idempotency_key: "str | None" = None,
         force: bool = False,
     ) -> CancelExecutionResult:
+        if self._task_cancel is not None:
+            return await self._task_cancel(idempotency_key, force)
         return await self._runtime.cancel(
             self.execution_id,
             principal=self._principal,
@@ -130,7 +191,6 @@ class Execution(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._retry_execution(
-            self._binding_digest,
             self.execution_id,
             validate_user_input(user_prompt),
             files=files,
@@ -148,7 +208,6 @@ class Execution(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._fork_execution(
-            self._binding_digest,
             self.execution_id,
             validate_user_input(user_prompt),
             files=files,
@@ -157,16 +216,36 @@ class Execution(Generic[AppT]):
             correlation=correlation,
         )
 
+    async def list_events(
+        self,
+        *,
+        cursor: "str | None" = None,
+        include_content: bool = False,
+        limit: int = 100,
+    ) -> "Page[ExecutionEvent]":
+        history = self._runtime.history
+        if history is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return await history.list_events(
+            self.execution_id,
+            principal=self._principal,
+            cursor=cursor,
+            include_content=include_content,
+            limit=limit,
+        )
+
     async def history(
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionHistoryItem]":
         return await self._runtime.execution.history(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -174,12 +253,14 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ExecutionTraceItem]":
         return await self._runtime.execution.trace(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -187,12 +268,14 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[TranscriptItem]":
         return await self._runtime.execution.transcript(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -200,12 +283,14 @@ class Execution(Generic[AppT]):
         self,
         *,
         cursor: "str | None" = None,
+        include_content: bool = False,
         limit: int = 100,
     ) -> "Page[ModelInteractionItem]":
         return await self._runtime.execution.model_interactions(
             self.execution_id,
             principal=self._principal,
             cursor=cursor,
+            include_content=include_content,
             limit=limit,
         )
 
@@ -217,6 +302,7 @@ class Session(Generic[AppT]):
     _agent_digest: str
     session_id: str
     _principal: "Principal | None" = None
+    _definition: "AgentDefinition | None" = None
 
     async def start(
         self,
@@ -244,6 +330,7 @@ class Session(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
 
     async def run(
@@ -299,6 +386,7 @@ class Session(Generic[AppT]):
             planning=True,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -346,6 +434,7 @@ class Session(Generic[AppT]):
             principal=principal or self._principal,
             idempotency_key=idempotency_key,
             cwd=cwd,
+            definition=self._definition,
         )
 
     async def update(
@@ -389,6 +478,7 @@ class Agent(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     id: str
     _agent_digest: str
+    _definition: "AgentDefinition | None" = None
 
     async def start(
         self,
@@ -417,6 +507,7 @@ class Agent(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
 
     async def run(
@@ -475,6 +566,7 @@ class Agent(Generic[AppT]):
             planning=True,
             thinking=thinking,
             correlation=correlation,
+            definition=self._definition,
         )
         return await execution.wait(timeout_seconds=timeout_seconds)
 
@@ -484,7 +576,14 @@ class Agent(Generic[AppT]):
         *,
         principal: "Principal | None" = None,
     ) -> "Session[AppT]":
-        return Session(self._runtime, self.id, self._agent_digest, session_id, principal)
+        return Session(
+            self._runtime,
+            self.id,
+            self._agent_digest,
+            session_id,
+            principal,
+            self._definition,
+        )
 
     async def create_session(
         self,
@@ -503,7 +602,14 @@ class Agent(Generic[AppT]):
             metadata=metadata,
             idempotency_key=idempotency_key,
         )
-        return Session(self._runtime, self.id, self._agent_digest, session_id, principal)
+        return Session(
+            self._runtime,
+            self.id,
+            self._agent_digest,
+            session_id,
+            principal,
+            self._definition,
+        )
 
     async def start_evaluation(
         self,
@@ -515,20 +621,18 @@ class Agent(Generic[AppT]):
             self._agent_digest,
             request,
             output=output,
+            definition=self._definition,
         )
 
     async def replay_evaluation(
         self,
         snapshot_id: str,
         request: ReplayEvaluationRequest,
-        *,
-        output: "type[BaseModel] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._replay_evaluation_for_agent(
-            self._agent_digest,
+            self.id,
             snapshot_id,
             request,
-            output=output,
         )
 
     def task(
@@ -542,6 +646,13 @@ class Agent(Generic[AppT]):
         planning: "bool | None" = None,
         thinking: "ThinkingValue | None" = None,
         expander: "TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
+        files: Sequence[str] = (),
+        session_id: "str | None" = None,
+        memory_scope: "str | None" = None,
     ) -> "TaskNode":
         return self._runtime._task_for_agent(
             self._agent_digest,
@@ -553,6 +664,14 @@ class Agent(Generic[AppT]):
             planning=planning,
             thinking=thinking,
             expander=expander,
+            input_refs=input_refs,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+            retry_delay_seconds=retry_delay_seconds,
+            files=files,
+            session_id=session_id,
+            memory_scope=memory_scope,
+            definition=self._definition,
         )
 
 

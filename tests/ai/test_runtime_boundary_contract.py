@@ -259,6 +259,8 @@ async def test_wait_authorizes_before_abandoning_stream() -> None:
 
 
 class _LaunchExecutions:
+    tenant_id = "tenant"
+
     async def get(self, execution_id: str, *, tenant_id: str) -> object:
         return SimpleNamespace(
             execution_id=execution_id,

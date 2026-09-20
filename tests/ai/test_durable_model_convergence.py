@@ -48,7 +48,6 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
     record = ArtifactRecord(
         artifact_id="artifact",
         execution_id="execution",
-        tenant_id="tenant",
         producer="tool",
         media_type="text/plain",
         object_ref=reference,
@@ -60,7 +59,6 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
     assert set(payload["fields"]) == {
         "artifact_id",
         "execution_id",
-        "tenant_id",
         "producer",
         "media_type",
         "object_ref",

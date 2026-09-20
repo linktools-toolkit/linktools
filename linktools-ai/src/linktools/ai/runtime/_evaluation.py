@@ -4,13 +4,12 @@
 
 import asyncio
 import uuid
-from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Protocol
 
 from linktools.core import environ
 
+from ..agent import AgentBindingSnapshot
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
@@ -21,13 +20,10 @@ from ..core import (
     ResourceKind,
     ResourceRef,
     canonical_sha256,
-)
-from ..core import (
     idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
-from ._handoff import HandoffGate, HandoffState
-from ._snapshot import RunSnapshot
+from ._snapshot_contract import RunSnapshot
 from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,
@@ -42,64 +38,43 @@ from .service_api import (
 from .state._contracts import (
     EvaluationRecord,
     EvaluationState,
+    ExecutionRecord,
     ExecutionRepository,
     IdempotencyRecord,
 )
 
 _logger = environ.get_logger("ai.runtime.evaluation")
-
-
-class _EvaluationReleaseCallback(Protocol):
-    async def __call__(self, evaluation_id: str, *, tenant_id: str) -> None: ...
-
-
-class _ExecutionHoldCallback(Protocol):
-    async def __call__(
-        self, execution_id: str, *, tenant_id: str, hold_id: str
-    ) -> None: ...
-
-
-class _ExecutionHandoffCallback(Protocol):
-    async def __call__(self, execution_id: str, *, tenant_id: str) -> None: ...
-
-
-async def _no_release_terminal(evaluation_id: str, *, tenant_id: str) -> None:
-    del evaluation_id, tenant_id
-
-
-async def _no_execution_hold(
-    execution_id: str, *, tenant_id: str, hold_id: str
-) -> None:
-    del execution_id, tenant_id, hold_id
-
-
-async def _no_execution_handoff(execution_id: str, *, tenant_id: str) -> None:
-    del execution_id, tenant_id
-
-
-def validate_compare_request(request: CompareEvaluationRequest) -> None:
-    values = (
-        request.baseline_id,
-        request.candidate_id,
-        request.dataset_id,
-        request.evaluator_contract_id,
-        request.target_kind,
-        request.snapshot_digest,
-        request.artifact_digest,
-    )
-    revisions = (
-        request.dataset_revision,
-        request.evaluator_contract_revision,
-        request.metric_contract_revision,
-    )
-    if any(value is None or not value.strip() for value in values) or any(
-        value is None or value < 1 for value in revisions
-    ):
-        raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+_TERMINAL_EVALUATION_STATUSES = frozenset(
+    {
+        EvaluationStatus.SUCCEEDED,
+        EvaluationStatus.FAILED,
+        EvaluationStatus.CANCELLED,
+    }
+)
+_EXECUTION_EVALUATION_STATUS = {
+    ExecutionStatus.PENDING_START: EvaluationStatus.PENDING,
+    ExecutionStatus.START_UNKNOWN: EvaluationStatus.RUNNING,
+    ExecutionStatus.STARTED: EvaluationStatus.RUNNING,
+    ExecutionStatus.FINALIZING: EvaluationStatus.RUNNING,
+    ExecutionStatus.RECOVERY_REQUIRED: EvaluationStatus.RUNNING,
+    ExecutionStatus.WAITING_DEFERRED: EvaluationStatus.RUNNING,
+    ExecutionStatus.WAITING_RETRY: EvaluationStatus.RUNNING,
+    ExecutionStatus.CANCELLING: EvaluationStatus.RUNNING,
+    ExecutionStatus.SUCCEEDED: EvaluationStatus.SUCCEEDED,
+    ExecutionStatus.FAILED: EvaluationStatus.FAILED,
+    ExecutionStatus.CANCELLED: EvaluationStatus.CANCELLED,
+}
+_EVALUATION_STATUS_RANK = {
+    EvaluationStatus.PENDING: 0,
+    EvaluationStatus.RUNNING: 1,
+    EvaluationStatus.SUCCEEDED: 2,
+    EvaluationStatus.FAILED: 2,
+    EvaluationStatus.CANCELLED: 2,
+}
 
 
 class DefaultEvaluationService:
-    """Persist evaluation identity and enforce compatibility before replay."""
+    """Track evaluation executions and replay their exact historical binding."""
 
     def __init__(
         self,
@@ -107,35 +82,18 @@ class DefaultEvaluationService:
         executions: ExecutionRepository,
         authorization: AuthorizationPolicy,
         execution: ExecutionService,
-        *,
-        release_terminal: _EvaluationReleaseCallback | None = None,
-        acquire_execution_hold: _ExecutionHoldCallback | None = None,
-        release_execution_hold: _ExecutionHoldCallback | None = None,
-        request_execution_handoff: _ExecutionHandoffCallback | None = None,
     ) -> None:
-        hold_callbacks = (
-            acquire_execution_hold,
-            release_execution_hold,
-            request_execution_handoff,
-        )
-        if any(callback is None for callback in hold_callbacks) and any(
-            callback is not None for callback in hold_callbacks
-        ):
-            raise ValueError("evaluation execution hold callbacks must be complete")
         self._state = state
         self._executions = executions
         self._authorization = authorization
         self._execution = execution
-        self._release_terminal = release_terminal or _no_release_terminal
-        self._acquire_execution_hold = acquire_execution_hold or _no_execution_hold
-        self._release_execution_hold = release_execution_hold or _no_execution_hold
-        self._request_execution_handoff = (
-            request_execution_handoff or _no_execution_handoff
-        )
-        self._handoff = HandoffGate[tuple[str, str], object]()
 
     async def start(
-        self, binding_digest: str, request: StartEvaluationRequest
+        self,
+        binding_digest: str,
+        request: StartEvaluationRequest,
+        *,
+        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
         idempotency_key_digest = compute_idempotency_key_digest(request.idempotency_key)
@@ -143,7 +101,9 @@ class DefaultEvaluationService:
             request.principal,
             AuthorizationAction.EVALUATION_RUN,
             ResourceRef(
-                ResourceKind.EVALUATION, evaluation_id, request.principal.tenant_id
+                ResourceKind.EVALUATION,
+                evaluation_id,
+                request.principal.tenant_id,
             ),
         )
         request_digest = canonical_sha256(
@@ -173,7 +133,6 @@ class DefaultEvaluationService:
             now = datetime.now(timezone.utc)
             await self._state.idempotency.reserve(
                 IdempotencyRecord(
-                    tenant_id=request.principal.tenant_id,
                     scope="evaluation.run",
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
@@ -186,9 +145,11 @@ class DefaultEvaluationService:
                     updated_at=now,
                 )
             )
+
         try:
             record = await self._state.records.get(
-                evaluation_id, tenant_id=request.principal.tenant_id
+                evaluation_id,
+                tenant_id=request.principal.tenant_id,
             )
             if record is None:
                 if (
@@ -207,46 +168,29 @@ class DefaultEvaluationService:
                         planning=False,
                         thinking=False,
                     ),
+                    binding_snapshot=binding_snapshot,
                 )
-                await self._acquire_execution_hold(
-                    execution.execution_id,
-                    tenant_id=request.principal.tenant_id,
-                    hold_id=f"evaluation:{evaluation_id}",
-                )
-                record = EvaluationRecord(
-                    evaluation_id,
-                    request.principal.tenant_id,
-                    execution.execution_id,
-                    request.dataset_digest,
-                    1,
-                    "default",
-                    1,
-                    binding_digest,
-                    None,
-                    EvaluationStatus.PENDING,
-                    0,
-                    {},
-                    now,
-                    now,
-                )
-                await self._state.records.create(record)
-            elif record.status not in {
-                EvaluationStatus.SUCCEEDED,
-                EvaluationStatus.FAILED,
-                EvaluationStatus.CANCELLED,
-            }:
-                execution = await self._execution_record(record)
-                if execution is not None:
-                    await self._acquire_execution_hold(
-                        record.execution_id,
-                        tenant_id=request.principal.tenant_id,
-                        hold_id=f"evaluation:{evaluation_id}",
+                await self._state.records.create(
+                    EvaluationRecord(
+                        evaluation_id,
+                        execution.execution_id,
+                        request.dataset_digest,
+                        EvaluationStatus.PENDING,
+                        0,
+                        now,
+                        now,
                     )
-            elif (
-                existing is not None
-                and existing.status is not IdempotencyStatus.COMPLETED
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                )
+            else:
+                source = await self._require_execution(record)
+                if source.binding_digest != binding_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if (
+                    existing is not None
+                    and existing.status is not IdempotencyStatus.COMPLETED
+                    and record.status in _TERMINAL_EVALUATION_STATUSES
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -257,6 +201,7 @@ class DefaultEvaluationService:
                 exc_info=environ.debug,
             )
             raise
+
         try:
             await self._state.idempotency.compare_and_swap(
                 "evaluation.run",
@@ -264,7 +209,6 @@ class DefaultEvaluationService:
                 tenant_id=request.principal.tenant_id,
                 expected_status=IdempotencyStatus.RESERVED,
                 next_record=IdempotencyRecord(
-                    tenant_id=request.principal.tenant_id,
                     scope="evaluation.run",
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
@@ -295,242 +239,138 @@ class DefaultEvaluationService:
         return EvaluationHandle(evaluation_id)
 
     async def inspect(
-        self, evaluation_id: str, *, principal: Principal
+        self,
+        evaluation_id: str,
+        *,
+        principal: Principal,
     ) -> EvaluationView:
-        async with self._evaluation_consumer(evaluation_id, principal.tenant_id):
-            record = await self._authorized(
-                evaluation_id, principal, AuthorizationAction.EVALUATION_READ
+        record, _source = await self._synchronize(
+            await self._authorized(
+                evaluation_id,
+                principal,
+                AuthorizationAction.EVALUATION_READ,
             )
-            record = await self._synchronize(record, principal=principal)
-            view = EvaluationView(record.evaluation_id, record.status)
-            if record.status in {
-                EvaluationStatus.SUCCEEDED,
-                EvaluationStatus.FAILED,
-                EvaluationStatus.CANCELLED,
-            }:
-                await self._request_evaluation_release(
-                    evaluation_id, principal.tenant_id
-                )
-            return view
+        )
+        return EvaluationView(record.evaluation_id, record.status)
 
-    async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison:
-        validate_compare_request(request)
-        evaluation_ids = tuple(sorted({request.baseline_id, request.candidate_id}))
-        async with AsyncExitStack() as stack:
-            for evaluation_id in evaluation_ids:
-                await stack.enter_async_context(
-                    self._evaluation_consumer(
-                        evaluation_id, request.principal.tenant_id
-                    )
-                )
-            await self._authorization.authorize(
+    async def compare(
+        self,
+        request: CompareEvaluationRequest,
+    ) -> EvaluationComparison:
+        baseline, baseline_execution = await self._synchronize(
+            await self._authorized(
+                request.baseline_id,
                 request.principal,
                 AuthorizationAction.EVALUATION_READ,
-                ResourceRef(
-                    ResourceKind.EVALUATION,
-                    request.baseline_id,
-                    request.principal.tenant_id,
-                ),
             )
-            await self._authorization.authorize(
-                request.principal,
-                AuthorizationAction.EVALUATION_READ,
-                ResourceRef(
-                    ResourceKind.EVALUATION,
-                    request.candidate_id,
-                    request.principal.tenant_id,
-                ),
-            )
-            await self._authorization.authorize(
-                request.principal,
-                AuthorizationAction.EVALUATION_COMPARE,
-                ResourceRef(
-                    ResourceKind.EVALUATION,
-                    request.candidate_id,
-                    request.principal.tenant_id,
-                ),
-            )
-            baseline = await self._synchronize(
+        )
+        if request.candidate_id == request.baseline_id:
+            candidate = baseline
+            candidate_execution = baseline_execution
+        else:
+            candidate, candidate_execution = await self._synchronize(
                 await self._authorized(
-                    request.baseline_id,
+                    request.candidate_id,
                     request.principal,
                     AuthorizationAction.EVALUATION_READ,
-                ),
-                principal=request.principal,
-            )
-            candidate = (
-                baseline
-                if request.candidate_id == request.baseline_id
-                else await self._synchronize(
-                    await self._authorized(
-                        request.candidate_id,
-                        request.principal,
-                        AuthorizationAction.EVALUATION_READ,
-                    ),
-                    principal=request.principal,
                 )
             )
-            if (
-                baseline.dataset_id != candidate.dataset_id
-                or baseline.dataset_revision != candidate.dataset_revision
-                or baseline.evaluator_id != candidate.evaluator_id
-                or baseline.evaluator_revision != candidate.evaluator_revision
-                or baseline.binding_digest != candidate.binding_digest
-            ):
-                raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
-            comparison = EvaluationComparison(
-                request.baseline_id, request.candidate_id, True
-            )
-            for record in (baseline, candidate):
-                if record.status in {
-                    EvaluationStatus.SUCCEEDED,
-                    EvaluationStatus.FAILED,
-                    EvaluationStatus.CANCELLED,
-                }:
-                    await self._request_evaluation_release(
-                        record.evaluation_id, request.principal.tenant_id
-                    )
-            return comparison
+        await self._authorization.authorize(
+            request.principal,
+            AuthorizationAction.EVALUATION_COMPARE,
+            ResourceRef(
+                ResourceKind.EVALUATION,
+                request.candidate_id,
+                request.principal.tenant_id,
+            ),
+        )
+        if (
+            baseline.dataset_digest != candidate.dataset_digest
+            or baseline_execution.binding_digest
+            != candidate_execution.binding_digest
+        ):
+            raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+        return EvaluationComparison(
+            request.baseline_id,
+            request.candidate_id,
+        )
 
     async def snapshot(
-        self, evaluation_id: str, *, principal: Principal
+        self,
+        evaluation_id: str,
+        *,
+        principal: Principal,
     ) -> RunSnapshot:
-        async with self._evaluation_consumer(evaluation_id, principal.tenant_id):
-            record = await self._synchronize(
-                await self._authorized(
-                    evaluation_id, principal, AuthorizationAction.EVALUATION_READ
-                ),
-                principal=principal,
-            )
-            result_value = record.metrics.get("result_digest")
-            result_digest = result_value if isinstance(result_value, str) else None
-            digest = canonical_sha256(
-                {
-                    "snapshot_id": evaluation_id,
-                    "execution_id": record.execution_id,
-                    "binding_digest": record.binding_digest,
-                    "trace_digest": record.artifact_digest or "",
-                    "result_digest": result_digest,
-                }
-            )
-            snapshot = RunSnapshot(
+        record, source = await self._synchronize(
+            await self._authorized(
                 evaluation_id,
-                record.execution_id,
-                record.binding_digest,
-                record.artifact_digest or "",
-                result_digest,
-                digest,
+                principal,
+                AuthorizationAction.EVALUATION_READ,
             )
-            if record.status in {
-                EvaluationStatus.SUCCEEDED,
-                EvaluationStatus.FAILED,
-                EvaluationStatus.CANCELLED,
-            }:
-                await self._request_evaluation_release(
-                    evaluation_id, principal.tenant_id
-                )
-            return snapshot
+        )
+        digest = canonical_sha256(
+            {
+                "snapshot_id": evaluation_id,
+                "execution_id": record.execution_id,
+                "binding_digest": source.binding_digest,
+            }
+        )
+        return RunSnapshot(
+            evaluation_id,
+            record.execution_id,
+            source.binding_digest,
+            digest,
+        )
 
     async def replay(
-        self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest
+        self,
+        agent_id: str,
+        snapshot_id: str,
+        request: ReplayEvaluationRequest,
     ) -> ExecutionHandle:
-        async with self._evaluation_consumer(snapshot_id, request.principal.tenant_id):
-            record = await self._synchronize(
-                await self._authorized(
-                    snapshot_id, request.principal, AuthorizationAction.EVALUATION_READ
-                ),
+        record, source = await self._synchronize(
+            await self._authorized(
+                snapshot_id,
+                request.principal,
+                AuthorizationAction.EVALUATION_READ,
+            )
+        )
+        if source.binding.agent_spec.id != agent_id:
+            raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+        return await self._execution.start(
+            source.binding_digest,
+            ExecutionRequest(
+                user_prompt=f"evaluation:{record.dataset_digest}",
                 principal=request.principal,
-            )
-            if record.binding_digest != binding_digest:
-                raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
-            handle = await self._execution.start(
-                binding_digest,
-                ExecutionRequest(
-                    user_prompt=f"replay:{record.evaluation_id}",
-                    principal=request.principal,
-                    idempotency_key=request.idempotency_key,
-                    memory_scope=request.memory_scope,
-                    mode="run",
-                    planning=False,
-                    thinking=False,
-                ),
-            )
-            if record.status in {
-                EvaluationStatus.SUCCEEDED,
-                EvaluationStatus.FAILED,
-                EvaluationStatus.CANCELLED,
-            }:
-                await self._request_evaluation_release(
-                    snapshot_id, request.principal.tenant_id
-                )
-            return handle
+                idempotency_key=request.idempotency_key,
+                memory_scope=request.memory_scope,
+                mode="run",
+                planning=False,
+                thinking=False,
+            ),
+            binding_snapshot=source.binding,
+        )
 
     async def _synchronize(
-        self, record: EvaluationRecord, *, principal: Principal
-    ) -> EvaluationRecord:
-        hold_id = f"evaluation:{record.evaluation_id}"
+        self,
+        record: EvaluationRecord,
+    ) -> tuple[EvaluationRecord, ExecutionRecord]:
         current = record
-        terminal_statuses = {
-            EvaluationStatus.SUCCEEDED,
-            EvaluationStatus.FAILED,
-            EvaluationStatus.CANCELLED,
-        }
-        status_rank = {
-            EvaluationStatus.PENDING: 0,
-            EvaluationStatus.RUNNING: 1,
-            EvaluationStatus.SUCCEEDED: 2,
-            EvaluationStatus.FAILED: 2,
-            EvaluationStatus.CANCELLED: 2,
-        }
-        execution_status_map = {
-            ExecutionStatus.PENDING_START: EvaluationStatus.PENDING,
-            ExecutionStatus.START_UNKNOWN: EvaluationStatus.RUNNING,
-            ExecutionStatus.STARTED: EvaluationStatus.RUNNING,
-            ExecutionStatus.FINALIZING: EvaluationStatus.RUNNING,
-            ExecutionStatus.WAITING_DEFERRED: EvaluationStatus.RUNNING,
-            ExecutionStatus.CANCELLING: EvaluationStatus.RUNNING,
-            ExecutionStatus.SUCCEEDED: EvaluationStatus.SUCCEEDED,
-            ExecutionStatus.FAILED: EvaluationStatus.FAILED,
-            ExecutionStatus.CANCELLED: EvaluationStatus.CANCELLED,
-        }
         while True:
-            if current.status in terminal_statuses:
-                await self._request_execution_handoff(
-                    current.execution_id, tenant_id=current.tenant_id
-                )
-                await self._release_execution_hold(
-                    current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id
-                )
-                return current
-            execution = await self._execution_record(current)
-            if execution is None:
-                await self._release_execution_hold(
-                    current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id
-                )
-                _logger.warning(
-                    "evaluation dependency missing: evaluation=%s execution=%s dependency_missing=True",
-                    current.evaluation_id,
-                    current.execution_id,
-                )
-                return current
-            if execution.status not in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
-                await self._execution.inspect(
-                    execution.execution_id,
-                    principal=principal,
-                )
-            await self._acquire_execution_hold(
-                current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id
-            )
-            target_status = execution_status_map.get(execution.status)
-            if (
-                target_status is None
-                or status_rank[target_status] <= status_rank[current.status]
-            ):
-                return current
+            execution = await self._require_execution(current)
+            target_status = _EXECUTION_EVALUATION_STATUS.get(execution.status)
+            if target_status is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status in _TERMINAL_EVALUATION_STATUSES:
+                if target_status is not current.status:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return current, execution
+            target_rank = _EVALUATION_STATUS_RANK[target_status]
+            current_rank = _EVALUATION_STATUS_RANK[current.status]
+            if target_rank < current_rank:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if target_rank == current_rank:
+                return current, execution
             updated = replace(
                 current,
                 status=target_status,
@@ -540,95 +380,50 @@ class DefaultEvaluationService:
             try:
                 result = await self._state.records.compare_and_swap(
                     current.evaluation_id,
-                    tenant_id=current.tenant_id,
+                    tenant_id=self._state.records.tenant_id,
                     expected_revision=current.revision,
                     next_record=updated,
                 )
+                return result, execution
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-                result = await self._state.records.get(
-                    current.evaluation_id, tenant_id=current.tenant_id
+                latest = await self._state.records.get(
+                    current.evaluation_id,
+                    tenant_id=self._state.records.tenant_id,
                 )
-                if result is None or result.revision <= current.revision:
+                if latest is None or latest.revision <= current.revision:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                current = result
-                continue
-            if result.status in terminal_statuses:
-                await self._request_execution_handoff(
-                    result.execution_id, tenant_id=result.tenant_id
-                )
-                await self._release_execution_hold(
-                    result.execution_id, tenant_id=result.tenant_id, hold_id=hold_id
-                )
-            return result
+                current = latest
 
-    @asynccontextmanager
-    async def _evaluation_consumer(self, evaluation_id: str, tenant_id: str):
-        key = (tenant_id, evaluation_id)
-        state = await self._handoff.enter(key)
-        try:
-            yield state
-        finally:
-            owner = await self._handoff.leave(key, state)
-            if owner:
-                await self._run_evaluation_release(evaluation_id, tenant_id, state)
-
-    async def _request_evaluation_release(
-        self, evaluation_id: str, tenant_id: str
-    ) -> None:
-        key = (tenant_id, evaluation_id)
-        state, owner = await self._handoff.request_release(
-            key,
-            require_existing=True,
-        )
-        if owner:
-            await self._run_evaluation_release(evaluation_id, tenant_id, state)
-
-    async def _run_evaluation_release(
+    async def _require_execution(
         self,
-        evaluation_id: str,
-        tenant_id: str,
-        state: HandoffState[object],
-    ) -> None:
-        succeeded = False
-        cleanup_error: BaseException | None = None
-        try:
-            await self._release_terminal(evaluation_id, tenant_id=tenant_id)
-            succeeded = True
-        except BaseException as error:
-            cleanup_error = error
-            if isinstance(error, Exception):
-                _logger.error(
-                    "evaluation transient handoff cleanup failed: evaluation=%s",
-                    evaluation_id,
-                    exc_info=environ.debug,
-                )
-        finally:
-            await self._handoff.finish_release(
-                (tenant_id, evaluation_id),
-                state,
-                succeeded=succeeded,
-            )
-        if cleanup_error is not None and not isinstance(cleanup_error, Exception):
-            raise cleanup_error
-
-    async def _execution_record(self, record: EvaluationRecord):
-        return await self._executions.get(
-            record.execution_id, tenant_id=record.tenant_id
+        record: EvaluationRecord,
+    ) -> ExecutionRecord:
+        execution = await self._executions.get(
+            record.execution_id,
+            tenant_id=self._state.records.tenant_id,
         )
+        if execution is None or not isinstance(execution.binding, AgentBindingSnapshot):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return execution
 
     async def _authorized(
-        self, evaluation_id: str, principal: Principal, action: AuthorizationAction
+        self,
+        evaluation_id: str,
+        principal: Principal,
+        action: AuthorizationAction,
     ) -> EvaluationRecord:
         header = await self._state.records.get_header(
-            evaluation_id, tenant_id=principal.tenant_id
+            evaluation_id,
+            tenant_id=principal.tenant_id,
         )
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
         record = await self._state.records.get(
-            evaluation_id, tenant_id=principal.tenant_id
+            evaluation_id,
+            tenant_id=principal.tenant_id,
         )
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
@@ -645,4 +440,4 @@ def _stable_error(error_code: str | None) -> AIError:
     return AIError(code)
 
 
-__all__ = ["DefaultEvaluationService", "validate_compare_request"]
+__all__ = ["DefaultEvaluationService"]

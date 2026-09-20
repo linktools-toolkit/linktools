@@ -34,7 +34,13 @@ async def test_sqlite_runtime_state_owns_and_reopens_database(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_transient_runtime_state_closes_repository_and_object_domains() -> None:
-    plan = RuntimeStatePlan(**{domain.value: RuntimeStateRoute.transient() for domain in RuntimeDomain})
+    plan = RuntimeStatePlan(
+        **{
+            domain.value: RuntimeStateRoute.transient()
+            for domain in RuntimeDomain
+            if domain is not RuntimeDomain.RECOVERY
+        }
+    )
     state = RuntimeState.from_plan(plan)
     await state.initialize(namespace="transient", tenant_id="tenant")
     await state.close()
@@ -94,7 +100,6 @@ def test_mixed_runtime_plan_has_explicit_routes(tmp_path) -> None:
         conversation=RuntimeStateRoute.filesystem(tmp_path / "conversation"),
         execution=RuntimeStateRoute.transient(),
         memory=RuntimeStateRoute.memory(),
-        recovery=RuntimeStateRoute.transient(),
     )
     assert plan.route(RuntimeDomain.CONVERSATION).retention.value == "durable"
     assert plan.route(RuntimeDomain.EXECUTION).retention.value == "transient"

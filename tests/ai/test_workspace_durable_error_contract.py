@@ -108,7 +108,7 @@ def _context() -> RunContext[None]:
 async def test_missing_write_parent_is_known_failure_not_effect_unknown(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = await LocalSandbox().open(root=workspace.root)
     try:
         workspace_capability = workspace_capabilities(
@@ -147,7 +147,7 @@ async def test_missing_write_parent_is_known_failure_not_effect_unknown(
 async def test_effectful_plain_ai_error_after_partial_effect_becomes_unknown(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     session = _PartialDirectorySession(tmp_path)
     workspace_capability = workspace_capabilities(
         workspace,
@@ -189,7 +189,7 @@ async def test_effectful_plain_ai_error_after_partial_effect_becomes_unknown(
 async def test_effect_free_missing_target_remains_model_correctable(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     capability = workspace_capabilities(
         workspace,
         ("read_file",),

@@ -17,7 +17,7 @@ from ._contracts import ToolOperationRecord
 from ._codec import _decode_enveloped_domain, _encode_persisted_domain, encode_envelope, wire_type_id
 from ._contracts import ApprovalRecord, ArtifactRecord, ConversationHistoryRecord, EvaluationRecord, ExecutionRecord, ExternalCallRecord, IdempotencyRecord, MemoryRecord, RecoveryCheckpoint, SessionRecord
 from ._plan import RuntimeDomain
-from ._store import OperationQuery, RecordQuery, StateStore, StateTransaction, StoredOperation, StoredRecord, operation_key, parent_digest, partition_digest, record_key_digest, scope_digest, sequence_key, sortable_identity, stream_digest
+from ._store import OperationQuery, RecordQuery, StateStore, StateTransaction, StoredOperation, StoredRecord, operation_key, parent_digest, record_key_digest, scope_digest, sequence_key, sortable_identity, stream_digest
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
 
@@ -48,10 +48,13 @@ class _RepositoryBase:
     def state_store(self) -> StateStore:
         return self._store
 
-    def _partition(self, kind: str) -> bytes:
-        return partition_digest(
-            self._namespace, self._tenant_id, self._domain.value, kind
-        )
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
+
+    @property
+    def namespace(self) -> str:
+        return self._namespace
 
     def _key(self, kind: str, identity: object) -> bytes:
         return record_key_digest(
@@ -88,56 +91,17 @@ class _RepositoryBase:
         parent: bytes | None = None,
         state: str | None = None,
     ) -> StoredRecord:
-        if scope is None:
-            scope = self._default_scope(kind, value)
-        if parent is None:
-            parent = self._default_parent(kind, value)
-        lease_owner, lease_fence, lease_expires_at = _record_lease(value)
-        return StoredRecord(
-            self._key(kind, identity),
-            self._partition(kind),
-            scope,
-            parent,
-            kind,
-            sortable_identity(identity),
-            state,
-            0,
-            lease_owner,
-            lease_fence,
-            lease_expires_at,
-            _domain_data(value),
+        return project_record(
+            namespace=self._namespace,
+            tenant_id=self._tenant_id,
+            domain=self._domain,
+            kind=kind,
+            identity=identity,
+            value=value,
+            scope=scope,
+            parent=parent,
+            state=state,
         )
-
-    def _default_scope(self, kind: str, value: object) -> bytes | None:
-        if isinstance(value, SessionRecord):
-            return self._scope(kind, "owner", value.owner_principal_id)
-        if isinstance(value, ExecutionRecord) and value.session_id is not None:
-            return self._scope(kind, "session", value.session_id)
-        if isinstance(value, IdempotencyRecord):
-            return self._scope(
-                kind,
-                "resource",
-                [value.resource_kind.value, value.resource_id],
-            )
-        if isinstance(
-            value,
-            (EvaluationRecord, ArtifactRecord, ApprovalRecord, ExternalCallRecord),
-        ):
-            return self._scope(kind, "execution", value.execution_id)
-        if isinstance(value, MemoryRecord):
-            return self._scope(kind, "memory_scope", value.memory_scope_digest)
-        if isinstance(value, ToolOperationRecord):
-            return self._scope(kind, "step_run", value.step_run_id)
-        return None
-
-    def _default_parent(self, kind: str, value: object) -> bytes | None:
-        if isinstance(value, TaskNodeView):
-            return self._parent(kind, "graph", value.graph_id)
-        if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
-            return self._parent(kind, "execution", value.parent_execution_id)
-        if isinstance(value, ToolOperationRecord):
-            return self._parent(kind, "execution", value.execution_id)
-        return None
 
     async def _record(self, key: bytes) -> StoredRecord | None:
         return await self._store.read(lambda transaction: transaction.get_record(key))
@@ -165,11 +129,6 @@ class _RepositoryBase:
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=(
-                        self._partition(kind)
-                        if scope is None and parent is None
-                        else None
-                    ),
                     scope_digest=scope,
                     parent_digest=parent,
                     kind=kind,
@@ -185,11 +144,6 @@ class _RepositoryBase:
             last = records[-1]
             probe = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=(
-                        self._partition(kind)
-                        if scope is None and parent is None
-                        else None
-                    ),
                     scope_digest=scope,
                     parent_digest=parent,
                     kind=kind,
@@ -224,11 +178,6 @@ class _RepositoryBase:
         async def read(transaction: StateTransaction) -> bool:
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=(
-                        self._partition(kind)
-                        if scope is None and parent is None
-                        else None
-                    ),
                     scope_digest=scope,
                     parent_digest=parent,
                     kind=kind,
@@ -290,25 +239,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         return None
 
     def _identity(self, value: object) -> object:
-        if isinstance(value, SessionRecord):
-            return value.session_id
-        if isinstance(value, ExecutionRecord):
-            return value.execution_id
-        if isinstance(value, MemoryRecord):
-            return value.memory_id
-        if isinstance(value, ArtifactRecord):
-            return value.artifact_id
-        if isinstance(value, EvaluationRecord):
-            return value.evaluation_id
-        if isinstance(value, RecoveryCheckpoint):
-            return value.execution_id
-        if isinstance(value, ApprovalRecord):
-            return value.approval_id
-        if isinstance(value, ExternalCallRecord):
-            return value.call_id
-        if isinstance(value, IdempotencyRecord):
-            return self._identity_key(value.scope, value.idempotency_key_digest)
-        raise TypeError(f"unsupported repository value: {type(value).__name__}")
+        return _canonical_record_identity(self._kind, value)
 
     async def create(self, value: ValueT) -> ValueT:
         _require_tenant(value, self._tenant_id)
@@ -574,16 +505,32 @@ class OperationLedgerRepository(_RepositoryBase):
             "operation",
             [resource_kind.value, resource_id],
         )
-        values = await self._store.mutate(
-            lambda transaction: transaction.delete_operations(
+        async def compact(
+            transaction: StateTransaction,
+        ) -> tuple[StoredOperation, ...]:
+            query = OperationQuery(
+                stream_digest=stream,
+                states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
+                through_sequence=through_sequence,
+                compactable=True,
+            )
+            candidates = await transaction.list_operations(query)
+            if len(candidates) <= 1:
+                return ()
+            anchor = max(
+                candidates,
+                key=lambda value: (value.sequence, value.key_digest),
+            )
+            return await transaction.delete_operations(
                 OperationQuery(
                     stream_digest=stream,
                     states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
-                    through_sequence=through_sequence,
+                    through_sequence=anchor.sequence - 1,
                     compactable=True,
                 )
             )
-        )
+
+        values = await self._store.mutate(compact)
         return hashlib.sha256(
             canonical_json_bytes(
                 [
@@ -597,6 +544,157 @@ class OperationLedgerRepository(_RepositoryBase):
                 ]
             )
         ).hexdigest()
+
+
+def project_record(
+    *,
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    kind: str,
+    identity: object,
+    value: object,
+    scope: bytes | None = None,
+    parent: bytes | None = None,
+    state: str | None = None,
+    sort_key: str | None = None,
+    storage_version: int = 0,
+) -> StoredRecord:
+    """Project one logical value into its canonical physical Runtime record."""
+    if scope is None:
+        scope = _default_record_scope(
+            namespace,
+            tenant_id,
+            domain,
+            kind,
+            value,
+        )
+    if parent is None:
+        parent = _default_record_parent(
+            namespace,
+            tenant_id,
+            domain,
+            kind,
+            value,
+        )
+    lease_owner, lease_fence, lease_expires_at = _record_lease(value)
+    return StoredRecord(
+        record_key_digest(namespace, tenant_id, domain.value, kind, identity),
+        scope,
+        parent,
+        kind,
+        sortable_identity(identity) if sort_key is None else sort_key,
+        state,
+        storage_version,
+        lease_owner,
+        lease_fence,
+        lease_expires_at,
+        _domain_data(value),
+    )
+
+
+def _default_record_scope(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    kind: str,
+    value: object,
+) -> bytes | None:
+    if isinstance(value, SessionRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "owner",
+            value.owner_principal_id,
+        )
+    if isinstance(value, ExecutionRecord) and value.session_id is not None:
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "session",
+            value.session_id,
+        )
+    if isinstance(value, IdempotencyRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "resource",
+            [value.resource_kind.value, value.resource_id],
+        )
+    if isinstance(
+        value,
+        (EvaluationRecord, ArtifactRecord, ApprovalRecord, ExternalCallRecord),
+    ):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "execution",
+            value.execution_id,
+        )
+    if isinstance(value, MemoryRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "memory_scope",
+            value.memory_scope_digest,
+        )
+    if isinstance(value, ToolOperationRecord):
+        return scope_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "step_run",
+            value.step_run_id,
+        )
+    return None
+
+
+def _default_record_parent(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    kind: str,
+    value: object,
+) -> bytes | None:
+    if isinstance(value, TaskNodeView):
+        return parent_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "graph",
+            value.graph_id,
+        )
+    if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
+        return parent_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "execution",
+            value.parent_execution_id,
+        )
+    if isinstance(value, ToolOperationRecord):
+        return parent_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            kind,
+            "execution",
+            value.execution_id,
+        )
+    return None
 
 
 def _canonical_record_identity(kind: str, value: object) -> object:
@@ -668,27 +766,9 @@ def _record_lease(value: object) -> tuple[str | None, int, datetime | None]:
 
 
 def _require_tenant(value: object, tenant_id: str) -> None:
-    tenant_value = None
-    if isinstance(
-        value,
-        (
-            SessionRecord,
-            ExecutionRecord,
-            IdempotencyRecord,
-            OperationLedgerRecord,
-            OperationLedgerInput,
-            MemoryRecord,
-            EvaluationRecord,
-            ArtifactRecord,
-            ApprovalRecord,
-            ExternalCallRecord,
-            RecoveryCheckpoint,
-            ConversationHistoryRecord,
-            ToolOperationRecord,
-        ),
+    if isinstance(value, (OperationLedgerRecord, OperationLedgerInput)) and (
+        value.tenant_id != tenant_id
     ):
-        tenant_value = value.tenant_id
-    if tenant_value is not None and tenant_value != tenant_id:
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
 
@@ -770,14 +850,12 @@ def _require_session_identity(
 ) -> None:
     if (
         candidate.session_id,
-        candidate.tenant_id,
         candidate.owner_principal_id,
         candidate.agent_id,
         candidate.history_id,
         candidate.created_at,
     ) != (
         current.session_id,
-        current.tenant_id,
         current.owner_principal_id,
         current.agent_id,
         current.history_id,
@@ -967,11 +1045,13 @@ ResourceRepository = _ResourceRepository
 append_operation = _append_operation
 decode_operation = _decode_operation
 decode_record_cursor = _decode_record_cursor
+canonical_record_identity = _canonical_record_identity
 domain_data = _domain_data
 insert_operation = _insert_operation
 projected_record = _projected_record
 record_cursor = _record_cursor
 record_state = _record_state
+restore_lease_fields = _restore_lease_fields
 replace_checked = _replace_checked
 require_repository_tenant = _require_repository_tenant
 require_tenant = _require_tenant
@@ -987,11 +1067,14 @@ __all__ = [
     "append_operation",
     "decode_operation",
     "decode_record_cursor",
+    "canonical_record_identity",
     "domain_data",
     "insert_operation",
     "projected_record",
     "record_cursor",
     "record_state",
+    "restore_lease_fields",
+    "project_record",
     "replace_checked",
     "require_repository_tenant",
     "require_tenant",

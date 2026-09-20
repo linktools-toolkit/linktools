@@ -63,7 +63,6 @@ def _record() -> ExecutionRecord:
     snapshot = _binding_snapshot()
     return ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -129,6 +128,7 @@ def _backend() -> LocalExecutionBackend:
     backend._execution = _ExecutionState(record)
     binding = _binding()
     backend._catalog = SimpleNamespace(binding=lambda digest: binding)
+    backend._restore_binding = None
     backend._accepting = True
     backend._recovery_enabled = False
     backend._tenant_id = "tenant"

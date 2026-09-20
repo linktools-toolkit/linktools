@@ -492,6 +492,7 @@ def _record_execution_terminal(
     recorder: MetricRecorder | None,
     *,
     source_namespace: str,
+    tenant_id: str,
     result: ExecutionTerminalCommitResult,
     session_id: str | None,
 ) -> None:
@@ -516,12 +517,12 @@ def _record_execution_terminal(
             observation_id=_stable_observation_id(
                 "linktools.execution.terminal.v1",
                 source_namespace,
-                execution.tenant_id,
+                tenant_id,
                 execution.execution_id,
             ),
             kind="linktools.execution.terminal",
             source_namespace=source_namespace,
-            tenant_id=execution.tenant_id,
+            tenant_id=tenant_id,
             status=execution.status.value,
             error_code=execution.error_code,
             correlation=correlation,

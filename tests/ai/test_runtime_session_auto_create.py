@@ -8,7 +8,7 @@ import pytest
 from linktools.ai.core import SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, SessionView
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 class _RaceSessionService:
@@ -46,7 +46,7 @@ async def test_session_auto_create_race_reuses_authorized_session() -> None:
     await runtime._ensure_session(
         definition,
         "session",
-        trusted_workspace_principal("tenant"),
+        Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
     )
 
     assert runtime.session.get_calls == 2
@@ -66,7 +66,7 @@ async def test_session_auto_create_conflict_does_not_reveal_foreign_session() ->
         await runtime._ensure_session(
             definition,
             "session",
-            trusted_workspace_principal("tenant"),
+            Principal("workspace", "tenant", PrincipalKind.LOCAL_TRUSTED.value),
         )
 
     assert error.value.code is ErrorCode.AUTHORIZATION_DENIED

@@ -602,11 +602,7 @@ class _CowMap(MutableMapping[KeyT, MapValueT]):
 
 def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
     return (
-        (
-            query.partition_digest is None
-            or record.partition_digest == query.partition_digest
-        )
-        and (query.scope_digest is None or record.scope_digest == query.scope_digest)
+        (query.scope_digest is None or record.scope_digest == query.scope_digest)
         and (query.parent_digest is None or record.parent_digest == query.parent_digest)
         and (query.kind is None or record.kind == query.kind)
         and (
@@ -645,7 +641,6 @@ def _record_query_indexable(query: RecordQuery) -> bool:
     return (
         query.kind is not None
         and query.scope_digest is not None
-        and query.partition_digest is None
         and query.parent_digest is None
         and query.states is None
         and query.limit is not None

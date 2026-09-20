@@ -39,7 +39,7 @@ class _MissingOriginBackend(InMemoryAssetBackend):
 
 
 def _asset_root(name: str) -> AssetRoot:
-    return AssetRoot(f"memory:{name}", "memory", name, name)
+    return AssetRoot("memory", name, name)
 
 
 def test_workspace_config_defaults_and_mapping(tmp_path: Path) -> None:

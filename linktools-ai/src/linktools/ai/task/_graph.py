@@ -9,6 +9,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import MappingProxyType
 
 from ..core import (
     JsonValue,
@@ -25,7 +26,6 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +68,30 @@ def _normalize_json_value(value: object) -> JsonValue:
 
 
 _TASK_EXPANDER_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
+_RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskResultRef:
+    """Stable reference to a retained successful Task result."""
+
+    namespace: str
+    tenant_id: str
+    graph_id: str
+    node_id: str
+    result_digest: str
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (
+                self.namespace,
+                self.tenant_id,
+                self.graph_id,
+                self.node_id,
+            )
+        ) or _RESULT_DIGEST.fullmatch(self.result_digest) is None:
+            raise ValueError("task result reference is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +116,13 @@ class TaskNode:
     dependencies: tuple[str, ...]
     budget_cost: int
     expander: "TaskExpanderRef | None"
+    input_refs: "Mapping[str, TaskResultRef]"
+    timeout_seconds: "float | None"
+    max_attempts: int
+    retry_delay_seconds: float
+    output_schema: object | None
+    output_contract: "Mapping[str, JsonValue] | None"
+    effect: str
     _input: bytes = field(repr=False)
 
     def __init__(
@@ -102,6 +133,13 @@ class TaskNode:
         input: "Mapping[str, JsonValue] | None" = None,
         budget_cost: int = 1,
         expander: "TaskExpanderRef | None" = None,
+        input_refs: "Mapping[str, TaskResultRef] | None" = None,
+        timeout_seconds: "float | None" = None,
+        max_attempts: int = 1,
+        retry_delay_seconds: float = 0,
+        output_schema: object | None = None,
+        output_contract: "Mapping[str, JsonValue] | None" = None,
+        effect: str = "none",
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
             raise TypeError("task node dependencies are invalid")
@@ -121,21 +159,78 @@ class TaskNode:
             or isinstance(budget_cost, bool)
             or budget_cost < 1
             or (expander is not None and not isinstance(expander, TaskExpanderRef))
+            or isinstance(max_attempts, bool)
+            or not isinstance(max_attempts, int)
+            or max_attempts < 1
+            or isinstance(timeout_seconds, bool)
+            or (timeout_seconds is not None and timeout_seconds < 0)
+            or isinstance(retry_delay_seconds, bool)
+            or not isinstance(retry_delay_seconds, (int, float))
+            or retry_delay_seconds < 0
+            or effect not in {"none", "replay_safe", "non_replay_safe"}
         ):
             raise ValueError("task node identity is invalid")
         values: Mapping[str, JsonValue] = {} if input is None else input
         if not isinstance(values, Mapping):
             raise TypeError("task node input must be a mapping")
         normalized = _normalize_json_mapping(values)
+        references = {} if input_refs is None else dict(input_refs)
+        if any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(reference, TaskResultRef)
+            for name, reference in references.items()
+        ):
+            raise ValueError("task node input references are invalid")
+        if set(references).intersection(normalized):
+            raise ValueError("task node input reference names conflict with input")
+        if set(references).intersection(normalized_dependencies):
+            raise ValueError(
+                "task node input reference names conflict with dependencies"
+            )
+        contract = None
+        if output_contract is not None:
+            normalized_contract = _normalize_json_value(dict(output_contract))
+            if not isinstance(normalized_contract, dict):
+                raise ValueError("task node output contract is invalid")
+            contract = MappingProxyType(normalized_contract)
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "dependencies", normalized_dependencies)
         object.__setattr__(self, "budget_cost", budget_cost)
         object.__setattr__(self, "expander", expander)
+        object.__setattr__(self, "input_refs", MappingProxyType(references))
+        object.__setattr__(self, "timeout_seconds", timeout_seconds)
+        object.__setattr__(self, "max_attempts", max_attempts)
+        object.__setattr__(self, "retry_delay_seconds", float(retry_delay_seconds))
+        object.__setattr__(self, "output_schema", output_schema)
+        object.__setattr__(self, "output_contract", contract)
+        object.__setattr__(self, "effect", effect)
         object.__setattr__(self, "_input", canonical_json_bytes(normalized))
 
     @property
     def input(self) -> "dict[str, JsonValue]":
         return json.loads(self._input.decode("utf-8"))
+
+    @classmethod
+    def wait(
+        cls,
+        node_id: str,
+        *,
+        dependencies: "tuple[str, ...]" = (),
+        input: "Mapping[str, JsonValue] | None" = None,
+        output_schema: object | None = None,
+    ) -> "TaskNode":
+        """Declare a node whose value is supplied through the Runtime API."""
+        values = {} if input is None else dict(input)
+        if "type" in values or "version" in values:
+            raise ValueError("task wait input cannot contain reserved fields")
+        values = {"type": "linktools.ai.input", "version": 1, **values}
+        return cls(
+            node_id,
+            dependencies,
+            input=values,
+            output_schema=output_schema,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +241,7 @@ class TaskLease:
     owner: str
     fence: int
     lease_expires_at: datetime
+    execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
         try:
@@ -158,6 +254,13 @@ class TaskLease:
             or not self.node_id.strip()
             or self.fence < 1
             or self.lease_expires_at.tzinfo is None
+            or (
+                self.execution_id is not None
+                and (
+                    not isinstance(self.execution_id, str)
+                    or not self.execution_id.strip()
+                )
+            )
         ):
             raise ValueError("task lease is invalid")
 
@@ -175,6 +278,8 @@ class TaskNodeView:
     error_code: "str | None"
     error_digest: "str | None"
     execution_id: "str | None" = None
+    next_attempt_at: "datetime | None" = None
+    occupies_concurrency: bool = False
 
     def __post_init__(self) -> None:
         if self.owner is not None:
@@ -182,12 +287,20 @@ class TaskNodeView:
                 validate_lease_owner(self.owner)
             except AIError as error:
                 raise ValueError("task node lease owner is invalid") from error
-        if self.status in {
-            TaskStatus.PENDING,
-            TaskStatus.READY,
-            TaskStatus.RUNNING,
-        } and self.execution_id is not None:
-            raise ValueError("unbound task node state cannot carry an execution id")
+        if self.status is TaskStatus.PENDING and self.execution_id is not None:
+            raise ValueError("pending task node cannot carry an execution id")
+        if not isinstance(self.occupies_concurrency, bool):
+            raise TypeError("task concurrency projection must be bool")
+        if self.occupies_concurrency and self.status is not TaskStatus.WAITING:
+            raise ValueError("only waiting task can retain concurrency capacity")
+        if self.next_attempt_at is not None and (
+            self.status is not TaskStatus.READY
+            or self.execution_id is None
+            or self.next_attempt_at.tzinfo is None
+        ):
+            raise ValueError("task retry schedule is invalid")
+        if self.status is not TaskStatus.READY and self.next_attempt_at is not None:
+            raise ValueError("only ready task can carry a retry schedule")
         if self.status is TaskStatus.RECOVERY_REQUIRED and (
             self.owner is not None
             or self.lease_expires_at is not None
@@ -334,20 +447,7 @@ def _task_graph_request_digest(
             "principal": principal_identity_payload(principal),
             "graph_id": graph.graph_id,
             "nodes": [
-                {
-                    "node_id": node.node_id,
-                    "dependencies": sorted(node.dependencies),
-                    "input": node.input,
-                    "budget_cost": node.budget_cost,
-                    "expander": (
-                        None
-                        if node.expander is None
-                        else {
-                            "id": node.expander.id,
-                            "version": node.expander.version,
-                        }
-                    ),
-                }
+                _task_node_digest_payload(node)
                 for node in sorted(graph.nodes, key=lambda item: item.node_id)
             ],
             "limits": {
@@ -358,6 +458,45 @@ def _task_graph_request_digest(
             },
         }
     )
+
+
+def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
+    value: dict[str, JsonValue] = {
+        "node_id": node.node_id,
+        "dependencies": sorted(node.dependencies),
+        "input": node.input,
+        "budget_cost": node.budget_cost,
+        "expander": (
+            None
+            if node.expander is None
+            else {
+                "id": node.expander.id,
+                "version": node.expander.version,
+            }
+        ),
+    }
+    if node.input_refs:
+        value["input_refs"] = {
+            name: {
+                "namespace": reference.namespace,
+                "tenant_id": reference.tenant_id,
+                "graph_id": reference.graph_id,
+                "node_id": reference.node_id,
+                "result_digest": reference.result_digest,
+            }
+            for name, reference in sorted(node.input_refs.items())
+        }
+    if node.timeout_seconds is not None:
+        value["timeout_seconds"] = node.timeout_seconds
+    if node.max_attempts != 1:
+        value["max_attempts"] = node.max_attempts
+    if node.retry_delay_seconds != 0:
+        value["retry_delay_seconds"] = node.retry_delay_seconds
+    if node.output_contract is not None:
+        value["output_contract"] = dict(node.output_contract)
+    if node.effect != "none":
+        value["effect"] = node.effect
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -435,7 +574,6 @@ class TaskGraphAdmission:
 class TaskGraphResult:
     graph_id: str
     status: TaskStatus
-    execution_ids: "tuple[str, ...]"
     node_results: "tuple[TaskNodeResult, ...]" = ()
 
 
@@ -454,7 +592,7 @@ class TaskResultRecord:
     graph_id: str
     node_id: str
     result_digest: str
-    payload: StoredPayload
+    execution_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -463,34 +601,25 @@ class TaskResultRecord:
             raise ValueError("task result node id is required")
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task result digest is invalid")
-        if not isinstance(self.payload, StoredPayload):
-            raise TypeError("task result payload is invalid")
-        if self.payload.digest != self.result_digest:
-            raise ValueError("task result payload digest does not match result")
+        if not isinstance(self.execution_id, str) or not self.execution_id.strip():
+            raise ValueError("task result execution id is invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class TaskDependencyResult:
     result_digest: str
-    execution_id: "str | None" = None
-    result_payload: "StoredPayload | None" = None
+    execution_id: str
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task dependency result digest is invalid")
-        if self.result_payload is not None:
-            if not isinstance(self.result_payload, StoredPayload):
-                raise TypeError("task dependency result payload is invalid")
-            if self.result_payload.digest != self.result_digest:
-                raise ValueError(
-                    "task dependency result payload digest does not match result"
-                )
+        if not isinstance(self.execution_id, str) or not self.execution_id.strip():
+            raise ValueError("task dependency execution id is required")
 
 
 @dataclass(frozen=True, slots=True)
 class TaskGraphHandle:
     graph_id: str
-    handle_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,15 +630,76 @@ class TaskGraphView:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskNodeInfo:
+    """Safe public task-node metadata without raw input content."""
+
+    node_id: str
+    dependencies: tuple[str, ...]
+    budget_cost: int
+    expander: "TaskExpanderRef | None"
+    input_refs: "Mapping[str, TaskResultRef]"
+    timeout_seconds: "float | None"
+    max_attempts: int
+    retry_delay_seconds: float
+    output_schema: object | None
+    output_contract: "Mapping[str, JsonValue] | None"
+    effect: str
+
+    @classmethod
+    def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
+        return cls(
+            node.node_id,
+            node.dependencies,
+            node.budget_cost,
+            node.expander,
+            node.input_refs,
+            node.timeout_seconds,
+            node.max_attempts,
+            node.retry_delay_seconds,
+            node.output_schema,
+            node.output_contract,
+            node.effect,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphInfo:
+    """Safe public task graph view without raw node inputs."""
+
+    graph_id: str
+    status: TaskStatus
+    nodes: tuple[TaskNodeInfo, ...]
+    node_states: tuple[TaskNodeView, ...]
+    event_sequence: int = 0
+
+    @classmethod
+    def from_snapshot(cls, snapshot: "TaskGraphSnapshot") -> "TaskGraphInfo":
+        return cls(
+            snapshot.graph_id,
+            snapshot.status,
+            tuple(TaskNodeInfo.from_node(node) for node in snapshot.nodes),
+            snapshot.node_states,
+            snapshot.event_sequence,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskGraphSnapshot:
     graph_id: str
     status: TaskStatus
     nodes: "tuple[TaskNode, ...]"
     node_states: "tuple[TaskNodeView, ...]"
+    event_sequence: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
             raise ValueError("task graph snapshot id is required")
+        if (
+            isinstance(self.event_sequence, bool)
+            or not isinstance(self.event_sequence, int)
+            or self.event_sequence < 0
+        ):
+            raise ValueError("task graph snapshot event sequence is invalid")
         nodes = tuple(self.nodes)
         states = tuple(self.node_states)
         node_ids = tuple(node.node_id for node in nodes)
@@ -517,7 +707,10 @@ class TaskGraphSnapshot:
         if len(set(node_ids)) != len(node_ids) or node_ids != state_ids:
             raise ValueError("task graph snapshot node set is invalid")
         for node, state in zip(nodes, states, strict=True):
-            if state.graph_id != self.graph_id or state.dependencies != node.dependencies:
+            if (
+                state.graph_id != self.graph_id
+                or state.dependencies != node.dependencies
+            ):
                 raise ValueError("task graph snapshot node identity is invalid")
         aggregate = _aggregate_graph_status(states)
         if aggregate is not self.status:
@@ -577,6 +770,20 @@ class RecoverGraphRequest:
         validate_idempotency_key(self.idempotency_key)
 
 
+@dataclass(frozen=True, slots=True)
+class TaskInputSupplyRequest:
+    principal: Principal
+    wait_id: str
+    value: JsonValue
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.wait_id, str) or not self.wait_id.strip():
+            raise ValueError("task wait id is required")
+        object.__setattr__(self, "value", _normalize_json_value(self.value))
+        validate_idempotency_key(self.idempotency_key)
+
+
 def ready_nodes(
     graph: TaskGraph, completed: "frozenset[str]"
 ) -> "tuple[TaskNode, ...]":
@@ -595,6 +802,7 @@ __all__ = [
     "TaskGraph",
     "TaskGraphAdmission",
     "TaskGraphHandle",
+    "TaskGraphInfo",
     "TaskGraphLaunch",
     "TaskGraphLimits",
     "TaskGraphRequest",
@@ -604,10 +812,13 @@ __all__ = [
     "TaskGraphView",
     "TaskLease",
     "TaskNode",
+    "TaskNodeInfo",
     "TaskExpanderRef",
     "TaskNodeResult",
     "TaskNodeView",
     "TaskResultRecord",
+    "TaskResultRef",
+    "TaskInputSupplyRequest",
     "TaskStatus",
     "TaskTerminalRecord",
     "ready_nodes",

@@ -19,10 +19,8 @@ from linktools.ai.runtime.state._store import StoredRecord
 
 def _record(value: str) -> StoredRecord:
     digest = hashlib.sha256(value.encode("utf-8")).digest()
-    partition = hashlib.sha256(b"partition").digest()
     return StoredRecord(
         digest,
-        partition,
         None,
         None,
         "session",
@@ -76,7 +74,7 @@ async def test_directory_assets_are_limited_to_registered_kinds(tmp_path: Path) 
     (tmp_path / "agents" / "default.json").write_bytes(b"agent")
     (tmp_path / "runtime" / "state.json").write_bytes(b"runtime")
     backend = DirectoryAssetBackend(
-        AssetRoot("file:assets", "file", str(tmp_path), "assets"),
+        AssetRoot("file", str(tmp_path), "assets"),
         path_adapter=PrefixAssetPathAdapter({"agent": "agents"}),
         kinds=("agent",),
     )

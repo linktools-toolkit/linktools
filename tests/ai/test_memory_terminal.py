@@ -50,7 +50,6 @@ async def test_execution_idempotency_repository_owns_resource_kind() -> None:
     try:
         now = datetime.now(timezone.utc)
         record = IdempotencyRecord(
-            tenant_id="tenant",
             scope="execution.run",
             idempotency_key_digest="a" * 64,
             request_digest="b" * 64,
@@ -80,7 +79,6 @@ async def test_in_memory_terminal_commit_validates_success_result(
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id="execution",
-            tenant_id="tenant",
             session_id=None,
             parent_execution_id=None,
             root_execution_id="execution",
@@ -102,7 +100,6 @@ async def test_in_memory_terminal_commit_validates_success_result(
             **execution_owner_fields(),
         )
         identity = IdempotencyRecord(
-            tenant_id="tenant",
             scope="execution.run",
             idempotency_key_digest="a" * 64,
             request_digest="b" * 64,
@@ -131,8 +128,6 @@ async def test_in_memory_terminal_commit_validates_success_result(
             updated_at=now,
         )
         result = ResultRecord(
-            "execution",
-            "tenant",
             result_payload,
             StopReason.END_TURN,
             UsageMetrics(),

@@ -27,10 +27,10 @@ async def run(project: Path) -> object:
         system_prompt="You are a careful writer.",
     )
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=models,
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace), application),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         result = await runtime.agent("writer").run("Say hello.")
         return result.output

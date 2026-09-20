@@ -41,7 +41,6 @@ def _tool_record() -> ToolOperationRecord:
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
         tool_operation_id="operation",
-        tenant_id="tenant",
         execution_id="execution",
         step_run_id="run",
         tool_call_id="call",
@@ -116,7 +115,6 @@ async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> N
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",

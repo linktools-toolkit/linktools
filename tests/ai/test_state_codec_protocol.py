@@ -17,6 +17,7 @@ from linktools.ai.runtime.state._codec import (
     decode_fact,
     decode_operation,
     decode_record,
+    encode_record,
     parse_envelope,
     wire_type_id,
 )
@@ -70,7 +71,9 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     assert ref.message_index == 0
 
     primitives = fixture["stored_primitives"]
-    assert decode_record(primitives["record"]).kind == "golden"
+    record = decode_record(primitives["record"])
+    assert record.kind == "golden"
+    assert "partition" not in encode_record(record)
     assert decode_fact(primitives["fact"]).sequence == 1
     assert decode_operation(primitives["operation"]).sequence == 1
     assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(

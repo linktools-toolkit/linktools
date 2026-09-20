@@ -19,7 +19,7 @@ from linktools.ai.core import (
     TenantAuthorizationPolicy,
     UsageMetrics,
 )
-from linktools.ai.errors import AIError, ErrorCode, ErrorDiagnostics
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import MetricMeasurement, Metrics, Observation
 from linktools.ai.runtime import (
     ExecutionHistoryItem,
@@ -28,7 +28,11 @@ from linktools.ai.runtime import (
     ModelInteractionItem,
     RuntimeHistory,
     TranscriptItem,
+    UsageSummary,
 )
+from linktools.ai.runtime.state._contracts import StoredUserInput
+from linktools.ai.storage import StoredPayload
+from linktools.ai.task import TaskBindingSnapshot
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai._common import (
     _load_workspace,
@@ -51,7 +55,9 @@ def _info(
 ) -> ExecutionInfo:
     return ExecutionInfo(
         execution_id=execution_id,
+        binding_kind="agent",
         agent_id="agent",
+        task_type=None,
         status=(
             ExecutionStatus.FAILED
             if error_code is not None
@@ -64,13 +70,16 @@ def _info(
         session_id="session",
         created_at=created_at,
         updated_at=created_at,
+        started_at=created_at,
+        terminal_at=created_at,
+        binding_digest="a" * 64,
+        input_digest="b" * 64,
+        output_fingerprint="c" * 64,
+        output_digest=None if error_code is not None else "d" * 64,
+        usage=UsageSummary(),
         error_code=error_code,
         safe_error_details={} if error_code is None else {"stage": "runtime"},
-        error_diagnostics=(
-            None
-            if error_code is None
-            else ErrorDiagnostics("RuntimeError", "failed", "0" * 64)
-        ),
+        error_diagnostics=None,
     )
 
 
@@ -81,25 +90,41 @@ def _record(
     error_code: str | None = None,
 ):
     info = _info(execution_id, created_at, error_code=error_code)
+    binding = TaskBindingSnapshot(
+        "debug",
+        1,
+        "none",
+        {},
+        None,
+        1,
+        0,
+    )
+    stored_input = StoredUserInput(
+        "task-input-v1",
+        StoredPayload.inline_json({}),
+        {"version": 1, "kind": "task"},
+    )
     return SimpleNamespace(
-        **{
-            field: getattr(info, field)
-            for field in (
-                "execution_id",
-                "agent_id",
-                "status",
-                "lineage_kind",
-                "parent_execution_id",
-                "root_execution_id",
-                "parent_invocation_id",
-                "session_id",
-                "created_at",
-                "updated_at",
-                "error_code",
-                "safe_error_details",
-                "error_diagnostics",
-            )
-        }
+        execution_id=info.execution_id,
+        binding_kind="task",
+        agent_id=None,
+        task_type="debug",
+        status=info.status,
+        lineage_kind=info.lineage_kind,
+        parent_execution_id=info.parent_execution_id,
+        root_execution_id=info.root_execution_id,
+        parent_invocation_id=info.parent_invocation_id,
+        session_id=None,
+        created_at=info.created_at,
+        updated_at=info.updated_at,
+        started_at=info.started_at,
+        binding=binding,
+        binding_digest=binding.binding_digest,
+        stored_user_input=stored_input,
+        result=None,
+        error_code=info.error_code,
+        safe_error_details=info.safe_error_details,
+        error_diagnostics=None,
     )
 
 
@@ -139,6 +164,17 @@ class _RecentRepository:
             ),
             None,
         )
+
+
+class _RecentHistoryService:
+    async def usage(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+    ) -> UsageSummary:
+        del execution_id, principal
+        return UsageSummary()
 
 
 class _DetailHistory:
@@ -277,18 +313,18 @@ def test_ai_run_no_longer_exposes_storage_selection() -> None:
     assert "storage" not in {action.dest for action in parser._actions}
 
 
-def test_workspace_discovery_walks_up_from_nested_directory(
+def test_workspace_discovery_does_not_walk_up_without_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
+    Workspace.initialize(tmp_path)
     nested = tmp_path / "src" / "package"
     nested.mkdir(parents=True)
     monkeypatch.chdir(nested)
 
     loaded = _load_workspace()
 
-    assert loaded.root == workspace.root
+    assert loaded.root == nested
     assert not (nested / ".linktools").exists()
 
 
@@ -296,7 +332,7 @@ def test_workspace_discovery_walks_up_from_nested_directory(
 async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
+    workspace = Workspace.initialize(tmp_path)
     state = _local_runtime_state(workspace)
     metrics = await _local_metrics(workspace)
     runtime_root = workspace.storage_root / "runtime"
@@ -305,7 +341,7 @@ async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
         state.plan.route(domain).path == (runtime_root / "runtime.db").resolve()
         for domain in state.plan.durable_domains
     )
-    assert metrics.namespace == workspace.workspace_id
+    assert metrics.namespace == "default"
     assert (runtime_root / "metrics.db").is_file()
     assert not (runtime_root / "runtime.db").exists()
 
@@ -314,7 +350,7 @@ async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
 async def test_existing_invalid_metrics_database_fails_before_runtime_use(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.initialize(tmp_path, workspace_id="workspace")
+    workspace = Workspace.initialize(tmp_path)
     runtime_root = workspace.storage_root / "runtime"
     runtime_root.mkdir(parents=True)
     database = runtime_root / "metrics.db"
@@ -339,7 +375,7 @@ async def test_runtime_history_returns_exact_recent_executions_and_errors() -> N
     )
     repository = _RecentRepository(records)
     history = RuntimeHistory(
-        SimpleNamespace(),
+        _RecentHistoryService(),  # type: ignore[arg-type]
         tenant_id="default",
         executions=repository,
         authorization=TenantAuthorizationPolicy("default"),
@@ -357,7 +393,7 @@ async def test_runtime_history_returns_exact_recent_executions_and_errors() -> N
     assert repository.calls == 3
     assert inspected.error_code == "FAILED_CODE"
     assert inspected.safe_error_details == {"stage": "runtime"}
-    assert inspected.error_diagnostics is not None
+    assert inspected.error_diagnostics is None
 
 
 @pytest.mark.asyncio

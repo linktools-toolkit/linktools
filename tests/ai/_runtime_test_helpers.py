@@ -139,4 +139,4 @@ def runtime_usage_workspace(path: Path) -> Workspace:
             AgentSpec("default", model="default", allow_tools=())
         )
     )
-    return Workspace.load(path, workspace_id="workspace")
+    return Workspace.load(path)

@@ -42,7 +42,7 @@ from linktools.ai.runtime.state._contracts import (
 from linktools.ai.spec import AgentSpec, SubagentRef
 from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskGraph, TaskLease, TaskNode
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.core import Principal, PrincipalKind
 
 
 class _JsonEnum(Enum):
@@ -181,7 +181,6 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
     ) -> RecoveryCheckpoint:
         return RecoveryCheckpoint(
             execution_id="execution",
-            tenant_id="tenant",
             step_run_id=step_run_id,
             state=state,
             revision=0,
@@ -210,7 +209,6 @@ def test_execution_record_owns_binding_and_durable_user_input() -> None:
     now = datetime.now(timezone.utc)
     record = ExecutionRecord(
         execution_id="execution",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id=None,
         root_execution_id="execution",
@@ -289,7 +287,7 @@ def test_memory_scope_rejects_noncanonical_values(value: str) -> None:
     with pytest.raises(AIError) as error:
         ExecutionRequest(
             user_prompt="prompt",
-            principal=trusted_workspace_principal("workspace"),
+            principal=Principal("workspace", "workspace", PrincipalKind.LOCAL_TRUSTED.value),
             idempotency_key="request-key",
             memory_scope=value,
             mode="run",

@@ -155,7 +155,7 @@ async def test_directory_asset_backend_does_not_follow_symlinks_by_default(
 async def test_workspace_declaration_symlinks_freeze_valid_external_declarations(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path / "workspace", workspace_id="workspace")
+    workspace = Workspace.load(tmp_path / "workspace")
     storage_root = workspace.storage_root
     external = tmp_path / "shared-declarations"
     external_skill = external / "skills" / "review"
@@ -180,13 +180,9 @@ async def test_workspace_declaration_symlinks_freeze_valid_external_declarations
     store = _workspace_declaration_store(workspace)
     await store.initialize()
     try:
-        group: CapabilityGroup[object] = CapabilityGroup.from_store(
-            "workspace",
-            store,
-            skill_source=LocalSkillResourceSource(
+        group: CapabilityGroup[object] = CapabilityGroup("workspace", assets=store, skill_source=LocalSkillResourceSource(
                 "workspace",
-                storage_root / "skills",
-            ),
+                storage_root / "skills"),
         )
         frozen = await group.freeze()
         assert {(item.kind, item.id) for item in frozen} == {

@@ -23,7 +23,6 @@ def _session() -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         status=SessionStatus.OPEN,
         revision=0,
@@ -92,7 +91,6 @@ def test_timeline_range_uses_committed_cursor_when_snapshot_is_already_materiali
     history = ConversationHistoryRecord(
         history_id="history",
         session_id="session",
-        tenant_id="tenant",
         parent_history_id="parent",
         prefix_index_head_id="node",
         inherited_message_count=3,
@@ -114,7 +112,6 @@ def test_timeline_range_allows_root_recovery_after_transcript_materialization() 
     history = ConversationHistoryRecord(
         history_id="history",
         session_id="session",
-        tenant_id="tenant",
         parent_history_id=None,
         prefix_index_head_id=None,
         inherited_message_count=0,

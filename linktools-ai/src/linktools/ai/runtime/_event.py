@@ -13,6 +13,7 @@ from linktools.core import environ
 from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
+    canonical_json_bytes,
     ExecutionDeltaType,
     ExecutionEventType,
     ExecutionStatus,
@@ -66,13 +67,18 @@ class _LiveEvent:
 
 
 
+@dataclass(frozen=True, slots=True)
+class _LiveReplayRequired:
+    execution_id: str
+
+
 @dataclass(slots=True)
 class _PreparedStreamLease:
     execution_id: str
     base_sequence: int | None = None
 
 
-_OrderedItem = ExecutionDelta | _LiveEvent
+_OrderedItem = ExecutionDelta | _LiveEvent | _LiveReplayRequired
 
 
 
@@ -88,8 +94,8 @@ class _LiveSubscription:
         self._queue: deque[_OrderedItem] = deque()
         self._max_bytes = max_bytes
         self._queue_bytes = 0
-        self._queue_delta_count = 0
         self._truncated_pending = False
+        self._replay_required = False
         self._wakeup = asyncio.Event()
         self._completed = False
         self._closed = False
@@ -101,9 +107,7 @@ class _LiveSubscription:
         while True:
             if self._queue:
                 value = self._queue.popleft()
-                if isinstance(value, ExecutionDelta):
-                    self._queue_bytes -= len(value.content.encode("utf-8"))
-                    self._queue_delta_count -= 1
+                self._queue_bytes -= _live_item_size(value)
                 return value
             if self._closed or self._completed:
                 raise StopAsyncIteration
@@ -117,30 +121,50 @@ class _LiveSubscription:
             self._closed = True
             self._broker._remove_subscription(self._execution_id, self)
 
+    @property
+    def replay_required(self) -> bool:
+        return self._replay_required
+
     def put_delta(self, value: ExecutionDelta) -> bool:
-        if self._closed:
+        if self._closed or self._replay_required:
             return False
         value = _bounded_delta(value, self._max_bytes)
         if not value.content:
             self._truncated_pending = True
             return False
         value_size = len(value.content.encode("utf-8"))
-        while self._queue_delta_count >= _QUEUE_LIMIT or self._queue_bytes + value_size > self._max_bytes:
+        while len(self._queue) >= _QUEUE_LIMIT or self._queue_bytes + value_size > self._max_bytes:
             if not self._drop_oldest_delta():
-                break
+                self.require_replay()
+                return False
         truncated = value.stream_truncated or self._truncated_pending
         self._truncated_pending = False
         value = ExecutionDelta(value.execution_id, value.delta_type, value.content, truncated)
         self._queue.append(value)
         self._queue_bytes += value_size
-        self._queue_delta_count += 1
         self._wakeup.set()
         return True
 
-    def put_event(self, value: _LiveEvent) -> None:
-        if self._closed:
-            return
+    def put_event(self, value: _LiveEvent) -> bool:
+        if self._closed or self._replay_required:
+            return False
+        value_size = _live_item_size(value)
+        while len(self._queue) >= _QUEUE_LIMIT or self._queue_bytes + value_size > self._max_bytes:
+            if not self._drop_oldest_delta():
+                self.require_replay()
+                return False
         self._queue.append(value)
+        self._queue_bytes += value_size
+        self._wakeup.set()
+        return True
+
+    def require_replay(self) -> None:
+        if self._closed or self._replay_required:
+            return
+        self._queue.clear()
+        self._queue_bytes = 0
+        self._replay_required = True
+        self._queue.append(_LiveReplayRequired(self._execution_id))
         self._wakeup.set()
 
     def finish(self) -> None:
@@ -155,8 +179,7 @@ class _LiveSubscription:
                 values = list(self._queue)
                 removed = values.pop(index)
                 self._queue = deque(values)
-                self._queue_bytes -= len(removed.content.encode("utf-8"))
-                self._queue_delta_count -= 1
+                self._queue_bytes -= _live_item_size(removed)
                 self._truncated_pending = True
                 return True
         return False
@@ -178,10 +201,8 @@ class LiveExecutionEventBroker:
         self._completed: set[str] = set()
         self._base_sequences: dict[str, int] = {}
         self._prepared: dict[str, _PreparedStreamLease] = {}
-        self._durable_events: dict[
-            tuple[str, int],
-            tuple[str, JsonValue],
-        ] = {}
+        self._replay_required: set[str] = set()
+        self._pending_event_counts: dict[str, int] = {}
 
     def register_local_producer(self, execution_id: str, base_sequence: int) -> None:
         if base_sequence < 0:
@@ -207,6 +228,9 @@ class LiveExecutionEventBroker:
 
     def publish(self, delta: ExecutionDelta) -> None:
         if not delta.content:
+            return
+        if delta.execution_id in self._replay_required:
+            self._truncated.add(delta.execution_id)
             return
         delta = _bounded_delta(delta, self._max_bytes)
         if not delta.content:
@@ -247,9 +271,10 @@ class LiveExecutionEventBroker:
             )
             self._buffer_bytes[execution_id] = self._buffer_bytes.get(execution_id, 0) + size
         self._last_type[execution_id] = delta.delta_type
-        while self._buffer_bytes[execution_id] > self._max_bytes:
+        while len(buffer) > _QUEUE_LIMIT or self._buffer_bytes[execution_id] > self._max_bytes:
             if not self._drop_oldest_delta(buffer, execution_id):
-                break
+                self._require_replay(execution_id)
+                return
         published = ExecutionDelta(
             execution_id,
             delta.delta_type,
@@ -273,26 +298,48 @@ class LiveExecutionEventBroker:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if execution_id not in self._base_sequences:
             return
+        if durable_sequence is None:
+            self._pending_event_counts[execution_id] = (
+                self._pending_event_counts.get(execution_id, 0) + 1
+            )
+        elif durable_sequence < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        if execution_id in self._replay_required:
+            if durable_sequence is not None:
+                self._signal(execution_id)
+            return
+
+        buffer = self._buffers.setdefault(execution_id, deque())
         if durable_sequence is not None:
-            if durable_sequence < 1:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            key = (execution_id, durable_sequence)
-            previous = self._durable_events.get(key)
-            if previous is not None:
-                if previous != (event_name, payload):
-                    raise AIError(
-                        ErrorCode.STORAGE_INTEGRITY_ERROR,
-                        safe_details={
-                            "phase": "live_durable_event_dedupe",
-                            "execution_id": execution_id,
-                            "durable_sequence": durable_sequence,
-                        },
-                    )
-                return
-            self._durable_events[key] = (event_name, payload)
+            for previous in buffer:
+                if (
+                    isinstance(previous, _LiveEvent)
+                    and previous.durable_sequence == durable_sequence
+                ):
+                    if previous.event_type != event_name or previous.payload != payload:
+                        raise AIError(
+                            ErrorCode.STORAGE_INTEGRITY_ERROR,
+                            safe_details={
+                                "phase": "live_durable_event_dedupe",
+                                "execution_id": execution_id,
+                                "durable_sequence": durable_sequence,
+                            },
+                        )
+                    return
+
         event = _LiveEvent(execution_id, event_name, payload, durable_sequence)
-        self._buffers.setdefault(execution_id, deque()).append(event)
+        value_size = _live_item_size(event)
         self._buffer_bytes.setdefault(execution_id, 0)
+        while (
+            len(buffer) >= _QUEUE_LIMIT
+            or self._buffer_bytes[execution_id] + value_size > self._max_bytes
+        ):
+            if not self._drop_oldest_delta(buffer, execution_id):
+                self._require_replay(execution_id)
+                return
+        buffer.append(event)
+        self._buffer_bytes[execution_id] += value_size
         self._last_type.pop(execution_id, None)
         for subscription in tuple(self._subscriptions.get(execution_id, ())):
             subscription.put_event(event)
@@ -309,18 +356,27 @@ class LiveExecutionEventBroker:
             raise ValueError("durable event confirmation range is invalid")
         if count == 0 or execution_id not in self._base_sequences:
             return
-        sequence = first_sequence
-        confirmed = 0
-        for value in self._buffers.get(execution_id, ()):
-            if not isinstance(value, _LiveEvent) or value.durable_sequence is not None:
-                continue
-            value.durable_sequence = sequence
-            sequence += 1
-            confirmed += 1
-            if confirmed == count:
-                break
-        if confirmed != count:
+        pending = self._pending_event_counts.get(execution_id, 0)
+        if count > pending:
             raise RuntimeError("live event confirmation does not match pending audit")
+        remaining = pending - count
+        if remaining:
+            self._pending_event_counts[execution_id] = remaining
+        else:
+            self._pending_event_counts.pop(execution_id, None)
+        if execution_id not in self._replay_required:
+            sequence = first_sequence
+            confirmed = 0
+            for value in self._buffers.get(execution_id, ()):
+                if not isinstance(value, _LiveEvent) or value.durable_sequence is not None:
+                    continue
+                value.durable_sequence = sequence
+                sequence += 1
+                confirmed += 1
+                if confirmed == count:
+                    break
+            if confirmed != count:
+                raise RuntimeError("live event confirmation does not match pending audit")
         self._signal(execution_id)
 
     def subscribe(self, execution_id: str) -> _LiveSubscription:
@@ -411,6 +467,9 @@ class LiveExecutionEventBroker:
                     self._release_execution(execution_id)
 
     def _fill_subscription(self, subscription: _LiveSubscription, execution_id: str) -> None:
+        if execution_id in self._replay_required:
+            subscription.require_replay()
+            return
         for item in self._buffers.get(execution_id, ()):
             if isinstance(item, ExecutionDelta):
                 subscription.put_delta(
@@ -421,8 +480,10 @@ class LiveExecutionEventBroker:
                         item.stream_truncated or execution_id in self._truncated,
                     )
                 )
-            else:
+            elif isinstance(item, _LiveEvent):
                 subscription.put_event(item)
+            else:
+                raise RuntimeError("live broker replay marker leaked into retained buffer")
 
     def _drop_oldest_delta(self, buffer: deque[_OrderedItem], execution_id: str) -> bool:
         for index, value in enumerate(buffer):
@@ -431,10 +492,22 @@ class LiveExecutionEventBroker:
                 removed = values.pop(index)
                 buffer.clear()
                 buffer.extend(values)
-                self._buffer_bytes[execution_id] -= len(removed.content.encode("utf-8"))
+                self._buffer_bytes[execution_id] -= _live_item_size(removed)
                 self._truncated.add(execution_id)
                 return True
         return False
+
+    def _require_replay(self, execution_id: str) -> None:
+        if execution_id in self._replay_required:
+            return
+        self._replay_required.add(execution_id)
+        self._buffers.pop(execution_id, None)
+        self._buffer_bytes.pop(execution_id, None)
+        self._last_type.pop(execution_id, None)
+        self._truncated.add(execution_id)
+        for subscription in tuple(self._subscriptions.get(execution_id, ())):
+            subscription.require_replay()
+        self._signal(execution_id)
 
     def _release_execution(self, execution_id: str) -> None:
         self._buffers.pop(execution_id, None)
@@ -445,9 +518,21 @@ class LiveExecutionEventBroker:
         self._base_sequences.pop(execution_id, None)
         self._activity.pop(execution_id, None)
         self._prepared.pop(execution_id, None)
-        for key in tuple(self._durable_events):
-            if key[0] == execution_id:
-                self._durable_events.pop(key, None)
+        self._replay_required.discard(execution_id)
+        self._pending_event_counts.pop(execution_id, None)
+
+
+def _live_item_size(value: _OrderedItem) -> int:
+    if isinstance(value, ExecutionDelta):
+        return len(value.content.encode("utf-8"))
+    if isinstance(value, _LiveEvent):
+        return (
+            len(value.execution_id.encode("utf-8"))
+            + len(value.event_type.encode("utf-8"))
+            + len(canonical_json_bytes(value.payload))
+            + 32
+        )
+    return 0
 
 
 def _bounded_delta(delta: ExecutionDelta, max_bytes: int) -> ExecutionDelta:
@@ -579,13 +664,38 @@ class DefaultEventService:
                         return
 
             replay_cursor = after_sequence if after_sequence > base_sequence else None
+            ephemeral_semantic_count = 0
             poll_backoff = 1.0
             async for item in live:
+                if isinstance(item, _LiveReplayRequired):
+                    await live.close()
+                    skipped = 0
+                    async for event in self._stream_durable(
+                        execution_id,
+                        tenant_id=principal.tenant_id,
+                        after_sequence=cursor,
+                    ):
+                        if skipped < ephemeral_semantic_count:
+                            skipped += 1
+                            continue
+                        yield event
+                    if skipped != ephemeral_semantic_count:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return
                 if replay_cursor is not None:
                     if isinstance(item, ExecutionDelta):
                         poll_backoff = 1.0
                         continue
                     while item.durable_sequence is None:
+                        if live.replay_required:
+                            await live.close()
+                            async for event in self._stream_durable(
+                                execution_id,
+                                tenant_id=principal.tenant_id,
+                                after_sequence=cursor,
+                            ):
+                                yield event
+                            return
                         if self._live.is_completed(execution_id):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         try:
@@ -614,13 +724,25 @@ class DefaultEventService:
                         {"text": item.content, "stream_truncated": item.stream_truncated},
                     )
                     continue
-                if item.durable_sequence is not None:
-                    poll_backoff = 1.0
-                    if item.durable_sequence <= after_sequence:
-                        if item.event_type in _TERMINAL_EVENT_TYPES:
-                            return
-                        continue
-                    cursor = max(cursor, item.durable_sequence)
+                if item.durable_sequence is None:
+                    ephemeral_semantic_count += 1
+                    yield ExecutionStreamEvent(
+                        item.execution_id,
+                        None,
+                        item.event_type,
+                        item.payload,
+                    )
+                    continue
+                poll_backoff = 1.0
+                if item.durable_sequence <= after_sequence:
+                    if item.event_type in _TERMINAL_EVENT_TYPES:
+                        return
+                    continue
+                expected_sequence = cursor + ephemeral_semantic_count + 1
+                if item.durable_sequence != expected_sequence:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                cursor = item.durable_sequence
+                ephemeral_semantic_count = 0
                 yield ExecutionStreamEvent(
                     item.execution_id,
                     item.durable_sequence,

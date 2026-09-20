@@ -48,10 +48,10 @@ from ._store import (
     StateTransaction,
     StoredFact,
     StoredRecord,
-    partition_digest,
     record_key_digest,
     require_no_run_history_lock,
     sequence_key,
+    sortable_identity,
     stream_digest,
 )
 
@@ -324,11 +324,10 @@ class TranscriptRepository:
         key = self._head_key(head.owner_id)
         return StoredRecord(
             key,
-            self._partition("transcript_head"),
             None,
             None,
             "transcript_head",
-            head.owner_id,
+            sortable_identity(head.owner_id),
             None,
             0,
             None,
@@ -556,7 +555,6 @@ class TranscriptRepository:
                 key = self._seek_key(owner_id, block_start)
                 candidates[key] = StoredRecord(
                     key,
-                    self._partition("transcript_seek"),
                     None,
                     self._head_key(owner_id),
                     "transcript_seek",
@@ -754,7 +752,6 @@ class TranscriptRepository:
             page = await self._store.read(
                 lambda transaction, sort_key=after_sort, key_digest=after_key: transaction.list_records(
                     RecordQuery(
-                        partition_digest=self._partition("transcript_head"),
                         kind="transcript_head",
                         after_sort_key=sort_key,
                         after_key_digest=key_digest,
@@ -934,7 +931,6 @@ class TranscriptRepository:
         key = self._projection_key(run_id)
         value = StoredRecord(
             key,
-            self._partition("context_projection"),
             None,
             self._owner_key(run_id),
             "context_projection",
@@ -958,7 +954,6 @@ class TranscriptRepository:
         if not await transaction.replace_record(
             replace(
                 value,
-                partition_digest=current.partition_digest,
                 scope_digest=current.scope_digest,
                 parent_digest=current.parent_digest,
                 storage_version=current.storage_version + 1,
@@ -1483,14 +1478,6 @@ class TranscriptRepository:
     def projection_key(self, run_id: str) -> bytes:
         """Return the physical key for one context projection."""
         return self._projection_key(run_id)
-
-    def _partition(self, kind: str) -> bytes:
-        return partition_digest(
-            self._namespace,
-            self._tenant_id,
-            self._runtime_domain.value,
-            kind,
-        )
 
 
 async def _one_chunk(value: bytes) -> AsyncIterator[bytes]:

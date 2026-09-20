@@ -201,12 +201,12 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     secret = "TOP_SECRET_PROMPT_VALUE"
 
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run(secret, timeout_seconds=10)
@@ -251,12 +251,12 @@ async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
     _write_default_agent(tmp_path)
     metrics = Metrics.from_store(_FailingMetricStore(), namespace="runtime-fail-open")  # type: ignore[arg-type]
 
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run("hello", timeout_seconds=10)

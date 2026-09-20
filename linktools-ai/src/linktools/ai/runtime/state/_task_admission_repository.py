@@ -178,7 +178,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_graph"
             or record.key_digest != self._graph_key(graph_id)
-            or record.partition_digest != self._partition("task_graph")
             or record.scope_digest is not None
             or record.parent_digest is not None
             or record.sort_key != sortable_identity(graph_id)
@@ -193,7 +192,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_admission"
             or record.key_digest != self._admission_key(graph_id)
-            or record.partition_digest != self._partition("task_admission")
             or record.scope_digest != self._recovery_scope()
             or record.parent_digest is not None
             or record.sort_key != sortable_identity(graph_id)
@@ -209,7 +207,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_node_definition"
             or record.key_digest != self._definition_key(graph_id, node_id)
-            or record.partition_digest != self._partition("task_node_definition")
             or record.scope_digest is not None
             or record.parent_digest != self._definition_parent(graph_id)
             or record.sort_key != sortable_identity([graph_id, node_id])
@@ -225,7 +222,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         if (
             record.kind != "task_node_state"
             or record.key_digest != self._state_key(graph_id, node_id)
-            or record.partition_digest != self._partition("task_node_state")
             or record.scope_digest is not None
             or record.parent_digest != self._state_parent(graph_id)
             or record.sort_key != sortable_identity([graph_id, node_id])
@@ -345,7 +341,6 @@ class TaskAdmissionRepositoryImpl(RepositoryBase):
         async def read(transaction: StateTransaction) -> Page[TaskGraphLaunch]:
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=self._partition("task_graph"),
                     kind="task_graph",
                     states=_RECOVERABLE_GRAPH_STATES,
                     after_sort_key=after_sort_key,

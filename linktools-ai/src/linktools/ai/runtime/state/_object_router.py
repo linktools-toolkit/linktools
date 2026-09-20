@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from linktools.core import environ
 
@@ -42,6 +43,12 @@ class _RuntimeObjectRouter:
             return self._stores[domain]
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
+
+    def local_paths(self) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        for store in self._stores.values():
+            paths.extend(store.local_paths())
+        return tuple(dict.fromkeys(paths))
 
     def resolve_object(
         self, domain: RuntimeDomain, reference: ObjectRef
@@ -104,6 +111,7 @@ def build_runtime_object_router(
 ) -> _RuntimeObjectRouter:
     values: dict[RuntimeDomain, ObjectStore] = {}
     close_guard_stores: list[ObjectStore] = []
+    filesystem_objects: dict[Path, FilesystemObjectStore] = {}
     sql_objects: dict[int, SqlObjectStore] = {}
     for domain in RuntimeDomain:
         if not runtime_domain_uses_object_store(domain):
@@ -120,9 +128,13 @@ def build_runtime_object_router(
             values[domain] = store
             close_guard_stores.append(store)
         elif route.kind == "filesystem" and route.path is not None:
-            store = FilesystemObjectStore(route.path / "objects")
+            object_root = (route.path / "objects").resolve()
+            store = filesystem_objects.get(object_root)
+            if store is None:
+                store = FilesystemObjectStore(object_root)
+                filesystem_objects[object_root] = store
+                close_guard_stores.append(store)
             values[domain] = store
-            close_guard_stores.append(store)
         elif route.kind in {"sqlite", "sql"} and domain in contexts:
             context = contexts[domain]
             context_key = id(context)

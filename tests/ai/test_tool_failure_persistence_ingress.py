@@ -26,7 +26,6 @@ def _record() -> ToolOperationRecord:
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
         tool_operation_id="operation",
-        tenant_id="tenant",
         execution_id="execution",
         step_run_id="run",
         tool_call_id="call",

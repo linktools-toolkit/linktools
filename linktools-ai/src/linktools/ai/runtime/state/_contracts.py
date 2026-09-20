@@ -48,11 +48,11 @@ from ...core import (
     validate_agent_id,
     validate_lease_owner,
     validate_resource_id,
-    validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
+    TaskBindingSnapshot,
     TaskEvent,
     TaskGraph,
     TaskGraphAdmission,
@@ -79,6 +79,53 @@ def _is_sha256(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _normalize_model_attachment_fact(
+    value: Mapping[str, JsonValue],
+) -> Mapping[str, JsonValue]:
+    expected = {
+        "fact",
+        "attachment_id",
+        "source",
+        "media_type",
+        "size",
+        "digest",
+        "content_key",
+        "position",
+        "call_id",
+    }
+    if set(value) != expected:
+        raise ValueError("model attachment fact fields are invalid")
+    fact = value.get("fact")
+    attachment_id = value.get("attachment_id")
+    source = value.get("source")
+    media_type = value.get("media_type")
+    size = value.get("size")
+    digest = value.get("digest")
+    content_key = value.get("content_key")
+    position = value.get("position")
+    call_id = value.get("call_id")
+    if (
+        fact not in {"accepted", "included_in_request"}
+        or not _is_sha256(attachment_id)
+        or not isinstance(source, str)
+        or not source
+        or media_type is not None
+        and (not isinstance(media_type, str) or not media_type)
+        or size is not None
+        and (isinstance(size, bool) or not isinstance(size, int) or size < 0)
+        or digest is not None
+        and not _is_sha256(digest)
+        or not _is_sha256(content_key)
+        or isinstance(position, bool)
+        or not isinstance(position, int)
+        or position < 0
+        or call_id is not None
+        and (not isinstance(call_id, str) or not call_id)
+    ):
+        raise ValueError("model attachment fact is invalid")
+    return dict(value)
 
 
 def _validate_tool_arguments_payload(
@@ -224,7 +271,7 @@ class StoredUserInput:
     view: Mapping[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
-        if self.codec not in {"text", "user-content-v1"}:
+        if self.codec not in {"text", "user-content-v1", "task-input-v1"}:
             raise ValueError("stored user input codec is invalid")
         if not isinstance(self.payload, StoredPayload):
             raise TypeError("stored user input payload is invalid")
@@ -447,6 +494,7 @@ class ModelInteractionRecord:
     error_code: str | None
     duration_ns: int
     usage: UsageMetrics | None
+    attachments: tuple[Mapping[str, JsonValue], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -467,6 +515,11 @@ class ModelInteractionRecord:
         if self.status == "FAILED" and not self.error_code:
             raise ValueError("failed model interaction needs an error code")
         object.__setattr__(self, "model", dict(self.model))
+        object.__setattr__(
+            self,
+            "attachments",
+            tuple(_normalize_model_attachment_fact(value) for value in self.attachments),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,7 +545,6 @@ class ConversationHistoryRecord:
 
     history_id: str
     session_id: str
-    tenant_id: str
     parent_history_id: str | None
     prefix_index_head_id: str | None
     inherited_message_count: int
@@ -500,7 +552,7 @@ class ConversationHistoryRecord:
     def __post_init__(self) -> None:
         if self.inherited_message_count < 0:
             raise ValueError("inherited message count cannot be negative")
-        if not self.history_id or not self.session_id or not self.tenant_id:
+        if not self.history_id or not self.session_id:
             raise ValueError("history descriptor identity cannot be empty")
         if self.parent_history_id is None:
             if (
@@ -515,7 +567,6 @@ class ConversationHistoryRecord:
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     session_id: str
-    tenant_id: str
     owner_principal_id: str
     status: SessionStatus
     revision: int
@@ -570,7 +621,6 @@ class SessionRecord:
 @dataclass(frozen=True, slots=True)
 class ExecutionRecord:
     execution_id: str
-    tenant_id: str
     session_id: str | None
     parent_execution_id: str | None
     root_execution_id: str
@@ -585,10 +635,10 @@ class ExecutionRecord:
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
-    mode: ExecutionMode
-    planning: bool
-    thinking: ThinkingValue
-    binding: AgentBindingSnapshot
+    mode: ExecutionMode | None
+    planning: bool | None
+    thinking: ThinkingValue | None
+    binding: AgentBindingSnapshot | TaskBindingSnapshot
     principal_id: str
     principal_kind: str
     stored_user_input: StoredUserInput
@@ -599,16 +649,68 @@ class ExecutionRecord:
     repository_instructions: RuntimePayloadRef | None = None
     error_diagnostics: ErrorDiagnostics | None = None
     correlation: Mapping[str, str | int] = field(default_factory=dict)
+    task_attempt: int = 0
+    task_deadline_at: datetime | None = None
+    task_next_attempt_at: datetime | None = None
+    dependency_hold_ids: tuple[str, ...] = ()
+    retention_closed: bool = False
+    started_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        mode = normalize_execution_mode(self.mode)
-        thinking = normalize_thinking(self.thinking)
-        if not isinstance(self.planning, bool):
-            raise TypeError("execution planning must be bool")
-        if mode == "plan" and not self.planning:
-            raise ValueError("plan mode requires planning")
-        object.__setattr__(self, "mode", mode)
-        object.__setattr__(self, "thinking", thinking)
+        agent_binding = isinstance(self.binding, AgentBindingSnapshot)
+        task_binding = isinstance(self.binding, TaskBindingSnapshot)
+        if agent_binding == task_binding:
+            raise TypeError("execution binding snapshot is invalid")
+        if agent_binding:
+            mode = normalize_execution_mode(self.mode)
+            thinking = normalize_thinking(self.thinking)
+            if not isinstance(self.planning, bool):
+                raise TypeError("agent execution planning must be bool")
+            if mode == "plan" and not self.planning:
+                raise ValueError("plan mode requires planning")
+            if (
+                self.task_attempt != 0
+                or self.task_deadline_at is not None
+                or self.task_next_attempt_at is not None
+            ):
+                raise ValueError("agent execution cannot carry task attempt state")
+            object.__setattr__(self, "mode", mode)
+            object.__setattr__(self, "thinking", thinking)
+        else:
+            if self.mode is not None or self.planning is not None or self.thinking is not None:
+                raise ValueError("task execution cannot carry agent execution policy")
+            if (
+                self.session_id is not None
+                or self.memory_scope is not None
+                or self.conversation_step_run_id is not None
+                or self.parent_execution_id is not None
+                or self.parent_invocation_id is not None
+                or self.lineage_kind is not ExecutionLineageKind.RUN
+                or self.agent_run_sequence != 0
+            ):
+                raise ValueError("task execution carries agent-only state")
+            if (
+                isinstance(self.task_attempt, bool)
+                or not isinstance(self.task_attempt, int)
+                or self.task_attempt < 0
+                or self.task_attempt > self.binding.max_attempts
+            ):
+                raise ValueError("task execution attempt is invalid")
+            for value in (self.task_deadline_at, self.task_next_attempt_at):
+                if value is not None and value.tzinfo is None:
+                    raise ValueError("task execution timestamps must be timezone-aware")
+        holds = tuple(self.dependency_hold_ids)
+        if (
+            any(not isinstance(value, str) or not value.strip() for value in holds)
+            or len(set(holds)) != len(holds)
+            or tuple(sorted(holds)) != holds
+        ):
+            raise ValueError("execution dependency holds must be sorted and unique")
+        if not isinstance(self.retention_closed, bool):
+            raise TypeError("execution retention_closed must be bool")
+        if self.started_at is not None and self.started_at.tzinfo is None:
+            raise ValueError("execution started_at must be timezone-aware")
+        object.__setattr__(self, "dependency_hold_ids", holds)
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
         if self.lineage_kind is ExecutionLineageKind.SUBAGENT:
             if (
@@ -622,8 +724,6 @@ class ExecutionRecord:
                 raise ValueError("subagent execution lineage is invalid")
         elif self.parent_execution_id is not None or self.parent_invocation_id is not None:
             raise ValueError("non-subagent execution cannot carry parent lineage")
-        if not isinstance(self.binding, AgentBindingSnapshot):
-            raise TypeError("execution binding snapshot is invalid")
         if not isinstance(self.principal_id, str) or not self.principal_id:
             raise TypeError("execution principal id is invalid")
         if not isinstance(self.principal_kind, str) or not self.principal_kind:
@@ -645,8 +745,24 @@ class ExecutionRecord:
         return self.binding.binding_digest
 
     @property
-    def agent_id(self) -> str:
-        return self.binding.agent_spec.id
+    def binding_kind(self) -> str:
+        return "agent" if isinstance(self.binding, AgentBindingSnapshot) else "task"
+
+    @property
+    def agent_id(self) -> str | None:
+        return (
+            self.binding.agent_spec.id
+            if isinstance(self.binding, AgentBindingSnapshot)
+            else None
+        )
+
+    @property
+    def task_type(self) -> str | None:
+        return (
+            self.binding.task_type
+            if isinstance(self.binding, TaskBindingSnapshot)
+            else None
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,14 +804,13 @@ class ExecutionRunSealHead:
 @dataclass(frozen=True, slots=True)
 class ExecutionHistorySealRecord:
     execution_id: str
-    tenant_id: str
     run_heads: tuple[ExecutionRunSealHead, ...]
     execution_event_high_water: int
 
     def __post_init__(self) -> None:
         if self.execution_event_high_water < 0:
             raise ValueError("execution history seal values are invalid")
-        if not self.execution_id or not self.tenant_id:
+        if not self.execution_id:
             raise ValueError("execution history seal identity cannot be empty")
         run_ids = tuple(head.run_id for head in self.run_heads)
         if run_ids != tuple(sorted(run_ids)) or len(run_ids) != len(set(run_ids)):
@@ -706,7 +821,6 @@ class ExecutionHistorySealRecord:
         return canonical_sha256(
             {
                 "execution_id": self.execution_id,
-                "tenant_id": self.tenant_id,
                 "run_heads": [
                     {
                         "run_id": head.run_id,
@@ -739,7 +853,6 @@ class ExecutionHistoryHeadRecord:
     """
 
     execution_id: str
-    tenant_id: str
     state: ExecutionHistoryState
     revision: int
     seal_digest: str | None
@@ -747,7 +860,7 @@ class ExecutionHistoryHeadRecord:
     def __post_init__(self) -> None:
         if self.revision < 0:
             raise ValueError("execution history head revision cannot be negative")
-        if not self.execution_id or not self.tenant_id:
+        if not self.execution_id:
             raise ValueError("execution history head identity cannot be empty")
         if self.state is ExecutionHistoryState.SEALED and not self.seal_digest:
             raise ValueError("sealed history head requires a seal digest")
@@ -758,7 +871,6 @@ class ExecutionHistoryHeadRecord:
 @dataclass(frozen=True, slots=True)
 class ExecutionStartClaim:
     execution_id: str
-    tenant_id: str
     expected_revision: int
     expected_event_sequence: int
     scope: str
@@ -770,7 +882,6 @@ class ExecutionStartClaim:
 @dataclass(frozen=True, slots=True)
 class ExecutionStartUnknownCommit:
     execution_id: str
-    tenant_id: str
     expected_revision: int
     expected_event_sequence: int
     scope: str
@@ -782,7 +893,6 @@ class ExecutionStartUnknownCommit:
 @dataclass(frozen=True, slots=True)
 class ExecutionCancelRequestCommit:
     execution_id: str
-    tenant_id: str
     expected_revision: int
     expected_event_sequence: int
     operation_id: str
@@ -805,7 +915,6 @@ class ExecutionStartReservationResult:
 @dataclass(frozen=True, slots=True)
 class AgentAttemptClaim:
     execution_id: str
-    tenant_id: str
     expected_execution_revision: int
     expected_agent_run_sequence: int
     expected_recovery_revision: int
@@ -814,7 +923,6 @@ class AgentAttemptClaim:
 
 @dataclass(frozen=True, slots=True)
 class IdempotencyRecord:
-    tenant_id: str
     scope: str
     idempotency_key_digest: str
     request_digest: str
@@ -833,8 +941,6 @@ class IdempotencyRecord:
 
 @dataclass(frozen=True, slots=True)
 class ResultRecord:
-    execution_id: str
-    tenant_id: str
     output: StoredPayload | None
     stop_reason: StopReason
     usage: UsageMetrics
@@ -848,7 +954,6 @@ class ResultRecord:
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
     memory_id: str
-    tenant_id: str
     memory_scope_digest: str
     content: StoredPayload
     metadata: Mapping[str, JsonValue]
@@ -862,7 +967,6 @@ class ToolOperationRecord:
     """Durable authority for one accepted model tool call."""
 
     tool_operation_id: str
-    tenant_id: str
     execution_id: str
     step_run_id: str
     tool_call_id: str
@@ -925,7 +1029,6 @@ class ToolOperationRecord:
         else:
             raise ValueError("tool operation status is invalid")
         try:
-            validate_tenant_id(self.tenant_id)
             validate_resource_id(self.execution_id)
             if self.owner is not None:
                 validate_lease_owner(self.owner)
@@ -936,26 +1039,35 @@ class ToolOperationRecord:
 @dataclass(frozen=True, slots=True)
 class EvaluationRecord:
     evaluation_id: str
-    tenant_id: str
     execution_id: str
-    dataset_id: str
-    dataset_revision: int
-    evaluator_id: str
-    evaluator_revision: int
-    binding_digest: str
-    artifact_digest: str | None
+    dataset_digest: str
     status: EvaluationStatus
     revision: int
-    metrics: Mapping[str, float | int]
     created_at: datetime
     updated_at: datetime
+
+    def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.evaluation_id)
+            validate_resource_id(self.execution_id)
+        except AIError as error:
+            raise ValueError("evaluation identity is invalid") from error
+        if not isinstance(self.status, EvaluationStatus):
+            raise TypeError("evaluation status is invalid")
+        if (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or self.revision < 0
+        ):
+            raise ValueError("evaluation revision is invalid")
+        if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
+            raise ValueError("evaluation timestamps must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
 class ArtifactRecord:
     artifact_id: str
     execution_id: str
-    tenant_id: str
     producer: str
     media_type: str
     object_ref: ObjectRef
@@ -989,11 +1101,6 @@ class ExecutionTerminalCommit:
             ExecutionStatus.CANCELLED,
         }:
             raise ValueError("terminal commit requires a terminal Execution")
-        if (
-            self.result.execution_id != self.execution.execution_id
-            or self.result.tenant_id != self.execution.tenant_id
-        ):
-            raise ValueError("terminal result identity mismatch")
         if status is ExecutionStatus.SUCCEEDED and self.result.output is None:
             raise ValueError("successful terminal result requires output")
         if status is not ExecutionStatus.SUCCEEDED and self.result.output is not None:
@@ -1056,7 +1163,6 @@ class ExecutionTerminalCommitResult:
 class ApprovalRecord:
     approval_id: str
     execution_id: str
-    tenant_id: str
     status: ApprovalStatus
     idempotency_key_digest: str | None
     decision: ApprovalDecision | None
@@ -1086,7 +1192,6 @@ class ApprovalRecord:
 class ExternalCallRecord:
     call_id: str
     execution_id: str
-    tenant_id: str
     status: ExternalCallStatus
     idempotency_key_digest: str | None
     created_at: datetime
@@ -1193,7 +1298,6 @@ class RecoveryHandoffPhase(str, Enum):
 @dataclass(frozen=True, slots=True)
 class RecoveryCheckpoint:
     execution_id: str
-    tenant_id: str
     step_run_id: str | None
     state: RecoveryCheckpointState
     revision: int
@@ -1345,6 +1449,10 @@ class RuntimeRepository(Protocol):
     async def close(self) -> None: ...
     @property
     def state_store(self) -> StateStore: ...
+    @property
+    def tenant_id(self) -> str: ...
+    @property
+    def namespace(self) -> str: ...
 
 
 class SessionRepository(RuntimeRepository, Protocol):
@@ -1635,6 +1743,25 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         expected_event_sequence: int,
         expected_agent_run_sequence: int,
     ) -> ExecutionRecord: ...
+    async def transition_task_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        expected_event_sequence: int,
+        expected_status: ExecutionStatus,
+        next_status: ExecutionStatus,
+        task_attempt: int,
+        task_deadline_at: datetime | None,
+        task_next_attempt_at: datetime | None,
+        error_code: str | None,
+        safe_error_details: Mapping[str, JsonValue],
+        event_type: str,
+        payload: Mapping[str, JsonValue],
+        occurred_at: datetime,
+    ) -> ExecutionRecord: ...
+
     async def mark_start_unknown(
         self, commit: ExecutionStartUnknownCommit
     ) -> ExecutionRecord: ...
@@ -1670,6 +1797,26 @@ class ExecutionRepository(RuntimeRepository, Protocol):
         *,
         tenant_id: str,
     ) -> ExecutionHistorySealRecord | None: ...
+    async def acquire_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> bool: ...
+    async def release_dependency_hold(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        hold_id: str,
+    ) -> ExecutionRecord: ...
+    async def close_retention(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> bool: ...
     async def get_history_head(
         self,
         execution_id: str,
@@ -1777,7 +1924,6 @@ class ExecutionEventAppend:
 
 @dataclass(frozen=True, slots=True)
 class ToolOperationAdmission:
-    tenant_id: str
     execution_id: str
     tool_operation_id: str
     step_run_id: str
@@ -1803,7 +1949,6 @@ class ToolOperationAdmission:
 @dataclass(frozen=True, slots=True)
 class ExecutionEventRecord:
     execution_id: str
-    tenant_id: str
     sequence: int
     event_type: str
     payload: JsonValue
@@ -2020,6 +2165,23 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def scheduler_snapshot(
         self, graph_id: str, *, tenant_id: str
     ) -> TaskGraphSnapshot: ...
+    async def recover_graph(
+        self,
+        graph_id: str,
+        *,
+        tenant_id: str,
+        cancel_requested: bool = False,
+    ) -> TaskGraphView: ...
+    async def requeue_recovery(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        expected_fence: int,
+        execution_id: "str | None" = None,
+        next_attempt_at: "datetime | None" = None,
+    ) -> TaskGraphView: ...
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def claim(
         self,
@@ -2043,10 +2205,10 @@ class TaskRepository(RuntimeRepository, Protocol):
         tenant_id: str,
         execution_id: str | None,
         result_digest: str,
-        result_payload: StoredPayload | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
         expanded_nodes: tuple[TaskNode, ...] = (),
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord: ...
     async def fail(
         self,
@@ -2058,6 +2220,7 @@ class TaskRepository(RuntimeRepository, Protocol):
         execution_id: str | None = None,
         graph_id: str | None = None,
         node_id: str | None = None,
+        expected_fence: int | None = None,
     ) -> TaskTerminalRecord: ...
     async def list_nodes(
         self, graph_id: str, *, tenant_id: str

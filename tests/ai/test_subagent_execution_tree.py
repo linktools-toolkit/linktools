@@ -48,7 +48,6 @@ def _record(*, subagent: bool, parent_invocation_id: str | None) -> ExecutionRec
     now = datetime.now(timezone.utc)
     return ExecutionRecord(
         execution_id="child" if subagent else "root",
-        tenant_id="tenant",
         session_id=None,
         parent_execution_id="root" if subagent else None,
         root_execution_id="root",
@@ -505,7 +504,6 @@ async def test_subagent_execution_cannot_be_retried_or_forked(
 
     with pytest.raises(AIError) as retry_error:
         await service.retry(
-            "a" * 64,
             "child",
             RetryExecutionRequest("retry", principal, "retry-key"),
         )
@@ -513,7 +511,6 @@ async def test_subagent_execution_cannot_be_retried_or_forked(
 
     with pytest.raises(AIError) as fork_error:
         await service.fork(
-            "a" * 64,
             "child",
             ForkExecutionRequest("fork", principal, "fork-key"),
         )

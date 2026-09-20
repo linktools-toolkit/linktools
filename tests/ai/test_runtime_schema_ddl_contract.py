@@ -16,6 +16,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     records = metadata.tables["ai_state_records"]
     dialect = mysql.dialect()
 
+    assert "partition_digest" not in records.c
     assert (
         records.c.sort_key.type.compile(dialect=dialect)
         == "LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
@@ -27,7 +28,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         if index.info.get("ddl_dialect") == "mysql"
     }
     for name in (
-        "ix_partition_digest_sort_key",
+        "ix_store_digest_kind_sort_key",
         "ix_scope_digest_sort_key",
         "ix_scope_digest_state_sort_key",
         "ix_parent_digest_sort_key",
@@ -46,10 +47,61 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         in migration
     )
     assert "sort_key VARCHAR(128)" not in migration
+    assert "partition_digest" not in migration
     for fragment in (
-        "ix_partition_digest_sort_key (partition_digest, sort_key(128))",
+        "ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128))",
         "ix_scope_digest_sort_key (scope_digest, sort_key(128))",
         "ix_scope_digest_state_sort_key (scope_digest, state, sort_key(128))",
         "ix_parent_digest_sort_key (parent_digest, sort_key(128))",
     ):
         assert fragment in migration
+
+
+
+def test_runtime_state_identity_indexes_are_store_scoped() -> None:
+    metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+    expected = {
+        "ai_state_records": {
+            "uk_store_digest_key_digest",
+            "ix_store_digest_kind_key_digest",
+        },
+        "ai_state_aliases": {
+            "uk_store_digest_alias_digest",
+            "ix_record_key_digest",
+        },
+        "ai_state_facts": {
+            "uk_store_digest_stream_digest_sequence",
+            "ix_owner_key_digest",
+            "ix_stream_digest_subject_digest_sequence",
+        },
+        "ai_state_sequences": {"uk_store_digest_key_digest"},
+        "ai_state_operations": {
+            "uk_store_digest_key_digest",
+            "uk_store_digest_stream_digest_sequence",
+            "ix_stream_digest_state_sequence",
+        },
+    }
+    forbidden = {
+        "ai_state_records": {"uk_key_digest", "ix_partition_digest_sort_key"},
+        "ai_state_aliases": {"uk_alias_digest", "ix_store_digest_alias_digest"},
+        "ai_state_facts": {
+            "uk_stream_digest_sequence",
+            "ix_store_digest_stream_digest_sequence",
+        },
+        "ai_state_sequences": {"uk_key_digest", "ix_store_digest_key_digest"},
+        "ai_state_operations": {
+            "uk_key_digest",
+            "uk_stream_digest_sequence",
+            "ix_store_digest_key_digest",
+        },
+    }
+
+    for table_name, names in expected.items():
+        table = metadata.tables[table_name]
+        mysql_names = {
+            index.name
+            for index in table.indexes
+            if index.info.get("ddl_dialect") == "mysql"
+        }
+        assert names <= mysql_names
+        assert not (forbidden[table_name] & mysql_names)

@@ -4,7 +4,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
@@ -13,13 +13,14 @@ from linktools.core import environ
 from ..core import (
     JsonValue,
     Page,
+    Principal,
     TaskStatus,
     canonical_sha256,
     validate_lease_owner,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import StoredPayload
 from ._event import TaskEvent
+from ._handler import TaskEffectResolution
 from ._graph import (
     TaskDependencyResult,
     TaskGraphHandle,
@@ -49,6 +50,7 @@ _RECOVERY_UNKNOWN_CODES = frozenset(
         ErrorCode.STORAGE_RECOVERY_REQUIRED,
         ErrorCode.EXECUTION_START_UNKNOWN,
         ErrorCode.TOOL_EFFECT_UNKNOWN,
+        ErrorCode.TASK_EFFECT_UNKNOWN,
     }
 )
 _TERMINAL = frozenset(
@@ -63,6 +65,24 @@ _TERMINAL = frozenset(
 
 async def _noop_execution_hold(*args: object, **kwargs: object) -> None:
     del args, kwargs
+
+
+@runtime_checkable
+class _TaskDependencyPreparation(Protocol):
+    async def prepare_node(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+        principal: Principal,
+    ) -> None: ...
+
+    async def release_graph_dependencies(
+        self,
+        snapshot: TaskGraphSnapshot,
+        *,
+        tenant_id: str,
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -132,13 +152,42 @@ class _TaskRepository(Protocol):
         lease_seconds: int,
     ) -> TaskLease: ...
 
-    async def handoff_execution(
+    async def bind_execution(
         self,
         lease: TaskLease,
         *,
         tenant_id: str,
         execution_id: str,
     ) -> TaskNodeView: ...
+
+    async def handoff_execution(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        occupies_concurrency: bool = True,
+    ) -> TaskNodeView: ...
+
+    async def requeue_retry(
+        self,
+        lease: TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        next_attempt_at: datetime,
+    ) -> TaskNodeView: ...
+
+    async def requeue_recovery(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        expected_fence: int,
+        execution_id: "str | None" = None,
+        next_attempt_at: "datetime | None" = None,
+    ) -> TaskGraphView: ...
 
     async def mark_recovery_required(
         self,
@@ -159,10 +208,10 @@ class _TaskRepository(Protocol):
         tenant_id: str,
         execution_id: "str | None",
         result_digest: str,
-        result_payload: "StoredPayload | None" = None,
         graph_id: "str | None" = None,
         node_id: "str | None" = None,
         expanded_nodes: "tuple[TaskNode, ...]" = (),
+        expected_fence: "int | None" = None,
     ) -> object: ...
 
     async def fail(
@@ -175,7 +224,17 @@ class _TaskRepository(Protocol):
         execution_id: "str | None" = None,
         graph_id: "str | None" = None,
         node_id: "str | None" = None,
+        expected_fence: "int | None" = None,
     ) -> object: ...
+
+    async def cancel_node(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+    ) -> TaskGraphView: ...
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
 
@@ -185,6 +244,7 @@ class _GraphRun:
     request: TaskGraphLaunch
     owner: str
     task: "asyncio.Task[None] | None" = None
+    inflight: dict[str, "_InflightNode"] = field(default_factory=dict)
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     generation: int = 0
     observation_backoff: float = 1.0
@@ -222,10 +282,34 @@ class _TaskNodeRunControlImpl:
         self._execution_id: str | None = None
 
     @property
+    def execution_id(self) -> str | None:
+        return self._execution_id or self._lease_state.lease.execution_id
+
+    @property
     def handed_off_execution_id(self) -> str | None:
         return self._execution_id
 
-    async def handoff_execution(self, execution_id: str) -> None:
+    async def bind_execution(self, execution_id: str) -> None:
+        if not isinstance(execution_id, str) or not execution_id.strip():
+            raise ValueError("execution id is required")
+        async with self._lease_state.lock:
+            await self._repository.bind_execution(
+                self._lease_state.lease,
+                tenant_id=self._tenant_id,
+                execution_id=execution_id,
+            )
+            self._lease_state.lease = replace(
+                self._lease_state.lease,
+                execution_id=execution_id,
+            )
+        await self._on_activity()
+
+    async def handoff_execution(
+        self,
+        execution_id: str,
+        *,
+        occupies_concurrency: bool = True,
+    ) -> None:
         if not isinstance(execution_id, str) or not execution_id.strip():
             raise ValueError("execution id is required")
         async with self._lease_state.lock:
@@ -234,6 +318,7 @@ class _TaskNodeRunControlImpl:
                     self._lease_state.lease,
                     tenant_id=self._tenant_id,
                     execution_id=execution_id,
+                    occupies_concurrency=occupies_concurrency,
                 )
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
@@ -314,7 +399,6 @@ class LocalTaskGraphLauncher:
                     raise _copy_ai_error(existing.failure)
                 return TaskGraphHandle(
                     request.graph_id,
-                    f"local:{key[0]}:{key[1]}",
                 )
             run = _GraphRun(request, self._owner)
             self._graphs[key] = run
@@ -327,18 +411,329 @@ class LocalTaskGraphLauncher:
             )
         return TaskGraphHandle(
             request.graph_id,
-            f"local:{key[0]}:{key[1]}",
         )
+
+    async def supply_input(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+        value: JsonValue,
+    ) -> TaskGraphView:
+        tenant_id = launch.principal.tenant_id
+        graph_id = launch.graph_id
+        snapshot = await self._repository.snapshot_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        if (
+            state is None
+            or node is None
+            or state.status is not TaskStatus.WAITING
+            or state.execution_id != execution_id
+        ):
+            raise AIError(ErrorCode.TASK_NOT_READY)
+        completion = await self._runner.supply_input(
+            TaskNodeInvocation(
+                node,
+                graph_id,
+                launch.principal,
+                launch.correlation,
+                {},
+                execution_id,
+            ),
+            execution_id,
+            value,
+        )
+        if completion.execution_id != execution_id or completion.retry_at is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._repository.complete(
+            None,
+            tenant_id=tenant_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            execution_id=execution_id,
+            result_digest=completion.result_digest,
+            expanded_nodes=completion.expanded_nodes,
+        )
+        view = await self._repository.get_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return view
+
+    async def resolve_effect(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+        expected_fence: int,
+        resolution: TaskEffectResolution,
+    ) -> TaskGraphView:
+        tenant_id = launch.principal.tenant_id
+        graph_id = launch.graph_id
+        snapshot = await self._repository.snapshot_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        state = next(
+            (value for value in snapshot.node_states if value.node_id == node_id),
+            None,
+        )
+        node = next(
+            (value for value in snapshot.nodes if value.node_id == node_id),
+            None,
+        )
+        allowed_status = (
+            state is not None
+            and (
+                state.status is TaskStatus.RECOVERY_REQUIRED
+                or (
+                    resolution.kind == "not_applied"
+                    and state.status is TaskStatus.READY
+                )
+                or (
+                    resolution.kind == "applied"
+                    and state.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}
+                )
+            )
+        )
+        if (
+            state is None
+            or node is None
+            or not allowed_status
+            or state.execution_id != execution_id
+            or state.fence != expected_fence
+        ):
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+        invocation = TaskNodeInvocation(
+            node,
+            graph_id,
+            launch.principal,
+            launch.correlation,
+            {},
+            execution_id,
+        )
+        try:
+            completion = await self._runner.resolve_effect(
+                invocation,
+                execution_id,
+                resolution,
+            )
+        except TaskNodeRunError as error:
+            digest = canonical_sha256(
+                {
+                    "graph_id": graph_id,
+                    "node_id": node_id,
+                    "code": error.code.value,
+                }
+            )
+            await self._repository.fail(
+                None,
+                tenant_id=tenant_id,
+                graph_id=graph_id,
+                node_id=node_id,
+                execution_id=execution_id,
+                error_code=error.code.value,
+                error_digest=digest,
+                expected_fence=expected_fence,
+            )
+        else:
+            if completion is None:
+                view = await self._repository.get_graph(
+                    graph_id,
+                    tenant_id=tenant_id,
+                )
+                if view is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return view
+            if completion.execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if completion.retry_at is not None:
+                if state.status is TaskStatus.RECOVERY_REQUIRED:
+                    await self._repository.requeue_recovery(
+                        graph_id,
+                        node_id,
+                        tenant_id=tenant_id,
+                        expected_fence=expected_fence,
+                        execution_id=execution_id,
+                        next_attempt_at=completion.retry_at,
+                    )
+                elif (
+                    state.status is not TaskStatus.READY
+                    or state.next_attempt_at != completion.retry_at
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+            else:
+                await self._repository.complete(
+                    None,
+                    tenant_id=tenant_id,
+                    graph_id=graph_id,
+                    node_id=node_id,
+                    execution_id=execution_id,
+                    result_digest=completion.result_digest,
+                    expanded_nodes=completion.expanded_nodes,
+                    expected_fence=expected_fence,
+                )
+        view = await self._repository.get_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return view
+
+    async def cancel_node(
+        self,
+        launch: TaskGraphLaunch,
+        node_id: str,
+        execution_id: str,
+    ) -> TaskGraphView:
+        tenant_id = launch.principal.tenant_id
+        graph_id = launch.graph_id
+        snapshot = await self._repository.snapshot_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        if state is None or state.execution_id != execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = (tenant_id, graph_id)
+        async with self._lock:
+            run = self._graphs.get(key)
+        if run is not None and run.request != launch:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if run is not None and node_id in run.inflight:
+            await self._quiesce_node(
+                run,
+                snapshot,
+                node_id,
+                invoke_cancel=state.status is TaskStatus.CANCELLED,
+            )
+            await self._notify(run)
+        view = await self._repository.get_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return view
+
+    async def _quiesce_node(
+        self,
+        run: _GraphRun,
+        snapshot: TaskGraphSnapshot,
+        node_id: str,
+        *,
+        invoke_cancel: bool,
+    ) -> None:
+        inflight = run.inflight.pop(node_id, None)
+        if inflight is None:
+            return
+        node = next(
+            (item for item in snapshot.nodes if item.node_id == node_id),
+            None,
+        )
+        state = next(
+            (item for item in snapshot.node_states if item.node_id == node_id),
+            None,
+        )
+        if node is None or state is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        cancellation_error: BaseException | None = None
+        if invoke_cancel and state.execution_id is not None:
+            try:
+                await self._runner.cancel(
+                    TaskNodeInvocation(
+                        node,
+                        snapshot.graph_id,
+                        run.request.principal,
+                        run.request.correlation,
+                        await self._dependency_results(
+                            snapshot.graph_id,
+                            node,
+                            tenant_id=run.request.principal.tenant_id,
+                        ),
+                        state.execution_id,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:  # noqa: BLE001
+                cancellation_error = error
+        if not inflight.task.done():
+            inflight.task.cancel()
+        await asyncio.gather(inflight.task, return_exceptions=True)
+        if cancellation_error is not None:
+            if isinstance(cancellation_error, AIError):
+                raise cancellation_error
+            raise AIError(
+                ErrorCode.STORAGE_RECOVERY_REQUIRED,
+                safe_details={
+                    "phase": "task_node_cancel_cleanup",
+                    "graph_id": snapshot.graph_id,
+                    "node_id": node_id,
+                },
+            ) from cancellation_error
+
+    async def _quiesce_persisted_nodes(
+        self,
+        run: _GraphRun,
+        snapshot: TaskGraphSnapshot,
+    ) -> None:
+        states = {state.node_id: state for state in snapshot.node_states}
+        for node_id in tuple(run.inflight):
+            state = states.get(node_id)
+            if state is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if state.status not in {
+                TaskStatus.CANCELLED,
+                TaskStatus.RECOVERY_REQUIRED,
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.BLOCKED,
+            }:
+                continue
+            await self._quiesce_node(
+                run,
+                snapshot,
+                node_id,
+                invoke_cancel=state.status is TaskStatus.CANCELLED,
+            )
+
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         graph_id = launch.graph_id
         tenant_id = launch.principal.tenant_id
         key = (tenant_id, graph_id)
         async with self._lock:
-            active_run = self._graphs.get(key)
-        if active_run is not None and active_run.request != launch:
+            run = self._graphs.get(key)
+        if run is not None and run.request != launch:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        view = await self._repository.get_graph(graph_id, tenant_id=tenant_id)
+        view = await self._repository.get_graph(
+            graph_id,
+            tenant_id=tenant_id,
+        )
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         snapshot = await self._repository.snapshot_graph(
@@ -347,54 +742,40 @@ class LocalTaskGraphLauncher:
         )
         if snapshot is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        states = snapshot.node_states
-        static = {node.node_id: node for node in snapshot.nodes}
         cleanup_error: BaseException | None = None
-        for state in states:
-            if state.status is not TaskStatus.CANCELLED or state.fence < 1:
-                continue
-            node = static.get(state.node_id)
-            if node is None:
-                if cleanup_error is None:
-                    cleanup_error = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                continue
+        if run is not None:
             try:
-                await self._runner.cancel(
-                    TaskNodeInvocation(
-                        node,
-                        graph_id,
-                        launch.principal,
-                        launch.correlation,
-                        await self._dependency_results(
-                            graph_id, node, tenant_id=tenant_id
-                        ),
-                    )
-                )
+                await self._quiesce_persisted_nodes(run, snapshot)
             except asyncio.CancelledError:
                 raise
             except BaseException as error:  # noqa: BLE001
-                if cleanup_error is None:
-                    cleanup_error = error
+                cleanup_error = error
         async with self._lock:
-            run = self._graphs.pop(key, None)
-            if run is not None:
-                run.closed = True
-                task = run.task
+            current = self._graphs.pop(key, None)
+            if current is not None:
+                current.closed = True
+                task = current.task
             else:
                 task = None
         if task is not None and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if run is not None:
-            await self._notify(run)
+        if current is not None:
+            await self._notify(current)
         if self._metric_projector is not None and view.status in _TERMINAL:
-            self._metric_projector.trigger(graph_id, tenant_id=tenant_id)
+            self._metric_projector.trigger(
+                graph_id,
+                tenant_id=tenant_id,
+            )
         if cleanup_error is not None:
             if isinstance(cleanup_error, AIError):
                 raise cleanup_error
             raise AIError(
                 ErrorCode.STORAGE_RECOVERY_REQUIRED,
-                safe_details={"phase": "task_graph_cancel_cleanup", "graph_id": graph_id},
+                safe_details={
+                    "phase": "task_graph_cancel_cleanup",
+                    "graph_id": graph_id,
+                },
             ) from cleanup_error
         return view
 
@@ -488,7 +869,7 @@ class LocalTaskGraphLauncher:
     async def _run_graph(self, run: _GraphRun) -> None:
         request = run.request
         tenant_id = request.principal.tenant_id
-        inflight: dict[str, _InflightNode] = {}
+        inflight = run.inflight
         observed_fingerprint: str | None = None
         try:
             while not run.closed:
@@ -514,9 +895,15 @@ class LocalTaskGraphLauncher:
                     observed_fingerprint = fingerprint
                     run.observation_backoff = 1.0
                     await self._notify(run)
+                await self._quiesce_persisted_nodes(run, snapshot)
                 if view.status is TaskStatus.RECOVERY_REQUIRED:
                     return
                 if view.status in _TERMINAL:
+                    if isinstance(self._runner, _TaskDependencyPreparation):
+                        await self._runner.release_graph_dependencies(
+                            snapshot,
+                            tenant_id=tenant_id,
+                        )
                     if self._metric_projector is not None:
                         self._metric_projector.trigger(
                             request.graph_id,
@@ -545,13 +932,25 @@ class LocalTaskGraphLauncher:
                     node = static.get(state.node_id)
                     if node is None or state.execution_id is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if state.execution_id.startswith("wait:"):
+                        continue
                     task = asyncio.create_task(
                         self._wait_bound_node(run, node, state.execution_id),
                         name=f"task-wait-{request.graph_id}-{node.node_id}",
                     )
                     inflight[node.node_id] = _InflightNode(task, None)
                     await self._notify(run)
-                used = persisted | waiting | set(inflight)
+                waiting = {
+                    state.node_id
+                    for state in states
+                    if state.status is TaskStatus.WAITING
+                    and state.occupies_concurrency
+                }
+                used = persisted | waiting | {
+                    node_id
+                    for node_id, value in inflight.items()
+                    if value.lease_state is not None
+                }
                 capacity = max(
                     0,
                     request.limits.max_concurrency - len(used),
@@ -566,6 +965,17 @@ class LocalTaskGraphLauncher:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if state.node_id in used or not _runnable(state, now):
                         continue
+                    if isinstance(
+                        self._runner,
+                        _TaskDependencyPreparation,
+                    ):
+                        await self._runner.prepare_node(
+                            node,
+                            graph_id=request.graph_id,
+                            principal=request.principal,
+                        )
+                    elif node.input_refs:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                     try:
                         lease = await self._repository.claim(
                             request.graph_id,
@@ -760,7 +1170,6 @@ class LocalTaskGraphLauncher:
                 node_id=node.node_id,
                 execution_id=completion.execution_id or execution_id,
                 result_digest=completion.result_digest,
-                result_payload=completion.result_payload,
                 expanded_nodes=completion.expanded_nodes,
             )
         except AIError as error:
@@ -904,6 +1313,14 @@ class LocalTaskGraphLauncher:
                 raise
             except BaseException as error:  # noqa: BLE001
                 await _stop_heartbeat(heartbeat_stop, heartbeat)
+                if not isinstance(error, asyncio.CancelledError):
+                    _logger.error(
+                        "task node runner failed: graph=%s node=%s type=%s",
+                        graph_id,
+                        node.node_id,
+                        type(error).__name__,
+                        exc_info=True,
+                    )
                 if isinstance(error, AIError) and error.code in _RECOVERY_UNKNOWN_CODES:
                     await self._defer_recovery(
                         run,
@@ -966,6 +1383,20 @@ class LocalTaskGraphLauncher:
             recovery_error: AIError | None = None
             async with lease_state.lock:
                 try:
+                    if completion.deferred:
+                        await self._notify(run)
+                        return
+                    if completion.retry_at is not None:
+                        if completion.execution_id is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        await self._repository.requeue_retry(
+                            lease_state.lease,
+                            tenant_id=tenant_id,
+                            execution_id=completion.execution_id,
+                            next_attempt_at=completion.retry_at,
+                        )
+                        await self._notify(run)
+                        return
                     await self._repository.complete(
                         None
                         if control.handed_off_execution_id is not None
@@ -976,7 +1407,6 @@ class LocalTaskGraphLauncher:
                             or control.handed_off_execution_id
                         ),
                         result_digest=completion.result_digest,
-                        result_payload=completion.result_payload,
                         graph_id=(
                             graph_id
                             if control.handed_off_execution_id is not None
@@ -1019,7 +1449,7 @@ class LocalTaskGraphLauncher:
             raise
         finally:
             execution_id = control.handed_off_execution_id
-            if execution_id is not None:
+            if execution_id is not None and not execution_id.startswith("wait:"):
                 await self._release_execution_hold(
                     execution_id,
                     tenant_id=tenant_id,
@@ -1044,15 +1474,6 @@ class LocalTaskGraphLauncher:
                 or state.execution_id != completion.execution_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if completion.result_payload is not None:
-                results = await self._repository.get_results(
-                    graph_id,
-                    (node_id,),
-                    tenant_id=tenant_id,
-                )
-                record = results.get(node_id)
-                if record is None or record.result_digest != completion.result_digest:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return True
         if state.status in _TERMINAL or state.status is TaskStatus.RECOVERY_REQUIRED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1160,12 +1581,19 @@ class LocalTaskGraphLauncher:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             record = records.get(dependency_id)
-            if record is not None and record.result_digest != state.result_digest:
+            if (
+                state.execution_id is None
+                or record is None
+                or record.result_digest != state.result_digest
+                or (
+                    record.execution_id is not None
+                    and record.execution_id != state.execution_id
+                )
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result[dependency_id] = TaskDependencyResult(
                 state.result_digest,
                 state.execution_id,
-                None if record is None else record.payload,
             )
         return result
 
@@ -1277,7 +1705,10 @@ def _scheduler_observation_fingerprint(
 
 
 def _runnable(node: TaskNodeView, now: datetime) -> bool:
-    return node.status is TaskStatus.READY or (
+    return (
+        node.status is TaskStatus.READY
+        and (node.next_attempt_at is None or node.next_attempt_at <= now)
+    ) or (
         node.status is TaskStatus.RUNNING
         and node.lease_expires_at is not None
         and node.lease_expires_at <= now

@@ -440,7 +440,6 @@ class ToolRepositoryImpl(_RepositoryBase):
         transaction: StateTransaction,
         request: ToolOperationAdmission,
     ) -> ToolOperationRecord:
-        _require_repository_tenant(request.tenant_id, self._tenant_id)
         validate_lease_owner(request.owner)
         validate_lease_seconds(request.lease_seconds)
         aliases = tuple(
@@ -482,7 +481,6 @@ class ToolRepositoryImpl(_RepositoryBase):
                 now = await transaction.now()
                 value = ToolOperationRecord(
                     tool_operation_id=request.tool_operation_id,
-                    tenant_id=self._tenant_id,
                     execution_id=request.execution_id,
                     step_run_id=request.step_run_id,
                     tool_call_id=request.tool_call_id,
@@ -743,10 +741,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 if value is None:
                     value = await self._decode(stored, ToolOperationRecord)
                     decoded[key] = value
-                if (
-                    value.tenant_id != self._tenant_id
-                    or value.tool_call_id != tool_call_id
-                ):
+                if value.tool_call_id != tool_call_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 present.add(tool_call_id)
             return frozenset(present)
@@ -800,10 +795,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         values = tuple(
             [await self._decode(record, ToolOperationRecord) for record in records]
         )
-        if any(
-            value.tenant_id != self._tenant_id or value.step_run_id != step_run_id
-            for value in values
-        ):
+        if any(value.step_run_id != step_run_id for value in values):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
@@ -1202,8 +1194,7 @@ class ToolRepositoryImpl(_RepositoryBase):
 
 def _tool_replay_matches(left: ToolOperationRecord, right: ToolOperationRecord) -> bool:
     return (
-        left.tenant_id == right.tenant_id
-        and left.execution_id == right.execution_id
+        left.execution_id == right.execution_id
         and left.step_run_id == right.step_run_id
         and left.tool_call_id == right.tool_call_id
         and left.idempotency_key_digest == right.idempotency_key_digest
@@ -1222,8 +1213,7 @@ def _tool_admission_matches(
     left: ToolOperationRecord, right: ToolOperationAdmission
 ) -> bool:
     return (
-        left.tenant_id == right.tenant_id
-        and left.execution_id == right.execution_id
+        left.execution_id == right.execution_id
         and left.tool_operation_id == right.tool_operation_id
         and left.tool_call_id == right.tool_call_id
         and left.idempotency_key_digest == right.idempotency_key_digest

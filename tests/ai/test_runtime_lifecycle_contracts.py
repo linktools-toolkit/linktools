@@ -28,6 +28,7 @@ class _Components:
     artifact = object()
     task_node_runtime = None
     tree_streamer = None
+    binding_freezer = None
 
     def __init__(self, close_callback) -> None:
         self.close_callback = close_callback
@@ -65,7 +66,7 @@ async def _compose_with_successful_close(
 
 
 def _workspace(tmp_path: Path) -> Workspace:
-    return Workspace.load(tmp_path, workspace_id="lifecycle")
+    return Workspace.load(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -482,7 +483,11 @@ async def test_late_build_abort_stops_after_owner_cleanup_failure(
         state_close_calls += 1
         await original_state_close(current)
 
-    monkeypatch.setattr(factory, "_restore_recovery_bindings", fail_restore)
+    monkeypatch.setattr(
+        factory.DefaultTaskGraphService,
+        "recover_pending",
+        fail_restore,
+    )
     monkeypatch.setattr(
         factory.DefaultTaskGraphService,
         "drain_owned_finalizers",

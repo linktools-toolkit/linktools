@@ -118,7 +118,6 @@ def _record(
     is_child = parent_execution_id is not None
     return ExecutionRecord(
         execution_id=execution_id,
-        tenant_id="tenant",
         session_id=session_id,
         parent_execution_id=parent_execution_id,
         root_execution_id="exec-001" if is_child else execution_id,

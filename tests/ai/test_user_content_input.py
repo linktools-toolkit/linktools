@@ -74,23 +74,34 @@ def test_native_user_content_is_canonical_and_durable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_binary_content_is_stored_with_workspace_path_and_deduplicated() -> None:
+async def test_binary_content_preserves_duplicate_workspace_occurrences() -> None:
     materializer, session = _materializer({"evidence.txt": b"error"})
     try:
         canonical_files = await materializer.canonicalize_files(
             ("evidence.txt", "evidence.txt")
         )
-        assert canonical_files == ("evidence.txt",)
+        assert canonical_files == ("evidence.txt", "evidence.txt")
         canonical = await materializer.materialize(
             ("Inspect this file",),
             canonical_files,
         )
         stored = await materializer.store(canonical, tenant_id="tenant")
-        assert len(session.reads) == 1
+        assert [path for path, _limit in session.reads] == [
+            "evidence.txt",
+            "evidence.txt",
+        ]
         assert canonical[0] == "Inspect this file"
         assert canonical[1] == 'Workspace file path: "evidence.txt"'
         assert isinstance(canonical[2], BinaryContent)
+        assert canonical[3] == 'Workspace file path: "evidence.txt"'
+        assert isinstance(canonical[4], BinaryContent)
         assert await materializer.restore(stored) == canonical
+        assert stored.view is not None
+        attachments = stored.view["attachments"]
+        assert isinstance(attachments, list)
+        assert len(attachments) == 2
+        assert attachments[0]["digest"] == attachments[1]["digest"]
+        assert attachments[0]["attachment_id"] != attachments[1]["attachment_id"]
     finally:
         await materializer.close()
 
@@ -161,6 +172,29 @@ def test_user_content_version_rejects_boolean_values() -> None:
         decode_user_content_payload({"version": True, "items": []})
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_external_url_attachment_does_not_claim_size_or_digest() -> None:
+    materializer, _session = _materializer({})
+    content = ImageUrl(
+        url="https://example.com/evidence.png",
+        media_type="image/png",
+    )
+    try:
+        stored = await materializer.store((content,), tenant_id="tenant")
+        assert stored.view is not None
+        attachments = stored.view["attachments"]
+        assert isinstance(attachments, list)
+        assert len(attachments) == 1
+        attachment = attachments[0]
+        assert attachment["source"] == "url"
+        assert attachment["media_type"] == "image/png"
+        assert attachment["size"] is None
+        assert attachment["digest"] is None
+        assert "https://example.com/evidence.png" not in str(attachment)
+    finally:
+        await materializer.close()
 
 
 def test_url_vendor_metadata_must_be_json() -> None:

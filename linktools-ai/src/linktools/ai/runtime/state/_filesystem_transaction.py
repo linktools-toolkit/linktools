@@ -16,7 +16,7 @@ from ._filesystem_layout import (
     _CowMap, _FactStreamInfo, _FilesystemIndex, _RECORD_INDEX_MARKER, _RecordIndexNode,
     _alias_path, _decode_record_index_node_bytes, _fact_item_path, _fact_meta_path,
     _fact_subject_path, _json_bytes, _matches_record, _operation_path, _operation_ref_path,
-    _read_fact_batch, _read_record_index_node, _record_index_child, _record_index_common_prefix,
+    _read_fact_batch, _read_record_index_node, _read_sequence_metadata, _record_index_child, _record_index_common_prefix,
     _record_index_identity, _record_index_node_path, _record_index_node_payload,
     _record_index_replace_child, _record_path, _relative_path, _require_scan_limit, _sequence_path,
 )
@@ -152,7 +152,6 @@ class _FilesystemTransaction:
             return None
         guarded = StoredRecord(
             current.key_digest,
-            current.partition_digest,
             current.scope_digest,
             current.parent_digest,
             current.kind,
@@ -239,7 +238,6 @@ class _FilesystemTransaction:
             raise ValueError("record lease is invalid")
         updated = StoredRecord(
             current.key_digest,
-            current.partition_digest,
             current.scope_digest,
             current.parent_digest,
             current.kind,
@@ -422,6 +420,30 @@ class _FilesystemTransaction:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return values
 
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
+        values = dict(await asyncio.to_thread(self._cache.list_aliases))
+        values.update(self.aliases.changes())
+        for alias in self.aliases.deleted():
+            values.pop(alias, None)
+        return tuple(
+            StoredAlias(alias, record_key)
+            for alias, record_key in sorted(values.items())
+        )
+
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        _require_scan_limit(limit)
+        values = await self.scan_aliases()
+        return tuple(
+            value
+            for value in values
+            if after is None or value.alias_digest > after
+        )[:limit]
+
     async def insert_alias(self, alias: StoredAlias) -> None:
         await self.insert_aliases((alias,))
 
@@ -463,6 +485,33 @@ class _FilesystemTransaction:
         for key in self.sequences.deleted():
             cached[key] = 0
         return cached
+
+    async def scan_sequences(self) -> Mapping[bytes, int]:
+        values: dict[bytes, int] = {}
+        root = self._root / "sequences"
+        for path in root.glob("*/*.json"):
+            key, value = await asyncio.to_thread(_read_sequence_metadata, path)
+            values[key] = value
+        values.update(self.sequences.changes())
+        for key in self.sequences.deleted():
+            values.pop(key, None)
+        return dict(sorted(values.items()))
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        _require_scan_limit(limit)
+        values = await self.scan_sequences()
+        return dict(
+            list(
+                (key, values[key])
+                for key in sorted(values)
+                if after is None or key > after
+            )[:limit]
+        )
 
     async def next_sequence(self, key: bytes) -> int:
         value = await self.get_sequence(key) + 1

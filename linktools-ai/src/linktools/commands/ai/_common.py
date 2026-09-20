@@ -52,7 +52,7 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
             await validate_metrics_sqlite(path)
         else:
             await provision_metrics_sqlite(path)
-    return Metrics.sqlite(path, namespace=workspace.workspace_id)
+    return Metrics.sqlite(path, namespace="default")
 
 
 def _local_models(workspace: Workspace) -> ModelRegistry:
@@ -92,11 +92,11 @@ async def _open_local_runtime(
     models: "ModelRegistry | None" = None,
 ) -> AsyncIterator[Runtime]:
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         state=_local_runtime_state(workspace),
         metrics=await _local_metrics(workspace),
         models=_local_models(workspace) if models is None else models,
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         yield runtime
 

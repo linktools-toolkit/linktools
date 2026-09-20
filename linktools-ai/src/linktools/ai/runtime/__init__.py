@@ -3,11 +3,24 @@
 """Public runtime contracts and composition entry point."""
 
 from ..core import PromptLimits
-from ..task import CancelGraphRequest, TaskEvent, TaskEventType, TaskGraphService
+from ..task import (
+    CancelGraphRequest,
+    TaskEvent,
+    TaskEventType,
+    TaskGraphInfo,
+    TaskGraphService,
+)
 from ._agent import Agent, Execution, Session
 from ._context import RuntimeContext
 from ._metrics import RuntimeMetricFlushResult, RuntimeMetricStatus
 from ._runtime_history import ExecutionInfo, RuntimeHistory
+from ._snapshot import (
+    RestoredRuntime,
+    RuntimeSnapshot,
+    SnapshotExclusiveGuard,
+    SnapshotLimits,
+    SnapshotTargetInspection,
+)
 from ._runtime_service import Runtime
 from ._task import TaskGraphRun
 from .recovery import (
@@ -21,6 +34,7 @@ from .recovery import (
 )
 from .service_api import (
     ApprovalDecisionRequest,
+    AttachmentFact,
     ApprovalDecisionResult,
     ApprovalService,
     ApprovalView,
@@ -61,7 +75,6 @@ from .service_api import (
     ForkSessionRequest,
     ListExecutionRequest,
     ListSessionRequest,
-    LoadedSession,
     ModelInteractionItem,
     Page,
     ReplayEvaluationRequest,
@@ -77,6 +90,8 @@ from .service_api import (
     TaskGraphRunEvent,
     TranscriptItem,
     UpdateSessionRequest,
+    UsageReadCutoff,
+    UsageSummary,
 )
 from .state import (
     RuntimeDomain,
@@ -92,6 +107,7 @@ __all__ = [
     "Session",
     "Runtime",
     "ApprovalDecisionRequest",
+    "AttachmentFact",
     "ApprovalDecisionResult",
     "ApprovalService",
     "ApprovalView",
@@ -136,7 +152,6 @@ __all__ = [
     "ForkSessionRequest",
     "ListExecutionRequest",
     "ListSessionRequest",
-    "LoadedSession",
     "Page",
     "PromptLimits",
     "ReplayEvaluationRequest",
@@ -152,6 +167,11 @@ __all__ = [
     "RuntimeState",
     "RuntimeStatePlan",
     "RuntimeStateRoute",
+    "RestoredRuntime",
+    "RuntimeSnapshot",
+    "SnapshotExclusiveGuard",
+    "SnapshotLimits",
+    "SnapshotTargetInspection",
     "SessionHistoryItem",
     "SessionHistoryReader",
     "SessionService",
@@ -161,6 +181,7 @@ __all__ = [
     "StartEvaluationRequest",
     "TaskEvent",
     "TaskEventType",
+    "TaskGraphInfo",
     "TaskGraphRun",
     "TaskGraphRunEvent",
     "TaskGraphService",
@@ -171,4 +192,6 @@ __all__ = [
     "ToolEffectResolutionResult",
     "TranscriptItem",
     "UpdateSessionRequest",
+    "UsageReadCutoff",
+    "UsageSummary",
 ]

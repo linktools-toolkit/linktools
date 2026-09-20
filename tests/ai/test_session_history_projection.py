@@ -42,7 +42,6 @@ def _session(session_id: str = "session") -> SessionRecord:
     now = datetime.now(timezone.utc)
     return SessionRecord(
         session_id=session_id,
-        tenant_id="tenant",
         owner_principal_id="owner",
         agent_id="agent",
         status=SessionStatus.OPEN,

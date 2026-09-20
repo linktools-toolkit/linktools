@@ -190,7 +190,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     store = AssetStore(StorageOverlay(source))
     await store.initialize()
 
-    frozen = await CapabilityGroup.from_store("workspace", store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
     assert [(item.kind, item.id) for item in frozen] == [
         ("agent", "default"),
@@ -205,13 +205,13 @@ def _workspace_runtime_state(workspace: Workspace) -> RuntimeState:
 
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     models = ModelRegistry.openai(model="gpt-test")
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=models,
         state=_workspace_runtime_state(workspace),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "default"
         assert runtime.default_principal.tenant_id == "default"
@@ -225,21 +225,21 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         ).items == ()
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         context=RuntimeContext(None, tenant_id="tenant-a"),
         models=models,
         state=_workspace_runtime_state(workspace),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         assert runtime.tenant_id == "tenant-a"
         assert runtime.default_principal.tenant_id == "tenant-a"
         await runtime.agent("default").create_session("custom-tenant")
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         models=models,
         state=_workspace_runtime_state(workspace),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
     ) as runtime:
         loaded = await runtime.session.get(
             created.session_id,

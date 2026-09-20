@@ -10,9 +10,12 @@ from typing import cast
 import pytest
 
 from linktools.ai.core import (
+    AuthorizationAction,
     HmacCursorSigner,
     JsonValue,
     Principal,
+    ResourceKind,
+    ResourceRef,
     TenantAuthorizationPolicy,
     canonical_json_bytes,
 )
@@ -28,18 +31,70 @@ from linktools.ai.runtime.state._contracts import ArtifactRecord
 from linktools.ai.storage import ObjectRef
 
 
-_GRANT_KEY = b"artifact-grant-test-key"
+_TOKEN_SEED = b"artifact-grant-test-key"
 
 
 def _resign(payload: dict[str, str | int]) -> str:
     current = dict(payload)
     current.pop("hmac", None)
     signature = hmac.new(
-        _GRANT_KEY,
+        _TOKEN_SEED,
         canonical_json_bytes(cast(JsonValue, current)),
         hashlib.sha256,
     ).hexdigest()
     return _encode_grant({**current, "hmac": signature})
+
+
+class _RecordingAuthorization:
+    def __init__(self) -> None:
+        self.calls: list[tuple[AuthorizationAction, ResourceRef]] = []
+
+    async def authorize(
+        self,
+        principal: Principal,
+        action: AuthorizationAction,
+        resource: ResourceRef,
+    ) -> None:
+        del principal
+        self.calls.append((action, resource))
+
+
+@pytest.mark.asyncio
+async def test_artifact_list_authorizes_the_execution_identity() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="artifact-list", tenant_id="tenant")
+    try:
+        await state.artifact.records.put_metadata(
+            ArtifactRecord(
+                artifact_id="artifact",
+                execution_id="execution",
+                producer="tool",
+                media_type="text/plain",
+                object_ref=ObjectRef("runtime", "artifact/key", "a" * 64, 7),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        authorization = _RecordingAuthorization()
+        service = DefaultArtifactService(
+            state.artifact,
+            authorization,  # type: ignore[arg-type]
+            token_seed=_TOKEN_SEED,
+            cursor_signer=HmacCursorSigner("artifact", _TOKEN_SEED),
+        )
+
+        page = await service.list(
+            "execution",
+            principal=Principal("caller", "tenant", "service"),
+        )
+
+        assert [item.artifact_id for item in page.items] == ["artifact"]
+        assert len(authorization.calls) == 1
+        action, resource = authorization.calls[0]
+        assert action is AuthorizationAction.EXECUTION_READ
+        assert resource.kind is ResourceKind.EXECUTION
+        assert resource.id == "execution"
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
@@ -59,7 +114,6 @@ async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
             ArtifactRecord(
                 artifact_id="artifact",
                 execution_id="execution",
-                tenant_id="tenant",
                 producer="tool",
                 media_type="text/plain",
                 object_ref=reference,
@@ -69,8 +123,8 @@ async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
         service = DefaultArtifactService(
             state.artifact,
             TenantAuthorizationPolicy("tenant"),
-            grant_key=_GRANT_KEY,
-            cursor_signer=HmacCursorSigner("artifact", _GRANT_KEY),
+            token_seed=_TOKEN_SEED,
+            cursor_signer=HmacCursorSigner("artifact", _TOKEN_SEED),
         )
         principal = Principal("caller", "tenant", "service")
         download = await service.get("artifact", principal=principal)

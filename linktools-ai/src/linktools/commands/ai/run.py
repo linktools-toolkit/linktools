@@ -64,12 +64,11 @@ class Command(BaseCommand):
         workspace = _load_workspace(args.project)
         if not isinstance(args.model, str) or not args.model.strip():
             raise CommandError("--model is required")
-        workspace_id = workspace.workspace_id
         _logger.info(
-            "ai run session selected: workspace=%s session=%s memory_scope=%s",
-            workspace_id,
-            workspace_id,
-            workspace_id,
+            "ai run session selected: namespace=%s session=%s memory_scope=%s",
+            "default",
+            "default",
+            "default",
         )
 
         async def execute() -> int:
@@ -85,8 +84,8 @@ class Command(BaseCommand):
                 return await _emit_result(
                     runtime,
                     args.prompt,
-                    workspace_id,
-                    workspace_id,
+                    "default",
+                    "default",
                     args.json,
                     args.planning,
                     args.thinking,

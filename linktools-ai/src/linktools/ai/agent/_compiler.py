@@ -14,7 +14,7 @@ from ..capability import (
     mcp_server_namespace,
     mcp_server_selector,
 )
-from ..core import JsonValue, canonical_sha256, validate_persistence_namespace
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
 from ..spec import (
@@ -38,8 +38,6 @@ class AgentCompiler:
         model_resolver: ModelResolver,
         candidates: Sequence[CapabilityContribution[object]],
         agents: Mapping[str, AgentSpec],
-        namespace: "str | None" = None,
-        workspace_ref: "Mapping[str, JsonValue] | None" = None,
     ) -> None:
         if model_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -54,20 +52,10 @@ class AgentCompiler:
         if len({(item.kind, item.id) for item in ordered}) != len(ordered):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         current_agents = dict(agents)
-        if not current_agents:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         for agent_id, specification in current_agents.items():
             if not isinstance(agent_id, str) or not isinstance(specification, AgentSpec) or specification.id != agent_id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         self._models = model_resolver
-        self._namespace = (
-            None
-            if namespace is None
-            else validate_persistence_namespace(namespace)
-        )
-        self._workspace_ref = (
-            None if workspace_ref is None else dict(workspace_ref)
-        )
         self._candidates = ordered
         self._by_identity = {(item.kind, item.id): item for item in ordered}
         self._agents: Mapping[str, AgentSpec] = MappingProxyType(current_agents)
@@ -103,7 +91,6 @@ class AgentCompiler:
             selected_subagents=selected_subagents,
             ordinary_policy=ordinary_policy,
             mcp_policy=mcp_policy,
-            workspace_ref=self._workspace_ref,
         )
 
     def bind(
@@ -144,7 +131,6 @@ class AgentCompiler:
             selected_subagents=(),
             ordinary_policy=definition.ordinary_tool_policy,
             mcp_policy=definition.mcp_selector_policy,
-            workspace_ref=definition.workspace_ref,
         )
         return self._bind(child_definition, output=output, subagents=())
 
@@ -165,10 +151,8 @@ class AgentCompiler:
             subagents=tuple(subagents),
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
-            workspace_ref=definition.workspace_ref,
         )
         return AgentBinding(
-            snapshot.binding_digest,
             definition,
             output_binding,
             snapshot,
@@ -179,7 +163,6 @@ class AgentCompiler:
         if not isinstance(snapshot, AgentBindingSnapshot):
             raise TypeError("snapshot must be AgentBindingSnapshot")
         try:
-            self._validate_workspace_ref(snapshot)
             model = self._models.restore(
                 snapshot.base_model,
                 route_id=snapshot.agent_spec.model,
@@ -199,7 +182,6 @@ class AgentCompiler:
                 selected_subagents=snapshot.subagent_ids,
                 ordinary_policy=ordinary_policy,
                 mcp_policy=mcp_policy,
-                workspace_ref=snapshot.workspace_ref,
             )
             output_binding = restore_output(snapshot.output_mode, snapshot.output_schema)
         except AIError as error:
@@ -211,26 +193,10 @@ class AgentCompiler:
                 raise
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
         return AgentBinding(
-            snapshot.binding_digest,
             definition,
             output_binding,
             snapshot,
         )
-
-    def _validate_workspace_ref(self, snapshot: AgentBindingSnapshot) -> None:
-        if self._namespace is None:
-            return
-        required = snapshot.required_workspace_id(self._namespace)
-        current = (
-            self._namespace
-            if self._workspace_ref is None
-            else cast("str | None", self._workspace_ref.get("id"))
-        )
-        if required != current:
-            raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={"reason": "workspace_mismatch"},
-            )
 
     def _restore_selected(
         self,
@@ -397,7 +363,6 @@ class AgentCompiler:
         selected_subagents: Sequence[str],
         ordinary_policy: Sequence[str],
         mcp_policy: Sequence[str],
-        workspace_ref: "Mapping[str, JsonValue] | None",
     ) -> AgentDefinition:
         selected_skill_ids = {candidate.id for candidate in selected_skills}
         if any(skill_id not in selected_skill_ids for skill_id in spec.preload_skills):
@@ -424,8 +389,6 @@ class AgentCompiler:
                 for agent_id in sorted(set(selected_subagents))
             ],
         }
-        if workspace_ref is not None:
-            identity["workspace_ref"] = dict(workspace_ref)
         digest = canonical_sha256(identity)
         return AgentDefinition(
             digest=digest,
@@ -438,7 +401,6 @@ class AgentCompiler:
             selected_subagents=tuple(sorted(set(selected_subagents))),
             ordinary_tool_policy=tuple(ordinary_policy),
             mcp_selector_policy=tuple(mcp_policy),
-            workspace_ref=workspace_ref,
         )
 
 

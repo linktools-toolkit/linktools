@@ -7,7 +7,7 @@ namespace
     + ModelRegistry
     + RuntimeState
     + CapabilityGroup(s)
-        -> optional Workspace via CapabilityGroup.from_workspace(...)
+        -> optional Workspace via CapabilityGroup(..., workspace=...)
         -> Runtime.open(...)
         -> frozen capability/declaration candidates
         -> AgentCompiler
@@ -20,7 +20,7 @@ namespace
 The main ownership rules are:
 
 - `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
-- `Workspace` owns workspace identity, paths, policy, and sandbox configuration when installed through `CapabilityGroup.from_workspace()`.
+- `Workspace` owns paths, policy, and sandbox configuration when installed through `CapabilityGroup(..., workspace=...)`; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
 - `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one immutable `AssetStore` snapshot.
 - `AgentSpec` is a runtime-independent Agent declaration.
@@ -59,14 +59,14 @@ models = ModelRegistry.openai(model="gpt-4o-mini")
 state = RuntimeState.in_memory()
 
 async with Runtime.open(
-    workspace.workspace_id,
+    "default",
     models=models,
     state=state,
-    capabilities=(CapabilityGroup.from_workspace(workspace),),
+    capabilities=(CapabilityGroup("workspace", workspace=workspace),),
 ) as runtime:
     result = await runtime.agent("default").run(
         "review this change",
-        memory_scope=workspace.workspace_id,
+        memory_scope="default",
         planning=True,
     )
 ```
@@ -96,10 +96,10 @@ application.agent(
 )
 
 async with Runtime.open(
-    workspace.workspace_id,
+    "default",
     models=models,
     state=state,
-    capabilities=(CapabilityGroup.from_workspace(workspace), application),
+    capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
 ) as runtime:
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
@@ -119,7 +119,7 @@ these declarations instead of inferring behavior from Tool names.
 
 ## 3. Workspace declarations
 
-Workspace behavior is opt-in. Install it with `CapabilityGroup.from_workspace(workspace)`; construction is side-effect free, and declaration discovery happens when the Runtime freezes the group. The default Workspace source loads these declaration kinds:
+Workspace behavior is opt-in. Install it with `CapabilityGroup("workspace", workspace=workspace)`; construction is side-effect free, and declaration discovery happens when the Runtime freezes the group. The default Workspace source loads these declaration kinds:
 
 ```text
 .linktools/
@@ -132,10 +132,10 @@ Workspace behavior is opt-in. Install it with `CapabilityGroup.from_workspace(wo
 For a filesystem Workspace, use the dedicated constructor:
 
 ```python
-workspace_group = CapabilityGroup.from_workspace(workspace)
+workspace_group = CapabilityGroup("workspace", workspace=workspace)
 
 async with Runtime.open(
-    workspace.workspace_id,
+    "default",
     models=models,
     state=state,
     capabilities=(workspace_group,),
@@ -143,11 +143,11 @@ async with Runtime.open(
     ...
 ```
 
-For caller-owned declaration storage independent of a Workspace, `CapabilityGroup.from_store()` performs discovery over one borrowed immutable `AssetStore` snapshot.
+For caller-owned declaration storage independent of a Workspace, `CapabilityGroup(..., assets=...)` performs discovery from the borrowed `AssetStore` using metadata captured when freeze starts.
 
-A store-backed group reads metadata, batch-loads the corresponding bytes, verifies content identity, runs its loaders, and verifies that the store revision did not change during the freeze. Conflicting identities or layouts fail closed.
+A store-backed group captures the declaration metadata visible when freeze starts. Assets added afterward are ignored for that freeze; assets actually read by a loader must still match their captured metadata through verification. Conflicting identities or layouts fail closed.
 
-For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it with `group.loader(loader)`. The loader receives the frozen `AssetInfo` sequence and matching byte mapping and returns normal `CapabilityContribution` values. No additional Registry/Provider abstraction is required.
+For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it for its input Asset kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or `mcp` replaces only that built-in parser slot. The loader receives one `CapabilityLoadContext`, can inspect the captured metadata and read captured keys with `read()` / `read_many()`, and returns normal `CapabilityContribution` values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP declarations. No additional Registry/Provider abstraction is required.
 
 ### Workspace sandbox
 
@@ -230,8 +230,8 @@ The exact durable binding stores:
 
 - the v1 `AgentSpec` semantic payload;
 - the resolved model semantic payload;
-- the selected semantic pins;
-- selected Subagent ids;
+- the selected semantic pins, including frozen Skill resource references when Execution state is durable;
+- selected Subagent ids and their direct execution bindings;
 - `output_mode`;
 - the canonical output JSON Schema;
 - one `binding_digest`.
@@ -276,9 +276,11 @@ result = await agent.run(
 )
 ```
 
-The Sandbox canonicalizes and deduplicates logical paths before reading them. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
+The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, reads the current Workspace contents, and sends those files only to the next model request. A later complete model response consumes them under the same transient rule. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same explicit `files=` execution input.
+If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same explicit `files=` execution input.
+
+Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose only known media type/size/digest and request association, and keep `processing_status="unknown"` unless Runtime has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 
 ### Runtime context and execution queries
 
@@ -315,15 +317,29 @@ page = await runtime.execution.list(
 
 `RuntimeHistory.open()` provides the same read-only execution metadata and
 history projections without loading a ModelRegistry or compiling Agents.
-`RuntimeHistory.inspect_execution()` and `list_executions()` use the same
-authorization and filters as `Runtime.execution`. Execution list cursors are
-HMAC-protected, ordered weak-consistency continuations: they do not provide a
-cross-page MVCC snapshot, and a caller needing a closed set should query after
-the target set is stable or restart from the first page.
+`inspect_execution()` returns safe durable summaries for binding, input,
+output, timestamps, usage, and errors; it does not return prompt/output bodies
+or raw error diagnostics. `result()`, `history()/trace()`,
+`transcript()/model_interactions()`, `task_graph()`, `list_events()`,
+`usage()/graph_usage()`, `attachment_facts()`,
+`task_result()/task_result_ref()`, and `artifacts()` are owned by the same
+authorized query composition. Execution list and detail cursors are opaque namespace-bound continuations;
+authorization is rechecked for every query. Paged detail queries fix the
+committed high-water captured by the first page; restarting from the first page
+can observe newer facts.
+
+Execution and TaskGraph watch events carry opaque resumable cursors. The cursor
+is bound to namespace, tenant, resource identity, content mode, and the durable
+positions of the relevant execution streams. A cursor produced with
+`include_content=False` cannot be reused with `include_content=True`.
+TaskGraph replay captures a fixed durable prefix and emits the same event model
+with resumable cursors; it does not invoke models, task handlers, or external
+systems.
 
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
-private repositories directly. No durable schema or data migration is part of
-this Runtime query surface.
+private repositories directly. Runtime persistence v1 is the compatibility baseline. Future persistence
+versions must keep an explicit v1 reader rather than reinterpret or silently
+rewrite v1 data.
 
 ## 7. Runtime state
 
@@ -360,17 +376,9 @@ request context projection; it never rewrites the raw transcript.
 
 ### Workspace relocation
 
-Use an explicit logical `workspace_id` when a Workspace must survive a physical move:
+Workspace has no independent persistent identity. `Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Runtime.open()` / `RuntimeState`.
 
-```python
-workspace = Workspace.load(
-    "/new/project",
-    workspace_id="workspace-prod-01",
-)
-state = RuntimeState.filesystem("/new/runtime-state")
-```
-
-`Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore `store_id`, and storage topology are deployment details. Runtime persistence keeps logical Workspace paths and resolves object payloads by durable Runtime domain plus object key/digest/size, so `Runtime.open()` performs normal recovery after a consistent Workspace, state, and ObjectStore restore without freezing the original backend identity. A separate `Runtime.restore()` migration step is not required.
+Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime state consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the frozen execution inputs and Skill resource snapshots. A separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics
 

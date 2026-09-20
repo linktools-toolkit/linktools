@@ -276,7 +276,6 @@ class StoredRecord:
     """Current mutable state of one logical resource."""
 
     key_digest: bytes
-    partition_digest: bytes
     scope_digest: bytes | None
     parent_digest: bytes | None
     kind: str
@@ -290,7 +289,6 @@ class StoredRecord:
 
     def __post_init__(self) -> None:
         _require_digest(self.key_digest, "key_digest")
-        _require_digest(self.partition_digest, "partition_digest")
         if self.scope_digest is not None:
             _require_digest(self.scope_digest, "scope_digest")
         if self.parent_digest is not None:
@@ -418,7 +416,6 @@ class RecordReplacement:
 
 @dataclass(frozen=True, slots=True)
 class RecordQuery:
-    partition_digest: bytes | None = None
     scope_digest: bytes | None = None
     parent_digest: bytes | None = None
     kind: str | None = None
@@ -429,10 +426,9 @@ class RecordQuery:
     limit: int | None = None
 
     def __post_init__(self) -> None:
-        if not any(value is not None for value in (self.partition_digest, self.scope_digest, self.parent_digest)):
+        if self.kind is None and self.scope_digest is None and self.parent_digest is None:
             raise ValueError("RecordQuery requires a query dimension")
         for name, value in (
-            ("partition_digest", self.partition_digest),
             ("scope_digest", self.scope_digest),
             ("parent_digest", self.parent_digest),
         ):
@@ -537,10 +533,24 @@ class StateTransaction(Protocol):
     ) -> tuple[StoredRecord, ...]: ...
     async def resolve_alias(self, alias: bytes) -> bytes | None: ...
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]: ...
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]: ...
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]: ...
     async def insert_alias(self, alias: StoredAlias) -> None: ...
     async def insert_aliases(self, aliases: Sequence[StoredAlias]) -> None: ...
     async def get_sequence(self, key: bytes) -> int: ...
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]: ...
+    async def scan_sequences(self) -> Mapping[bytes, int]: ...
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]: ...
     async def next_sequence(self, key: bytes) -> int: ...
     async def reserve_sequence(self, key: bytes, count: int) -> int: ...
     async def reserve_sequences(self, reservations: Mapping[bytes, int]) -> Mapping[bytes, int]: ...
@@ -615,11 +625,33 @@ class _ReadOnlyStateTransaction(StateTransaction):
     async def resolve_aliases(self, aliases: Sequence[bytes]) -> Mapping[bytes, bytes]:
         return await self._transaction.resolve_aliases(aliases)
 
+    async def scan_aliases(self) -> tuple[StoredAlias, ...]:
+        return await self._transaction.scan_aliases()
+
+    async def scan_aliases_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> tuple[StoredAlias, ...]:
+        return await self._transaction.scan_aliases_page(after=after, limit=limit)
+
     async def get_sequence(self, key: bytes) -> int:
         return await self._transaction.get_sequence(key)
 
     async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
         return await self._transaction.get_sequences(keys)
+
+    async def scan_sequences(self) -> Mapping[bytes, int]:
+        return await self._transaction.scan_sequences()
+
+    async def scan_sequences_page(
+        self,
+        *,
+        after: bytes | None,
+        limit: int,
+    ) -> Mapping[bytes, int]:
+        return await self._transaction.scan_sequences_page(after=after, limit=limit)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         return await self._transaction.list_facts(query)
@@ -803,8 +835,8 @@ def record_key_digest(
     return _digest(["record", namespace, tenant_id, runtime_domain, kind, identity])
 
 
-def partition_digest(namespace: str, tenant_id: str, runtime_domain: str, kind: str) -> bytes:
-    return _digest(["partition", namespace, tenant_id, runtime_domain, kind])
+def state_store_digest(namespace: str, tenant_id: str, runtime_domain: str) -> bytes:
+    return _digest(["state_store", namespace, tenant_id, runtime_domain])
 
 
 def scope_digest(
@@ -909,7 +941,6 @@ def validate_record_identity(record: StoredRecord) -> None:
     """Validate physical invariants after decoding a backend row or file."""
     values = (
         ("key_digest", record.key_digest),
-        ("partition_digest", record.partition_digest),
         ("scope_digest", record.scope_digest),
         ("parent_digest", record.parent_digest),
     )
@@ -927,7 +958,6 @@ def validate_record_replacement(current: StoredRecord, candidate: StoredRecord) 
     """Keep immutable physical identity columns stable across a CAS."""
     if (
         current.key_digest != candidate.key_digest
-        or current.partition_digest != candidate.partition_digest
         or current.scope_digest != candidate.scope_digest
         or current.parent_digest != candidate.parent_digest
         or current.kind != candidate.kind
@@ -983,11 +1013,11 @@ __all__ = [
     "exit_run_history_lock",
     "operation_key",
     "parent_digest",
-    "partition_digest",
     "record_key_digest",
     "require_no_run_history_lock",
     "scope_digest",
     "sequence_key",
+    "state_store_digest",
     "sortable_id",
     "sortable_identity",
     "sortable_timestamp",

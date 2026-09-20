@@ -3,7 +3,6 @@
 """Runtime persistence compatibility contracts."""
 
 import copy
-from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -15,7 +14,14 @@ from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import SessionRecord
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._contracts import (
+    ContextProjection,
+    ModelInteractionRecord,
+    RuntimePayloadRef,
+    SessionRecord,
+)
+from linktools.ai.storage import StoredPayload
 from linktools.ai.runtime.state._step_contracts import RunRecord
 from linktools.ai.task import TaskNode
 
@@ -24,7 +30,6 @@ def _session() -> SessionRecord:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     return SessionRecord(
         session_id="session",
-        tenant_id="tenant",
         owner_principal_id="owner",
         agent_id="agent",
         status=SessionStatus.OPEN,
@@ -51,18 +56,56 @@ def test_persisted_session_round_trips() -> None:
     assert _decode_enveloped_domain(_envelope(payload), SessionRecord) == session
 
 
-def test_persisted_session_allows_additive_and_defaulted_fields() -> None:
+def test_persisted_session_allows_additive_unknown_fields() -> None:
     session = _session()
     additive = copy.deepcopy(_encode_persisted_domain(session))
     additive["fields"]["future_metadata"] = {"future": True}
     assert _decode_enveloped_domain(_envelope(additive), SessionRecord) == session
 
-    defaulted = copy.deepcopy(_encode_persisted_domain(session))
-    defaulted["fields"].pop("history_id")
-    assert _decode_enveloped_domain(_envelope(defaulted), SessionRecord) == replace(
-        session,
-        history_id=None,
+
+def test_persisted_session_uses_frozen_v1_default_for_missing_optional_field() -> None:
+    session = _session()
+    payload = copy.deepcopy(_encode_persisted_domain(session))
+    payload["fields"].pop("history_id")
+
+    decoded = _decode_enveloped_domain(_envelope(payload), SessionRecord)
+
+    assert decoded.history_id is None
+    assert decoded == SessionRecord(
+        session_id=session.session_id,
+        owner_principal_id=session.owner_principal_id,
+        agent_id=session.agent_id,
+        status=session.status,
+        revision=session.revision,
+        cwd=session.cwd,
+        metadata=session.metadata,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+        closed_at=session.closed_at,
+        active_execution_id=session.active_execution_id,
     )
+
+
+def test_persisted_session_v1_field_set_is_stable() -> None:
+    payload = _encode_persisted_domain(_session())
+    assert set(payload["fields"]) == {
+        "session_id",
+        "owner_principal_id",
+        "status",
+        "revision",
+        "cwd",
+        "metadata",
+        "created_at",
+        "updated_at",
+        "closed_at",
+        "active_execution_id",
+        "agent_id",
+        "continuation",
+        "history_quality",
+        "history_id",
+        "timeline_parent_session_id",
+        "timeline_parent_turn_sequence",
+    }
 
 
 def test_persisted_session_rejects_missing_required_field() -> None:
@@ -88,8 +131,9 @@ def test_persisted_session_rejects_malformed_known_field() -> None:
 @pytest.mark.parametrize(
     ("schema", "expected"),
     (
-        (0, ErrorCode.STORAGE_INTEGRITY_ERROR),
         (2, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (0, ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1.0, ErrorCode.STORAGE_INTEGRITY_ERROR),
     ),
 )
 def test_persisted_schema_version_boundaries(schema: object, expected: ErrorCode) -> None:
@@ -158,6 +202,52 @@ def test_persisted_custom_dataclass_allows_additive_field() -> None:
         TaskNode,
     ) == node
 
+
+def test_persisted_model_interaction_uses_frozen_v1_default_for_attachments() -> None:
+    interaction = ModelInteractionRecord(
+        run_id="run",
+        step_index=1,
+        request_sequence=1,
+        purpose="agent",
+        output_retry_index=None,
+        model={"route_id": "default"},
+        request_context=ContextProjection(()),
+        request_envelope=RuntimePayloadRef(
+            StoredPayload.inline_bytes(b"{}"),
+            RuntimeDomain.EXECUTION,
+        ),
+        response_context=None,
+        status="CANCELLED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+        attachments=(),
+    )
+    payload = copy.deepcopy(_encode_persisted_domain(interaction))
+    payload["fields"].pop("attachments")
+
+    decoded = _decode_enveloped_domain(
+        _envelope(payload, wire_id="model_interaction"),
+        ModelInteractionRecord,
+    )
+
+    assert decoded == interaction
+
+
+
+def test_dynamic_v1_default_remains_required() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    run = RunRecord(run_id="run", started_at=now)
+    payload = copy.deepcopy(_encode_persisted_domain(run))
+    payload["fields"].pop("started_at")
+
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(
+            _envelope(payload, wire_id="run_record"),
+            RunRecord,
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 def test_step_persistence_reads_current_payload() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)

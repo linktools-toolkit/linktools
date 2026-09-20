@@ -15,7 +15,6 @@ from ._root import (
     Workspace,
     WorkspacePolicy,
     WorkspaceToolPermissionPolicy,
-    trusted_workspace_principal,
     normalize_workspace_path,
 )
 from ._local_sandbox import LocalSandbox
@@ -49,5 +48,4 @@ __all__ = [
     "WorkspaceToolPermissionPolicy",
     "normalize_workspace_input_path",
     "normalize_workspace_path",
-    "trusted_workspace_principal",
 ]

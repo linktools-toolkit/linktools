@@ -61,7 +61,7 @@ def test_runtime_context_rejects_unbounded_or_reserved_metric_dimensions(
 async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_queries(
     tmp_path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     metrics = Metrics.in_memory(namespace="runtime-context")
     models = ModelRegistry.openai(model="gpt-test")
     context = RuntimeContext(
@@ -74,7 +74,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
         observation_id="runtime-context-observation",
         kind="linktools.model.request",
         occurred_at=occurred_at,
-        source_namespace=workspace.workspace_id,
+        source_namespace="default",
         tenant_id="default",
         status="SUCCEEDED",
         error_code=None,
@@ -84,11 +84,11 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
     )
 
     async with Runtime.open(
-        workspace.workspace_id,
+        "default",
         context=context,
         models=models,
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup.from_workspace(workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         metrics=metrics,
     ) as runtime:
         control = runtime._metric_control  # type: ignore[attr-defined]
@@ -99,7 +99,7 @@ async def test_runtime_metric_dimensions_flow_into_automatic_observations_and_qu
 
     stored = await metrics.get_observation(observation.observation_id)
     assert stored is not None
-    assert stored.source_namespace == workspace.workspace_id
+    assert stored.source_namespace == "default"
     assert dict(stored.dimensions) == {
         "context.environment": "prod",
         "context.region": "us-west",

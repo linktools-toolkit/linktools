@@ -102,7 +102,7 @@ class _Launcher:
         if repository is not None:
             await repository.compare_and_swap(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=repository.tenant_id,
                 expected_revision=execution.revision,
                 next_record=started,
             )
@@ -236,7 +236,7 @@ async def test_task_start_holds_immediate_terminal_execution_before_return() -> 
             await super().launch(request, execution)
             await self.service.request_terminal_handoff(
                 execution.execution_id,
-                tenant_id=execution.tenant_id,
+                tenant_id=self._repository.tenant_id,
             )
 
     async def release_terminal(execution_id: str, *, tenant_id: str) -> None:

@@ -7,10 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, SemanticPin
+from linktools.ai.agent import (
+    AgentBindingSnapshot,
+    AgentCatalog,
+    AgentCompiler,
+    SemanticPin,
+)
 from linktools.ai.capability import SkillDefinition
+from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -80,6 +87,61 @@ def test_v1_binding_restores_from_current_semantic_snapshot() -> None:
     }
     assert restored.snapshot.to_payload() == payload
 
+
+
+
+def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> None:
+    agents = {
+        "parent": AgentSpec("parent", allow_subagents=("child",)),
+        "child": AgentSpec("child", allow_subagents=()),
+    }
+    compiler = _compiler(agents)
+    catalog = AgentCatalog(
+        {
+            agent_id: compiler.compile(spec)
+            for agent_id, spec in agents.items()
+        }
+    )
+    snapshot = compiler.bind(catalog.root_definition("parent")).snapshot
+    dispatcher = SubagentDispatcher(
+        catalog,
+        compiler,
+        object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AIError) as raised:
+        dispatcher.delegate_for(
+            parent_execution_id="parent-execution",
+            root_execution_id="parent-execution",
+            memory_scope=None,
+            principal=Principal("principal", "tenant"),
+            refs=snapshot.subagents,
+            binding=snapshot,
+            mode="run",
+            require_frozen_bindings=True,
+        )
+
+    assert raised.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
+    assert callable(
+        dispatcher.delegate_for(
+            parent_execution_id="parent-execution",
+            root_execution_id="parent-execution",
+            memory_scope=None,
+            principal=Principal("principal", "tenant"),
+            refs=snapshot.subagents,
+            binding=snapshot,
+            mode="run",
+            require_frozen_bindings=False,
+        )
+    )
+
+
+def test_future_binding_snapshot_version_is_rejected() -> None:
+    payload = _load_json("agent_binding_subagent_v1_golden.json")
+    payload["version"] = 2
+    with pytest.raises(AIError) as raised:
+        AgentBindingSnapshot.from_payload(payload)
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 def test_skill_and_agent_use_v1_declaration_contracts() -> None:
     skill = SkillSpec("review", "instructions", "Review changes")

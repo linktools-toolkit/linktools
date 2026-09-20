@@ -108,7 +108,7 @@ async def test_runtime_tool_boundary_flattens_one_instruction_sequence() -> None
 async def test_workspace_guidance_is_static_when_workspace_tools_are_selected(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, workspace_id="workspace")
+    workspace = Workspace.load(tmp_path)
     sandbox = LocalSandbox()
     session = await sandbox.open(root=workspace.root)
     try:

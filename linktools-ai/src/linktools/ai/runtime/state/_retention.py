@@ -29,16 +29,11 @@ class RuntimeRetentionController:
         *,
         conversation: ConversationState,
         execution: ExecutionState,
-        memory: object,
-        artifact: object,
-        evaluation: object,
-        recovery: object,
         objects: _RuntimeObjectRouter,
         steps: RuntimeStepStore,
         plan: RuntimeStatePlan,
         namespace: str,
     ) -> None:
-        del memory, artifact, evaluation, recovery
         self._conversation = conversation
         self._execution = execution
         self._namespace = namespace
@@ -53,7 +48,12 @@ class RuntimeRetentionController:
 
     async def release_execution_handoff(
         self, execution_id: str, *, tenant_id: str
-    ) -> None:
+    ) -> bool:
+        if not await self._execution.executions.close_retention(
+            execution_id,
+            tenant_id=tenant_id,
+        ):
+            return False
         execution = await self._execution.executions.get(
             execution_id, tenant_id=tenant_id
         )
@@ -86,6 +86,7 @@ class RuntimeRetentionController:
             tenant_id,
             execution_id,
         )
+        return True
 
     async def release_session(
         self,
@@ -96,9 +97,6 @@ class RuntimeRetentionController:
     ) -> None:
         # Forked sessions may still reference transient conversation state.
         del session_id, tenant_id, continuation
-
-    async def release_evaluation(self, evaluation_id: str, *, tenant_id: str) -> None:
-        del evaluation_id, tenant_id
 
     async def close(self) -> None:
         if self._closed:

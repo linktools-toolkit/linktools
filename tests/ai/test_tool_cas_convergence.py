@@ -32,7 +32,6 @@ def _record(
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
         tool_operation_id="tool-operation",
-        tenant_id="tenant",
         execution_id="execution",
         step_run_id="step-run",
         tool_call_id="tool-call",
@@ -59,7 +58,6 @@ def _record(
 
 def _admission(*, owner: str = "tool-owner") -> ToolOperationAdmission:
     return ToolOperationAdmission(
-        tenant_id="tenant",
         execution_id="execution",
         tool_operation_id="tool-operation",
         step_run_id="step-run",
@@ -102,16 +100,16 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
         assert first.fence == second.fence == 1
         assert await repository.list_by_execution(
             request.execution_id,
-            tenant_id=request.tenant_id,
+            tenant_id="tenant",
         ) == (first,)
         assert await repository.list_by_execution(
             "other-execution",
-            tenant_id=request.tenant_id,
+            tenant_id="tenant",
         ) == ()
 
         renewed = await repository.renew(
             request.tool_operation_id,
-            tenant_id=request.tenant_id,
+            tenant_id="tenant",
             owner=request.owner,
             fence=first.fence,
             lease_seconds=60,
@@ -119,7 +117,7 @@ async def test_sqlite_materializes_convergent_tool_repository(tmp_path) -> None:
         payload = StoredPayload.inline_bytes(b"result")
         terminal = await repository.complete_payload(
             request.tool_operation_id,
-            tenant_id=request.tenant_id,
+            tenant_id="tenant",
             owner=request.owner,
             fence=renewed.fence,
             result_payload=payload,
