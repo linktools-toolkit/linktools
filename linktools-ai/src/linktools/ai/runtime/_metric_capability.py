@@ -75,6 +75,16 @@ class ModelInteractionRecorder(Protocol):
         usage: object | None,
     ) -> None: ...
 
+    async def record_model_event(
+        self,
+        fact: ModelRequestFact,
+        *,
+        phase: str,
+        response: ModelResponse | None = None,
+        error_code: str | None = None,
+        include_observation: bool,
+    ) -> None: ...
+
 
 class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]):
     """Observe actual logical model handler invocations without changing them."""
@@ -123,18 +133,6 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             ctx.deps.correlation,
         )
 
-    async def before_model_request(
-        self,
-        ctx: PydanticRunContext[AgentContext[object]],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        self._journal.begin(
-            ctx.run_step,
-            purpose="agent",
-            output_retry_index=None if ctx.retry <= 0 else ctx.retry,
-        )
-        return request_context
-
     async def wrap_model_request(
         self,
         ctx: PydanticRunContext[AgentContext[object]],
@@ -144,18 +142,14 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
     ) -> ModelResponse:
         selected_model = request_context.model
         run_context = ctx.deps
-        fact = self._journal.latest_for_step(ctx.run_step)
-        if fact is None or fact.duration_ns is not None:
-            if fact is not None:
-                self._journal.consume(fact.request_sequence)
-            fact = self._journal.begin(
-                ctx.run_step,
-                purpose="agent",
-                output_retry_index=None if ctx.retry <= 0 else ctx.retry,
-            )
-        assert fact is not None
+        fact = self._journal.begin(
+            ctx.run_step,
+            purpose="agent",
+            output_retry_index=None if ctx.retry <= 0 else ctx.retry,
+        )
         request_sequence = fact.request_sequence
         self._stage_request(fact, request_context)
+        await self._record_request_event(fact, phase="started")
         try:
             response = await handler(request_context)
         except asyncio.CancelledError:
@@ -168,6 +162,10 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 None,
                 None,
             )
+            await self._record_request_event(
+                fact,
+                phase="cancelled",
+            )
             self._record_model(
                 run_context,
                 fact,
@@ -177,6 +175,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 error_code=None,
                 measurements=(),
             )
+            self._journal.consume(request_sequence)
             raise
         except RunCancelled as error:
             fact = self._journal.finish(request_sequence, status="CANCELLED")
@@ -189,6 +188,11 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 error_code,
                 None,
             )
+            await self._record_request_event(
+                fact,
+                phase="cancelled",
+                error_code=error_code,
+            )
             self._record_model(
                 run_context,
                 fact,
@@ -198,6 +202,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 error_code=error_code,
                 measurements=(),
             )
+            self._journal.consume(request_sequence)
             raise
         except Exception as error:
             fact = self._journal.finish(request_sequence, status="FAILED")
@@ -210,6 +215,11 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 error_code,
                 None,
             )
+            await self._record_request_event(
+                fact,
+                phase="failed",
+                error_code=error_code,
+            )
             self._record_model(
                 run_context,
                 fact,
@@ -219,6 +229,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 error_code=error_code,
                 measurements=(),
             )
+            self._journal.consume(request_sequence)
             raise
         fact = self._journal.finish(request_sequence, status="SUCCEEDED")
         self._finish_request(
@@ -229,6 +240,11 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             None,
             response.usage,
         )
+        await self._record_request_event(
+            fact,
+            phase="completed",
+            response=response,
+        )
         self._record_model(
             run_context,
             fact,
@@ -238,6 +254,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             error_code=None,
             measurements=_provider_usage_measurements(response),
         )
+        self._journal.consume(request_sequence)
         return response
 
     async def after_model_request(
@@ -247,8 +264,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
-        del request_context
-        self._consume_current_request(ctx.run_step)
+        del ctx, request_context
         return response
 
     async def on_model_request_error(
@@ -258,23 +274,8 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
         request_context: ModelRequestContext,
         error: Exception,
     ) -> ModelResponse:
-        del request_context
-        self._consume_current_request(ctx.run_step)
+        del ctx, request_context
         raise error
-
-    async def on_run_error(
-        self,
-        ctx: PydanticRunContext[AgentContext[object]],
-        *,
-        error: BaseException,
-    ) -> AgentRunResult[object]:
-        self._consume_current_request(ctx.run_step)
-        raise error
-
-    def _consume_current_request(self, step_index: int) -> None:
-        fact = self._journal.latest_for_step(step_index)
-        if fact is not None:
-            self._journal.consume(fact.request_sequence)
 
     async def record_external_model_request(
         self,
@@ -301,6 +302,7 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 model_id=str(getattr(model, "model_id", "")) or None,
                 source_messages=source_messages,
             )
+            await self._record_request_event(fact, phase="started")
             return
         if phase not in {"completed", "failed", "cancelled"}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -324,6 +326,11 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
                 None,
                 response.usage,
             )
+            await self._record_request_event(
+                fact,
+                phase="completed",
+                response=response,
+            )
             return
         exception = error if isinstance(error, Exception) else None
         error_code = None if exception is None else _model_error_code(exception)
@@ -343,6 +350,30 @@ class RuntimeModelObservationCapability(AbstractCapability[AgentContext[object]]
             "CANCELLED" if phase == "cancelled" else "FAILED",
             error_code,
             None,
+        )
+        await self._record_request_event(
+            fact,
+            phase=phase,
+            error_code=error_code,
+        )
+
+    async def _record_request_event(
+        self,
+        fact: ModelRequestFact,
+        *,
+        phase: str,
+        response: ModelResponse | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        recorder = self._interaction_recorder
+        if recorder is None:
+            return
+        await recorder.record_model_event(
+            fact,
+            phase=phase,
+            response=response,
+            error_code=error_code,
+            include_observation=self._recorder is not None,
         )
 
     def _stage_request(
