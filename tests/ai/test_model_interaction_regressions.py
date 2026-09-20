@@ -146,6 +146,43 @@ async def test_runtime_step_store_pages_plain_staging(enhanced: bool) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_step_store_continues_recovery_interaction_high_water() -> None:
+    staging = ModelInteractionStagingStepStore()
+    recovery = ModelInteractionInMemoryStepArchive(RuntimeDomain.RECOVERY)
+    store = RuntimeStepStore(
+        staging,
+        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        execution_archive=None,
+        recovery_archive=recovery,
+        conversation_retention=RuntimeRetentionMode.VOLATILE,
+        execution_retention=RuntimeRetentionMode.VOLATILE,
+        recovery_retention=RuntimeRetentionMode.VOLATILE,
+    )
+    await store.initialize()
+    try:
+        run = RunRecord("run")
+        await recovery.register_run(run)
+        durable = await recovery.prepare_interactions(
+            run,
+            (_interaction(1), _interaction(2)),
+            lambda _digest: b"{}",
+        )
+        await recovery.sync_projection(
+            run,
+            events=(),
+            snapshots=(),
+            interactions=durable,
+        )
+
+        assert await store.model_interaction_count(run_id="run") == 2
+        store.stage_model_interaction(_interaction(3))
+        assert await store.model_interaction_count(run_id="run") == 3
+    finally:
+        await store.preflight_close()
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_interaction_prepare_resolves_explicit_local_span() -> None:
     archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
     await archive.initialize()
