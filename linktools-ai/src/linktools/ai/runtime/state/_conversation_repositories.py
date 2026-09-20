@@ -297,11 +297,35 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                 inherited_message_count=inherited_messages,
             )
             key = self._key("conversation_history", child_history_id)
-            current = await transaction.get_record(key)
+            projection_key = self._key("context_projection", source_history_id)
+            current, source_projection = (
+                await transaction.get_record(key),
+                await transaction.get_record(projection_key),
+            )
+
+            async def ensure_projection() -> None:
+                projection = self.fork_projection_record(
+                    source_projection,
+                    source_history_id,
+                    child_history_id,
+                )
+                if projection is None:
+                    return
+                existing_projection = await transaction.get_record(
+                    projection.key_digest
+                )
+                if existing_projection is None:
+                    await transaction.insert_record(projection)
+                elif existing_projection.data != projection.data:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
             if current is None:
-                return await self.create_in_transaction(transaction, child)
+                created = await self.create_in_transaction(transaction, child)
+                await ensure_projection()
+                return created
             existing = await self._decode_history(current)
             if existing == child:
+                await ensure_projection()
                 return existing
             if (
                 existing.session_id == session_id
@@ -320,6 +344,7 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
                     ),
                     current.storage_version,
                 )
+                await ensure_projection()
                 return child
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
 
