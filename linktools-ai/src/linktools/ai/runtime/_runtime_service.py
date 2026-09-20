@@ -216,7 +216,7 @@ class Runtime(Generic[AppT]):
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_RuntimeMetricControl | None" = None,
-        binding_freezer: "_RuntimeBindingFreezer | None" = None,
+        _binding_freezer: "_RuntimeBindingFreezer | None" = None,
     ) -> None:
         if any(
             value is None
@@ -258,7 +258,7 @@ class Runtime(Generic[AppT]):
         self._task_node_runtime = task_node_runtime
         self._tree_streamer = tree_streamer
         self._metric_control = metric_control
-        self._binding_freezer = binding_freezer
+        self._binding_freezer = _binding_freezer
         self._closed = False
         self._closing = False
         self._close_lock = asyncio.Lock()
@@ -1248,7 +1248,7 @@ async def _open_runtime(
             task_node_runtime=components.task_node_runtime,
             tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
-            binding_freezer=components.binding_freezer,
+            _binding_freezer=components.binding_freezer,
         )
     except BaseException:
         try:
