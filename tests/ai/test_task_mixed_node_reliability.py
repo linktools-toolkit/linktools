@@ -78,6 +78,16 @@ class _TaskTestModels:
         return _TaskTestModelBinding()
 
 
+def test_task_registration_returns_original_handler() -> None:
+    group = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.echo", 1, _echo_task)
+
+    registered = group.task(handler, effect="none")
+
+    assert registered is handler
+    assert registered.node("node").node_id == "node"
+
+
 async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
     if not context.dependencies:
         return {"value": context.input.get("value")}
