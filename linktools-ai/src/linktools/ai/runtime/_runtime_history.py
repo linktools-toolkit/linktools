@@ -1005,7 +1005,7 @@ async def _open_runtime_history(
         artifacts = DefaultArtifactService(
             selected_state.artifact,
             effective_authorization,
-            grant_key=token_seed(resolved_namespace),
+            token_seed=token_seed(resolved_namespace),
             cursor_signer=HmacCursorSigner("artifact", token_seed(resolved_namespace)),
         )
         yield RuntimeHistory(
