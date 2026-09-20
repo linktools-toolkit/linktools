@@ -342,9 +342,6 @@ async def test_runtime_state_snapshot_restores_frozen_skill_objects(
                 ),
             )
         )
-        maintenance = state._maintenance
-        assert maintenance is not None
-        await maintenance._compact_objects()
         child = _frozen_child(frozen.snapshot)
         skill_ref = _skill_snapshot(child)
         source = FrozenSkillResourceSource(
@@ -455,9 +452,6 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         )
         await capabilities.capture(admission, graph)
         await state.task.admissions.admit(admission, graph)
-        maintenance = state._maintenance
-        assert maintenance is not None
-        await maintenance._compact_objects()
         loaded = await capabilities.load(admission)
         binding = loaded.bindings[fixture.binding.digest]
         skill_ref = _skill_snapshot(_frozen_child(binding))
