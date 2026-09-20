@@ -17,6 +17,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime.service_api import (
+    CompareEvaluationRequest,
     ExecutionHandle,
     ExecutionRequest,
     ReplayEvaluationRequest,
@@ -186,6 +187,58 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
         assert execution.binding_snapshot == source.binding
         assert execution.request is not None
         assert execution.request.user_prompt == "evaluation:dataset"
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_compare_uses_source_execution_binding() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="evaluation", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    baseline_source = _execution(_binding("agent"), execution_id="baseline-execution")
+    candidate_source = _execution(_binding("agent"), execution_id="candidate-execution")
+    incompatible_source = _execution(
+        _binding("different-agent"),
+        execution_id="incompatible-execution",
+    )
+    for source in (baseline_source, candidate_source, incompatible_source):
+        await state.execution.executions.create(source)
+    for evaluation_id, source in (
+        ("baseline", baseline_source),
+        ("candidate", candidate_source),
+        ("incompatible", incompatible_source),
+    ):
+        await state.evaluation.records.create(
+            EvaluationRecord(
+                evaluation_id=evaluation_id,
+                execution_id=source.execution_id,
+                dataset_digest="dataset",
+                status=EvaluationStatus.SUCCEEDED,
+                revision=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    service = DefaultEvaluationService(
+        state.evaluation,
+        state.execution.executions,
+        _Allow(),  # type: ignore[arg-type]
+        _RecordingExecution(),  # type: ignore[arg-type]
+    )
+    principal = Principal("principal", "tenant")
+    try:
+        comparison = await service.compare(
+            CompareEvaluationRequest(principal, "baseline", "candidate")
+        )
+        assert comparison.baseline_id == "baseline"
+        assert comparison.candidate_id == "candidate"
+
+        with pytest.raises(AIError) as raised:
+            await service.compare(
+                CompareEvaluationRequest(principal, "baseline", "incompatible")
+            )
+        assert raised.value.code is ErrorCode.EVALUATION_INCOMPATIBLE
     finally:
         await state.close()
 
