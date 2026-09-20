@@ -89,13 +89,17 @@ class _RuntimeBindingFreezer:
         frozen = await self._freeze_skills(snapshot, skill_snapshots=cache)
         if frozen.subagent_bindings:
             children = tuple(
-                await self._freeze_skills(child, skill_snapshots=cache)
-                for child in frozen.subagent_bindings
+                [
+                    await self._freeze_skills(child, skill_snapshots=cache)
+                    for child in frozen.subagent_bindings
+                ]
             )
         else:
             children = tuple(
-                await self._freeze_child(child_id, skill_snapshots=cache)
-                for child_id in frozen.subagent_ids
+                [
+                    await self._freeze_child(child_id, skill_snapshots=cache)
+                    for child_id in frozen.subagent_ids
+                ]
             )
         return replace(frozen, subagent_bindings=children)
 
