@@ -56,7 +56,6 @@ class SkillDefinition:
             }
             if self.source_ref.snapshot is not None:
                 source["snapshot"] = {
-                    "store_id": self.source_ref.snapshot.store_id,
                     "key": self.source_ref.snapshot.key,
                     "digest": self.source_ref.snapshot.digest,
                     "size": self.source_ref.snapshot.size,
@@ -91,13 +90,12 @@ class SkillDefinition:
             snapshot_ref = None
             if snapshot is not None:
                 if not isinstance(snapshot, Mapping) or not {
-                    "store_id",
                     "key",
                     "digest",
                     "size",
                 }.issubset(snapshot):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                store_id = snapshot["store_id"]
+                store_id = snapshot.get("store_id", "runtime")
                 key = snapshot["key"]
                 digest = snapshot["digest"]
                 size = snapshot["size"]
