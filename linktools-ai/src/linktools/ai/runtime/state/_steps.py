@@ -556,14 +556,38 @@ class RuntimeStepStore(StepStore):
             if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
                 await self._abandon_durability_flight(flight)
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            local_message_count = (
-                await destination.transcript_message_count_for_run(run)
-                if isinstance(destination, StateStepArchive)
-                else await destination.transcript_message_count(step_run_id)
-            )
-            if local_message_count > len(snapshot.messages):
-                await self._abandon_durability_flight(flight)
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                target is RuntimeDomain.CONVERSATION
+                and isinstance(destination, StateStepArchive)
+            ):
+                existing_run = await destination.get_run(run_id=run.run_id)
+                if existing_run is None:
+                    local_message_count = 0
+                else:
+                    existing_snapshot = await destination.latest_snapshot(
+                        run_id=run.run_id,
+                        include_interrupted=True,
+                    )
+                    if (
+                        existing_run != run
+                        or not _relocated_snapshot_matches(
+                            RuntimeDomain.CONVERSATION,
+                            snapshot,
+                            existing_snapshot,
+                        )
+                    ):
+                        await self._abandon_durability_flight(flight)
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    local_message_count = len(snapshot.messages)
+            else:
+                local_message_count = (
+                    await destination.transcript_message_count_for_run(run)
+                    if isinstance(destination, StateStepArchive)
+                    else await destination.transcript_message_count(step_run_id)
+                )
+                if local_message_count > len(snapshot.messages):
+                    await self._abandon_durability_flight(flight)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             target_snapshot = replace(
                 snapshot,
                 transcript_message_count_before=local_message_count,
@@ -616,14 +640,10 @@ class RuntimeStepStore(StepStore):
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                snapshot_matches = (
-                    observed_snapshot == snapshot
-                    or observed_snapshot is not None
-                    and replace(
-                        observed_snapshot,
-                        transcript_message_count_before=None,
-                    )
-                    == snapshot
+                snapshot_matches = _relocated_snapshot_matches(
+                    target,
+                    snapshot,
+                    observed_snapshot,
                 )
                 if (
                     observed_run == run
@@ -1585,6 +1605,41 @@ class RuntimeStepStore(StepStore):
     async def _ensure_business(self) -> None:
         if not self._initialized:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+def _relocated_snapshot_matches(
+    target: RuntimeDomain,
+    source: ContinuableSnapshot,
+    observed: ContinuableSnapshot | None,
+) -> bool:
+    if observed is None:
+        return False
+    if target is not RuntimeDomain.CONVERSATION:
+        return replace(
+            observed,
+            transcript_message_count_before=None,
+        ) == source
+    if (
+        observed.run_id != source.run_id
+        or observed.step_index != source.step_index
+        or observed.conversation_id != source.conversation_id
+        or observed.parent_run_id != source.parent_run_id
+        or observed.agent_name != source.agent_name
+        or observed.timestamp != source.timestamp
+        or observed.state != source.state
+        or observed.idempotency_key != source.idempotency_key
+        or observed.pending_request_index != source.pending_request_index
+        or observed.context_messages != source.context_messages
+    ):
+        return False
+    source_messages = tuple(source.messages)
+    observed_messages = tuple(observed.messages)
+    if not source_messages:
+        return True
+    return (
+        len(observed_messages) >= len(source_messages)
+        and observed_messages[-len(source_messages) :] == source_messages
+    )
 
 
 def _run_registration_identity(run: RunRecord) -> tuple[object, ...]:
