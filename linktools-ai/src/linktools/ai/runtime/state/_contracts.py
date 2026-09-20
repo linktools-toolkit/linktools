@@ -530,6 +530,15 @@ class StoredStepSnapshot:
     state: str
     projection_digest: str
     has_context_projection: bool = False
+    pending_request_index: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.pending_request_index is not None and (
+            isinstance(self.pending_request_index, bool)
+            or not isinstance(self.pending_request_index, int)
+            or self.pending_request_index < 0
+        ):
+            raise ValueError("stored snapshot pending request index is invalid")
 
 
 class HistoryQuality(str, Enum):
