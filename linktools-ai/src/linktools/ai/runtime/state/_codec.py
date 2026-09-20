@@ -1770,42 +1770,63 @@ def _iter_runtime_object_dependencies(
     *,
     default_domain: RuntimeDomain,
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
-    if not reference.key.startswith("v1/skill-source-snapshot/"):
-        return
     try:
         manifest = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if (
-        not isinstance(manifest, Mapping)
-        or manifest.get("kind") != "skill-source-snapshot"
-        or manifest.get("format_version") != 1
-        or not isinstance(manifest.get("resources"), list)
-    ):
+    if not isinstance(manifest, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for item in cast(list[object], manifest["resources"]):
-        if not isinstance(item, Mapping):
+
+    if reference.key.startswith("v1/skill-source-snapshot/"):
+        if (
+            manifest.get("kind") != "skill-source-snapshot"
+            or manifest.get("format_version") != 1
+            or not isinstance(manifest.get("resources"), list)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        content = item.get("content")
-        if not isinstance(content, Mapping) or set(content) != {
-            "key",
-            "digest",
-            "size",
-        }:
+        for item in cast(list[object], manifest["resources"]):
+            if not isinstance(item, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            content = item.get("content")
+            if not isinstance(content, Mapping) or set(content) != {
+                "key",
+                "digest",
+                "size",
+            }:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            size = content["size"]
+            if isinstance(size, bool) or not isinstance(size, int):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                nested = ObjectRef(
+                    reference.store_id,
+                    cast(str, content["key"]),
+                    cast(str, content["digest"]),
+                    size,
+                )
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            yield default_domain, nested
+        return
+
+    if reference.key.startswith("v1/task-capability-snapshot/"):
+        if (
+            manifest.get("kind") != "task-capability-snapshot"
+            or manifest.get("format_version") != 1
+            or not isinstance(manifest.get("roots"), Mapping)
+            or not isinstance(manifest.get("bindings"), Mapping)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        size = content["size"]
-        if isinstance(size, bool) or not isinstance(size, int):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            nested = ObjectRef(
-                reference.store_id,
-                cast(str, content["key"]),
-                cast(str, content["digest"]),
-                size,
-            )
-        except (TypeError, ValueError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        yield default_domain, nested
+        for values in (manifest["roots"], manifest["bindings"]):
+            for raw in cast("Mapping[object, object]", values).values():
+                snapshot = AgentBindingSnapshot.from_payload(raw)
+                yield from _iter_agent_binding_object_refs(
+                    snapshot,
+                    RuntimeDomain.EXECUTION,
+                )
+        return
+
+    return
 
 
 def _iter_runtime_object_refs(
