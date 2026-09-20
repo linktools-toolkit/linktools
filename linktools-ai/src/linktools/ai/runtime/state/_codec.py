@@ -971,6 +971,190 @@ def _decode_v1_object_ref(
 
 
 
+def _encode_v1_evaluation_record(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, EvaluationRecord):
+        raise TypeError("V1 evaluation_record encoder received the wrong type")
+    return {
+        "evaluation_id": _encode_domain(
+            value.evaluation_id, codec, persisted=persisted
+        ),
+        "execution_id": _encode_domain(
+            value.execution_id, codec, persisted=persisted
+        ),
+        "dataset_digest": _encode_domain(
+            value.dataset_digest, codec, persisted=persisted
+        ),
+        "binding_digest": _encode_domain(
+            value.binding_digest, codec, persisted=persisted
+        ),
+        "status": _encode_domain(value.status, codec, persisted=persisted),
+        "revision": _encode_domain(value.revision, codec, persisted=persisted),
+        "created_at": _encode_domain(
+            value.created_at, codec, persisted=persisted
+        ),
+        "updated_at": _encode_domain(
+            value.updated_at, codec, persisted=persisted
+        ),
+    }
+
+
+def _decode_v1_evaluation_record(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> EvaluationRecord:
+    current_fields = frozenset(
+        {
+            "evaluation_id",
+            "execution_id",
+            "dataset_digest",
+            "binding_digest",
+            "status",
+            "revision",
+            "created_at",
+            "updated_at",
+        }
+    )
+    legacy_fields = frozenset(
+        {
+            "evaluation_id",
+            "tenant_id",
+            "execution_id",
+            "dataset_id",
+            "dataset_revision",
+            "evaluator_id",
+            "evaluator_revision",
+            "binding_digest",
+            "artifact_digest",
+            "status",
+            "revision",
+            "metrics",
+            "created_at",
+            "updated_at",
+        }
+    )
+    if "dataset_digest" in raw_fields:
+        _require_contract_fields(
+            raw_fields,
+            current_fields,
+            persisted=persisted,
+        )
+        dataset_digest = _decode_domain(
+            raw_fields["dataset_digest"],
+            str,
+            codec,
+            persisted=persisted,
+        )
+    else:
+        if not persisted:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_contract_fields(
+            raw_fields,
+            legacy_fields,
+            persisted=True,
+        )
+        _decode_domain(raw_fields["tenant_id"], str, codec, persisted=True)
+        _decode_domain(raw_fields["dataset_revision"], int, codec, persisted=True)
+        _decode_domain(raw_fields["evaluator_id"], str, codec, persisted=True)
+        _decode_domain(
+            raw_fields["evaluator_revision"],
+            int,
+            codec,
+            persisted=True,
+        )
+        _decode_domain(
+            raw_fields["artifact_digest"],
+            str | None,
+            codec,
+            persisted=True,
+        )
+        _decode_domain(
+            raw_fields["metrics"],
+            Mapping[str, float | int],
+            codec,
+            persisted=True,
+        )
+        dataset_digest = _decode_domain(
+            raw_fields["dataset_id"],
+            str,
+            codec,
+            persisted=True,
+        )
+    try:
+        return EvaluationRecord(
+            evaluation_id=cast(
+                str,
+                _decode_domain(
+                    raw_fields["evaluation_id"],
+                    str,
+                    codec,
+                    persisted=persisted,
+                ),
+            ),
+            execution_id=cast(
+                str,
+                _decode_domain(
+                    raw_fields["execution_id"],
+                    str,
+                    codec,
+                    persisted=persisted,
+                ),
+            ),
+            dataset_digest=cast(str, dataset_digest),
+            binding_digest=cast(
+                str,
+                _decode_domain(
+                    raw_fields["binding_digest"],
+                    str,
+                    codec,
+                    persisted=persisted,
+                ),
+            ),
+            status=cast(
+                EvaluationStatus,
+                _decode_domain(
+                    raw_fields["status"],
+                    EvaluationStatus,
+                    codec,
+                    persisted=persisted,
+                ),
+            ),
+            revision=cast(
+                int,
+                _decode_domain(
+                    raw_fields["revision"],
+                    int,
+                    codec,
+                    persisted=persisted,
+                ),
+            ),
+            created_at=cast(
+                datetime,
+                _decode_domain(
+                    raw_fields["created_at"],
+                    datetime,
+                    codec,
+                    persisted=persisted,
+                ),
+            ),
+            updated_at=cast(
+                datetime,
+                _decode_domain(
+                    raw_fields["updated_at"],
+                    datetime,
+                    codec,
+                    persisted=persisted,
+                ),
+            ),
+        )
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 def _encode_v1_stored_user_input(
     value: object,
     codec: "_VersionCodec",
@@ -1030,6 +1214,7 @@ def _decode_v1_stored_user_input(
 
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
+        "evaluation_record": _encode_v1_evaluation_record,
         "object_ref": _encode_v1_object_ref,
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
@@ -1040,6 +1225,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
+        "evaluation_record": _decode_v1_evaluation_record,
         "object_ref": _decode_v1_object_ref,
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
@@ -2530,6 +2716,7 @@ def _validate_v1_codec_definition() -> None:
     if set(_CURRENT_CODEC.enum_wire_ids.values()) != set(enum_wire_ids):
         raise RuntimeError("Runtime v1 enum wire-id registry is incomplete")
     custom_encoders = {
+        "evaluation_record",
         "object_ref",
         "stored_user_input",
         "task_graph_view",
@@ -2538,6 +2725,7 @@ def _validate_v1_codec_definition() -> None:
         "task_result",
     }
     custom_decoders = {
+        "evaluation_record",
         "object_ref",
         "stored_user_input",
         "task_graph_view",
