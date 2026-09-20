@@ -4,6 +4,7 @@
 
 import hashlib
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 from pydantic_ai.messages import (
@@ -22,6 +23,7 @@ from linktools.ai.runtime._model_interaction import (
     StagedContextSpan,
     StagedModelInteraction,
     build_context_projection,
+    message_prefix_digest,
     model_response_projection,
     project_public_messages,
 )
@@ -141,6 +143,63 @@ async def test_runtime_step_store_pages_plain_staging(enhanced: bool) -> None:
     finally:
         await store.preflight_close()
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_interaction_prepare_accepts_framework_stamped_source_equivalent() -> None:
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
+    await archive.initialize()
+    try:
+        run = RunRecord("run")
+        await archive.register_run(run)
+        source = ModelRequest(
+            parts=[UserPromptPart(content="hello")],
+            timestamp=None,
+        )
+        stamped = replace(
+            source,
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            run_id="run",
+            conversation_id="conversation",
+            instructions="instruction",
+        )
+        payloads: dict[str, bytes] = {}
+
+        def intern(value: bytes) -> tuple[str, int]:
+            digest = hashlib.sha256(value).hexdigest()
+            payloads[digest] = value
+            return digest, len(value)
+
+        projection = build_context_projection((stamped,), (stamped,), intern)
+        envelope_digest, _ = intern(b"{}")
+        interaction = StagedModelInteraction(
+            run_id="run",
+            step_index=1,
+            request_sequence=1,
+            purpose="agent",
+            output_retry_index=None,
+            model={"route_id": "default"},
+            request_context=projection,
+            request_envelope_digest=envelope_digest,
+            response_context=None,
+            status="CANCELLED",
+            error_code=None,
+            duration_ns=0,
+            usage=None,
+        )
+
+        prepared = await archive.prepare_interactions(
+            run,
+            (interaction,),
+            lambda digest: payloads[digest],
+            source_messages=(source,),
+        )
+
+        assert len(prepared) == 1
+        assert projection.items == (StagedContextSpan(0, 1),)
+        assert message_prefix_digest((source,)) == message_prefix_digest((stamped,))
+    finally:
+        await archive.close()
 
 
 def test_repeated_message_matching_preserves_first_unused_source() -> None:
