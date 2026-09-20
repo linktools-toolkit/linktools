@@ -275,7 +275,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "conversation_history_segment": ("owner_history_id", "through_local_message_count"),
         "context_projection": ("items",),
         "error_diagnostics": ("exception_type", "exception_message", "cause_digest"),
-        "evaluation_record": ("evaluation_id", "execution_id", "dataset_digest", "binding_digest", "status", "revision", "created_at", "updated_at"),
+        "evaluation_record": ("evaluation_id", "execution_id", "dataset_digest", "status", "revision", "created_at", "updated_at"),
         "execution_event": ("execution_id", "sequence", "event_type", "payload"),
         "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
         "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),
@@ -981,7 +981,6 @@ def _decode_v1_evaluation_record(
             "evaluation_id",
             "execution_id",
             "dataset_digest",
-            "binding_digest",
             "status",
             "revision",
             "created_at",
@@ -1003,6 +1002,7 @@ def _decode_v1_evaluation_record(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         required = current_fields.difference({"dataset_digest"}) | {
             "dataset_id",
+            "binding_digest",
             *legacy_only,
         }
         dataset_field = "dataset_id"
@@ -1015,6 +1015,9 @@ def _decode_v1_evaluation_record(
             codec,
             persisted=persisted,
         )
+
+    if "binding_digest" in raw_fields:
+        decode("binding_digest", str)
 
     if dataset_field == "dataset_id":
         if "tenant_id" in raw_fields:
@@ -1033,7 +1036,6 @@ def _decode_v1_evaluation_record(
             evaluation_id=cast(str, decode("evaluation_id", str)),
             execution_id=cast(str, decode("execution_id", str)),
             dataset_digest=cast(str, decode(dataset_field, str)),
-            binding_digest=cast(str, decode("binding_digest", str)),
             status=cast(
                 EvaluationStatus,
                 decode("status", EvaluationStatus),
