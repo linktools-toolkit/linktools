@@ -41,13 +41,7 @@ def build_runtime_steps(
             and domain is not RuntimeDomain.CONVERSATION
         ):
             continue
-        if (
-            route.retention is RuntimeRetentionMode.DURABLE
-            or (
-                domain is RuntimeDomain.CONVERSATION
-                and route.retention is RuntimeRetentionMode.VOLATILE
-            )
-        ):
+        if route.retention is not RuntimeRetentionMode.TRANSIENT:
             context_sources = None
             conversation_archive = archives.get(RuntimeDomain.CONVERSATION)
             if isinstance(conversation_archive, StateStepArchive):
