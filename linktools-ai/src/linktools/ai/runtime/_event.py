@@ -94,7 +94,6 @@ class _LiveSubscription:
         self._queue: deque[_OrderedItem] = deque()
         self._max_bytes = max_bytes
         self._queue_bytes = 0
-        self._queue_delta_count = 0
         self._truncated_pending = False
         self._replay_required = False
         self._wakeup = asyncio.Event()
@@ -109,7 +108,6 @@ class _LiveSubscription:
             if self._queue:
                 value = self._queue.popleft()
                 if isinstance(value, ExecutionDelta):
-                    self._queue_delta_count -= 1
                 self._queue_bytes -= _live_item_size(value)
                 return value
             if self._closed or self._completed:
@@ -145,7 +143,6 @@ class _LiveSubscription:
         value = ExecutionDelta(value.execution_id, value.delta_type, value.content, truncated)
         self._queue.append(value)
         self._queue_bytes += value_size
-        self._queue_delta_count += 1
         self._wakeup.set()
         return True
 
@@ -167,8 +164,6 @@ class _LiveSubscription:
             return
         self._queue.clear()
         self._queue_bytes = 0
-        self._queue_delta_count = 0
-        self._truncated_pending = True
         self._replay_required = True
         self._queue.append(_LiveReplayRequired(self._execution_id))
         self._wakeup.set()
@@ -186,7 +181,6 @@ class _LiveSubscription:
                 removed = values.pop(index)
                 self._queue = deque(values)
                 self._queue_bytes -= _live_item_size(removed)
-                self._queue_delta_count -= 1
                 self._truncated_pending = True
                 return True
         return False
