@@ -13,6 +13,7 @@ from linktools.ai.core import (
     ExecutionStatus,
     Principal,
 )
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime.service_api import (
     ExecutionHandle,
@@ -85,6 +86,7 @@ class _RecordingExecution:
     def __init__(self) -> None:
         self.binding_digest: str | None = None
         self.binding_snapshot: AgentBindingSnapshot | None = None
+        self.request: ExecutionRequest | None = None
 
     async def start(
         self,
@@ -94,9 +96,10 @@ class _RecordingExecution:
         dependency_hold_id: str | None = None,
         binding_snapshot: AgentBindingSnapshot | None = None,
     ) -> ExecutionHandle:
-        del request, dependency_hold_id
+        del dependency_hold_id
         self.binding_digest = binding_digest
         self.binding_snapshot = binding_snapshot
+        self.request = request
         return ExecutionHandle("execution")
 
 
@@ -151,15 +154,10 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
     evaluation = EvaluationRecord(
         evaluation_id="evaluation",
         execution_id=source.execution_id,
-        dataset_id="dataset",
-        dataset_revision=1,
-        evaluator_id="default",
-        evaluator_revision=1,
+        dataset_digest="dataset",
         binding_digest=source.binding_digest,
-        artifact_digest=None,
         status=EvaluationStatus.SUCCEEDED,
         revision=1,
-        metrics={},
         created_at=now,
         updated_at=now,
     )
@@ -187,5 +185,41 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
         assert replayed.execution_id == "execution"
         assert execution.binding_digest == source.binding_digest
         assert execution.binding_snapshot == source.binding
+        assert execution.request is not None
+        assert execution.request.user_prompt == "evaluation:dataset"
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_missing_source_execution_fails_closed() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="evaluation", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+    await state.evaluation.records.create(
+        EvaluationRecord(
+            evaluation_id="missing-source",
+            execution_id="missing-execution",
+            dataset_digest="dataset",
+            binding_digest="a" * 64,
+            status=EvaluationStatus.PENDING,
+            revision=0,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    service = DefaultEvaluationService(
+        state.evaluation,
+        state.execution.executions,
+        _Allow(),  # type: ignore[arg-type]
+        _RecordingExecution(),  # type: ignore[arg-type]
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            await service.inspect(
+                "missing-source",
+                principal=Principal("principal", "tenant"),
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
