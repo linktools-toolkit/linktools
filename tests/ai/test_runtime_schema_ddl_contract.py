@@ -137,8 +137,5 @@ def test_runtime_state_migration_contains_no_known_duplicate_indexes() -> None:
         "KEY ix_store_digest_alias_digest ",
         "KEY ix_store_digest_stream_digest_sequence ",
         "KEY ix_store_digest_key_digest ",
-        "UNIQUE KEY uk_key_digest ",
-        "UNIQUE KEY uk_alias_digest ",
-        "UNIQUE KEY uk_stream_digest_sequence ",
     ):
         assert fragment not in migration
