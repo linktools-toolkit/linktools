@@ -177,8 +177,9 @@ def test_request_envelope_keeps_capability_visibility_inputs() -> None:
     assert parameters["deferred_capability_ids"] == ["skill-a", "skill-b"]
     assert parameters["revealed_tool_names"] == ["tool-a", "tool-b"]
     instruction_parts = parameters["instruction_parts"]
-    assert isinstance(instruction_parts, list)
-    assert instruction_parts[0]["content"] == "system"  # type: ignore[index]
+    assert isinstance(instruction_parts, list) and instruction_parts
+    assert isinstance(instruction_parts[0], Mapping)
+    assert instruction_parts[0]["content"] == "system"
     assert b'"version":1' in raw
 
 
