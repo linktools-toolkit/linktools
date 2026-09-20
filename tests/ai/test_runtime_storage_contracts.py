@@ -421,10 +421,7 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         ) is None
         assert await second.read(
             lambda transaction: transaction.list_records(
-                RecordQuery(
-                    partition_digest=record.partition_digest,
-                    kind="scope-test",
-                )
+                RecordQuery(kind="scope-test")
             )
         ) == ()
         assert await second.read(
