@@ -224,6 +224,47 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_graph_watch_starts_execution_before_binding_event_yield() -> None:
+    started: list[str] = []
+
+    def watch_tree(
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequences=None,
+        include_content: bool = False,
+    ):
+        del principal, after_sequences, include_content
+        started.append(execution_id)
+
+        async def values():
+            await asyncio.Event().wait()
+            if False:
+                yield None
+
+        return values()
+
+    run = TaskGraphRun(
+        _Runtime(),
+        "graph",
+        Principal("owner", "tenant"),
+        watch_tree,
+    )
+    stream = run.watch()
+    try:
+        await anext(stream)
+        assert started == []
+        await anext(stream)
+        assert started == []
+        binding = await anext(stream)
+        assert isinstance(binding.event, TaskEvent)
+        assert binding.event.execution_id == "execution"
+        assert started == ["execution"]
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
     run = TaskGraphRun(
         _Runtime(),

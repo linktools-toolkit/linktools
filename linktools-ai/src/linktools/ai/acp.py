@@ -133,7 +133,7 @@ class ACPAgent:
             memory_scope=self._memory_scope,
         )
         stop_reason = "end_turn"
-        async for item in execution.watch():
+        async for item in execution.watch(include_content=True):
             if item.depth != 0:
                 continue
             event = item.event

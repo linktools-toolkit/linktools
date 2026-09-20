@@ -369,7 +369,13 @@ class _FailedRuntime:
 class _StreamingExecution:
     execution_id = "streaming-execution"
 
-    def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
+    def watch(
+        self,
+        *,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        assert include_content is True
+
         async def events() -> AsyncIterator[ExecutionTreeEvent]:
             for sequence, event_type, payload in (
                 (
