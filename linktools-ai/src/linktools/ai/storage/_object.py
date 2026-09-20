@@ -5,9 +5,10 @@
 import asyncio
 import hashlib
 from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from ..errors import AIError, ErrorCode
 
@@ -69,6 +70,18 @@ def runtime_object_key(
     for value in (namespace_digest, tenant_digest, stored_digest):
         _validate_digest(value)
     return f"v1/runtime/{namespace_digest}/{tenant_digest}/{stored_digest}"
+
+
+@runtime_checkable
+class ObjectStoreInspection(Protocol):
+    def list_objects(self) -> AsyncIterator[ObjectStat]: ...
+
+
+@runtime_checkable
+class ObjectStoreMaintenance(ObjectStoreInspection, Protocol):
+    async def delete_object(self, key: str, *, expected_digest: str) -> bool: ...
+
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
 async def read_object(
@@ -200,6 +213,8 @@ __all__ = [
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
+    "ObjectStoreInspection",
+    "ObjectStoreMaintenance",
     "read_object",
     "runtime_object_key",
 ]
