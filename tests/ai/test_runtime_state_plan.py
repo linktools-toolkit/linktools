@@ -79,3 +79,20 @@ def test_durable_evaluation_requires_durable_execution(tmp_path) -> None:
         match="durable evaluation requires durable execution",
     ):
         RuntimeState.from_plan(plan)
+
+
+def test_durable_evaluation_requires_durable_recovery(tmp_path) -> None:
+    durable = RuntimeStateRoute.filesystem(
+        tmp_path / "durable",
+        transaction_root=tmp_path / "durable",
+    )
+    plan = RuntimeStatePlan(
+        execution=durable,
+        evaluation=durable,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="durable evaluation requires durable recovery",
+    ):
+        RuntimeState.from_plan(plan)
