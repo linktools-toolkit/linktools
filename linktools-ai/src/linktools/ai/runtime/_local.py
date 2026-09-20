@@ -2833,10 +2833,25 @@ class LocalExecutionBackend:
                 history = list(loaded_context.model_messages())
             elif session_history_source:
                 if session_history_owner is not None:
-                    loaded_context = await self._steps.load_loaded_model_context(
-                        RuntimeDomain.CONVERSATION,
-                        session_history_owner,
-                    )
+                    if (
+                        isinstance(self._steps, RuntimeStepStore)
+                        and session is not None
+                        and session.continuation is not None
+                        and history_id is not None
+                    ):
+                        loaded_context = (
+                            await self._steps.load_committed_conversation_context(
+                                history_id=history_id,
+                                step_run_id=session.continuation.step_run_id,
+                                message_count=session.continuation.message_count,
+                                tenant_id=self._tenant_id,
+                            )
+                        )
+                    else:
+                        loaded_context = await self._steps.load_loaded_model_context(
+                            RuntimeDomain.CONVERSATION,
+                            session_history_owner,
+                        )
                 history = list(loaded_context.model_messages())
             else:
                 history = cast("list[ModelMessage]", await self._history(current))
