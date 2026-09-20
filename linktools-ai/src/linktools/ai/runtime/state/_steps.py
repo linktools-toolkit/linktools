@@ -556,7 +556,11 @@ class RuntimeStepStore(StepStore):
             if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
                 await self._abandon_durability_flight(flight)
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            local_message_count = await destination.transcript_message_count(step_run_id)
+            local_message_count = (
+                await destination.transcript_message_count_for_run(run)
+                if isinstance(destination, StateStepArchive)
+                else await destination.transcript_message_count(step_run_id)
+            )
             if local_message_count > len(snapshot.messages):
                 await self._abandon_durability_flight(flight)
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
