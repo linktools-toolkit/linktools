@@ -306,7 +306,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "resource_ref": ("kind", "id", "tenant_id", "owner_principal_id"),
         "result_record": ("output", "stop_reason", "usage", "created_at"),
         "session_record": ("session_id", "owner_principal_id", "status", "revision", "cwd", "metadata", "created_at", "updated_at", "closed_at", "active_execution_id", "agent_id", "continuation", "history_quality", "history_id", "timeline_parent_session_id", "timeline_parent_turn_sequence"),
-        "stored_step_snapshot": ("run_id", "step_index", "timestamp", "state", "projection_digest", "has_context_projection"),
+        "stored_step_snapshot": ("run_id", "step_index", "timestamp", "state", "projection_digest", "has_context_projection", "pending_request_index"),
         "stored_payload": ("kind", "encoding", "digest", "size", "value", "ref"),
         "inline_context_block": ("content",),
         "loaded_context_message": ("message", "source"),
@@ -366,7 +366,10 @@ _V1_GENERIC_DATACLASS_DEFAULTS: Mapping[
         ),
         "model_interaction": MappingProxyType({"attachments": ()}),
         "stored_step_snapshot": MappingProxyType(
-            {"has_context_projection": False}
+            {
+                "has_context_projection": False,
+                "pending_request_index": None,
+            }
         ),
         "session_record": MappingProxyType(
             {
