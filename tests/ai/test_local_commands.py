@@ -49,9 +49,11 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     tmp_path: Path,
 ) -> None:
     workspace = Workspace.initialize(tmp_path)
-    opened: list[Workspace] = []
+    models = object()
+    opened: list[tuple[Workspace, object]] = []
 
     monkeypatch.setattr(acp_module, "_load_workspace", lambda _root: workspace)
+    monkeypatch.setattr(acp_module, "_local_runtime_models", lambda _args: models)
 
     @asynccontextmanager
     async def open_local_runtime(
@@ -59,8 +61,7 @@ def test_ai_acp_uses_shared_local_runtime_composition(
         *,
         models: object,
     ):
-        del models
-        opened.append(runtime_workspace)
+        opened.append((runtime_workspace, models))
         yield SimpleNamespace(default_principal=object())
 
     monkeypatch.setattr(acp_module, "_open_local_runtime", open_local_runtime)
@@ -72,7 +73,7 @@ def test_ai_acp_uses_shared_local_runtime_composition(
     monkeypatch.setattr(acp_module, "serve_stdio", serve_stdio)
 
     assert acp_command.run(acp_command.create_parser().parse_args([])) == 0
-    assert opened == [workspace]
+    assert opened == [(workspace, models)]
 
 
 def test_ai_asset_command_is_removed() -> None:
