@@ -82,6 +82,7 @@ class RuntimeSnapshot:
         metadata: Mapping[str, JsonValue] | None = None,
         limits: SnapshotLimits,
     ) -> ObjectRef:
+        """Capture state and Workspace under a caller-owned quiescence boundary."""
         resolved_namespace = validate_persistence_namespace(namespace)
         resolved_tenant = validate_tenant_id(tenant_id)
         if not isinstance(limits, SnapshotLimits):
