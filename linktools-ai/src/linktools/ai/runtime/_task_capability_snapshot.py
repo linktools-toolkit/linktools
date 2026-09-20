@@ -13,6 +13,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
 from ._binding_freeze import _RuntimeBindingFreezer
+from ._runtime_identity import task_capability_snapshot_key
 
 _KIND = "task-capability-snapshot"
 _VERSION = 1
@@ -267,16 +268,12 @@ class TaskCapabilitySnapshotStore:
         return FrozenTaskCapabilities(roots, bindings)
 
     def _key(self, admission: TaskGraphAdmission) -> str:
-        digest = canonical_sha256(
-            {
-                "version": _VERSION,
-                "namespace": self._namespace,
-                "tenant_id": admission.principal.tenant_id,
-                "graph_id": admission.graph_id,
-                "request_digest": admission.initial_request_digest,
-            }
+        return task_capability_snapshot_key(
+            self._namespace,
+            admission.principal.tenant_id,
+            admission.graph_id,
+            admission.initial_request_digest,
         )
-        return f"v1/task-capability-snapshot/{digest}"
 
 
 __all__ = [
