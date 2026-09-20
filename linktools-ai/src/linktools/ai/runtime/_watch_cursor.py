@@ -9,7 +9,7 @@ from ..core import HmacCursorSigner, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
-from ._runtime_identity import grant_key
+from ._runtime_identity import token_seed
 
 _WATCH_CURSOR_VERSION = 1
 
@@ -159,7 +159,7 @@ def decode_graph_watch_cursor(
 
 
 def _signer(namespace: str, purpose: str) -> HmacCursorSigner:
-    return HmacCursorSigner(purpose, grant_key(namespace))
+    return HmacCursorSigner(purpose, token_seed(namespace))
 
 
 def _filter_digest(
