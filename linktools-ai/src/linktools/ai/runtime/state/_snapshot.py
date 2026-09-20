@@ -2,7 +2,13 @@
 # -*- coding: utf-8 -*-
 """Pure Runtime snapshot admission limits."""
 
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from typing import Protocol
+
+
+class OfflineExclusiveStorage(Protocol):
+    def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,4 +28,4 @@ class SnapshotLimits:
             raise ValueError("snapshot limits must be positive integers")
 
 
-__all__ = ["SnapshotLimits"]
+__all__ = ["OfflineExclusiveStorage", "SnapshotLimits"]
