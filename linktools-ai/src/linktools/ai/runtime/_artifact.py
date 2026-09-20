@@ -41,12 +41,12 @@ _CURSOR_RESOURCE_KIND = "ARTIFACT"
 class DefaultArtifactService:
     """Authorize metadata access before issuing an opaque download URL."""
 
-    def __init__(self, state: ArtifactState, authorization: AuthorizationPolicy, *, grant_key: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
-        if not grant_key:
-            raise ValueError("artifact grant key is required")
+    def __init__(self, state: ArtifactState, authorization: AuthorizationPolicy, *, token_seed: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
+        if not token_seed:
+            raise ValueError("artifact token seed is required")
         self._state = state
         self._authorization = authorization
-        self._grant_key = grant_key
+        self._token_seed = token_seed
         self._cursor_signer = cursor_signer
         self._entry_path = entry_path.rstrip("/")
 
@@ -91,7 +91,7 @@ class DefaultArtifactService:
         now = datetime.now(timezone.utc)
         operation = await self._state.operations.append(OperationLedgerInput(nonce, principal.tenant_id, ResourceKind.DOWNLOAD_GRANT, artifact_id, record.execution_id, OperationKind.DOWNLOAD_GRANT, OperationStatus.PENDING, request_digest, record.object_ref.key, record.digest, None, True, now, now))
         payload = {"tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest, "expires_at": expires_at, "nonce": nonce}
-        signature = hmac.new(self._grant_key, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
+        signature = hmac.new(self._token_seed, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
         token = _encode_grant({**payload, "hmac": signature})
         await self._state.operations.compare_and_swap(nonce, tenant_id=principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.operation_kind, OperationStatus.SUCCEEDED, operation.request_digest, record.object_ref.key, record.digest, None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
         _logger.info("artifact grant issued: artifact=%s tenant=%s", artifact_id, principal.tenant_id)
@@ -102,7 +102,7 @@ class DefaultArtifactService:
             payload = _decode_grant(token)
             signature = str(payload.pop("hmac"))
             expected = hmac.new(
-                self._grant_key,
+                self._token_seed,
                 canonical_json_bytes(payload),
                 hashlib.sha256,
             ).hexdigest()
