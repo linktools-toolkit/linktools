@@ -855,7 +855,9 @@ class RuntimeState:
             if decoded is None:
                 continue
             domain, source, content_ref = decoded
-            if not source.key.startswith("v1/skill-source-snapshot/"):
+            if not source.key.startswith(
+                ("v1/skill-source-snapshot/", "v1/task-capability-snapshot/")
+            ):
                 continue
             dependency_payload = await read_object(
                 object_store,
