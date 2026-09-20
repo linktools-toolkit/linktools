@@ -90,16 +90,33 @@ class SkillDefinition:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             snapshot_ref = None
             if snapshot is not None:
-                if not isinstance(snapshot, Mapping):
+                if not isinstance(snapshot, Mapping) or set(snapshot) != {
+                    "store_id",
+                    "key",
+                    "digest",
+                    "size",
+                }:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                store_id = snapshot["store_id"]
+                key = snapshot["key"]
+                digest = snapshot["digest"]
+                size = snapshot["size"]
+                if (
+                    not isinstance(store_id, str)
+                    or not store_id
+                    or not isinstance(key, str)
+                    or not key
+                    or not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                    or isinstance(size, bool)
+                    or not isinstance(size, int)
+                    or size < 0
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
-                    snapshot_ref = ObjectRef(
-                        str(snapshot["store_id"]),
-                        str(snapshot["key"]),
-                        str(snapshot["digest"]),
-                        int(snapshot["size"]),
-                    )
-                except (KeyError, TypeError, ValueError) as error:
+                    snapshot_ref = ObjectRef(store_id, key, digest, size)
+                except ValueError as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             try:
                 source_ref = SkillSourceRef(source_id, root, snapshot_ref)
