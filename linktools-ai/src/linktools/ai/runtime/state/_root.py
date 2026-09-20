@@ -699,6 +699,7 @@ class RuntimeState:
         entry_count = len(raw_objects)
         object_bytes = 0
         expected_objects: set[tuple[str, str, str, int]] = set()
+        expected_task_object_keys: set[str] = set()
         decoded_domains: dict[
             RuntimeDomain,
             tuple[
@@ -778,6 +779,22 @@ class RuntimeState:
                 operations,
                 sequences,
             )
+            if domain is RuntimeDomain.TASK:
+                for record in records:
+                    if record.kind != "task_admission":
+                        continue
+                    admission = _decode_enveloped_domain(
+                        record.data,
+                        TaskGraphAdmission,
+                    )
+                    expected_task_object_keys.add(
+                        task_capability_snapshot_key(
+                            namespace,
+                            admission.principal.tenant_id,
+                            admission.graph_id,
+                            admission.initial_request_digest,
+                        )
+                    )
             for encoded in (*raw_records, *raw_facts, *raw_operations):
                 for source_domain, reference in iter_runtime_object_refs(
                     encoded,
@@ -819,6 +836,17 @@ class RuntimeState:
             object_bytes += content_ref.size
             if len(payload) + object_bytes > limits.max_bytes:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+        for key in expected_task_object_keys:
+            matches = tuple(
+                identity
+                for identity in actual_objects
+                if identity[0] == RuntimeDomain.TASK.value
+                and identity[1] == key
+            )
+            if len(matches) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            expected_objects.add(matches[0])
 
         pending_objects = list(expected_objects)
         while pending_objects:
