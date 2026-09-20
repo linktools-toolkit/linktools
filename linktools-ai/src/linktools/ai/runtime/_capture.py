@@ -229,6 +229,42 @@ class RuntimeCaptureStore:
         current = project_transient_binary_content(current)
         return list(freeze_model_messages(current)), pending_index
 
+    def _source_refs_for(
+        self,
+        messages: Sequence[ModelMessage],
+    ) -> tuple[TranscriptMessageRef | int | None, ...]:
+        values = freeze_model_messages(messages)
+        known = tuple(self._source_messages)
+        by_message: dict[ModelMessage, list[int]] = {}
+        for index, message in enumerate(known):
+            try:
+                by_message.setdefault(message, []).append(index)
+            except TypeError:
+                return (None,) * len(values)
+        requested_counts: dict[ModelMessage, int] = {}
+        try:
+            for message in values:
+                requested_counts[message] = requested_counts.get(message, 0) + 1
+        except TypeError:
+            return (None,) * len(values)
+        used: dict[ModelMessage, int] = {}
+        refs: list[TranscriptMessageRef | int | None] = []
+        for message in values:
+            candidates = by_message.get(message, ())
+            if not candidates or (
+                len(candidates) > 1
+                and requested_counts.get(message, 0) != len(candidates)
+            ):
+                refs.append(None)
+                continue
+            offset = used.get(message, 0)
+            if offset >= len(candidates):
+                refs.append(None)
+                continue
+            used[message] = offset + 1
+            refs.append(self._source_refs[candidates[offset]])
+        return tuple(refs)
+
     def begin_model_interaction(
         self,
         fact: ModelRequestFact,
@@ -240,16 +276,21 @@ class RuntimeCaptureStore:
         model_id: str | None = None,
         source_messages: Sequence[ModelMessage] | None = None,
     ) -> None:
-        del source_messages
         frozen = freeze_model_messages(messages)
+        if source_messages is None:
+            source = tuple(self._source_messages)
+            source_refs = tuple(self._source_refs)
+        else:
+            source = freeze_model_messages(source_messages)
+            source_refs = self._source_refs_for(source)
         projection = build_context_projection(
-            self._source_messages,
+            source,
             frozen,
             lambda payload: self._interaction_store.intern_payload(
                 self._step_run_id,
                 payload,
             ),
-            source_refs=self._source_refs,
+            source_refs=source_refs,
         )
         _envelope, envelope_bytes = request_envelope(
             model_settings=model_settings,
