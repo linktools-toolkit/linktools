@@ -961,7 +961,6 @@ def _normalize_path(value: "str | Path") -> Path:
 
 def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
     return {
-        "store_id": ref.store_id,
         "key": ref.key,
         "digest": ref.digest,
         "size": ref.size,
@@ -969,14 +968,10 @@ def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
 
 
 def _object_ref_from_payload(value: object) -> ObjectRef:
-    if not isinstance(value, Mapping) or set(value) != {
-        "store_id",
-        "key",
-        "digest",
-        "size",
-    }:
+    required = {"key", "digest", "size"}
+    if not isinstance(value, Mapping) or not required.issubset(value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    store_id = value["store_id"]
+    store_id = value.get("store_id", "runtime")
     key = value["key"]
     digest = value["digest"]
     size = value["size"]
