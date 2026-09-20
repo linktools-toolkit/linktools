@@ -9,6 +9,7 @@ from time import monotonic
 from uuid import uuid4
 
 from linktools.core import environ
+from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
 from .._model_interaction import StagedModelInteraction
