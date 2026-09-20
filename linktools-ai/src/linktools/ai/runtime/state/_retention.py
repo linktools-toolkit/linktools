@@ -98,9 +98,6 @@ class RuntimeRetentionController:
         # Forked sessions may still reference transient conversation state.
         del session_id, tenant_id, continuation
 
-    async def release_evaluation(self, evaluation_id: str, *, tenant_id: str) -> None:
-        del evaluation_id, tenant_id
-
     async def close(self) -> None:
         if self._closed:
             return
