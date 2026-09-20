@@ -125,6 +125,7 @@ def _fixture(tmp_path: Path) -> _BindingFixture:
             (LocalSkillResourceSource("application", skill_root),)
         ),
         objects,
+        snapshot_resources=True,
     )
     return _BindingFixture(
         compiler,
