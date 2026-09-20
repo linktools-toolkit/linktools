@@ -664,16 +664,23 @@ class DefaultEventService:
                         return
 
             replay_cursor = after_sequence if after_sequence > base_sequence else None
+            ephemeral_semantic_count = 0
             poll_backoff = 1.0
             async for item in live:
                 if isinstance(item, _LiveReplayRequired):
                     await live.close()
+                    skipped = 0
                     async for event in self._stream_durable(
                         execution_id,
                         tenant_id=principal.tenant_id,
                         after_sequence=cursor,
                     ):
+                        if skipped < ephemeral_semantic_count:
+                            skipped += 1
+                            continue
                         yield event
+                    if skipped != ephemeral_semantic_count:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     return
                 if replay_cursor is not None:
                     if isinstance(item, ExecutionDelta):
@@ -717,35 +724,25 @@ class DefaultEventService:
                         {"text": item.content, "stream_truncated": item.stream_truncated},
                     )
                     continue
-                while item.durable_sequence is None:
-                    if live.replay_required:
-                        await live.close()
-                        async for event in self._stream_durable(
-                            execution_id,
-                            tenant_id=principal.tenant_id,
-                            after_sequence=cursor,
-                        ):
-                            yield event
-                        return
-                    if self._live.is_completed(execution_id):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    try:
-                        await asyncio.wait_for(
-                            self._live.wait_for_activity(execution_id),
-                            timeout=poll_backoff,
-                        )
-                    except TimeoutError:
-                        poll_backoff = min(30.0, poll_backoff * 2)
-                    else:
-                        poll_backoff = 1.0
+                if item.durable_sequence is None:
+                    ephemeral_semantic_count += 1
+                    yield ExecutionStreamEvent(
+                        item.execution_id,
+                        None,
+                        item.event_type,
+                        item.payload,
+                    )
+                    continue
                 poll_backoff = 1.0
                 if item.durable_sequence <= after_sequence:
                     if item.event_type in _TERMINAL_EVENT_TYPES:
                         return
                     continue
-                if item.durable_sequence != cursor + 1:
+                expected_sequence = cursor + ephemeral_semantic_count + 1
+                if item.durable_sequence != expected_sequence:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 cursor = item.durable_sequence
+                ephemeral_semantic_count = 0
                 yield ExecutionStreamEvent(
                     item.execution_id,
                     item.durable_sequence,

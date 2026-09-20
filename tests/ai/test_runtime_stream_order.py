@@ -209,6 +209,92 @@ async def test_live_durable_terminal_publication_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_stream_emits_pending_semantic_event_immediately() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    service = _service(_execution(), _EventReader({}), broker)
+    principal = Principal("user", "tenant", "user")
+    iterator = service.stream(
+        "execution",
+        principal=principal,
+    ).__aiter__()
+
+    pending = asyncio.create_task(anext(iterator))
+    await asyncio.sleep(0)
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.TOOL_CALL_STARTED,
+        {"call_id": "call", "tool_name": "tool"},
+        durable_sequence=None,
+    )
+    event = await asyncio.wait_for(pending, timeout=1.0)
+    assert event.durable_sequence is None
+    assert event.event_type == ExecutionEventType.TOOL_CALL_STARTED
+
+    await iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_overflow_skips_semantic_events_already_emitted_ephemerally() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    events = _EventReader({})
+    service = _service(
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=260, event_sequence=260),
+        events,
+        broker,
+    )
+    principal = Principal("user", "tenant", "user")
+    iterator = service.stream(
+        "execution",
+        principal=principal,
+    ).__aiter__()
+
+    first_task = asyncio.create_task(anext(iterator))
+    await asyncio.sleep(0)
+    first_payload = {"call_id": "call-1", "tool_name": "tool"}
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.TOOL_CALL_STARTED,
+        first_payload,
+        durable_sequence=None,
+    )
+    first = await asyncio.wait_for(first_task, timeout=1.0)
+    assert first.durable_sequence is None
+    assert first.payload == first_payload
+
+    broker.confirm_events("execution", first_sequence=1, count=1)
+    durable = tuple(
+        ExecutionEvent(
+            "execution",
+            sequence,
+            ExecutionEventType.EXECUTION_SUCCEEDED
+            if sequence == 260
+            else ExecutionEventType.TOOL_CALL_STARTED,
+            {}
+            if sequence == 260
+            else {"call_id": f"call-{sequence}", "tool_name": "tool"},
+        )
+        for sequence in range(1, 261)
+    )
+    events.pages[0] = durable
+    for event in durable[1:]:
+        broker.publish_event(
+            event.execution_id,
+            event.event_type,
+            event.payload,
+            durable_sequence=event.sequence,
+        )
+    broker.complete("execution")
+
+    remaining = [item async for item in iterator]
+    assert [item.durable_sequence for item in remaining] == list(range(2, 261))
+    assert remaining[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+
+
+@pytest.mark.asyncio
 async def test_live_broker_durable_overflow_switches_to_repository_replay() -> None:
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
