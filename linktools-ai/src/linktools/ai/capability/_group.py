@@ -553,7 +553,7 @@ class CapabilityGroup(Generic[AppT]):
                 contract,
             )
         )
-        return registered
+        return handler
 
     def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
         """Register one pure application-owned TaskGraph expander version."""
