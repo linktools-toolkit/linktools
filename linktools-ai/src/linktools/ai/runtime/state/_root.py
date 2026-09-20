@@ -47,6 +47,7 @@ from ._store import (
 from ._snapshot import SnapshotLimits
 from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from ._codec import (
+    _iter_runtime_object_dependencies,
     decode_fact,
     decode_operation,
     decode_record,
@@ -54,7 +55,6 @@ from ._codec import (
     encode_operation,
     encode_record,
     iter_runtime_object_refs,
-    _iter_runtime_object_dependencies,
 )
 
 if TYPE_CHECKING:
