@@ -7,9 +7,9 @@ import hashlib
 from ..core import canonical_sha256
 
 
-def grant_key(namespace: str) -> bytes:
-    """Return the namespace-scoped key used for local capability grants."""
-    return hashlib.sha256(f"workspace:{namespace}".encode()).digest()
+def token_seed(namespace: str) -> bytes:
+    """Return a deterministic namespace-scoped seed for opaque Runtime tokens."""
+    return hashlib.sha256(f"runtime-token-v1:{namespace}".encode()).digest()
 
 
 def task_capability_snapshot_key(
@@ -31,4 +31,4 @@ def task_capability_snapshot_key(
     return f"v1/task-capability-snapshot/{digest}"
 
 
-__all__ = ["grant_key", "task_capability_snapshot_key"]
+__all__ = ["task_capability_snapshot_key", "token_seed"]
