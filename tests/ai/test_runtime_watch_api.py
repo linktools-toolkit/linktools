@@ -192,7 +192,6 @@ async def test_execution_list_events_uses_runtime_history_query_surface() -> Non
     execution = Execution(
         _Runtime(),
         "execution",
-        "binding",
         Principal("owner", "tenant"),
         _watch_tree,
     )
@@ -210,7 +209,6 @@ async def test_execution_watch_projects_complete_execution_tree() -> None:
     execution = Execution(
         runtime,
         "execution",
-        "binding",
         Principal("owner", "tenant"),
         _watch_tree,
     )
