@@ -331,13 +331,8 @@ class RuntimeSnapshot:
             generation = secrets.token_hex(16)
             locks = root / ".runtime-snapshot-locks"
             locks.mkdir(parents=True, exist_ok=True)
-            generation_lock = FileLock(
-                str(locks / f"{generation}.lock"),
-                thread_local=False,
-            )
-            await asyncio.to_thread(generation_lock.acquire)
             staging = root / ".staging" / generation
-            try:
+            async with FilesystemMutationLock(locks / f"{generation}.lock"):
                 staging.mkdir(parents=True, exist_ok=False)
                 (staging / ".runtime-snapshot-staging").write_text(
                     generation,
@@ -410,8 +405,6 @@ class RuntimeSnapshot:
                             generation_root if generation_root.exists() else staging,
                             True,
                         )
-            finally:
-                await asyncio.to_thread(generation_lock.release)
 
         if replace_policy != "replace":
             return await restore_generation()
