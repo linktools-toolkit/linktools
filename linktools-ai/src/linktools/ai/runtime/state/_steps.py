@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import replace
 from time import monotonic
 from uuid import uuid4
 
