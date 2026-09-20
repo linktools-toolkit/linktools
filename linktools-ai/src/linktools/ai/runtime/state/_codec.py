@@ -1764,7 +1764,7 @@ def _iter_agent_binding_object_refs(
         yield from _iter_agent_binding_object_refs(child, domain)
 
 
-def _iter_runtime_object_dependencies(
+def iter_runtime_object_dependencies(
     reference: ObjectRef,
     payload: bytes,
     *,
@@ -2596,6 +2596,7 @@ __all__ = [
     "encode_fact",
     "encode_operation",
     "encode_record",
+    "iter_runtime_object_dependencies",
     "iter_runtime_object_refs",
     "parse_envelope",
     "wire_type_id",
