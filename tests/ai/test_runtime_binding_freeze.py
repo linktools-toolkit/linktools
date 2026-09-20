@@ -236,7 +236,7 @@ async def test_runtime_start_admits_frozen_binding(tmp_path: Path) -> None:
         None,
         namespace="namespace",
         context=RuntimeContext(None),
-        binding_freezer=fixture.freezer,
+        _binding_freezer=fixture.freezer,
     )
 
     started = await runtime._start_for_agent(
