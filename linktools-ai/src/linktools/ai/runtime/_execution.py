@@ -2621,7 +2621,10 @@ class DefaultExecutionService:
         previous = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
-        if previous.parent_execution_id is not None:
+        if (
+            previous.parent_execution_id is not None
+            or not isinstance(previous.binding, AgentBindingSnapshot)
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
@@ -2660,7 +2663,10 @@ class DefaultExecutionService:
         previous = await self._load_authorized(
             execution_id, request.principal, AuthorizationAction.EXECUTION_READ
         )
-        if previous.parent_execution_id is not None:
+        if (
+            previous.parent_execution_id is not None
+            or not isinstance(previous.binding, AgentBindingSnapshot)
+        ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
