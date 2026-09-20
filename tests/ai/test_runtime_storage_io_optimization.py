@@ -275,7 +275,6 @@ async def test_filesystem_object_store_syncs_payload_before_publish(
     def publish(
         temporary: Path,
         destination: Path,
-        metadata: Path,
         key: str,
         size: int,
         digest: str,
@@ -284,7 +283,6 @@ async def test_filesystem_object_store_syncs_payload_before_publish(
         return original_publish(
             temporary,
             destination,
-            metadata,
             key,
             size,
             digest,
