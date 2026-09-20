@@ -84,6 +84,7 @@ class SubagentDispatcher:
         refs: "tuple[SubagentRef, ...]",
         binding: AgentBindingSnapshot,
         mode: ExecutionMode,
+        require_frozen_bindings: bool = False,
     ) -> SubagentDelegate:
         if not isinstance(binding, AgentBindingSnapshot):
             raise TypeError("binding must be AgentBindingSnapshot")
@@ -91,6 +92,15 @@ class SubagentDispatcher:
         if len(allowed) != len(refs):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         frozen_children = dict(binding.subagent_binding_map)
+        if require_frozen_bindings and set(frozen_children) != set(allowed):
+            missing = tuple(sorted(set(allowed).difference(frozen_children)))
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "subagent_binding",
+                    "agent_ids": list(missing),
+                },
+            )
         if frozen_children and set(frozen_children) != set(allowed):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
