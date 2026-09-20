@@ -683,9 +683,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 + source_head.message_count
             )
             committed_total = (
-                physical_total
+                0
                 if source.continuation is None
-                or source.continuation.message_count is None
+                else physical_total
+                if source.continuation.message_count is None
                 else source.continuation.message_count
             )
             if (
