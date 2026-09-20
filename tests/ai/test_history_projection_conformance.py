@@ -101,16 +101,17 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
 
 
 def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     old = ModelRequest(
         parts=(
             SystemPromptPart(content="old"),
-            UserPromptPart(content="hello"),
+            UserPromptPart(content="hello", timestamp=timestamp),
         )
     )
     new = ModelRequest(
         parts=(
             SystemPromptPart(content="new"),
-            UserPromptPart(content="hello"),
+            UserPromptPart(content="hello", timestamp=timestamp),
         )
     )
 
@@ -121,7 +122,7 @@ def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transcript_overlap_ignores_framework_stamped_fields(
+async def test_legacy_transcript_overlap_keeps_framework_stamped_occurrence(
     tmp_path: Path,
 ) -> None:
     state = RuntimeState.filesystem(tmp_path / "runtime")
@@ -170,11 +171,13 @@ async def test_transcript_overlap_ignores_framework_stamped_fields(
         context = await archive.load_loaded_model_context(owner_id="run")
         context_messages = context.model_messages()
 
-        assert len(messages) == 2
+        assert len(messages) == 3
         assert isinstance(messages[0], ModelRequest)
-        assert isinstance(messages[1], ModelResponse)
+        assert isinstance(messages[1], ModelRequest)
+        assert isinstance(messages[2], ModelResponse)
         assert messages[0].parts[0].content == "hello"
-        assert messages[1].parts[0].content == "done"
+        assert messages[1].instructions == "instruction"
+        assert messages[2].parts[0].content == "done"
         assert len(context_messages) == 2
         assert isinstance(context_messages[0], ModelRequest)
         assert context_messages[0].instructions == "instruction"
