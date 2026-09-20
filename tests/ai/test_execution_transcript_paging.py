@@ -14,6 +14,7 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
+    step_conversation_id,
     step_run_id,
 )
 from linktools.ai.runtime._history import StepExecutionHistoryReader
@@ -107,7 +108,11 @@ class _RangedStore:
             return None
         return RunRecord(
             run_id=run_id,
-            conversation_id=None,
+            conversation_id=step_conversation_id(
+                namespace="history",
+                tenant_id="tenant",
+                execution_id="execution",
+            ),
             parent_run_id=None,
             agent_name=None,
             metadata={"segment_sequence": "1"},
