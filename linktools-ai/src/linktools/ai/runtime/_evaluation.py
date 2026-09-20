@@ -189,7 +189,9 @@ class DefaultEvaluationService:
                     )
                 )
             else:
-                await self._require_execution(record)
+                source = await self._require_execution(record)
+                if source.binding_digest != binding_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if (
                     existing is not None
                     and existing.status is not IdempotencyStatus.COMPLETED
