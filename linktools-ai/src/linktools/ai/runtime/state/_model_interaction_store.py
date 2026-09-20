@@ -6,10 +6,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from itertools import islice
-
-from pydantic_ai.messages import ModelMessage
-
 from ...errors import AIError, ErrorCode
 from ...storage import StoredPayload
 from .._model_interaction import (
@@ -17,8 +13,6 @@ from .._model_interaction import (
     StagedContextSpan,
     StagedModelInteraction,
     context_projection_to_durable,
-    extend_prefix_digest,
-    message_prefix_digest,
 )
 from ._contracts import (
     ContextProjection,
@@ -76,28 +70,29 @@ class ModelInteractionInMemoryStepArchive(InMemoryStepArchive):
         run: RunRecord,
         interactions: Sequence[StagedModelInteraction],
         payload: Callable[[str], bytes],
-        source_messages: Sequence[ModelMessage] | None = None,
+        *,
+        local_message_base: int = 0,
+        local_message_count: int = 0,
     ) -> tuple[ModelInteractionRecord, ...]:
         values = _validate_interaction_batch(run, interactions)
-        if not values:
-            return ()
-        required_count = _required_source_message_count(values)
-        if source_messages is not None and len(source_messages) >= required_count:
-            prefix_messages: Sequence[ModelMessage] = source_messages
-        else:
-            snapshot = await self.latest_snapshot(
-                run_id=run.run_id,
-                include_interrupted=True,
-            )
-            prefix_messages = () if snapshot is None else snapshot.messages
-        _validate_interaction_sources(values, prefix_messages)
+        if local_message_base < 0 or local_message_count < 0:
+            raise ValueError("local interaction transcript range is invalid")
 
         def prepare_context(staged: StagedContextProjection) -> ContextProjection:
+            for item in staged.items:
+                if isinstance(item, StagedContextSpan) and item.end > local_message_count:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if isinstance(item, TranscriptSpanRef) and (
+                    item.source_domain is not self.runtime_domain
+                    or item.owner_id != run.run_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
             return context_projection_to_durable(
                 staged,
                 owner_id=run.run_id,
                 source_domain=self.runtime_domain,
                 payload=payload,
+                local_message_base=local_message_base,
             )
 
         return tuple(
@@ -199,78 +194,17 @@ class ModelInteractionStateStepArchive(StateStepArchive):
         run: RunRecord,
         interactions: Sequence[StagedModelInteraction],
         payload: Callable[[str], bytes],
-        source_messages: Sequence[ModelMessage] | None = None,
+        *,
+        local_message_base: int = 0,
+        local_message_count: int = 0,
     ) -> tuple[ModelInteractionRecord, ...]:
-        values = _validate_interaction_batch(run, interactions)
-        if not values:
-            return ()
-        required_count = _required_source_message_count(values)
-        if source_messages is not None and len(source_messages) >= required_count:
-            prefix_messages: Sequence[ModelMessage] = source_messages
-        else:
-            prefix_messages = await self._history.load_messages(run.run_id)
-        _validate_interaction_sources(values, prefix_messages)
-
-        prepared_payloads: dict[str, RuntimePayloadRef] = {}
-
-        async def prepare_payload(digest: str) -> RuntimePayloadRef:
-            prepared = prepared_payloads.get(digest)
-            if prepared is not None:
-                return prepared
-            prepared = await self._prepare_inline_payload(
-                run.run_id,
-                RuntimePayloadRef(
-                    StoredPayload.inline_bytes(payload(digest)),
-                    self.runtime_domain,
-                ),
-            )
-            prepared_payloads[digest] = prepared
-            return prepared
-
-        async def prepare_context(
-            staged: StagedContextProjection,
-        ) -> ContextProjection:
-            projection = context_projection_to_durable(
-                staged,
-                owner_id=run.run_id,
-                source_domain=self.runtime_domain,
-                payload=payload,
-            )
-            items = []
-            for item in projection.items:
-                if isinstance(item, TranscriptSpanRef):
-                    items.append(item)
-                    continue
-                items.append(
-                    InlineContextBlock(
-                        await prepare_payload(item.content.payload.digest)
-                    )
-                )
-            return ContextProjection(tuple(items))
-
-        result: list[ModelInteractionRecord] = []
-        for staged in values:
-            result.append(
-                ModelInteractionRecord(
-                    staged.run_id,
-                    staged.step_index,
-                    staged.request_sequence,
-                    staged.purpose,
-                    staged.output_retry_index,
-                    staged.model,
-                    await prepare_context(staged.request_context),
-                    await prepare_payload(staged.request_envelope_digest),
-                    None
-                    if staged.response_context is None
-                    else await prepare_context(staged.response_context),
-                    staged.status,
-                    staged.error_code,
-                    staged.duration_ns,
-                    staged.usage,
-                    staged.attachments,
-                )
-            )
-        return tuple(result)
+        return await super().prepare_interactions(
+            run,
+            interactions,
+            payload,
+            local_message_base=local_message_base,
+            local_message_count=local_message_count,
+        )
 
     async def list_model_interactions(
         self,
@@ -453,83 +387,6 @@ def _validate_interaction_batch(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         sequences.add(interaction.request_sequence)
     return values
-
-
-def _required_source_message_count(
-    interactions: Sequence[StagedModelInteraction],
-) -> int:
-    return max(
-        (
-            max(
-                projection.source_message_count,
-                max(
-                    (
-                        item.end
-                        for item in projection.items
-                        if isinstance(item, StagedContextSpan)
-                    ),
-                    default=0,
-                ),
-            )
-            for interaction in interactions
-            for projection in (
-                interaction.request_context,
-                *(
-                    ()
-                    if interaction.response_context is None
-                    else (interaction.response_context,)
-                ),
-            )
-        ),
-        default=0,
-    )
-
-
-def _validate_interaction_sources(
-    interactions: Sequence[StagedModelInteraction],
-    source_messages: Sequence[ModelMessage],
-) -> None:
-    required_count = _required_source_message_count(interactions)
-    if required_count > len(source_messages):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    prefix_counts = {
-        projection.source_message_count
-        for interaction in interactions
-        for projection in (
-            interaction.request_context,
-            *(
-                ()
-                if interaction.response_context is None
-                else (interaction.response_context,)
-            ),
-        )
-        if projection.source_prefix_digest != "0" * 64
-    }
-    digest = message_prefix_digest(())
-    checkpoints = {0: digest} if 0 in prefix_counts else {}
-    max_prefix = max(prefix_counts, default=0)
-    for index, message in enumerate(islice(source_messages, max_prefix), 1):
-        digest = extend_prefix_digest(digest, message)
-        if index in prefix_counts:
-            checkpoints[index] = digest
-    for interaction in interactions:
-        for projection in (
-            interaction.request_context,
-            *(
-                ()
-                if interaction.response_context is None
-                else (interaction.response_context,)
-            ),
-        ):
-            if projection.source_prefix_digest == "0" * 64:
-                continue
-            if checkpoints.get(projection.source_message_count) != (
-                projection.source_prefix_digest
-            ):
-                raise AIError(
-                    ErrorCode.STORAGE_INTEGRITY_ERROR,
-                    "model interaction source prefix digest mismatch",
-                )
 
 
 def _stage_interaction(
