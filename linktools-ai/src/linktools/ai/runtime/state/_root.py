@@ -63,7 +63,6 @@ from ._codec import (
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from ._maintenance import RuntimeStorageInspection
     from ._materializer import _MaterializedRuntimeState
     from ._object_router import _RuntimeObjectRouter
     from ._retention import RuntimeRetentionController
@@ -109,7 +108,6 @@ class RuntimeState:
         self._objects: _RuntimeObjectRouter | None = None
         self._steps: RuntimeStepStore | None = None
         self._retention: RuntimeRetentionController | None = None
-        self._maintenance: RuntimeStorageInspection | None = None
         self._stores: dict[RuntimeDomain, StateStore] = {}
         self._read_only = False
 
@@ -350,7 +348,6 @@ class RuntimeState:
         self._objects = value.objects
         self._steps = value.steps
         self._retention = value.retention
-        self._maintenance = value.maintenance
         self._stores = dict(value.stores)
         self._close_actions = value.close_actions
         self._namespace = namespace
