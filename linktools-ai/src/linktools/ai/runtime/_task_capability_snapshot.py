@@ -2,26 +2,17 @@
 # -*- coding: utf-8 -*-
 """Private immutable capability snapshot used by admitted TaskGraphs."""
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import cast
 
-from ..agent import (
-    AgentBindingSnapshot,
-    AgentCatalog,
-    AgentCompiler,
-    SemanticPin,
-)
-from ..capability import (
-    SkillDefinition,
-    SkillSourceRegistry,
-    SnapshotSkillResourceSource,
-)
+from ..agent import AgentBindingSnapshot, AgentCompiler
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
+from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
+from ._binding_freeze import _RuntimeBindingFreezer
 
 _KIND = "task-capability-snapshot"
 _VERSION = 1
@@ -59,27 +50,23 @@ class TaskCapabilitySnapshotStore:
     def __init__(
         self,
         namespace: str,
-        catalog: AgentCatalog,
         compiler: AgentCompiler,
-        skill_sources: SkillSourceRegistry,
+        binding_freezer: _RuntimeBindingFreezer,
         object_store: ObjectStore,
         *,
         agent_task_type: str,
     ) -> None:
         if not isinstance(namespace, str) or not namespace:
             raise ValueError("namespace is required")
-        if not isinstance(catalog, AgentCatalog):
-            raise TypeError("catalog must be AgentCatalog")
         if not isinstance(compiler, AgentCompiler):
             raise TypeError("compiler must be AgentCompiler")
-        if not isinstance(skill_sources, SkillSourceRegistry):
-            raise TypeError("skill_sources must be SkillSourceRegistry")
+        if not isinstance(binding_freezer, _RuntimeBindingFreezer):
+            raise TypeError("binding_freezer must be _RuntimeBindingFreezer")
         if not isinstance(agent_task_type, str) or not agent_task_type:
             raise ValueError("agent_task_type is required")
         self._namespace = namespace
-        self._catalog = catalog
         self._compiler = compiler
-        self._skill_sources = skill_sources
+        self._binding_freezer = binding_freezer
         self._objects = object_store
         self._agent_task_type = agent_task_type
 
@@ -110,21 +97,18 @@ class TaskCapabilitySnapshotStore:
             snapshot.binding_digest: snapshot
             for snapshot in node_bindings
         }
-        required_roots: set[str] = set()
-        for snapshot in unique_bindings.values():
-            required_roots.update(snapshot.subagent_ids)
-        if any(node.expander is not None for node in graph.nodes):
-            required_roots.update(self._catalog.root_ids)
         skill_snapshots: dict[tuple[str, str], ObjectRef] = {}
-        roots = await self._freeze_roots(
-            required_roots,
-            skill_snapshots=skill_snapshots,
-        )
+        roots: dict[str, AgentBindingSnapshot] = {}
+        if any(node.expander is not None for node in graph.nodes):
+            for agent_id in self._binding_freezer.root_ids:
+                roots[agent_id] = await self._binding_freezer.freeze_root(
+                    agent_id,
+                    skill_snapshots=skill_snapshots,
+                )
         bindings: dict[str, AgentBindingSnapshot] = {}
         for binding_digest, snapshot in sorted(unique_bindings.items()):
-            bindings[binding_digest] = await self._freeze_binding(
+            bindings[binding_digest] = await self._binding_freezer.freeze_snapshot(
                 snapshot,
-                roots=roots,
                 skill_snapshots=skill_snapshots,
             )
 
@@ -205,136 +189,6 @@ class TaskCapabilitySnapshotStore:
             ),
             admission,
         )
-
-    async def _freeze_roots(
-        self,
-        agent_ids: set[str],
-        *,
-        skill_snapshots: dict[tuple[str, str], ObjectRef],
-    ) -> Mapping[str, AgentBindingSnapshot]:
-        if not agent_ids:
-            return MappingProxyType({})
-        pending = set(agent_ids)
-        base: dict[str, AgentBindingSnapshot] = {}
-        while pending:
-            agent_id = min(pending)
-            pending.remove(agent_id)
-            if agent_id in base:
-                continue
-            definition = self._catalog.root_definition(agent_id)
-            snapshot = await self._freeze_skills(
-                self._compiler.bind(
-                    definition,
-                    output=None,
-                ).snapshot,
-                skill_snapshots=skill_snapshots,
-            )
-            base[agent_id] = snapshot
-            pending.update(
-                child_id
-                for child_id in snapshot.subagent_ids
-                if child_id not in base
-            )
-
-        roots: dict[str, AgentBindingSnapshot] = {}
-        for agent_id in sorted(agent_ids):
-            snapshot = base[agent_id]
-            children = tuple(
-                self._compiler.bind_subagent(
-                    self._compiler.restore(base[child_id]).definition
-                ).snapshot
-                for child_id in snapshot.subagent_ids
-            )
-            roots[agent_id] = replace(
-                snapshot,
-                subagent_bindings=children,
-            )
-        return MappingProxyType(roots)
-
-    async def _freeze_binding(
-        self,
-        snapshot: AgentBindingSnapshot,
-        *,
-        roots: Mapping[str, AgentBindingSnapshot],
-        skill_snapshots: dict[tuple[str, str], ObjectRef],
-    ) -> AgentBindingSnapshot:
-        frozen = await self._freeze_skills(
-            snapshot,
-            skill_snapshots=skill_snapshots,
-        )
-        children: list[AgentBindingSnapshot] = []
-        for child_id in frozen.subagent_ids:
-            root = roots.get(child_id)
-            if root is None:
-                raise AIError(
-                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={
-                        "kind": "agent",
-                        "agent_id": child_id,
-                    },
-                )
-            children.append(
-                self._compiler.bind_subagent(
-                    self._compiler.restore(root).definition
-                ).snapshot
-            )
-        return replace(
-            frozen,
-            subagent_bindings=tuple(children),
-        )
-
-    async def _freeze_skills(
-        self,
-        snapshot: AgentBindingSnapshot,
-        *,
-        skill_snapshots: dict[tuple[str, str], ObjectRef],
-    ) -> AgentBindingSnapshot:
-        selected: list[SemanticPin] = []
-        for pin in snapshot.selected:
-            if pin.kind != "skill":
-                selected.append(pin)
-                continue
-            skill = SkillDefinition.from_semantic_contract(
-                cast("Mapping[str, object]", pin.contract)
-            )
-            source_ref = skill.source_ref
-            if source_ref is None or source_ref.snapshot is not None:
-                selected.append(pin)
-                continue
-            source = self._skill_sources.resolve(source_ref.source_id)
-            if not isinstance(source, SnapshotSkillResourceSource):
-                raise AIError(
-                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={
-                        "kind": "skill_snapshot",
-                        "skill_id": skill.id,
-                        "source_id": source_ref.source_id,
-                    },
-                )
-            source_key = (source_ref.source_id, source_ref.root)
-            reference = skill_snapshots.get(source_key)
-            if reference is None:
-                revision = await source.current_revision(source_ref.root)
-                if not isinstance(revision, StorageRevision):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                reference = await source.snapshot(
-                    source_ref.root,
-                    expected_revision=revision,
-                    object_store=self._objects,
-                )
-                skill_snapshots[source_key] = reference
-            frozen_skill = SkillDefinition(
-                skill.spec,
-                source_ref.with_snapshot(reference),
-            )
-            selected.append(
-                SemanticPin(
-                    "skill",
-                    pin.id,
-                    frozen_skill.semantic_contract,
-                )
-            )
-        return replace(snapshot, selected=tuple(selected))
 
     def _node_binding(
         self,
