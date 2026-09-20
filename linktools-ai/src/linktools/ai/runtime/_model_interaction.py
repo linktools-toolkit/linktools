@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from typing import cast
@@ -148,6 +149,7 @@ def build_context_projection(
     source_refs: Sequence[StagedContextSource] | None = None,
 ) -> StagedContextProjection:
     source_values = tuple(source)
+    projected_values = tuple(projected)
     refs = (
         tuple(range(len(source_values)))
         if source_refs is None
@@ -159,6 +161,10 @@ def build_context_projection(
     signatures: dict[bytes, list[int]] = {}
     for index, message in enumerate(source_values):
         signatures.setdefault(_message_signature(message), []).append(index)
+    projected_signatures = tuple(
+        _message_signature(message) for message in projected_values
+    )
+    projected_counts = Counter(projected_signatures)
     next_candidate: dict[bytes, int] = {}
     items: list[StagedContextItem] = []
 
@@ -201,15 +207,20 @@ def build_context_projection(
             raise TypeError("context source reference is invalid")
         return False
 
-    for message in projected:
-        signature = _message_signature(message)
+    for message, signature in zip(
+        projected_values,
+        projected_signatures,
+        strict=True,
+    ):
         candidates = signatures.get(signature, ())
         candidate_index = next_candidate.get(signature, 0)
-        source_index = (
-            candidates[candidate_index]
-            if candidate_index < len(candidates)
-            else None
-        )
+        source_index = None
+        if len(candidates) == 1 or projected_counts[signature] == len(candidates):
+            source_index = (
+                candidates[candidate_index]
+                if candidate_index < len(candidates)
+                else None
+            )
         if source_index is not None:
             next_candidate[signature] = candidate_index + 1
             if append_source(refs[source_index]):
