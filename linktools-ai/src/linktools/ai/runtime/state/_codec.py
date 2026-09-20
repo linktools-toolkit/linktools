@@ -1725,6 +1725,89 @@ def _iter_enveloped_runtime_object_refs(
     yield from _iter_runtime_object_refs(payload, default_domain, codec)
 
 
+def _iter_agent_binding_object_refs(
+    snapshot: AgentBindingSnapshot,
+    domain: RuntimeDomain,
+) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
+    for pin in snapshot.selected:
+        if pin.kind != "skill":
+            continue
+        source = pin.contract.get("source")
+        if source is None:
+            continue
+        if not isinstance(source, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raw = source.get("snapshot")
+        if raw is None:
+            continue
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "store_id",
+            "key",
+            "digest",
+            "size",
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        size = raw["size"]
+        if isinstance(size, bool) or not isinstance(size, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            reference = ObjectRef(
+                cast(str, raw["store_id"]),
+                cast(str, raw["key"]),
+                cast(str, raw["digest"]),
+                size,
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        yield domain, reference
+    for child in snapshot.subagent_bindings:
+        yield from _iter_agent_binding_object_refs(child, domain)
+
+
+def _iter_runtime_object_dependencies(
+    reference: ObjectRef,
+    payload: bytes,
+    *,
+    default_domain: RuntimeDomain,
+) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
+    if not reference.key.startswith("v1/skill-source-snapshot/"):
+        return
+    try:
+        manifest = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("kind") != "skill-source-snapshot"
+        or manifest.get("format_version") != 1
+        or not isinstance(manifest.get("resources"), list)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    for item in cast(list[object], manifest["resources"]):
+        if not isinstance(item, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        content = item.get("content")
+        if not isinstance(content, Mapping) or set(content) != {
+            "key",
+            "digest",
+            "size",
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        size = content["size"]
+        if isinstance(size, bool) or not isinstance(size, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            nested = ObjectRef(
+                reference.store_id,
+                cast(str, content["key"]),
+                cast(str, content["digest"]),
+                size,
+            )
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        yield default_domain, nested
+
+
 def _iter_runtime_object_refs(
     value: object,
     domain: RuntimeDomain,
@@ -1741,8 +1824,33 @@ def _iter_runtime_object_refs(
         source_domain = value.source_domain or domain
         yield from _iter_runtime_object_refs(value.payload, source_domain, codec)
         return
+    if isinstance(value, AgentBindingSnapshot):
+        yield from _iter_agent_binding_object_refs(value, domain)
+        return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
+        if dataclass_name == codec.wire_ids.get(ExecutionRecord):
+            fields_value = value.get("fields")
+            if not isinstance(fields_value, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for key, item in fields_value.items():
+                if (
+                    key == "binding"
+                    and isinstance(item, Mapping)
+                    and "$dataclass" not in item
+                ):
+                    binding = _decode_external(
+                        item,
+                        AgentBindingSnapshot,
+                        codec,
+                        persisted=True,
+                    )
+                    if not isinstance(binding, AgentBindingSnapshot):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    yield from _iter_agent_binding_object_refs(binding, domain)
+                    continue
+                yield from _iter_runtime_object_refs(item, domain, codec)
+            return
         if dataclass_name == codec.wire_ids[RuntimePayloadRef]:
             decoded = _decode_domain(
                 value,
