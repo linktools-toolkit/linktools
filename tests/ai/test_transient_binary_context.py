@@ -12,7 +12,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._message import (
     binary_content_usage,
     project_transient_binary_content,
@@ -82,12 +82,16 @@ def test_only_binary_after_latest_complete_response_remains_pending() -> None:
 
 
 def test_snapshot_context_projects_consumed_binary_even_without_compaction() -> None:
-    adapter = HarnessStepStoreAdapter(object(), execution_id="execution")  # type: ignore[arg-type]
+    capture = RuntimeCaptureStore(
+        object(),  # type: ignore[arg-type]
+        execution_id="execution",
+        step_run_id="run",
+    )
     request = _request("a.png", b"image")
     response = ModelResponse(parts=[TextPart("done")])
     raw = [request, response]
 
-    context = adapter.snapshot_context_messages(raw)
+    context = capture.snapshot_context(raw)[0]
 
     assert context is not None
     assert binary_content_usage(context) == (0, 0)
@@ -95,15 +99,19 @@ def test_snapshot_context_projects_consumed_binary_even_without_compaction() -> 
 
 
 def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
-    adapter = HarnessStepStoreAdapter(object(), execution_id="execution")  # type: ignore[arg-type]
+    capture = RuntimeCaptureStore(
+        object(),  # type: ignore[arg-type]
+        execution_id="execution",
+        step_run_id="run",
+    )
     consumed_request = _request("old.png", b"old")
     consumed_response = ModelResponse(parts=[TextPart("done")])
     source = (consumed_request, consumed_response)
     summary = ModelRequest(parts=[UserPromptPart(content="summary")])
-    adapter.remember_context_projection(source, (summary,))
+    capture.remember_context_projection(source, (summary,))
     pending = _request("new.png", b"new")
 
-    context = adapter.snapshot_context_messages((*source, pending))
+    context = capture.snapshot_context((*source, pending))[0]
 
     assert context is not None
     assert context[0] == summary
@@ -117,7 +125,16 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
     await store.initialize()
     await store.register_run(RunRecord("pending"))
     await store.register_run(RunRecord("consumed"))
-    adapter = HarnessStepStoreAdapter(store, execution_id=None)
+    pending_capture = RuntimeCaptureStore(
+        store,
+        execution_id=None,
+        step_run_id="pending",
+    )
+    consumed_capture = RuntimeCaptureStore(
+        store,
+        execution_id=None,
+        step_run_id="consumed",
+    )
     pending_request = _request("pending.png", b"pending")
     consumed_request = _request("consumed.png", b"consumed")
     consumed_response = ModelResponse(parts=[TextPart("done")])
@@ -127,7 +144,7 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
             run_id="pending",
             step_index=1,
             messages=[pending_request],
-            context_messages=adapter.snapshot_context_messages([pending_request]),
+            context_messages=pending_capture.snapshot_context([pending_request])[0],
         )
     )
     consumed_raw = [consumed_request, consumed_response]
@@ -136,7 +153,7 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
             run_id="consumed",
             step_index=1,
             messages=consumed_raw,
-            context_messages=adapter.snapshot_context_messages(consumed_raw),
+            context_messages=consumed_capture.snapshot_context(consumed_raw)[0],
         )
     )
 
