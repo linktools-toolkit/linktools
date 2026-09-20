@@ -60,8 +60,8 @@ def test_v1_skill_wire_and_semantic_pin_round_trip() -> None:
     }
 
 
-def test_v2_binding_restores_from_current_semantic_snapshot() -> None:
-    payload = _load_json("agent_binding_subagent_v2_golden.json")
+def test_v1_binding_restores_from_current_semantic_snapshot() -> None:
+    payload = _load_json("agent_binding_subagent_v1_golden.json")
     snapshot = AgentBindingSnapshot.from_payload(payload)
     compiler = _compiler(
         {
@@ -83,11 +83,12 @@ def test_v2_binding_restores_from_current_semantic_snapshot() -> None:
 
 
 
-def test_v1_binding_snapshot_is_rejected() -> None:
+def test_future_binding_snapshot_version_is_rejected() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
+    payload["version"] = 2
     with pytest.raises(AIError) as raised:
         AgentBindingSnapshot.from_payload(payload)
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 def test_skill_and_agent_use_v1_declaration_contracts() -> None:
     skill = SkillSpec("review", "instructions", "Review changes")

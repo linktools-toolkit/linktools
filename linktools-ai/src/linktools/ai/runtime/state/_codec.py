@@ -1057,7 +1057,7 @@ _V2_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
         OperationTerminalUpdate: (
             "linktools.ai.runtime.state.OperationTerminalUpdate"
         ),
-        AgentBindingSnapshot: "linktools.ai.agent.AgentBindingSnapshot@2",
+        AgentBindingSnapshot: "linktools.ai.agent.AgentBindingSnapshot@1",
         ModelRequest: "pydantic_ai.messages.ModelRequest",
         ModelResponse: "pydantic_ai.messages.ModelResponse",
     }

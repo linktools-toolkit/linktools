@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ai.asset.sql")
 _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 _RETRY_LIMIT = 8
-_ASSET_INFO_VERSION = 2
+_ASSET_INFO_VERSION = 1
 _ASSET_INFO_FIELDS = frozenset(
     {
         "kind", "id", "revision", "store_revision", "etag", "size", "status",

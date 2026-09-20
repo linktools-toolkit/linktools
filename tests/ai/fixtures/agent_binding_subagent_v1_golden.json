@@ -5,10 +5,18 @@
     "model": "default",
     "system_prompt": "",
     "instructions": [],
-    "allow_tools": ["*"],
-    "allow_skills": ["*"],
-    "allow_subagents": ["child"],
-    "allow_capabilities": ["*"],
+    "allow_tools": [
+      "*"
+    ],
+    "allow_skills": [
+      "*"
+    ],
+    "allow_subagents": [
+      "child"
+    ],
+    "allow_capabilities": [
+      "*"
+    ],
     "usage_limits": null,
     "planning": false,
     "thinking": false,
@@ -23,7 +31,10 @@
   },
   "selected": [],
   "subagents": [
-    {"kind": "agent", "id": "child"}
+    {
+      "kind": "agent",
+      "id": "child"
+    }
   ],
   "output_mode": "text",
   "output_schema": {
@@ -33,7 +44,10 @@
         "type": "string"
       }
     },
-    "required": ["text"],
+    "required": [
+      "text"
+    ],
     "type": "object"
-  }
+  },
+  "version": 1
 }

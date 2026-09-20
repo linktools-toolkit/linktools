@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 _PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
 _PIN_FIELDS = frozenset({"kind", "id", "contract"})
-_BINDING_VERSION = 2
+_BINDING_VERSION = 1
 _BINDING_FIELDS = frozenset(
     {
         "version",
@@ -161,7 +161,7 @@ class AgentBindingSnapshot:
             "_binding_digest",
             canonical_sha256(
                 {
-                    "contract": "agent-binding-v2",
+                    "contract": "agent-binding-v1",
                     "snapshot": self.to_payload(),
                 }
             ),

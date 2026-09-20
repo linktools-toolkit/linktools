@@ -47,7 +47,7 @@ from ._receipt import (
 )
 
 _logger = environ.get_logger("ai.asset.filesystem")
-_GENERATION = 2
+_GENERATION = 1
 _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
 

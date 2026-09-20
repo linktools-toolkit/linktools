@@ -41,5 +41,6 @@
       "text"
     ],
     "type": "object"
-  }
+  },
+  "version": 1
 }
