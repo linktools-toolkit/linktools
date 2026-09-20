@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
+import linktools.ai.storage._object as object_contract
 import linktools.ai.storage._object_filesystem as object_module
 from linktools.ai.asset import (
     AssetCacheAdapter,
@@ -152,6 +153,41 @@ async def test_sql_object_delete_settles_before_propagating_cancellation(
         assert store.pending_background_tasks == ()
         assert await store.stat("payload") is None
     finally:
+        await engine.dispose()
+
+
+async def test_sqlite_object_open_does_not_hold_reader_while_consumer_pauses(
+    tmp_path: Path,
+) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
+    await provision_database(engine)
+    store = SqlObjectStore(engine)
+    payload = b"x" * (object_contract._CHUNK_SIZE + 17)
+    digest = hashlib.sha256(payload).hexdigest()
+    await store.put(
+        "payload",
+        _chunks(payload),
+        expected_size=len(payload),
+        expected_digest=digest,
+    )
+    stream = store.open("payload")
+    delete_task: asyncio.Task[bool] | None = None
+    try:
+        received = bytearray(await anext(stream))
+        delete_task = asyncio.create_task(
+            store.delete_object("payload", expected_digest=digest)
+        )
+        done, _ = await asyncio.wait({delete_task}, timeout=2)
+        assert delete_task in done
+        assert delete_task.result() is True
+
+        async for chunk in stream:
+            received.extend(chunk)
+        assert bytes(received) == payload
+    finally:
+        await stream.aclose()
+        if delete_task is not None and not delete_task.done():
+            await delete_task
         await engine.dispose()
 
 

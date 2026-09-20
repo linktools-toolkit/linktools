@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from ..errors import AIError, ErrorCode
 from ._database import create_sql_storage_context
@@ -349,11 +349,34 @@ class SqlObjectStore:
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
+        if self._context.dialect.name != "sqlite":
+            stream = self._stream_open(key)
+            try:
+                async for value in stream:
+                    yield value
+            finally:
+                await stream.aclose()
+            return
+
+        temporary = await asyncio.to_thread(tempfile.TemporaryFile)
+        try:
+            await self._stage_open(key, temporary)
+            await asyncio.to_thread(temporary.seek, 0)
+            while True:
+                value = await asyncio.to_thread(temporary.read, _CHUNK_SIZE)
+                if not value:
+                    break
+                yield value
+        finally:
+            await asyncio.to_thread(temporary.close)
+
+    async def _stream_open(self, key: str) -> AsyncIterator[bytes]:
         from sqlalchemy import select
 
         table = self._metadata.tables["ai_objects"]
         chunks = self._metadata.tables["ai_object_chunks"]
         session = self._context.sessions()
+        result = None
         try:
             header = (
                 (
@@ -392,7 +415,17 @@ class SqlObjectStore:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         finally:
+            if result is not None:
+                await result.close()
             await session.close()
+
+    async def _stage_open(self, key: str, handle: BinaryIO) -> None:
+        stream = self._stream_open(key)
+        try:
+            async for value in stream:
+                await asyncio.to_thread(handle.write, value)
+        finally:
+            await stream.aclose()
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)

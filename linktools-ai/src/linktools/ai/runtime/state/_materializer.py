@@ -13,6 +13,7 @@ from linktools.core import environ
 from ...core import canonical_sha256
 from ...errors import AIError, ErrorCode
 from ...storage import (
+    FilesystemMutationLock,
     ObjectStore,
     SqlStorageContext,
     build_object_sql_metadata,
@@ -171,11 +172,9 @@ async def materialize_runtime_state(
 
         for key, domains in sql_groups.items():
             route = sql_routes[key]
-            bootstrap_local_schema = False
             if key[0] == "sqlite":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                bootstrap_local_schema = not route.path.exists()
                 if not read_only:
                     await asyncio.to_thread(
                         route.path.parent.mkdir, parents=True, exist_ok=True
@@ -202,10 +201,16 @@ async def materialize_runtime_state(
                     for domain in domains
                 ):
                     build_object_sql_metadata(metadata=metadata)
-                if bootstrap_local_schema and not read_only:
-                    await context.initialize()
-                    async with context.engine.begin() as connection:
-                        await connection.run_sync(metadata.create_all)
+                if key[0] == "sqlite" and not read_only:
+                    if route.path is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    async with FilesystemMutationLock(
+                        route.path.with_name(route.path.name + ".init.lock")
+                    ):
+                        if not route.path.exists():
+                            await context.initialize()
+                            async with context.engine.begin() as connection:
+                                await connection.run_sync(metadata.create_all)
                 elif read_only and key[0] == "sqlite":
                     await context.initialize()
                 group = SqlStateStorageGroup(

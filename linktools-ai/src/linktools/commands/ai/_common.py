@@ -10,8 +10,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-from filelock import FileLock
-
 from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
@@ -22,6 +20,7 @@ from linktools.ai.migrate import provision_metrics_sqlite, validate_metrics_sqli
 from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.storage import FilesystemMutationLock
 from linktools.ai.workspace import Workspace
 
 ResultT = TypeVar("ResultT")
@@ -70,7 +69,7 @@ async def _local_metrics(workspace: Workspace) -> Metrics:
     runtime_root = _local_runtime_root(workspace)
     runtime_root.mkdir(parents=True, exist_ok=True)
     path = runtime_root / "metrics.db"
-    with FileLock(str(path) + ".lock"):
+    async with FilesystemMutationLock(str(path) + ".lock"):
         if path.exists():
             await validate_metrics_sqlite(path)
         else:
