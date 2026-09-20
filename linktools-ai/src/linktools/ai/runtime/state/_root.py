@@ -50,7 +50,7 @@ from ._snapshot import SnapshotLimits
 from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from ._codec import (
     _decode_enveloped_domain,
-    _iter_runtime_object_dependencies,
+    iter_runtime_object_dependencies,
     decode_fact,
     decode_operation,
     decode_record,
@@ -493,7 +493,7 @@ class RuntimeState:
                     expected_digest=reference.digest,
                     expected_size=reference.size,
                 )
-                for nested_domain, nested in _iter_runtime_object_dependencies(
+                for nested_domain, nested in iter_runtime_object_dependencies(
                     reference,
                     payload,
                     default_domain=source_domain,
@@ -865,7 +865,7 @@ class RuntimeState:
                 expected_digest=content_ref.digest,
                 expected_size=content_ref.size,
             )
-            for nested_domain, nested in _iter_runtime_object_dependencies(
+            for nested_domain, nested in iter_runtime_object_dependencies(
                 source,
                 dependency_payload,
                 default_domain=domain,
