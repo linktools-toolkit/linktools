@@ -10,13 +10,20 @@ from typing import cast
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, SemanticPin, bind_output, restore_output
 from linktools.ai.capability import CapabilityGroup, workspace_capabilities
-from linktools.ai.core import IdempotencyStatus, JsonValue, OperationStatus, canonical_json_bytes
+from linktools.ai.core import (
+    EvaluationStatus,
+    IdempotencyStatus,
+    JsonValue,
+    OperationStatus,
+    canonical_json_bytes,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import (
     ContextProjection,
+    EvaluationRecord,
     IdempotencyTerminalUpdate,
     OperationTerminalUpdate,
 )
@@ -197,6 +204,48 @@ def test_custom_wire_v1_fixture_matches_current_shape() -> None:
     value = _load_json("runtime_custom_wire_v1.json")
     assert isinstance(value, Mapping)
     assert value == _custom_wire_values()
+
+
+def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    current = EvaluationRecord(
+        evaluation_id="evaluation",
+        execution_id="execution",
+        dataset_digest="dataset-digest",
+        binding_digest="a" * 64,
+        status=EvaluationStatus.SUCCEEDED,
+        revision=2,
+        created_at=now,
+        updated_at=now,
+    )
+    payload = cast(
+        dict[str, object],
+        runtime_codec._encode_persisted_domain(current),
+    )
+    fields = cast(dict[str, object], payload["fields"])
+    dataset = fields.pop("dataset_digest")
+    fields.update(
+        {
+            "tenant_id": runtime_codec._encode_persisted_domain("tenant"),
+            "dataset_id": dataset,
+            "dataset_revision": runtime_codec._encode_persisted_domain(1),
+            "evaluator_id": runtime_codec._encode_persisted_domain("default"),
+            "evaluator_revision": runtime_codec._encode_persisted_domain(1),
+            "artifact_digest": runtime_codec._encode_persisted_domain(None),
+            "metrics": runtime_codec._encode_persisted_domain({}),
+        }
+    )
+    decoded = runtime_codec._decode_enveloped_domain(
+        runtime_codec.encode_envelope(
+            {
+                "type": runtime_codec.wire_type_id(current),
+                "payload": cast(JsonValue, payload),
+            }
+        ),
+        EvaluationRecord,
+    )
+
+    assert decoded == current
 
 
 def test_generic_v1_envelope_round_trips_current_shape() -> None:
