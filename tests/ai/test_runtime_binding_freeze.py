@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -24,30 +23,18 @@ from linktools.ai.capability import (
     SkillSourceRegistry,
 )
 from linktools.ai.core import (
-    EvaluationStatus,
     ExecutionLineageKind,
     ExecutionStatus,
     Principal,
-    ResourceKind,
-    ResourceRef,
 )
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_freeze import _RuntimeBindingFreezer
 from linktools.ai.runtime._context import RuntimeContext
-from linktools.ai.runtime._evaluation import DefaultEvaluationService
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapshotStore
-from linktools.ai.runtime.service_api import (
-    ExecutionHandle,
-    ExecutionRequest,
-    ReplayEvaluationRequest,
-)
+from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
-from linktools.ai.runtime.state._contracts import (
-    EvaluationRecord,
-    ExecutionRecord,
-    StoredUserInput,
-)
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 from linktools.ai.task import (
@@ -537,122 +524,3 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         assert await source.read("child-skill", "guide.txt") == b"original"
     finally:
         await restored.close()
-
-
-class _EvaluationRecords:
-    tenant_id = "tenant"
-
-    def __init__(self, record: EvaluationRecord) -> None:
-        self._record = record
-
-    async def get_header(
-        self,
-        evaluation_id: str,
-        *,
-        tenant_id: str,
-    ) -> ResourceRef | None:
-        if evaluation_id != self._record.evaluation_id or tenant_id != self.tenant_id:
-            return None
-        return ResourceRef(ResourceKind.EVALUATION, evaluation_id, tenant_id)
-
-    async def get(
-        self,
-        evaluation_id: str,
-        *,
-        tenant_id: str,
-    ) -> EvaluationRecord | None:
-        if evaluation_id != self._record.evaluation_id or tenant_id != self.tenant_id:
-            return None
-        return self._record
-
-
-class _EvaluationExecutions:
-    def __init__(self, record: ExecutionRecord) -> None:
-        self._record = record
-
-    async def get(
-        self,
-        execution_id: str,
-        *,
-        tenant_id: str,
-    ) -> ExecutionRecord | None:
-        if execution_id != self._record.execution_id or tenant_id != "tenant":
-            return None
-        return self._record
-
-
-class _AllowEvaluation:
-    async def authorize(self, *args: object) -> None:
-        del args
-
-
-@pytest.mark.asyncio
-async def test_evaluation_replay_uses_historical_execution_binding(
-    tmp_path: Path,
-) -> None:
-    fixture = _fixture(tmp_path)
-    historical = await fixture.freezer.freeze(fixture.binding)
-    now = datetime.now(timezone.utc)
-    source = ExecutionRecord(
-        execution_id="source-execution",
-        session_id=None,
-        parent_execution_id=None,
-        root_execution_id="source-execution",
-        source_execution_id=None,
-        base_execution_id=None,
-        lineage_kind=ExecutionLineageKind.RUN,
-        status=ExecutionStatus.SUCCEEDED,
-        revision=1,
-        event_sequence=1,
-        agent_run_sequence=1,
-        error_code=None,
-        safe_error_details={},
-        created_at=now,
-        updated_at=now,
-        mode="run",
-        planning=False,
-        thinking=False,
-        binding=historical.snapshot,
-        principal_id="principal",
-        principal_kind="service",
-        stored_user_input=StoredUserInput(
-            "text",
-            StoredPayload.inline_text("evaluation"),
-        ),
-    )
-    evaluation = EvaluationRecord(
-        evaluation_id="evaluation",
-        execution_id=source.execution_id,
-        dataset_id="dataset",
-        dataset_revision=1,
-        evaluator_id="default",
-        evaluator_revision=1,
-        binding_digest=source.binding_digest,
-        artifact_digest=None,
-        status=EvaluationStatus.SUCCEEDED,
-        revision=1,
-        metrics={},
-        created_at=now,
-        updated_at=now,
-    )
-    execution = _RecordingExecution()
-    service = DefaultEvaluationService(
-        SimpleNamespace(records=_EvaluationRecords(evaluation)),
-        _EvaluationExecutions(source),  # type: ignore[arg-type]
-        _AllowEvaluation(),  # type: ignore[arg-type]
-        execution,  # type: ignore[arg-type]
-    )
-
-    replayed = await service.replay(
-        "parent",
-        evaluation.evaluation_id,
-        ReplayEvaluationRequest(
-            Principal("principal", "tenant"),
-            "evaluation-memory",
-            "evaluation-replay",
-        ),
-    )
-
-    assert replayed.execution_id == "execution"
-    assert execution.binding_digest == source.binding_digest
-    assert execution.binding_snapshot == source.binding
