@@ -1046,6 +1046,25 @@ class EvaluationRecord:
     created_at: datetime
     updated_at: datetime
 
+    def __post_init__(self) -> None:
+        try:
+            validate_resource_id(self.evaluation_id)
+            validate_resource_id(self.execution_id)
+        except AIError as error:
+            raise ValueError("evaluation identity is invalid") from error
+        if not isinstance(self.dataset_digest, str) or not self.dataset_digest.strip():
+            raise ValueError("evaluation dataset identity is required")
+        if not isinstance(self.status, EvaluationStatus):
+            raise TypeError("evaluation status is invalid")
+        if (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or self.revision < 0
+        ):
+            raise ValueError("evaluation revision is invalid")
+        if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
+            raise ValueError("evaluation timestamps must be timezone-aware")
+
 
 @dataclass(frozen=True, slots=True)
 class ArtifactRecord:
