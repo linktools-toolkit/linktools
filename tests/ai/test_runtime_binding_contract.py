@@ -13,6 +13,7 @@ from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
+    SemanticPin,
 )
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
@@ -186,6 +187,30 @@ def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
         "output_schema",
     }
     assert snapshot.binding_digest == snapshot.binding_digest
+
+
+def test_binding_v1_rejects_unknown_fields() -> None:
+    payload = _snapshot().to_payload()
+    payload["future_semantic_field"] = True
+
+    with pytest.raises(AIError) as raised:
+        AgentBindingSnapshot.from_payload(payload)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_semantic_pin_v1_rejects_unknown_fields() -> None:
+    with pytest.raises(AIError) as raised:
+        SemanticPin.from_payload(
+            {
+                "kind": "tool",
+                "id": "tool",
+                "contract": {"version": 1},
+                "future_semantic_field": True,
+            }
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_custom_output_materializes_from_durable_json_schema() -> None:
