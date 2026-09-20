@@ -18,13 +18,11 @@ from linktools.ai.runtime.state._store import RecordQuery, StoredRecord
 
 pytestmark = pytest.mark.asyncio
 _SCOPE = b"s" * 32
-_PARTITION = b"p" * 32
 
 
 def _record(sort_key: str) -> StoredRecord:
     return StoredRecord(
         hashlib.sha256(sort_key.encode("ascii")).digest(),
-        _PARTITION,
         _SCOPE,
         None,
         "probe",

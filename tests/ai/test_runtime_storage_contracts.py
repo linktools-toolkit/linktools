@@ -126,7 +126,6 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
     subject_b = b"b" * 32
     record = StoredRecord(
         owner,
-        b"p" * 32,
         None,
         None,
         "test",
@@ -378,7 +377,6 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
     operation_stream = b"p" * 32
     record = StoredRecord(
         record_key,
-        b"d" * 32,
         None,
         None,
         "scope-test",

@@ -54,7 +54,6 @@ async def _chunks(value: bytes) -> AsyncIterator[bytes]:
 def _filesystem_fact_record(owner: bytes) -> StoredRecord:
     return StoredRecord(
         owner,
-        b"p" * 32,
         None,
         None,
         "owner",
