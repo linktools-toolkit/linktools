@@ -4,7 +4,7 @@
 
 from datetime import datetime, timezone
 
-from linktools.ai.agent import AgentBindingSnapshot
+from linktools.ai.agent import AgentBindingSnapshot, SemanticPin
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, canonical_sha256
 from linktools.ai.runtime.state import RuntimeDomain
@@ -124,6 +124,51 @@ def test_instruction_aware_execution_round_trips_exact_pin() -> None:
     assert wire["$dataclass"] == "execution_record"
     decoded = decode_domain(wire, ExecutionRecord)
     assert decoded.repository_instructions == reference
+
+
+def test_object_ref_traversal_allows_additive_skill_snapshot_fields() -> None:
+    reference = ObjectRef("runtime", "skill/snapshot", "c" * 64, 23)
+    output = bind_output()
+    contract = {
+        "version": 1,
+        "id": "review",
+        "content": "review instructions",
+        "source": {
+            "source_id": "application",
+            "root": "review",
+            "snapshot": {
+                "store_id": reference.store_id,
+                "key": reference.key,
+                "digest": reference.digest,
+                "size": reference.size,
+                "future_metadata": {"version": 2},
+            },
+        },
+    }
+    binding = AgentBindingSnapshot(
+        agent_spec=AgentSpec("agent", model="model"),
+        base_model={"route_id": "model", "model_identity": "test:model"},
+        selected=(SemanticPin("skill", "review", contract),),
+        subagents=(),
+        output_mode=output.mode,
+        output_schema=output.schema_definition,
+    )
+    execution = _execution(None)
+    execution = ExecutionRecord(
+        **{
+            **execution.__dict__,
+            "binding": binding,
+        }
+    )
+
+    refs = tuple(
+        iter_runtime_object_refs(
+            _encode_persisted_domain(execution),
+            default_domain=RuntimeDomain.EXECUTION,
+        )
+    )
+
+    assert refs == ((RuntimeDomain.EXECUTION, reference),)
 
 
 def test_deferred_frontier_round_trips_current_contract() -> None:
