@@ -137,18 +137,11 @@ def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
     return canonical_json_bytes(value)
 
 
-def model_message_match_bytes(message: ModelMessage) -> bytes:
-    """Build a match key ignoring only Pydantic AI post-save message stamps."""
-    value = json.loads(encode_model_messages((message,)).decode("utf-8"))
-    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
-        raise RuntimeError("model message identity dump is invalid")
-    encoded = value[0]
-    encoded.pop("timestamp", None)
-    encoded.pop("run_id", None)
-    encoded.pop("conversation_id", None)
-    if isinstance(message, ModelRequest):
-        encoded.pop("instructions", None)
-    return canonical_json_bytes(value)
+def freeze_model_messages(
+    messages: Sequence[ModelMessage],
+) -> tuple[ModelMessage, ...]:
+    """Freeze model messages through the canonical persistence codec."""
+    return decode_model_messages(encode_model_messages(messages))
 
 
 def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
@@ -394,5 +387,6 @@ __all__ = [
     "binary_content_usage",
     "decode_model_messages",
     "encode_model_messages",
+    "freeze_model_messages",
     "project_transient_binary_content",
 ]
