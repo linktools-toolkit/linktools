@@ -763,6 +763,10 @@ class RuntimeState:
 
         actual_objects: set[tuple[str, str, str, int]] = set()
         decoded_objects: list[tuple[RuntimeDomain, ObjectRef, ObjectRef]] = []
+        decoded_by_identity: dict[
+            tuple[str, str, str, int],
+            tuple[RuntimeDomain, ObjectRef, ObjectRef],
+        ] = {}
         for raw_object in raw_objects:
             if not isinstance(raw_object, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -778,10 +782,43 @@ class RuntimeState:
             if identity in actual_objects:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             actual_objects.add(identity)
-            decoded_objects.append((domain, source, content_ref))
+            decoded = (domain, source, content_ref)
+            decoded_objects.append(decoded)
+            decoded_by_identity[identity] = decoded
             object_bytes += content_ref.size
             if len(payload) + object_bytes > limits.max_bytes:
                 raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
+
+        pending_objects = list(expected_objects)
+        while pending_objects:
+            identity = pending_objects.pop()
+            decoded = decoded_by_identity.get(identity)
+            if decoded is None:
+                continue
+            domain, source, content_ref = decoded
+            if not source.key.startswith("v1/skill-source-snapshot/"):
+                continue
+            dependency_payload = await read_object(
+                object_store,
+                content_ref.key,
+                expected_digest=content_ref.digest,
+                expected_size=content_ref.size,
+            )
+            for nested_domain, nested in _iter_runtime_object_dependencies(
+                source,
+                dependency_payload,
+                default_domain=domain,
+            ):
+                nested_identity = (
+                    nested_domain.value,
+                    nested.key,
+                    nested.digest,
+                    nested.size,
+                )
+                if nested_identity not in expected_objects:
+                    expected_objects.add(nested_identity)
+                    pending_objects.append(nested_identity)
+
         if actual_objects != expected_objects:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
