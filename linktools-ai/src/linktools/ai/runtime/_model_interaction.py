@@ -298,7 +298,7 @@ def model_response_projection(response: ModelResponse) -> JsonValue:
 
 
 def _message_signature(message: ModelMessage) -> bytes:
-    return hashlib.sha256(model_message_identity_bytes(message)).digest()
+    return hashlib.sha256(encode_model_messages((message,))).digest()
 
 
 def _json_snapshot(value: object) -> JsonValue:
