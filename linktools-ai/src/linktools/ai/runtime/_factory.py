@@ -40,6 +40,7 @@ from ..workspace import (
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
+from ._binding_freeze import _RuntimeBindingFreezer
 from ._artifact import DefaultArtifactService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
@@ -84,6 +85,7 @@ class _RuntimeComponents:
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
     metric_control: _RuntimeMetricBuffer | None
+    binding_freezer: _RuntimeBindingFreezer
     history: object
 
 
@@ -461,6 +463,12 @@ async def _build_local_components(
             history_reader,
             HmacCursorSigner("execution", grant_key),
         )
+        binding_freezer = _RuntimeBindingFreezer(
+            catalog,
+            compiler,
+            skill_sources,
+            state.object_store(RuntimeDomain.EXECUTION),
+        )
         execution = DefaultExecutionService(
             state.execution,
             state.object_store(RuntimeDomain.EXECUTION),
@@ -488,7 +496,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
-            skill_snapshot_store=state.object_store(RuntimeDomain.TASK),
+            skill_snapshot_store=state.object_store(RuntimeDomain.EXECUTION),
             metrics=metric_buffer,
         )
     except BaseException:
@@ -587,9 +595,8 @@ async def _build_local_components(
         )
         task_capability_snapshots = TaskCapabilitySnapshotStore(
             namespace,
-            catalog,
             compiler,
-            skill_sources,
+            binding_freezer,
             state.object_store(RuntimeDomain.TASK),
             agent_task_type="linktools.ai.agent",
         )
@@ -733,6 +740,7 @@ async def _build_local_components(
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
+        binding_freezer=binding_freezer,
         history=_borrowed_runtime_history(
             history_service,
             tenant_id=tenant_id,
