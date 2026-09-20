@@ -356,11 +356,6 @@ class DefaultSessionService:
                 tenant_id=principal.tenant_id,
                 continuation_step_run_id=continuation,
                 continuation_history_id=continuation_history_id,
-                continuation_message_count=(
-                    None
-                    if record.continuation is None
-                    else record.continuation.message_count
-                ),
                 cursor=cursor,
                 limit=limit,
             )
