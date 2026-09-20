@@ -18,6 +18,7 @@ from pydantic_ai.capabilities import (
     NodeResult,
 )
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -39,7 +40,12 @@ from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
-from .state._step_contracts import ContinuableSnapshot, RunRecord, StepStore
+from .state._step_contracts import (
+    ContinuableSnapshot,
+    RunRecord,
+    SnapshotState,
+    StepStore,
+)
 
 if TYPE_CHECKING:
     from ._journal import ModelRequestJournal
@@ -57,6 +63,12 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
     run_id: str
     parent_run_id: str | None = None
     metadata: dict[str, str] = field(default_factory=dict)
+    id: str | None = field(
+        default="linktools.ai.step-persistence",
+        init=False,
+        repr=False,
+        compare=False,
+    )
     deferred_pause_sink: Callable[[int], None] | None = field(
         default=None,
         repr=False,
@@ -113,8 +125,8 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
     async def before_model_request(
         self,
         ctx: PydanticRunContext[None],
-        request_context: object,
-    ) -> object:
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
         self._live_messages = ctx.messages
         if ctx.messages and isinstance(ctx.messages[-1], ModelRequest):
             self.capture.append_transcript_message(ctx.messages[-1])
@@ -258,7 +270,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         *,
         messages: Sequence[ModelMessage],
         pending: ModelMessage | None = None,
-        state: str,
+        state: SnapshotState,
     ) -> None:
         context_messages, pending_index = self.capture.snapshot_context(
             messages,
@@ -309,17 +321,17 @@ async def compose_platform_capabilities(
     plan_store_resolver: Callable[[PydanticRunContext[None]], RuntimePlanStore] | None,
     deferred_pause_sink: Callable[[int], None] | None = None,
     model_journal: "ModelRequestJournal | None" = None,
-    model_observation_enabled: bool = False,
     model_request_observer: "ExternalModelRequestCapture | None" = None,
-    harness_store: HarnessStepStoreAdapter | None = None,
+    capture_store: RuntimeCaptureStore | None = None,
 ) -> tuple[AbstractCapability[None], ...]:
     capabilities: list[AbstractCapability[None]] = []
+    capture = capture_store or RuntimeCaptureStore(
+        step_store,
+        execution_id=execution_id,
+        step_run_id=step_run_id,
+    )
     persistence = _RuntimeStepPersistence(
-        id="linktools.ai.step-persistence",
-        store=harness_store or HarnessStepStoreAdapter(
-            step_store,
-            execution_id=execution_id,
-        ),
+        capture=capture,
         agent_name=agent_name,
         run_id=step_run_id,
         parent_run_id=parent_step_run_id,
@@ -334,8 +346,6 @@ async def compose_platform_capabilities(
             ),
         },
         deferred_pause_sink=deferred_pause_sink,
-        model_journal=model_journal,
-        model_observation_enabled=model_observation_enabled,
     )
     capabilities.append(persistence)
     selected_memory = select_harness_memory_tools(ordinary_tool_policy)
