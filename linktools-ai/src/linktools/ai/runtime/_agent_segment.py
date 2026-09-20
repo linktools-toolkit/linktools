@@ -211,4 +211,8 @@ async def _step_messages(
     )
     if snapshot is None:
         raise LookupError(run_id)
-    return list(snapshot.messages)
+    return list(
+        snapshot.messages
+        if snapshot.context_messages is None
+        else snapshot.context_messages
+    )
