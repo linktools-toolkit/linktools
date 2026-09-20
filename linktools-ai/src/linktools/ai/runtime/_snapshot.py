@@ -354,34 +354,54 @@ class RuntimeSnapshot:
             (staging / "snapshot.json").write_bytes(snapshot_payload)
             generation_root = root / "generations" / generation
             generation_root.parent.mkdir(parents=True, exist_ok=True)
-            staging.rename(generation_root)
-
             publish_lock = root / ".runtime-snapshot-locks" / "publish.lock"
-            async with FilesystemMutationLock(publish_lock):
-                latest = _read_current(current_file)
-                if replace_policy == "missing" and latest is not None:
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                if replace_policy == "same" and latest is not None:
-                    if latest.get("snapshot_digest") != ref.digest:
+            published = False
+            try:
+                async with FilesystemMutationLock(publish_lock):
+                    latest = _read_current(current_file)
+                    if replace_policy == "missing" and latest is not None:
                         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                if replace_policy == "replace":
-                    if latest is None or latest.get("generation") != expected_generation:
-                        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                value = {
-                    "snapshot_digest": ref.digest,
-                    "generation": generation,
-                    "namespace": resolved_namespace,
-                    "tenant_id": resolved_tenant,
-                    "state_root": str(generation_root / "state"),
-                    "workspace_root": (
-                        None
-                        if workspace_root is None
-                        else str(generation_root / "workspace")
-                    ),
-                }
-                _write_current(current_file, value)
-                return _restored_runtime(root, value)
+                    if replace_policy == "same" and latest is not None:
+                        if latest.get("snapshot_digest") != ref.digest:
+                            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                        inspection = await cls.inspect_target(
+                            root,
+                            ref,
+                            object_store=object_store,
+                            limits=limits,
+                        )
+                        if inspection.status != "matching":
+                            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                        return _restored_runtime(root, latest)
+                    if replace_policy == "replace":
+                        if (
+                            latest is None
+                            or latest.get("generation") != expected_generation
+                        ):
+                            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                    staging.rename(generation_root)
+                    value = {
+                        "snapshot_digest": ref.digest,
+                        "generation": generation,
+                        "namespace": resolved_namespace,
+                        "tenant_id": resolved_tenant,
+                        "state_root": str(generation_root / "state"),
+                        "workspace_root": (
+                            None
+                            if workspace_root is None
+                            else str(generation_root / "workspace")
+                        ),
+                    }
+                    _write_current(current_file, value)
+                    published = True
+                    return _restored_runtime(root, value)
+            finally:
+                if not published:
+                    await asyncio.to_thread(
+                        shutil.rmtree,
+                        generation_root if generation_root.exists() else staging,
+                        True,
+                    )
 
         if replace_policy != "replace":
             return await restore_generation()
