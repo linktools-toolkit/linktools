@@ -211,16 +211,15 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             self._stored("conversation_index_node", node.node_id, node)
         )
 
-    async def fork_projection_record_in_transaction(
+    def fork_projection_record(
         self,
-        transaction: StateTransaction,
+        source: StoredRecord | None,
         source_history_id: str,
         child_history_id: str,
     ) -> StoredRecord | None:
-        source_key = self._key("context_projection", source_history_id)
-        source = await transaction.get_record(source_key)
         if source is None:
             return None
+        source_key = self._key("context_projection", source_history_id)
         if (
             source.key_digest != source_key
             or source.scope_digest is not None
@@ -623,12 +622,17 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             target_key = self._key("session", target.session_id)
             child_history_key = self._key("conversation_history", child_history_id)
             source_head_key = self._key("transcript_head", source.history_id)
+            source_projection_key = self._key(
+                "context_projection",
+                source.history_id,
+            )
             related = await transaction.get_records(
                 (
                     source_history_key,
                     target_key,
                     child_history_key,
                     source_head_key,
+                    source_projection_key,
                 )
             )
             source_history_stored = related.get(source_history_key)
@@ -642,6 +646,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             target_stored = related.get(target_key)
             child_stored = related.get(child_history_key)
             source_head_stored = related.get(source_head_key)
+            source_projection_stored = related.get(source_projection_key)
             if source_head_stored is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             source_head = _decode_enveloped_domain(
@@ -714,8 +719,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if target_stored is not None or child_stored is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            child_projection = await histories.fork_projection_record_in_transaction(
-                transaction,
+            child_projection = histories.fork_projection_record(
+                source_projection_stored,
                 source.history_id,
                 child.history_id,
             )
