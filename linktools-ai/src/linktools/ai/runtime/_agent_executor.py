@@ -531,11 +531,15 @@ class AgentExecutor:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             deferred_step_index = step_index
 
+        interaction_high_water = await scope.step_store.model_interaction_count(
+            run_id=scope.step_run_id
+        )
         model_journal = ModelRequestJournal(
             source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
             step_run_id=scope.step_run_id,
+            next_sequence=interaction_high_water + 1,
         )
         agent, capabilities = await _materialize_agent(
             scope,
