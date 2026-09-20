@@ -3,19 +3,28 @@
 """Runtime storage validation and object reachability inspection."""
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, cast
 
 from linktools.core import environ
 
-from ...core import ExecutionEventType
+from ...core import ExecutionEventType, validate_persistence_namespace
 from ...errors import AIError, ErrorCode
-from ...storage import ObjectStoreInspection, ObjectStoreMaintenance
-from ...task import TaskEventType
+from ...storage import (
+    ObjectRef,
+    ObjectStore,
+    ObjectStoreInspection,
+    ObjectStoreMaintenance,
+    read_object,
+)
+from ...task import TaskEventType, TaskGraphAdmission
+from .._runtime_identity import task_capability_snapshot_key
 from ._codec import (
     _VERSION_CODECS,
     _decode_domain,
+    _decode_enveloped_domain,
     _iter_enveloped_runtime_object_refs,
     decode_envelope,
+    iter_runtime_object_dependencies,
 )
 from ._offline_maintenance import OfflineRuntimeStorageMaintenance
 from ._plan import RuntimeDomain, runtime_domain_uses_object_store
@@ -66,11 +75,13 @@ class RuntimeStorageInspection:
         stores: Mapping[RuntimeDomain, StateStore],
         objects: ObjectRouter,
         *,
+        namespace: str,
         durable_domains: frozenset[RuntimeDomain],
         state_validators: Sequence[Callable[[], Awaitable[None]]] = (),
     ) -> None:
         self._stores = dict(stores)
         self._objects = objects
+        self._namespace = validate_persistence_namespace(namespace)
         self._durable_domains = durable_domains
         self._state_validators = tuple(state_validators)
 
@@ -80,6 +91,7 @@ class RuntimeStorageInspection:
 
     async def _scan_object_references(self) -> Mapping[int, frozenset[str]]:
         references: dict[int, set[str]] = {}
+        pending: list[tuple[RuntimeDomain, ObjectRef]] = []
         for domain in self._durable_domains:
             store = self._stores[domain]
             record_cursor: RecordScanCursor | None = None
@@ -92,7 +104,22 @@ class RuntimeStorageInspection:
                 )
                 if not records:
                     break
-                self._collect_references(domain, records, (), (), references)
+                self._collect_references(
+                    domain,
+                    records,
+                    (),
+                    (),
+                    references,
+                    pending,
+                )
+                if domain is RuntimeDomain.TASK:
+                    for record in records:
+                        if record.kind == "task_admission":
+                            await self._collect_task_capability_reference(
+                                record,
+                                references,
+                                pending,
+                            )
                 last = records[-1]
                 record_cursor = RecordScanCursor(last.kind, last.key_digest)
             fact_cursor: FactScanCursor | None = None
@@ -105,7 +132,14 @@ class RuntimeStorageInspection:
                 )
                 if not facts:
                     break
-                self._collect_references(domain, (), facts, (), references)
+                self._collect_references(
+                    domain,
+                    (),
+                    facts,
+                    (),
+                    references,
+                    pending,
+                )
                 last = facts[-1]
                 fact_cursor = FactScanCursor(last.stream_digest, last.sequence)
             operation_cursor: OperationScanCursor | None = None
@@ -118,8 +152,16 @@ class RuntimeStorageInspection:
                 )
                 if not operations:
                     break
-                self._collect_references(domain, (), (), operations, references)
+                self._collect_references(
+                    domain,
+                    (),
+                    (),
+                    operations,
+                    references,
+                    pending,
+                )
                 operation_cursor = OperationScanCursor(operations[-1].key_digest)
+        await self._expand_object_dependencies(references, pending)
         return {key: frozenset(value) for key, value in references.items()}
 
     async def validate_state_stores(self) -> None:
@@ -209,6 +251,7 @@ class RuntimeStorageInspection:
         facts: tuple[StoredFact, ...],
         operations: tuple[StoredOperation, ...],
         references: dict[int, set[str]],
+        pending: list[tuple[RuntimeDomain, ObjectRef]],
     ) -> None:
         for record in records:
             expected_version = _REFERENCE_FREE_RECORD_VERSIONS.get(record.kind)
@@ -218,10 +261,10 @@ class RuntimeStorageInspection:
                     expected_version=expected_version,
                 )
                 continue
-            self._collect_enveloped_references(domain, record.data, references)
+            self._collect_enveloped_references(domain, record.data, references, pending)
         for fact in facts:
             if fact.kind in _ENVELOPED_FACT_KINDS:
-                self._collect_enveloped_references(domain, fact.data, references)
+                self._collect_enveloped_references(domain, fact.data, references, pending)
                 continue
             expected_version = _REFERENCE_FREE_FACT_VERSIONS.get(fact.kind)
             if expected_version is not None:
@@ -234,13 +277,14 @@ class RuntimeStorageInspection:
                 continue
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         for operation in operations:
-            self._collect_enveloped_references(domain, operation.data, references)
+            self._collect_enveloped_references(domain, operation.data, references, pending)
 
     def _collect_enveloped_references(
         self,
         domain: RuntimeDomain,
         value: Mapping[str, object],
         references: dict[int, set[str]],
+        pending: list[tuple[RuntimeDomain, ObjectRef]],
     ) -> None:
         _validate_enveloped_value(value)
         self._record_references(
@@ -249,16 +293,99 @@ class RuntimeStorageInspection:
                 default_domain=domain,
             ),
             references,
+            pending,
         )
 
     def _record_references(
         self,
         values: object,
         references: dict[int, set[str]],
+        pending: list[tuple[RuntimeDomain, ObjectRef]],
     ) -> None:
         for source_domain, reference in values:
-            object_store = self._objects.object_store(source_domain)
-            references.setdefault(id(object_store), set()).add(reference.key)
+            self._remember_reference(
+                source_domain,
+                reference,
+                references,
+                pending,
+            )
+
+    def _remember_reference(
+        self,
+        source_domain: RuntimeDomain,
+        reference: ObjectRef,
+        references: dict[int, set[str]],
+        pending: list[tuple[RuntimeDomain, ObjectRef]],
+    ) -> None:
+        object_store = self._objects.object_store(source_domain)
+        keys = references.setdefault(id(object_store), set())
+        if reference.key in keys:
+            return
+        keys.add(reference.key)
+        pending.append((source_domain, reference))
+
+    async def _collect_task_capability_reference(
+        self,
+        record: StoredRecord,
+        references: dict[int, set[str]],
+        pending: list[tuple[RuntimeDomain, ObjectRef]],
+    ) -> None:
+        admission = _decode_enveloped_domain(record.data, TaskGraphAdmission)
+        key = task_capability_snapshot_key(
+            self._namespace,
+            admission.principal.tenant_id,
+            admission.graph_id,
+            admission.initial_request_digest,
+        )
+        object_store = cast(
+            ObjectStore,
+            self._objects.object_store(RuntimeDomain.TASK),
+        )
+        stat = await object_store.stat(key)
+        if stat is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._remember_reference(
+            RuntimeDomain.TASK,
+            ObjectRef(
+                object_store.store_id,
+                stat.key,
+                stat.digest,
+                stat.size,
+            ),
+            references,
+            pending,
+        )
+
+    async def _expand_object_dependencies(
+        self,
+        references: dict[int, set[str]],
+        pending: list[tuple[RuntimeDomain, ObjectRef]],
+    ) -> None:
+        while pending:
+            source_domain, reference = pending.pop()
+            if not reference.key.startswith(
+                ("v1/skill-source-snapshot/", "v1/task-capability-snapshot/")
+            ):
+                continue
+            object_store = cast(
+                ObjectStore,
+                self._objects.object_store(source_domain),
+            )
+            payload = await read_object(
+                object_store,
+                reference.key,
+                expected_digest=reference.digest,
+                expected_size=reference.size,
+            )
+            self._record_references(
+                iter_runtime_object_dependencies(
+                    reference,
+                    payload,
+                    default_domain=source_domain,
+                ),
+                references,
+                pending,
+            )
 
 
 def _validate_reference_free_version(
