@@ -3,6 +3,7 @@
 """Portable Runtime snapshot persisted-field validation."""
 
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import pytest
@@ -66,6 +67,69 @@ async def _put(store: InMemoryObjectStore, key: str, payload: bytes) -> ObjectRe
         expected_digest=digest,
     )
     return ObjectRef(store.store_id, key, digest, len(payload))
+
+
+class _SnapshotGuard:
+    @asynccontextmanager
+    async def offline_exclusivity(self):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_snapshot_identity_ignores_target_store(
+    tmp_path,
+) -> None:
+    root = tmp_path / "runtime"
+    writable = RuntimeState.filesystem(root)
+    await writable.initialize(namespace="runtime", tenant_id="tenant")
+    await writable.close()
+
+    state = RuntimeState.from_root(root)
+    await state.initialize(namespace="runtime", tenant_id="tenant", read_only=True)
+    limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
+    first = InMemoryObjectStore("snapshot-a")
+    second = InMemoryObjectStore("snapshot-b")
+    try:
+        first_ref = await state.export_snapshot(object_store=first, limits=limits)
+        second_ref = await state.export_snapshot(object_store=second, limits=limits)
+    finally:
+        await state.close()
+
+    assert first_ref.key == second_ref.key
+    assert first_ref.digest == second_ref.digest
+    assert first_ref.size == second_ref.size
+
+
+@pytest.mark.asyncio
+async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
+    root = tmp_path / "runtime"
+    writable = RuntimeState.filesystem(root)
+    await writable.initialize(namespace="runtime", tenant_id="tenant")
+    await writable.close()
+
+    limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
+    first = InMemoryObjectStore("snapshot-a")
+    second = InMemoryObjectStore("snapshot-b")
+    first_ref = await RuntimeSnapshot.create(
+        "runtime",
+        tenant_id="tenant",
+        state=RuntimeState.from_root(root),
+        object_store=first,
+        exclusive=_SnapshotGuard(),
+        limits=limits,
+    )
+    second_ref = await RuntimeSnapshot.create(
+        "runtime",
+        tenant_id="tenant",
+        state=RuntimeState.from_root(root),
+        object_store=second,
+        exclusive=_SnapshotGuard(),
+        limits=limits,
+    )
+
+    assert first_ref.key == second_ref.key
+    assert first_ref.digest == second_ref.digest
+    assert first_ref.size == second_ref.size
 
 
 @pytest.mark.asyncio
