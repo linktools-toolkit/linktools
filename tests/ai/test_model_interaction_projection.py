@@ -439,7 +439,7 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
     )
     response.parts = [TextPart("mutated response")]
 
-    frozen_request = capture.transcript_messages[0]
+    frozen_request = capture.transcript_messages()[0]
     assert isinstance(frozen_request, ModelRequest)
     assert frozen_request.instructions == "before"
     assert frozen_request.parts[0].content == "hello"  # type: ignore[attr-defined]
