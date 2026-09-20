@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal, Protocol, cast, runtime_checkable
 
-from ..asset import AssetKey, AssetStore
+from ..asset import AssetInfo, AssetKey, AssetStore
 from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
@@ -210,30 +210,10 @@ class AssetSkillResourceSource:
 
     async def inspect(self, root: str) -> SkillResourceView:
         logical_root = _normalize_relative_path(root, field_name="skill root")
-        prefix = f"{logical_root}/"
-        resources: list[str] = []
-        cursor: str | None = None
-        while True:
-            page = await self._store.list_info(
-                kind="skill",
-                prefix=prefix,
-                cursor=cursor,
-                limit=200,
-            )
-            for info in page.items:
-                relative = info.key.id[len(prefix) :]
-                if relative == "SKILL.md" or DEFAULT_DISCOVERY_POLICY.ignores(relative):
-                    continue
-                try:
-                    resources.append(_normalize_resource_path(relative))
-                except AIError as error:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
+        resources = await self._resource_infos(logical_root)
         return SkillResourceView(
             SkillLocation("virtual", f"{self._id}/skills/{logical_root}"),
-            tuple(sorted(resources)),
+            tuple(relative for relative, _info in resources),
         )
 
     async def read(self, root: str, path: str) -> bytes:
@@ -246,8 +226,39 @@ class AssetSkillResourceSource:
 
 
     async def current_revision(self, root: str) -> StorageRevision:
-        _normalize_relative_path(root, field_name="skill root")
-        return await self._store.current_revision()
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        resources = await self._resource_infos(logical_root)
+        return _skill_revision(
+            [
+                {
+                    "path": relative,
+                    "digest": info.etag,
+                    "size": info.size,
+                    "mode": 0,
+                }
+                for relative, info in resources
+            ],
+            sandbox_materialize=False,
+        )
+
+    async def _resource_infos(
+        self,
+        root: str,
+    ) -> "tuple[tuple[str, AssetInfo], ...]":
+        prefix = f"{root}/"
+        selected: list[tuple[str, AssetInfo]] = []
+        for info in await self._store.metadata_snapshot():
+            if info.key.kind != "skill" or not info.key.id.startswith(prefix):
+                continue
+            relative = info.key.id[len(prefix) :]
+            if relative == "SKILL.md" or DEFAULT_DISCOVERY_POLICY.ignores(relative):
+                continue
+            try:
+                normalized = _normalize_resource_path(relative)
+            except AIError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            selected.append((normalized, info))
+        return tuple(sorted(selected, key=lambda item: item[0]))
 
     async def resource_mode(self, root: str, path: str) -> int:
         _normalize_relative_path(root, field_name="skill root")
@@ -274,7 +285,7 @@ class AssetSkillResourceSource:
 
 
 async def _skill_source_revision(
-    source: SkillResourceSource,
+    source: SnapshotSkillResourceSource,
     root: str,
 ) -> StorageRevision:
     view = await source.inspect(root)
@@ -283,23 +294,48 @@ async def _skill_source_revision(
     entries: list[dict[str, JsonValue]] = []
     for relative in view.resources:
         value = await source.read(root, relative)
+        mode = await source.resource_mode(root, relative)
+        _validate_resource_mode(mode)
         entries.append(
             {
                 "path": relative,
                 "digest": hashlib.sha256(value).hexdigest(),
                 "size": len(value),
+                "mode": mode,
             }
         )
+    return _skill_revision(
+        entries,
+        sandbox_materialize=view.location.kind == "local",
+    )
+
+
+def _skill_revision(
+    entries: Sequence[Mapping[str, JsonValue]],
+    *,
+    sandbox_materialize: bool,
+) -> StorageRevision:
     return StorageRevision(
         hashlib.sha256(
             canonical_json_bytes(
                 {
                     "version": 1,
-                    "resources": entries,
+                    "sandbox_materialize": sandbox_materialize,
+                    "resources": list(entries),
                 }
             )
         ).hexdigest()
     )
+
+
+def _validate_resource_mode(mode: object) -> None:
+    if (
+        isinstance(mode, bool)
+        or not isinstance(mode, int)
+        or mode < 0
+        or mode > 0o111
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 async def _snapshot_skill_source(
@@ -311,17 +347,35 @@ async def _snapshot_skill_source(
 ) -> ObjectRef:
     if not isinstance(expected_revision, StorageRevision):
         raise TypeError("expected_revision must be StorageRevision")
-    before = await source.current_revision(root)
-    if before != expected_revision:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     view = await source.inspect(root)
     if not isinstance(view, SkillResourceView):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    entries: list[dict[str, JsonValue]] = []
+    states: list[dict[str, JsonValue]] = []
+    payloads: list[bytes] = []
     for relative in view.resources:
         value = await source.read(root, relative)
-        digest = hashlib.sha256(value).hexdigest()
+        mode = await source.resource_mode(root, relative)
+        _validate_resource_mode(mode)
+        states.append(
+            {
+                "path": relative,
+                "digest": hashlib.sha256(value).hexdigest(),
+                "size": len(value),
+                "mode": mode,
+            }
+        )
+        payloads.append(value)
+    captured_revision = _skill_revision(
+        states,
+        sandbox_materialize=view.location.kind == "local",
+    )
+    if captured_revision != expected_revision:
+        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+
+    entries: list[dict[str, JsonValue]] = []
+    for state, value in zip(states, payloads, strict=True):
+        digest = cast(str, state["digest"])
         key = f"v1/skill-source-content/{digest}"
         await _put_skill_snapshot_object(
             object_store,
@@ -329,27 +383,18 @@ async def _snapshot_skill_source(
             value,
             digest=digest,
         )
-        mode = await source.resource_mode(root, relative)
-        if (
-            isinstance(mode, bool)
-            or not isinstance(mode, int)
-            or mode < 0
-            or mode > 0o111
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         entries.append(
             {
-                "path": relative,
-                "mode": mode,
+                "path": cast(str, state["path"]),
+                "mode": cast(int, state["mode"]),
                 "content": {
                     "key": key,
                     "digest": digest,
-                    "size": len(value),
+                    "size": cast(int, state["size"]),
                 },
             }
         )
-    after = await source.current_revision(root)
-    if after != expected_revision:
+    if await source.current_revision(root) != expected_revision:
         raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     manifest: dict[str, JsonValue] = {
         "kind": "skill-source-snapshot",
