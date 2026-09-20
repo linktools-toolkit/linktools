@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
-class OfflineExclusiveStorage(Protocol):
+class SnapshotExclusiveGuard(Protocol):
+    """Quiesce every mutation source that can affect a portable snapshot."""
+
     def offline_exclusivity(self) -> AbstractAsyncContextManager[None]: ...
 
 
@@ -28,4 +30,4 @@ class SnapshotLimits:
             raise ValueError("snapshot limits must be positive integers")
 
 
-__all__ = ["OfflineExclusiveStorage", "SnapshotLimits"]
+__all__ = ["SnapshotExclusiveGuard", "SnapshotLimits"]
