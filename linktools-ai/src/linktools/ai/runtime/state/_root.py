@@ -947,17 +947,10 @@ def _validate_state_configuration(
     if (
         plan.route(RuntimeDomain.EVALUATION).retention
         is RuntimeRetentionMode.DURABLE
+        and plan.route(RuntimeDomain.EXECUTION).retention
+        is not RuntimeRetentionMode.DURABLE
     ):
-        if (
-            plan.route(RuntimeDomain.EXECUTION).retention
-            is not RuntimeRetentionMode.DURABLE
-        ):
-            raise ValueError("durable evaluation requires durable execution")
-        if (
-            plan.route(RuntimeDomain.RECOVERY).retention
-            is not RuntimeRetentionMode.DURABLE
-        ):
-            raise ValueError("durable evaluation requires durable recovery")
+        raise ValueError("durable evaluation requires durable execution")
 
 
 def _normalize_path(value: "str | Path") -> Path:
