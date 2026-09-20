@@ -1521,7 +1521,11 @@ class LocalExecutionBackend:
         )
         if snapshot is None or snapshot.state != "interrupted":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(snapshot.messages)
+        return tuple(
+            snapshot.messages
+            if snapshot.context_messages is None
+            else snapshot.context_messages
+        )
 
     async def claim_deferred_resume(
         self,
