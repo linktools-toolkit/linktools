@@ -2921,6 +2921,7 @@ class LocalExecutionBackend:
                             current.stored_user_input
                         ),
                         history=history,
+                        initial_context=loaded_context,
                         conversation_id=conversation_id,
                         step_store=self._steps,
                         step_run_id=run_id,
