@@ -78,7 +78,7 @@ async def test_artifact_list_authorizes_the_execution_identity() -> None:
         service = DefaultArtifactService(
             state.artifact,
             authorization,  # type: ignore[arg-type]
-            grant_key=_GRANT_KEY,
+            token_seed=_GRANT_KEY,
             cursor_signer=HmacCursorSigner("artifact", _GRANT_KEY),
         )
 
@@ -123,7 +123,7 @@ async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
         service = DefaultArtifactService(
             state.artifact,
             TenantAuthorizationPolicy("tenant"),
-            grant_key=_GRANT_KEY,
+            token_seed=_GRANT_KEY,
             cursor_signer=HmacCursorSigner("artifact", _GRANT_KEY),
         )
         principal = Principal("caller", "tenant", "service")
