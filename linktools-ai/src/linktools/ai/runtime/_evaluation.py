@@ -38,6 +38,7 @@ from .service_api import (
 from .state._contracts import (
     EvaluationRecord,
     EvaluationState,
+    ExecutionRecord,
     ExecutionRepository,
     IdempotencyRecord,
 )
@@ -181,19 +182,20 @@ class DefaultEvaluationService:
                         evaluation_id,
                         execution.execution_id,
                         request.dataset_digest,
-                        binding_digest,
                         EvaluationStatus.PENDING,
                         0,
                         now,
                         now,
                     )
                 )
-            elif (
-                existing is not None
-                and existing.status is not IdempotencyStatus.COMPLETED
-                and record.status in _TERMINAL_EVALUATION_STATUSES
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                await self._require_execution(record)
+                if (
+                    existing is not None
+                    and existing.status is not IdempotencyStatus.COMPLETED
+                    and record.status in _TERMINAL_EVALUATION_STATUSES
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -290,15 +292,21 @@ class DefaultEvaluationService:
                 request.principal.tenant_id,
             ),
         )
+        baseline_execution = await self._require_execution(baseline)
+        candidate_execution = (
+            baseline_execution
+            if candidate is baseline
+            else await self._require_execution(candidate)
+        )
         if (
             baseline.dataset_digest != candidate.dataset_digest
-            or baseline.binding_digest != candidate.binding_digest
+            or baseline_execution.binding_digest
+            != candidate_execution.binding_digest
         ):
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
         return EvaluationComparison(
             request.baseline_id,
             request.candidate_id,
-            True,
         )
 
     async def snapshot(
@@ -315,17 +323,18 @@ class DefaultEvaluationService:
             ),
             principal=principal,
         )
+        source = await self._require_execution(record)
         digest = canonical_sha256(
             {
                 "snapshot_id": evaluation_id,
                 "execution_id": record.execution_id,
-                "binding_digest": record.binding_digest,
+                "binding_digest": source.binding_digest,
             }
         )
         return RunSnapshot(
             evaluation_id,
             record.execution_id,
-            record.binding_digest,
+            source.binding_digest,
             digest,
         )
 
@@ -343,13 +352,7 @@ class DefaultEvaluationService:
             ),
             principal=request.principal,
         )
-        source = await self._execution_record(record)
-        if (
-            source is None
-            or not isinstance(source.binding, AgentBindingSnapshot)
-            or source.binding_digest != record.binding_digest
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source = await self._require_execution(record)
         if source.binding.agent_spec.id != agent_id:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
         return await self._execution.start(
@@ -374,23 +377,13 @@ class DefaultEvaluationService:
     ) -> EvaluationRecord:
         current = record
         while True:
-            execution = await self._execution_record(current)
-            if (
-                execution is None
-                or execution.binding_digest != current.binding_digest
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution = await self._require_execution(current)
             if execution.status not in _TERMINAL_EXECUTION_STATUSES:
                 await self._execution.inspect(
                     execution.execution_id,
                     principal=principal,
                 )
-                execution = await self._execution_record(current)
-                if (
-                    execution is None
-                    or execution.binding_digest != current.binding_digest
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                execution = await self._require_execution(current)
             target_status = _EXECUTION_EVALUATION_STATUS.get(execution.status)
             if target_status is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -428,11 +421,17 @@ class DefaultEvaluationService:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 current = latest
 
-    async def _execution_record(self, record: EvaluationRecord):
-        return await self._executions.get(
+    async def _require_execution(
+        self,
+        record: EvaluationRecord,
+    ) -> ExecutionRecord:
+        execution = await self._executions.get(
             record.execution_id,
             tenant_id=self._state.records.tenant_id,
         )
+        if execution is None or not isinstance(execution.binding, AgentBindingSnapshot):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return execution
 
     async def _authorized(
         self,
