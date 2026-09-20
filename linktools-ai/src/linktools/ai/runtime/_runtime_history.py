@@ -46,7 +46,7 @@ from ._cursor import decode_cursor as decode_runtime_cursor
 from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
-from ._runtime_identity import grant_key
+from ._runtime_identity import token_seed
 from .service_api import (
     AttachmentFact,
     ArtifactService,
@@ -988,7 +988,7 @@ async def _open_runtime_history(
             store=selected_state.steps.read_store(RuntimeDomain.EXECUTION),
             cursor_signer=HmacCursorSigner(
                 "execution-history",
-                grant_key(resolved_namespace),
+                token_seed(resolved_namespace),
             ),
         )
         effective_authorization = (
@@ -1000,13 +1000,13 @@ async def _open_runtime_history(
             selected_state.execution.executions,
             effective_authorization,
             reader,
-            cursor_signer=HmacCursorSigner("execution", grant_key(resolved_namespace)),
+            cursor_signer=HmacCursorSigner("execution", token_seed(resolved_namespace)),
         )
         artifacts = DefaultArtifactService(
             selected_state.artifact,
             effective_authorization,
-            grant_key=grant_key(resolved_namespace),
-            cursor_signer=HmacCursorSigner("artifact", grant_key(resolved_namespace)),
+            grant_key=token_seed(resolved_namespace),
+            cursor_signer=HmacCursorSigner("artifact", token_seed(resolved_namespace)),
         )
         yield RuntimeHistory(
             service,
@@ -1022,7 +1022,7 @@ async def _open_runtime_history(
             artifacts=artifacts,
             cursor_signer=HmacCursorSigner(
                 "runtime-history",
-                grant_key(resolved_namespace),
+                token_seed(resolved_namespace),
             ),
         )
     except BaseException as error:
