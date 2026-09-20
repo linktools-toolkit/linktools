@@ -219,6 +219,7 @@ async def compose_runtime_components(
         session_history_reader = StepSessionHistoryReader(
             store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
             cursor_signer=HmacCursorSigner("session-history", runtime_token_seed),
+            sessions=selected_state.conversation.sessions,
         )
         memory_store_factory = _memory_store_factory(
             resolved_namespace,
