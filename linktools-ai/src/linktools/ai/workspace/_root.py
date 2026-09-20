@@ -266,8 +266,6 @@ def load_config(path: Path) -> "dict[str, JsonValue]":
         value = normalize_json_value(raw)
         if not isinstance(value, dict):
             raise TypeError("workspace config root must be a mapping")
-        if "workspace_id" in value:
-            raise ValueError("workspace config contains removed workspace identity")
         return value
     except (_yaml.YAMLError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.WORKSPACE_CONFIG_INVALID) from error
