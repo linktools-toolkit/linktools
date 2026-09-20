@@ -354,12 +354,15 @@ class RuntimeSnapshot:
                 snapshot_payload = canonical_json_bytes(
                     cast(dict[str, JsonValue], manifest)
                 )
-                await asyncio.to_thread(
-                    _write_bytes_durable,
-                    staging / "snapshot.json",
-                    snapshot_payload,
-                )
-                await asyncio.to_thread(_fsync_tree, staging)
+                try:
+                    await asyncio.to_thread(
+                        _write_bytes_durable,
+                        staging / "snapshot.json",
+                        snapshot_payload,
+                    )
+                    await asyncio.to_thread(_fsync_tree, staging)
+                except OSError as error:
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
                 generation_root = root / "generations" / generation
                 generation_root.parent.mkdir(parents=True, exist_ok=True)
                 publish_lock = locks / "publish.lock"
@@ -388,10 +391,13 @@ class RuntimeSnapshot:
                             ):
                                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
                         staging.rename(generation_root)
-                        await asyncio.to_thread(
-                            _fsync_directory,
-                            generation_root.parent,
-                        )
+                        try:
+                            await asyncio.to_thread(
+                                _fsync_directory,
+                                generation_root.parent,
+                            )
+                        except OSError as error:
+                            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
                         value = {
                             "snapshot_digest": ref.digest,
                             "generation": generation,
