@@ -3,6 +3,7 @@
 """Regression coverage for execution-owned binding dependency snapshots."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -21,15 +22,21 @@ from linktools.ai.capability import (
     SkillSourceRef,
     SkillSourceRegistry,
 )
-from linktools.ai.core import Principal
+from linktools.ai.core import (
+    ExecutionLineageKind,
+    ExecutionStatus,
+    Principal,
+)
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_freeze import _RuntimeBindingFreezer
 from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapshotStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
+from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
-from linktools.ai.storage import InMemoryObjectStore
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -279,3 +286,106 @@ async def test_non_durable_binding_does_not_require_skill_snapshots(
     assert frozen is fixture.binding
     assert frozen.snapshot == fixture.binding.snapshot
     assert frozen.snapshot.subagent_bindings == ()
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_snapshot_restores_frozen_skill_objects(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    state_root = tmp_path / "state"
+    state = RuntimeState.filesystem(state_root)
+    await state.initialize(namespace="namespace", tenant_id="tenant")
+    try:
+        freezer = _RuntimeBindingFreezer(
+            fixture.catalog,
+            fixture.compiler,
+            SkillSourceRegistry(
+                (
+                    LocalSkillResourceSource(
+                        "application",
+                        fixture.resource.parents[1],
+                    ),
+                )
+            ),
+            state.object_store(RuntimeDomain.EXECUTION),
+            freeze_dependencies=True,
+        )
+        frozen = await freezer.freeze(fixture.binding)
+        now = datetime.now(timezone.utc)
+        await state.execution.executions.create(
+            ExecutionRecord(
+                execution_id="execution",
+                session_id=None,
+                parent_execution_id=None,
+                root_execution_id="execution",
+                source_execution_id=None,
+                base_execution_id=None,
+                lineage_kind=ExecutionLineageKind.RUN,
+                status=ExecutionStatus.PENDING_START,
+                revision=0,
+                event_sequence=0,
+                agent_run_sequence=0,
+                error_code=None,
+                safe_error_details={},
+                created_at=now,
+                updated_at=now,
+                mode="run",
+                planning=False,
+                thinking=False,
+                binding=frozen.snapshot,
+                principal_id="principal",
+                principal_kind="service",
+                stored_user_input=StoredUserInput(
+                    "text",
+                    StoredPayload.inline_text("prompt"),
+                ),
+            )
+        )
+    finally:
+        await state.close()
+
+    snapshot_store = InMemoryObjectStore("snapshot")
+    read_state = RuntimeState.filesystem(state_root)
+    await read_state.initialize(
+        namespace="namespace",
+        tenant_id="tenant",
+        read_only=True,
+    )
+    try:
+        snapshot_ref = await read_state.export_snapshot(
+            object_store=snapshot_store,
+            limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
+        )
+    finally:
+        await read_state.close()
+
+    restored_root = tmp_path / "restored"
+    await RuntimeState.restore_snapshot(
+        snapshot_ref,
+        object_store=snapshot_store,
+        root=restored_root,
+        limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
+    )
+    restored = RuntimeState.from_root(restored_root)
+    await restored.initialize(
+        namespace="namespace",
+        tenant_id="tenant",
+        read_only=True,
+    )
+    try:
+        execution = await restored.execution.executions.get(
+            "execution",
+            tenant_id="tenant",
+        )
+        assert execution is not None
+        child = _frozen_child(execution.binding)
+        skill_ref = _skill_snapshot(child)
+        source = FrozenSkillResourceSource(
+            "application",
+            {"child-skill": skill_ref},
+            restored.object_store(RuntimeDomain.EXECUTION),
+        )
+        assert await source.read("child-skill", "guide.txt") == b"original"
+    finally:
+        await restored.close()
