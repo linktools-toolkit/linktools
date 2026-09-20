@@ -192,6 +192,42 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluation_binding_projection_mismatch_fails_closed() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="evaluation", tenant_id="tenant")
+    source = _execution(_binding("agent"), execution_id="source-execution")
+    now = datetime.now(timezone.utc)
+    await state.execution.executions.create(source)
+    await state.evaluation.records.create(
+        EvaluationRecord(
+            evaluation_id="binding-mismatch",
+            execution_id=source.execution_id,
+            dataset_digest="dataset",
+            binding_digest="b" * 64,
+            status=EvaluationStatus.PENDING,
+            revision=0,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    service = DefaultEvaluationService(
+        state.evaluation,
+        state.execution.executions,
+        _Allow(),  # type: ignore[arg-type]
+        _RecordingExecution(),  # type: ignore[arg-type]
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            await service.inspect(
+                "binding-mismatch",
+                principal=Principal("principal", "tenant"),
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_evaluation_missing_source_execution_fails_closed() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")
