@@ -152,7 +152,6 @@ class _FilesystemTransaction:
             return None
         guarded = StoredRecord(
             current.key_digest,
-            current.partition_digest,
             current.scope_digest,
             current.parent_digest,
             current.kind,
@@ -239,7 +238,6 @@ class _FilesystemTransaction:
             raise ValueError("record lease is invalid")
         updated = StoredRecord(
             current.key_digest,
-            current.partition_digest,
             current.scope_digest,
             current.parent_digest,
             current.kind,

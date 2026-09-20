@@ -542,11 +542,6 @@ class _MemoryTransaction:
 
 
 def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
-    if (
-        query.partition_digest is not None
-        and record.partition_digest != query.partition_digest
-    ):
-        return False
     if query.scope_digest is not None and record.scope_digest != query.scope_digest:
         return False
     if query.parent_digest is not None and record.parent_digest != query.parent_digest:

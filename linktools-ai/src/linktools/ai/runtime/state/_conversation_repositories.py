@@ -378,7 +378,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> SessionTurnCommitRef:
         if (
             record.key_digest != self._timeline_commit_key(session_id, sequence)
-            or record.partition_digest != self._partition("session_turn_commit")
             or record.scope_digest
             != self._scope("session_turn_commit", "session", session_id)
             or record.parent_digest is not None
@@ -924,9 +923,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         async def read(transaction: StateTransaction) -> tuple[SessionRecord, ...]:
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=self._partition("session")
-                    if scope is None
-                    else None,
                     scope_digest=scope,
                     kind="session",
                 )
@@ -970,9 +966,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             after_sort_key, after_key_digest = _decode_record_cursor(cursor)
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=self._partition("session")
-                    if scope is None
-                    else None,
                     scope_digest=scope,
                     kind="session",
                     after_sort_key=after_sort_key,
@@ -984,11 +977,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 last = records[-1]
                 probe = await transaction.list_records(
                     RecordQuery(
-                        partition_digest=(
-                            self._partition("session")
-                            if scope is None
-                            else None
-                        ),
                         scope_digest=scope,
                         kind="session",
                         after_sort_key=last.sort_key,

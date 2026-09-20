@@ -1246,7 +1246,6 @@ def decode_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
 def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
     return {
         "key": record.key_digest.hex(),
-        "partition": record.partition_digest.hex(),
         "scope": None if record.scope_digest is None else record.scope_digest.hex(),
         "parent": None if record.parent_digest is None else record.parent_digest.hex(),
         "kind": record.kind,
@@ -1267,23 +1266,24 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
 def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(
-        value,
-        frozenset(
-            {
-                "key",
-                "partition",
-                "scope",
-                "parent",
-                "kind",
-                "sort",
-                "state",
-                "storage_version",
-                "lease",
-                "data",
-            }
-        ),
+    current_keys = frozenset(
+        {
+            "key",
+            "scope",
+            "parent",
+            "kind",
+            "sort",
+            "state",
+            "storage_version",
+            "lease",
+            "data",
+        }
     )
+    keys = frozenset(value)
+    if keys == current_keys | {"partition"}:
+        _digest_wire(_string(value, "partition"))
+    elif keys != current_keys:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     lease = value["lease"]
     if not isinstance(lease, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1294,7 +1294,6 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
     try:
         record = StoredRecord(
             _digest_wire(_string(value, "key")),
-            _digest_wire(_string(value, "partition")),
             _optional_digest(value["scope"]),
             _optional_digest(value["parent"]),
             _string(value, "kind"),
