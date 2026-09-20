@@ -107,8 +107,6 @@ from ._object import (
     ObjectRef,
     ObjectStat,
     ObjectStore,
-    ObjectStoreInspection,
-    ObjectStoreMaintenance,
     read_object,
     runtime_object_key,
 )
@@ -146,8 +144,6 @@ __all__ = [
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
-    "ObjectStoreInspection",
-    "ObjectStoreMaintenance",
     "PayloadPolicy",
     "PostgreSQLDialect",
     "PreloadResult",
