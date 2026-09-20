@@ -3,7 +3,6 @@
 """Canonical transcript chunks and bounded context projections."""
 
 import hashlib
-import json
 import zlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -11,10 +10,13 @@ from dataclasses import dataclass, replace
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
-from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
-from .._message import decode_model_messages, encode_model_messages
+from .._message import (
+    decode_model_messages,
+    encode_model_messages,
+    model_message_identity_bytes,
+)
 from ._codec import (
     _decode_enveloped_domain,
     _encode_persisted_domain,
@@ -65,23 +67,8 @@ _TRANSCRIPT_SEEK_BLOCK = 128
 
 
 def _overlap_signature(message: ModelMessage) -> bytes:
-    """Timestamp-ignoring signature used only for overlap/dedup matching."""
-    value = json.loads(
-        encode_model_messages((message,)).decode("utf-8")
-    )
-
-    def remove_timestamps(candidate: object) -> object:
-        if isinstance(candidate, list):
-            return [remove_timestamps(item) for item in candidate]
-        if isinstance(candidate, dict):
-            return {
-                key: remove_timestamps(item)
-                for key, item in candidate.items()
-                if key != "timestamp"
-            }
-        return candidate
-
-    return canonical_json_bytes(remove_timestamps(value))
+    """Framework-stamp-ignoring signature used for overlap matching."""
+    return model_message_identity_bytes(message)
 
 
 def _conversation_overlap_signature(message: ModelMessage) -> bytes:
