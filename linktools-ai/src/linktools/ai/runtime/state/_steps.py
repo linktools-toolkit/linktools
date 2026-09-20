@@ -705,9 +705,18 @@ class RuntimeStepStore(StepStore):
                     projection.run,
                     projection.snapshots,
                 )
+                latest_staged_snapshot = await self._staging.latest_snapshot(
+                    run_id=projection.run.run_id,
+                    include_interrupted=True,
+                )
                 local_base, local_count = _interaction_local_range(
                     projection.snapshots,
                     batch.target_transcript_message_count,
+                    fallback_local_count=(
+                        0
+                        if latest_staged_snapshot is None
+                        else len(latest_staged_snapshot.messages)
+                    ),
                 )
                 prepared.append(
                     PreparedExecutionProjection(
@@ -1094,9 +1103,18 @@ class RuntimeStepStore(StepStore):
                 captured.run,
                 captured.snapshots,
             )
+            latest_staged_snapshot = await self._staging.latest_snapshot(
+                run_id=captured.run.run_id,
+                include_interrupted=True,
+            )
             local_base, local_count = _interaction_local_range(
                 captured.snapshots,
                 prepared.target_transcript_message_count,
+                fallback_local_count=(
+                    0
+                    if latest_staged_snapshot is None
+                    else len(latest_staged_snapshot.messages)
+                ),
             )
             interactions = await archive.prepare_interactions(
                 captured.run,
@@ -1552,12 +1570,19 @@ def _interaction_semantic_header(
 def _interaction_local_range(
     snapshots: Sequence[ContinuableSnapshot],
     target_transcript_message_count: int,
+    *,
+    fallback_local_count: int = 0,
 ) -> tuple[int, int]:
-    if target_transcript_message_count < 0:
+    if (
+        target_transcript_message_count < 0
+        or fallback_local_count < 0
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if not snapshots:
-        return target_transcript_message_count, 0
-    local_count = len(snapshots[-1].messages)
+    local_count = (
+        len(snapshots[-1].messages)
+        if snapshots
+        else fallback_local_count
+    )
     local_base = target_transcript_message_count - local_count
     if local_base < 0:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
