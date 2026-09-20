@@ -107,7 +107,6 @@ class _LiveSubscription:
         while True:
             if self._queue:
                 value = self._queue.popleft()
-                if isinstance(value, ExecutionDelta):
                 self._queue_bytes -= _live_item_size(value)
                 return value
             if self._closed or self._completed:
