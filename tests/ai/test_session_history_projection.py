@@ -68,19 +68,35 @@ async def _advance(
     next_cursor: ConversationCursor,
 ) -> None:
     execution_id = "history-execution"
+    session = await state.conversation.sessions.get("session", tenant_id="tenant")
+    assert session is not None and session.history_id is not None
+    effective_expected = expected
+    if expected is not None and session.continuation is not None:
+        assert session.continuation.step_run_id == expected.step_run_id
+        effective_expected = session.continuation
+    message_count = await state.steps.conversation_message_count(
+        history_id=session.history_id,
+        step_run_id=next_cursor.step_run_id,
+        tenant_id="tenant",
+    )
+    effective_next = ConversationCursor(
+        next_cursor.step_run_id,
+        history_id=session.history_id,
+        message_count=message_count,
+    )
     await state.conversation.sessions.admit_execution(
         "session",
         tenant_id="tenant",
         execution_id=execution_id,
-        expected=expected,
+        expected=effective_expected,
     )
     try:
         await state.conversation.sessions.advance_continuation(
             "session",
             tenant_id="tenant",
             execution_id=execution_id,
-            expected=expected,
-            next_cursor=next_cursor,
+            expected=effective_expected,
+            next_cursor=effective_next,
         )
     finally:
         await state.conversation.sessions.release_execution(
@@ -213,7 +229,7 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
         )
         assert first_page.next_cursor is not None
 
-        await _materialize(state, second_run, ("A", "B", "C"))
+        await _materialize(state, second_run, ("C",))
         await _advance(
             state,
             ConversationCursor(first_run),
