@@ -961,6 +961,7 @@ def _normalize_path(value: "str | Path") -> Path:
 
 def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
     return {
+        "store_id": "runtime",
         "key": ref.key,
         "digest": ref.digest,
         "size": ref.size,
