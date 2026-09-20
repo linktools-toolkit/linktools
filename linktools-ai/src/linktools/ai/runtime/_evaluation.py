@@ -221,7 +221,6 @@ class DefaultEvaluationService:
                 )
                 record = EvaluationRecord(
                     evaluation_id,
-                    request.principal.tenant_id,
                     execution.execution_id,
                     request.dataset_digest,
                     1,
