@@ -173,7 +173,6 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             if self.deferred_pause_sink is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             self.deferred_pause_sink(self._last_observed_step_index)
-            self.capture.mark_interrupted()
         await self._save_snapshot(
             ctx,
             messages=result.all_messages(),
