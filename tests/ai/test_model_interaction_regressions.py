@@ -202,6 +202,54 @@ async def test_interaction_prepare_accepts_framework_stamped_source_equivalent()
         await archive.close()
 
 
+def test_interaction_projection_keeps_exact_stamped_request_content() -> None:
+    source = ModelRequest(
+        parts=[UserPromptPart(content="hello")],
+        timestamp=None,
+    )
+    projected = replace(
+        source,
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        run_id="run",
+        conversation_id="conversation",
+        instructions="instruction",
+    )
+    store = StagingStepStore()
+
+    projection = build_context_projection(
+        (source,),
+        (projected,),
+        lambda content: store.intern_payload("run", content),
+    )
+
+    assert len(projection.items) == 1
+    assert isinstance(projection.items[0], StagedContextInline)
+
+
+def test_message_prefix_digest_preserves_nested_business_timestamp() -> None:
+    first = ModelRequest(
+        parts=[
+            ToolReturnPart(
+                "tool",
+                {"timestamp": "2026-01-01T00:00:00Z"},
+                tool_call_id="call-1",
+            )
+        ]
+    )
+    second = replace(
+        first,
+        parts=[
+            ToolReturnPart(
+                "tool",
+                {"timestamp": "2026-01-02T00:00:00Z"},
+                tool_call_id="call-1",
+            )
+        ],
+    )
+
+    assert message_prefix_digest((first,)) != message_prefix_digest((second,))
+
+
 def test_repeated_message_matching_preserves_first_unused_source() -> None:
     message = ModelRequest(parts=[UserPromptPart(content="same")])
     other = ModelRequest(parts=[UserPromptPart(content="other")])
