@@ -211,6 +211,43 @@ class ConversationHistoryRepositoryImpl(_RepositoryBase):
             self._stored("conversation_index_node", node.node_id, node)
         )
 
+    async def fork_projection_record_in_transaction(
+        self,
+        transaction: StateTransaction,
+        source_history_id: str,
+        child_history_id: str,
+    ) -> StoredRecord | None:
+        source_key = self._key("context_projection", source_history_id)
+        source = await transaction.get_record(source_key)
+        if source is None:
+            return None
+        if (
+            source.key_digest != source_key
+            or source.scope_digest is not None
+            or source.parent_digest
+            != self._key("transcript_head", source_history_id)
+            or source.kind != "context_projection"
+            or source.sort_key != source_history_id
+            or source.state is not None
+            or source.lease_owner is not None
+            or source.lease_fence != 0
+            or source.lease_expires_at is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return StoredRecord(
+            self._key("context_projection", child_history_id),
+            None,
+            self._key("transcript_head", child_history_id),
+            "context_projection",
+            child_history_id,
+            None,
+            0,
+            None,
+            0,
+            None,
+            source.data,
+        )
+
     async def fork(
         self,
         source_history_id: str,
@@ -677,31 +714,37 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             if target_stored is not None or child_stored is not None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            await transaction.insert_records(
-                (
-                    self._stored(
-                        "session",
-                        expected_target.session_id,
-                        expected_target,
-                        scope=self._scope(
-                            "session",
-                            "owner",
-                            expected_target.owner_principal_id,
-                        ),
-                        state=expected_target.status.value,
-                    ),
-                    self._stored(
-                        "conversation_history",
-                        child.history_id,
-                        child,
-                    ),
-                    self._stored(
-                        "transcript_head",
-                        child.history_id,
-                        _empty_conversation_transcript_head(child.history_id),
-                    ),
-                )
+            child_projection = await histories.fork_projection_record_in_transaction(
+                transaction,
+                source.history_id,
+                child.history_id,
             )
+            records = [
+                self._stored(
+                    "session",
+                    expected_target.session_id,
+                    expected_target,
+                    scope=self._scope(
+                        "session",
+                        "owner",
+                        expected_target.owner_principal_id,
+                    ),
+                    state=expected_target.status.value,
+                ),
+                self._stored(
+                    "conversation_history",
+                    child.history_id,
+                    child,
+                ),
+                self._stored(
+                    "transcript_head",
+                    child.history_id,
+                    _empty_conversation_transcript_head(child.history_id),
+                ),
+            ]
+            if child_projection is not None:
+                records.append(child_projection)
+            await transaction.insert_records(tuple(records))
             await self._bump_list_generation(
                 transaction,
                 expected_target.owner_principal_id,
