@@ -127,11 +127,7 @@ class _RuntimeBindingFreezer:
                 cast("Mapping[str, object]", pin.contract)
             )
             source_ref = skill.source_ref
-            if (
-                source_ref is None
-                or source_ref.snapshot is not None
-                or not self._freeze_dependencies
-            ):
+            if source_ref is None or source_ref.snapshot is not None:
                 selected.append(pin)
                 continue
             source = self._skill_sources.resolve(source_ref.source_id)
