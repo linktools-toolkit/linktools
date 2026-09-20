@@ -377,7 +377,10 @@ class DefaultEvaluationService:
             if current.status in _TERMINAL_EVALUATION_STATUSES:
                 return current
             execution = await self._execution_record(current)
-            if execution is None:
+            if (
+                execution is None
+                or execution.binding_digest != current.binding_digest
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution.status not in _TERMINAL_EXECUTION_STATUSES:
                 await self._execution.inspect(
@@ -385,7 +388,10 @@ class DefaultEvaluationService:
                     principal=principal,
                 )
                 execution = await self._execution_record(current)
-                if execution is None:
+                if (
+                    execution is None
+                    or execution.binding_digest != current.binding_digest
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             target_status = _EXECUTION_EVALUATION_STATUS.get(execution.status)
             if target_status is None:
