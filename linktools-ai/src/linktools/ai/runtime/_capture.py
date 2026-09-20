@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Protocol, cast
 
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, ModelRequestParameters
@@ -32,6 +32,7 @@ from ._model_interaction import (
     request_envelope,
 )
 from .state._contracts import LoadedModelContext, TranscriptMessageRef
+from .state._plan import RuntimeDomain
 from .state._step_contracts import (
     ContinuableSnapshot,
     EventKind,
@@ -39,6 +40,12 @@ from .state._step_contracts import (
     StepEvent,
     StepStore,
 )
+
+
+class _InteractionStagingPort(Protocol):
+    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]: ...
+
+    def stage_model_interaction(self, interaction: object) -> None: ...
 
 
 class RuntimeCaptureStore:
@@ -57,11 +64,10 @@ class RuntimeCaptureStore:
         if not isinstance(step_run_id, str) or not step_run_id:
             raise ValueError("step_run_id is required")
         self._store = store
-        self._interaction_store = store
+        self._interaction_store = cast(_InteractionStagingPort, store)
         self._execution_id = execution_id
         self._step_run_id = step_run_id
         self._run: RunRecord | None = None
-        self._interrupted = False
         self._event_sequence = 0
         self._initial_attachments = tuple(dict(value) for value in initial_attachments)
         self._accepted_attachment_ids = {
@@ -79,7 +85,13 @@ class RuntimeCaptureStore:
             len(baseline_messages) == len(frozen_initial)
             and freeze_model_messages(baseline_messages) == frozen_initial
         ):
-            baseline_refs = tuple(value.source for value in baseline.messages)
+            baseline_refs = tuple(
+                value.source
+                if value.source is not None
+                and value.source.source_domain is RuntimeDomain.CONVERSATION
+                else None
+                for value in baseline.messages
+            )
         else:
             baseline_refs = (None,) * len(frozen_initial)
         self._source_messages: list[ModelMessage] = list(frozen_initial)
@@ -88,7 +100,7 @@ class RuntimeCaptureStore:
         )
         self._transcript_messages: list[ModelMessage] = []
 
-        self._projection_source_count: int | None = None
+        self._projection_source: tuple[ModelMessage, ...] | None = None
         self._projection_messages: tuple[ModelMessage, ...] | None = None
 
         self._interaction_projections: dict[int, StagedContextProjection] = {}
@@ -153,8 +165,6 @@ class RuntimeCaptureStore:
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         if snapshot.run_id != self._step_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if self._interrupted and snapshot.state != "interrupted":
-            snapshot.state = "interrupted"
         await self._store.save_snapshot(snapshot, execution_id=self._execution_id)
 
     async def latest_snapshot(
@@ -166,9 +176,6 @@ class RuntimeCaptureStore:
             run_id=self._step_run_id,
             include_interrupted=include_interrupted,
         )
-
-    def mark_interrupted(self) -> None:
-        self._interrupted = True
 
     def append_transcript_message(self, message: ModelMessage) -> ModelMessage:
         frozen = freeze_model_messages((message,))[0]
@@ -187,10 +194,10 @@ class RuntimeCaptureStore:
         projected: Sequence[ModelMessage] | None,
     ) -> None:
         if projected is None:
-            self._projection_source_count = None
+            self._projection_source = None
             self._projection_messages = None
             return
-        self._projection_source_count = len(source)
+        self._projection_source = freeze_model_messages(source)
         self._projection_messages = freeze_model_messages(projected)
 
     def snapshot_context(
@@ -200,14 +207,15 @@ class RuntimeCaptureStore:
         pending: ModelMessage | None = None,
     ) -> tuple[list[ModelMessage], int | None]:
         current = freeze_model_messages(messages)
-        source_count = self._projection_source_count
+        source = self._projection_source
         projected = self._projection_messages
         if (
-            source_count is not None
+            source is not None
             and projected is not None
-            and source_count <= len(current)
+            and len(source) <= len(current)
+            and current[: len(source)] == source
         ):
-            current = (*projected, *current[source_count:])
+            current = (*projected, *current[len(source) :])
         pending_index = None
         if pending is not None:
             frozen_pending = freeze_model_messages((pending,))[0]
