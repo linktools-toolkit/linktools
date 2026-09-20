@@ -209,6 +209,101 @@ async def test_live_durable_terminal_publication_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_broker_durable_overflow_switches_to_repository_replay() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    for sequence in range(1, 300):
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": f"call-{sequence}", "tool_name": "tool"},
+            durable_sequence=sequence,
+        )
+
+    assert "execution" in broker._replay_required
+    assert "execution" not in broker._buffers
+
+
+@pytest.mark.asyncio
+async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    first = broker.claim_local_producer("execution")
+    second = broker.subscribe("execution")
+    assert first is not None
+
+    for index in range(300):
+        broker.publish_event(
+            "execution",
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {"call_id": f"call-{index}", "tool_name": "tool"},
+            durable_sequence=None,
+        )
+
+    assert first.replay_required
+    assert second.replay_required
+    assert len(first._queue) == 1
+    assert len(second._queue) == 1
+    assert broker._pending_event_counts["execution"] == 300
+
+    broker.confirm_events("execution", first_sequence=1, count=300)
+    assert "execution" not in broker._pending_event_counts
+    await first.close()
+    await second.close()
+
+
+@pytest.mark.asyncio
+async def test_live_overflow_replays_all_durable_events_without_loss() -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    durable = tuple(
+        ExecutionEvent(
+            "execution",
+            sequence,
+            ExecutionEventType.EXECUTION_SUCCEEDED
+            if sequence == 300
+            else ExecutionEventType.TOOL_CALL_STARTED,
+            {}
+            if sequence == 300
+            else {"call_id": f"call-{sequence}", "tool_name": "tool"},
+        )
+        for sequence in range(1, 301)
+    )
+    for event in durable:
+        broker.publish_event(
+            event.execution_id,
+            event.event_type,
+            event.payload,
+            durable_sequence=event.sequence,
+        )
+    broker.complete("execution")
+
+    service = _service(
+        _execution(
+            status=ExecutionStatus.SUCCEEDED,
+            revision=300,
+            event_sequence=300,
+        ),
+        _EventReader({0: durable}),
+        broker,
+    )
+    principal = Principal("user", "tenant", "user")
+    streamed = [
+        item
+        async for item in service.stream(
+            "execution",
+            principal=principal,
+        )
+    ]
+
+    assert [item.durable_sequence for item in streamed] == list(range(1, 301))
+    assert streamed[-1].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+
+
+@pytest.mark.asyncio
 async def test_cancel_batches_pending_audit_in_one_filesystem_mutation(tmp_path: Path) -> None:
     state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="stream-order", tenant_id="tenant")
