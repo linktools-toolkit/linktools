@@ -251,7 +251,7 @@ class DefaultEvaluationService:
         *,
         principal: Principal,
     ) -> EvaluationView:
-        record = await self._synchronize(
+        record, _source = await self._synchronize(
             await self._authorized(
                 evaluation_id,
                 principal,
@@ -265,7 +265,7 @@ class DefaultEvaluationService:
         self,
         request: CompareEvaluationRequest,
     ) -> EvaluationComparison:
-        baseline = await self._synchronize(
+        baseline, baseline_execution = await self._synchronize(
             await self._authorized(
                 request.baseline_id,
                 request.principal,
@@ -273,10 +273,11 @@ class DefaultEvaluationService:
             ),
             principal=request.principal,
         )
-        candidate = (
-            baseline
-            if request.candidate_id == request.baseline_id
-            else await self._synchronize(
+        if request.candidate_id == request.baseline_id:
+            candidate = baseline
+            candidate_execution = baseline_execution
+        else:
+            candidate, candidate_execution = await self._synchronize(
                 await self._authorized(
                     request.candidate_id,
                     request.principal,
@@ -284,7 +285,6 @@ class DefaultEvaluationService:
                 ),
                 principal=request.principal,
             )
-        )
         await self._authorization.authorize(
             request.principal,
             AuthorizationAction.EVALUATION_COMPARE,
@@ -293,12 +293,6 @@ class DefaultEvaluationService:
                 request.candidate_id,
                 request.principal.tenant_id,
             ),
-        )
-        baseline_execution = await self._require_execution(baseline)
-        candidate_execution = (
-            baseline_execution
-            if candidate is baseline
-            else await self._require_execution(candidate)
         )
         if (
             baseline.dataset_digest != candidate.dataset_digest
@@ -317,7 +311,7 @@ class DefaultEvaluationService:
         *,
         principal: Principal,
     ) -> RunSnapshot:
-        record = await self._synchronize(
+        record, source = await self._synchronize(
             await self._authorized(
                 evaluation_id,
                 principal,
@@ -325,7 +319,6 @@ class DefaultEvaluationService:
             ),
             principal=principal,
         )
-        source = await self._require_execution(record)
         digest = canonical_sha256(
             {
                 "snapshot_id": evaluation_id,
@@ -346,7 +339,7 @@ class DefaultEvaluationService:
         snapshot_id: str,
         request: ReplayEvaluationRequest,
     ) -> ExecutionHandle:
-        record = await self._synchronize(
+        record, source = await self._synchronize(
             await self._authorized(
                 snapshot_id,
                 request.principal,
@@ -354,7 +347,6 @@ class DefaultEvaluationService:
             ),
             principal=request.principal,
         )
-        source = await self._require_execution(record)
         if source.binding.agent_spec.id != agent_id:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
         return await self._execution.start(
@@ -376,7 +368,7 @@ class DefaultEvaluationService:
         record: EvaluationRecord,
         *,
         principal: Principal,
-    ) -> EvaluationRecord:
+    ) -> tuple[EvaluationRecord, ExecutionRecord]:
         current = record
         while True:
             execution = await self._require_execution(current)
@@ -392,13 +384,13 @@ class DefaultEvaluationService:
             if current.status in _TERMINAL_EVALUATION_STATUSES:
                 if target_status is not current.status:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return current
+                return current, execution
             target_rank = _EVALUATION_STATUS_RANK[target_status]
             current_rank = _EVALUATION_STATUS_RANK[current.status]
             if target_rank < current_rank:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if target_rank == current_rank:
-                return current
+                return current, execution
             updated = replace(
                 current,
                 status=target_status,
@@ -406,12 +398,13 @@ class DefaultEvaluationService:
                 updated_at=datetime.now(timezone.utc),
             )
             try:
-                return await self._state.records.compare_and_swap(
+                result = await self._state.records.compare_and_swap(
                     current.evaluation_id,
                     tenant_id=self._state.records.tenant_id,
                     expected_revision=current.revision,
                     next_record=updated,
                 )
+                return result, execution
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
