@@ -1271,10 +1271,10 @@ class ExecutionService(Protocol):
         binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionResult: ...
     async def retry(
-        self, binding_digest: str, execution_id: str, request: RetryExecutionRequest
+        self, execution_id: str, request: RetryExecutionRequest
     ) -> ExecutionHandle: ...
     async def fork(
-        self, binding_digest: str, execution_id: str, request: ForkExecutionRequest
+        self, execution_id: str, request: ForkExecutionRequest
     ) -> ExecutionHandle: ...
     async def cancel(
         self, execution_id: str, request: CancelExecutionRequest
@@ -1397,11 +1397,9 @@ class EvaluationService(Protocol):
     ) -> RunSnapshot: ...
     async def replay(
         self,
-        binding_digest: str,
+        agent_id: str,
         snapshot_id: str,
         request: ReplayEvaluationRequest,
-        *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle: ...
 
 
