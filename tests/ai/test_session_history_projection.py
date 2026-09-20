@@ -59,6 +59,7 @@ def _reader(state: RuntimeState) -> StepSessionHistoryReader:
     return StepSessionHistoryReader(
         store=state.steps.read_store(RuntimeDomain.CONVERSATION),
         cursor_signer=HmacCursorSigner("session-history", b"session-history-key"),
+        sessions=state.conversation.sessions,
     )
 
 
