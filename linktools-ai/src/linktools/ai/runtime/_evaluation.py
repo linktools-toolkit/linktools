@@ -398,10 +398,11 @@ class DefaultEvaluationService:
                 if target_status is not current.status:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return current
-            if (
-                _EVALUATION_STATUS_RANK[target_status]
-                <= _EVALUATION_STATUS_RANK[current.status]
-            ):
+            target_rank = _EVALUATION_STATUS_RANK[target_status]
+            current_rank = _EVALUATION_STATUS_RANK[current.status]
+            if target_rank < current_rank:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if target_rank == current_rank:
                 return current
             updated = replace(
                 current,
