@@ -1134,6 +1134,20 @@ class StepSessionHistoryReader:
             if continuation_message_count is None:
                 total_messages = physical_total
             else:
+                run = await self._store.get_run(
+                    run_id=continuation_step_run_id
+                )
+                snapshot = await self._store.latest_snapshot(
+                    run_id=continuation_step_run_id,
+                    include_interrupted=True,
+                )
+                if (
+                    run is None
+                    or snapshot is None
+                    or snapshot.run_id != continuation_step_run_id
+                    or snapshot.state != "complete"
+                ):
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
                 if (
                     isinstance(continuation_message_count, bool)
                     or not isinstance(continuation_message_count, int)
