@@ -212,7 +212,6 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
         evaluation_id="evaluation",
         execution_id="execution",
         dataset_digest="dataset-digest",
-        binding_digest="a" * 64,
         status=EvaluationStatus.SUCCEEDED,
         revision=2,
         created_at=now,
@@ -223,17 +222,7 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
         runtime_codec._encode_persisted_domain(current),
     )
     fields = cast(dict[str, object], payload["fields"])
-    dataset = fields.pop("dataset_digest")
-    fields.update(
-        {
-            "dataset_id": dataset,
-            "dataset_revision": runtime_codec._encode_persisted_domain(1),
-            "evaluator_id": runtime_codec._encode_persisted_domain("default"),
-            "evaluator_revision": runtime_codec._encode_persisted_domain(1),
-            "artifact_digest": runtime_codec._encode_persisted_domain(None),
-            "metrics": runtime_codec._encode_persisted_domain({}),
-        }
-    )
+    fields["binding_digest"] = runtime_codec._encode_persisted_domain("a" * 64)
 
     def decode() -> EvaluationRecord:
         return runtime_codec._decode_enveloped_domain(
@@ -245,6 +234,22 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
             ),
             EvaluationRecord,
         )
+
+    # The convergence branch previously wrote dataset_digest plus a redundant
+    # binding projection. New readers accept and discard that derived field.
+    assert decode() == current
+
+    dataset = fields.pop("dataset_digest")
+    fields.update(
+        {
+            "dataset_id": dataset,
+            "dataset_revision": runtime_codec._encode_persisted_domain(1),
+            "evaluator_id": runtime_codec._encode_persisted_domain("default"),
+            "evaluator_revision": runtime_codec._encode_persisted_domain(1),
+            "artifact_digest": runtime_codec._encode_persisted_domain(None),
+            "metrics": runtime_codec._encode_persisted_domain({}),
+        }
+    )
 
     assert decode() == current
 
