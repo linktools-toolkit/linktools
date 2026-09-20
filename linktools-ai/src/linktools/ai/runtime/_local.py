@@ -2852,7 +2852,11 @@ class LocalExecutionBackend:
                 initial_repository_instructions,
                 repository_overlay,
             )
-            run_user_prompt = None if resumed_deferred_attempt else request.user_prompt
+            run_user_prompt = (
+                None
+                if resumed_deferred_attempt or recovery_history_run_id is not None
+                else request.user_prompt
+            )
 
             async def sink(emission: "LiveDelta | DurableBoundary") -> None:
                 if isinstance(emission, LiveDelta):
