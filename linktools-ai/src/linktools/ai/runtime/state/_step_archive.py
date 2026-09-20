@@ -22,8 +22,6 @@ from .._model_interaction import (
     StagedContextSpan,
     StagedModelInteraction,
     context_projection_to_durable,
-    extend_prefix_digest,
-    message_prefix_digest,
 )
 from ._codec import (
     _decode_enveloped_domain,
@@ -980,12 +978,17 @@ class StateStepArchive(StepStore):
         run: RunRecord,
         interactions: Sequence[StagedModelInteraction],
         payload: Callable[[str], bytes],
-        source_messages: Sequence[ModelMessage] | None = None,
+        *,
+        local_message_base: int = 0,
+        local_message_count: int = 0,
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(interactions)
         if not values:
             return ()
+        if local_message_base < 0 or local_message_count < 0:
+            raise ValueError("local interaction transcript range is invalid")
         request_sequences: set[int] = set()
+        external_refs: list[TranscriptMessageRef] = []
         for interaction in values:
             if (
                 interaction.run_id != run.run_id
@@ -993,40 +996,6 @@ class StateStepArchive(StepStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             request_sequences.add(interaction.request_sequence)
-        max_source_count = max(
-            (
-                projection.source_message_count
-                for interaction in values
-                for projection in (
-                    interaction.request_context,
-                    *(
-                        ()
-                        if interaction.response_context is None
-                        else (interaction.response_context,)
-                    ),
-                )
-                if projection.source_prefix_digest != "0" * 64
-            ),
-            default=0,
-        )
-        prefix_messages = (
-            tuple(source_messages)
-            if source_messages is not None
-            and len(source_messages) >= max_source_count
-            else await self._history.load_messages(run.run_id)
-        )
-        prefix_checkpoints = {0: message_prefix_digest(())}
-        prefix_digest = prefix_checkpoints[0]
-        for index, message in enumerate(prefix_messages[:max_source_count], 1):
-            prefix_digest = extend_prefix_digest(prefix_digest, message)
-            prefix_checkpoints[index] = prefix_digest
-        _logger.debug(
-            "model interaction prefix checkpoints: run=%s counts=%s kinds=%s",
-            run.run_id,
-            tuple(prefix_checkpoints),
-            tuple(type(message).__name__ for message in prefix_messages),
-        )
-        for interaction in values:
             for projection in (
                 interaction.request_context,
                 *(
@@ -1035,23 +1004,22 @@ class StateStepArchive(StepStore):
                     else (interaction.response_context,)
                 ),
             ):
-                if projection.source_prefix_digest == "0" * 64:
-                    continue
-                if projection.source_message_count > len(prefix_messages):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if any(
-                    isinstance(item, StagedContextSpan)
-                    and item.end > len(prefix_messages)
-                    for item in projection.items
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if prefix_checkpoints[projection.source_message_count] != (
-                    projection.source_prefix_digest
-                ):
-                    raise AIError(
-                        ErrorCode.STORAGE_INTEGRITY_ERROR,
-                        "model interaction source prefix digest mismatch",
-                    )
+                for item in projection.items:
+                    if isinstance(item, StagedContextSpan):
+                        if item.end > local_message_count:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    elif isinstance(item, TranscriptSpanRef):
+                        external_refs.extend(
+                            TranscriptMessageRef(
+                                item.source_domain,
+                                item.owner_id,
+                                index,
+                            )
+                            for index in range(item.start, item.end)
+                        )
+        if external_refs:
+            await self._history.resolve_transcript_message_refs(tuple(external_refs))
+
         result: list[ModelInteractionRecord] = []
         for staged in values:
             request_context = context_projection_to_durable(
@@ -1059,6 +1027,7 @@ class StateStepArchive(StepStore):
                 owner_id=run.run_id,
                 source_domain=self._runtime_domain,
                 payload=payload,
+                local_message_base=local_message_base,
             )
             request_context = await self._history.prepare_projection(
                 run.run_id,
@@ -1078,6 +1047,7 @@ class StateStepArchive(StepStore):
                     owner_id=run.run_id,
                     source_domain=self._runtime_domain,
                     payload=payload,
+                    local_message_base=local_message_base,
                 )
                 response_context = await self._history.prepare_projection(
                     run.run_id,
