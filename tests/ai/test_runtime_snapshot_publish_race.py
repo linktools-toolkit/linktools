@@ -3,15 +3,18 @@
 """Runtime snapshot publication race regression coverage."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import (
     RuntimeSnapshot,
     SnapshotLimits,
     SnapshotTargetInspection,
 )
+from linktools.ai.runtime import _snapshot as snapshot_module
 from linktools.ai.runtime.state import RuntimeState
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
@@ -197,3 +200,88 @@ async def test_collect_temporary_skips_active_restore_generation(
     restored = await restoring
     assert restored.generation
     assert len(tuple((target / "generations").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_current_pointer_commit_unknown_keeps_published_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryObjectStore("snapshot")
+    state_ref = ObjectRef("snapshot", "state", "a" * 64, 0)
+    snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
+    manifest = {
+        "kind": "runtime-snapshot",
+        "format_version": 1,
+        "namespace": "namespace",
+        "tenant_id": "tenant",
+        "state": {
+            "store_id": state_ref.store_id,
+            "key": state_ref.key,
+            "digest": state_ref.digest,
+            "size": state_ref.size,
+        },
+        "workspace": {"present": False, "entries": []},
+        "metadata": {},
+    }
+
+    async def verified_manifest(
+        cls,
+        ref: ObjectRef,
+        object_store,
+        limits: SnapshotLimits,
+    ):
+        del cls, ref, object_store, limits
+        return manifest
+
+    async def restore_state(
+        cls,
+        ref: ObjectRef,
+        *,
+        object_store,
+        root: str | Path,
+        limits: SnapshotLimits,
+    ) -> None:
+        del cls, ref, object_store, limits
+        Path(root).mkdir(parents=True, exist_ok=False)
+
+    monkeypatch.setattr(
+        RuntimeSnapshot,
+        "_verified_manifest",
+        classmethod(verified_manifest),
+    )
+    monkeypatch.setattr(
+        RuntimeState,
+        "restore_snapshot",
+        classmethod(restore_state),
+    )
+
+    target = tmp_path / "runtime"
+    original_fsync_directory = snapshot_module._fsync_directory
+
+    def fail_current_directory_sync(path: Path) -> None:
+        if path == target and (target / "current.json").is_file():
+            raise OSError("directory fsync failed")
+        original_fsync_directory(path)
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "_fsync_directory",
+        fail_current_directory_sync,
+    )
+
+    with pytest.raises(AIError) as raised:
+        await RuntimeSnapshot.restore(
+            snapshot_ref,
+            object_store=store,
+            target=target,
+            namespace="namespace",
+            tenant_id="tenant",
+            limits=SnapshotLimits(max_entries=100, max_bytes=1024 * 1024),
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+    current = json.loads((target / "current.json").read_text(encoding="utf-8"))
+    generation = target / "generations" / current["generation"]
+    assert generation.is_dir()
+    assert (generation / "snapshot.json").is_file()
