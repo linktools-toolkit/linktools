@@ -28,6 +28,7 @@ from ._plan import RuntimePlanStore
 from ._tool import ToolOperationBridge
 from ._tool_boundary import RepositoryInstructionBoundary
 from .state import RuntimeDomain
+from .state._contracts import LoadedModelContext
 from .state._step_contracts import StepStore
 from .state._steps import ExecutionTerminalSealPlan
 
@@ -99,6 +100,7 @@ class _AgentSegmentInput:
     user_prompt: CanonicalUserInput | None
     initial_attachments: tuple[Mapping[str, JsonValue], ...]
     history: list[ModelMessage]
+    initial_context: LoadedModelContext
     conversation_id: str
     step_store: StepStore
     step_run_id: str
@@ -161,6 +163,7 @@ class _AgentSegmentRunner:
             mcp_cwd=segment.mcp_cwd,
             user_prompt=segment.user_prompt,
             history=segment.history,
+            initial_context=segment.initial_context,
             initial_attachments=segment.initial_attachments,
             conversation_id=segment.conversation_id,
             step_store=segment.step_store,
