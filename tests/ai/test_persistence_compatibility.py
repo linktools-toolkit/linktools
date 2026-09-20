@@ -226,7 +226,6 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
     dataset = fields.pop("dataset_digest")
     fields.update(
         {
-            "tenant_id": runtime_codec._encode_persisted_domain("tenant"),
             "dataset_id": dataset,
             "dataset_revision": runtime_codec._encode_persisted_domain(1),
             "evaluator_id": runtime_codec._encode_persisted_domain("default"),
@@ -235,21 +234,9 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
             "metrics": runtime_codec._encode_persisted_domain({}),
         }
     )
-    decoded = runtime_codec._decode_enveloped_domain(
-        runtime_codec.encode_envelope(
-            {
-                "type": runtime_codec.wire_type_id(current),
-                "payload": cast(JsonValue, payload),
-            }
-        ),
-        EvaluationRecord,
-    )
 
-    assert decoded == current
-
-    fields["evaluator_id"] = runtime_codec._encode_persisted_domain("custom")
-    with pytest.raises(AIError) as raised:
-        runtime_codec._decode_enveloped_domain(
+    def decode() -> EvaluationRecord:
+        return runtime_codec._decode_enveloped_domain(
             runtime_codec.encode_envelope(
                 {
                     "type": runtime_codec.wire_type_id(current),
@@ -258,6 +245,15 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
             ),
             EvaluationRecord,
         )
+
+    assert decode() == current
+
+    fields["tenant_id"] = runtime_codec._encode_persisted_domain("tenant")
+    assert decode() == current
+
+    fields["evaluator_id"] = runtime_codec._encode_persisted_domain("custom")
+    with pytest.raises(AIError) as raised:
+        decode()
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
