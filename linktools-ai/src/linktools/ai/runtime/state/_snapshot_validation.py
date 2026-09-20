@@ -49,11 +49,13 @@ from ._store import (
     StoredFact,
     StoredOperation,
     StoredRecord,
+    alias_digest,
     operation_key,
     parent_digest,
     partition_digest,
     record_key_digest,
     scope_digest,
+    sequence_key,
     sortable_identity,
     sortable_timestamp,
     stream_digest,
@@ -139,6 +141,34 @@ _RECORD_TYPES = {
 }
 
 
+def canonical_snapshot_indexes(
+    *,
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    records: tuple[StoredRecord, ...],
+    facts: tuple[StoredFact, ...],
+    operations: tuple[StoredOperation, ...],
+) -> tuple[tuple[StoredAlias, ...], Mapping[bytes, int]]:
+    """Rebuild derived snapshot indexes from their durable semantic owners."""
+    _records_by_key, values = _decode_snapshot_records(domain, records)
+    aliases = _canonical_aliases(
+        namespace,
+        tenant_id,
+        domain,
+        values,
+    )
+    sequences = _canonical_sequences(
+        namespace,
+        tenant_id,
+        domain,
+        facts,
+        operations,
+        values,
+    )
+    return aliases, sequences
+
+
 def validate_snapshot_domain(
     *,
     namespace: str,
@@ -148,18 +178,10 @@ def validate_snapshot_domain(
     aliases: tuple[StoredAlias, ...],
     facts: tuple[StoredFact, ...],
     operations: tuple[StoredOperation, ...],
+    sequences: Mapping[bytes, int],
 ) -> None:
-    """Reject physical identities that cannot represent the decoded v2 facts."""
-    records_by_key: dict[bytes, StoredRecord] = {}
-    values: dict[bytes, object] = {}
-    for record in records:
-        if record.key_digest in records_by_key:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if record.kind not in _ALLOWED_RECORD_KINDS[domain]:
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        value = _decode_record(record)
-        records_by_key[record.key_digest] = record
-        values[record.key_digest] = value
+    """Reject physical identities that cannot represent the decoded v1 facts."""
+    records_by_key, values = _decode_snapshot_records(domain, records)
 
     graph_parents = _task_graph_parents(
         namespace,
@@ -180,7 +202,13 @@ def validate_snapshot_domain(
         if not _same_physical_identity(record, expected):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    if any(alias.record_key_digest not in records_by_key for alias in aliases):
+    expected_aliases = _canonical_aliases(
+        namespace,
+        tenant_id,
+        domain,
+        values,
+    )
+    if aliases != expected_aliases:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     _validate_facts(
@@ -192,6 +220,61 @@ def validate_snapshot_domain(
         values,
     )
     _validate_operations(namespace, tenant_id, domain, operations)
+    expected_sequences = _canonical_sequences(
+        namespace,
+        tenant_id,
+        domain,
+        facts,
+        operations,
+        values,
+    )
+    if dict(sequences) != dict(expected_sequences):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _decode_snapshot_records(
+    domain: RuntimeDomain,
+    records: tuple[StoredRecord, ...],
+) -> tuple[Mapping[bytes, StoredRecord], Mapping[bytes, object]]:
+    records_by_key: dict[bytes, StoredRecord] = {}
+    values: dict[bytes, object] = {}
+    for record in records:
+        if record.key_digest in records_by_key:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record.kind not in _ALLOWED_RECORD_KINDS[domain]:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        records_by_key[record.key_digest] = record
+        values[record.key_digest] = _decode_record(record)
+    return records_by_key, values
+
+
+def _canonical_aliases(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    values: Mapping[bytes, object],
+) -> tuple[StoredAlias, ...]:
+    if domain is not RuntimeDomain.RECOVERY:
+        return ()
+    aliases: dict[bytes, bytes] = {}
+    for record_key, value in values.items():
+        if not isinstance(value, ToolOperationRecord):
+            continue
+        digest = alias_digest(
+            namespace,
+            tenant_id,
+            domain.value,
+            "tool_call",
+            [value.step_run_id, value.tool_call_id],
+        )
+        current = aliases.get(digest)
+        if current is not None and current != record_key:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        aliases[digest] = record_key
+    return tuple(
+        StoredAlias(alias, aliases[alias])
+        for alias in sorted(aliases)
+    )
 
 
 def _decode_record(record: StoredRecord) -> object:
@@ -631,14 +714,30 @@ def _fact_stream(
     fact: StoredFact,
     owner: object,
 ) -> bytes:
+    identity = _fact_storage_identity(domain, fact, owner)
+    if identity is None:
+        if not isinstance(owner, ExecutionRecord):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        relation = "execution"
+        value: object = owner.execution_id
+    else:
+        relation, value = identity
+    return stream_digest(
+        namespace,
+        tenant_id,
+        domain.value,
+        relation,
+        value,
+    )
+
+
+def _fact_storage_identity(
+    domain: RuntimeDomain,
+    fact: StoredFact,
+    owner: object,
+) -> tuple[str, object] | None:
     if isinstance(owner, ExecutionRecord):
-        return stream_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            "execution",
-            owner.execution_id,
-        )
+        return None
     if isinstance(owner, SessionRecord):
         if fact.kind != "session_turn":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -653,13 +752,7 @@ def _fact_stream(
         execution_id = cast(str, fact.data["execution_id"])
         if fact.subject_digest != subject_digest(execution_id):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return stream_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            "session_turn",
-            [owner.session_id],
-        )
+        return "session_turn", [owner.session_id]
     if isinstance(owner, TranscriptHeadRecord):
         if fact.kind != "transcript_chunk":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -671,13 +764,7 @@ def _fact_stream(
             if domain is RuntimeDomain.CONVERSATION
             else "run_transcript"
         )
-        return stream_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            relation,
-            owner.owner_id,
-        )
+        return relation, owner.owner_id
     if isinstance(owner, RunRecord):
         relation = {
             "step_event": "event",
@@ -686,21 +773,9 @@ def _fact_stream(
         }.get(fact.kind)
         if relation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return stream_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            relation,
-            owner.run_id,
-        )
+        return relation, owner.run_id
     if isinstance(owner, TaskGraphView):
-        return stream_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            "task_event",
-            owner.graph_id,
-        )
+        return "task_event", owner.graph_id
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -740,4 +815,4 @@ def _validate_operations(
         positions.add(position)
 
 
-__all__ = ["validate_snapshot_domain"]
+__all__ = ["canonical_snapshot_indexes", "validate_snapshot_domain"]

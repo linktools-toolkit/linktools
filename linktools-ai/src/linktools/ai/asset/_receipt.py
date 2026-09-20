@@ -49,7 +49,7 @@ def encode_asset_batch_receipt(
         raise ValueError("persisted batch receipt requires idempotency identity")
     validate_batch_receipt_identity(result.idempotency_key, result.request_digest)
     return {
-        "version": 2,
+        "version": 1,
         "idempotency_key_digest": batch_receipt_key_digest(result.idempotency_key),
         "request_digest": result.request_digest,
         "store_revision": result.store_revision.value,
@@ -68,7 +68,7 @@ def decode_asset_batch_receipt(
     version = payload.get("version")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if version != 2:
+    if version != 1:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     key_digest = _sha256(payload.get("idempotency_key_digest"))
     if expected_key_digest is not None and key_digest != expected_key_digest:

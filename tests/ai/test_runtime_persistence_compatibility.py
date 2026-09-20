@@ -45,14 +45,14 @@ def _session() -> SessionRecord:
 
 
 def _envelope(payload: object, *, wire_id: str = "session_record") -> dict[str, object]:
-    return {"v": 2, "value": {"type": wire_id, "payload": payload}}
+    return {"v": 1, "value": {"type": wire_id, "payload": payload}}
 
 
 def test_persisted_session_round_trips() -> None:
     session = _session()
     payload = _encode_persisted_domain(session)
 
-    assert payload["schema"] == 2
+    assert payload["schema"] == 1
     assert _decode_enveloped_domain(_envelope(payload), SessionRecord) == session
 
 
@@ -63,7 +63,7 @@ def test_persisted_session_allows_additive_unknown_fields() -> None:
     assert _decode_enveloped_domain(_envelope(additive), SessionRecord) == session
 
 
-def test_persisted_session_uses_frozen_v2_default_for_missing_optional_field() -> None:
+def test_persisted_session_uses_frozen_v1_default_for_missing_optional_field() -> None:
     session = _session()
     payload = copy.deepcopy(_encode_persisted_domain(session))
     payload["fields"].pop("history_id")
@@ -86,7 +86,7 @@ def test_persisted_session_uses_frozen_v2_default_for_missing_optional_field() -
     )
 
 
-def test_persisted_session_v2_field_set_is_stable() -> None:
+def test_persisted_session_v1_field_set_is_stable() -> None:
     payload = _encode_persisted_domain(_session())
     assert set(payload["fields"]) == {
         "session_id",
@@ -131,8 +131,9 @@ def test_persisted_session_rejects_malformed_known_field() -> None:
 @pytest.mark.parametrize(
     ("schema", "expected"),
     (
-        (1, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
-        (3, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (2, ErrorCode.STORAGE_VERSION_UNSUPPORTED),
+        (0, ErrorCode.STORAGE_INTEGRITY_ERROR),
+        (1.0, ErrorCode.STORAGE_INTEGRITY_ERROR),
     ),
 )
 def test_persisted_schema_version_boundaries(schema: object, expected: ErrorCode) -> None:
@@ -158,7 +159,7 @@ def test_persisted_payload_requires_schema() -> None:
 def test_unknown_outer_version_and_wire_type_are_unsupported() -> None:
     payload = _encode_persisted_domain(_session())
     future_version = _envelope(payload)
-    future_version["v"] = 3
+    future_version["v"] = 2
     with pytest.raises(AIError) as version_error:
         _decode_enveloped_domain(future_version, SessionRecord)
     assert version_error.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
@@ -202,7 +203,7 @@ def test_persisted_custom_dataclass_allows_additive_field() -> None:
     ) == node
 
 
-def test_persisted_model_interaction_uses_frozen_v2_default_for_attachments() -> None:
+def test_persisted_model_interaction_uses_frozen_v1_default_for_attachments() -> None:
     interaction = ModelInteractionRecord(
         run_id="run",
         step_index=1,
@@ -234,7 +235,7 @@ def test_persisted_model_interaction_uses_frozen_v2_default_for_attachments() ->
 
 
 
-def test_dynamic_v2_default_remains_required() -> None:
+def test_dynamic_v1_default_remains_required() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     run = RunRecord(run_id="run", started_at=now)
     payload = copy.deepcopy(_encode_persisted_domain(run))
@@ -261,7 +262,7 @@ def test_step_persistence_reads_current_payload() -> None:
 
     current = _decode_step_envelope(
         {
-            "v": 2,
+            "v": 1,
             "value": {
                 "type": wire_type_id(run),
                 "payload": _encode_persisted_domain(run),

@@ -543,16 +543,32 @@ class OperationLedgerRepository(_RepositoryBase):
             "operation",
             [resource_kind.value, resource_id],
         )
-        values = await self._store.mutate(
-            lambda transaction: transaction.delete_operations(
+        async def compact(
+            transaction: StateTransaction,
+        ) -> tuple[StoredOperation, ...]:
+            query = OperationQuery(
+                stream_digest=stream,
+                states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
+                through_sequence=through_sequence,
+                compactable=True,
+            )
+            candidates = await transaction.list_operations(query)
+            if len(candidates) <= 1:
+                return ()
+            anchor = max(
+                candidates,
+                key=lambda value: (value.sequence, value.key_digest),
+            )
+            return await transaction.delete_operations(
                 OperationQuery(
                     stream_digest=stream,
                     states=frozenset({"SUCCEEDED", "FAILED", "CANCELLED"}),
-                    through_sequence=through_sequence,
+                    through_sequence=anchor.sequence - 1,
                     compactable=True,
                 )
             )
-        )
+
+        values = await self._store.mutate(compact)
         return hashlib.sha256(
             canonical_json_bytes(
                 [

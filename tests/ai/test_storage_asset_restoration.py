@@ -630,9 +630,9 @@ def test_asset_receipt_rejects_non_integer_version() -> None:
     from linktools.ai.asset._receipt import decode_asset_batch_receipt
 
     with pytest.raises(AIError) as raised:
-        decode_asset_batch_receipt({"version": 2.0})
+        decode_asset_batch_receipt({"version": 1.0})
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
-    with pytest.raises(AIError) as old:
-        decode_asset_batch_receipt({"version": 1})
-    assert old.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+    with pytest.raises(AIError) as future:
+        decode_asset_batch_receipt({"version": 2})
+    assert future.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED

@@ -24,7 +24,7 @@ from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
 
 _KIND = "task-capability-snapshot"
-_VERSION = 2
+_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,7 +422,7 @@ class TaskCapabilitySnapshotStore:
                 "request_digest": admission.initial_request_digest,
             }
         )
-        return f"v2/task-capability-snapshot/{digest}"
+        return f"v1/task-capability-snapshot/{digest}"
 
 
 __all__ = [

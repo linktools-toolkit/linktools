@@ -337,9 +337,9 @@ with resumable cursors; it does not invoke models, task handlers, or external
 systems.
 
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
-private repositories directly. Runtime persistence v2 is the new compatibility
-baseline; pre-v2 Runtime state is rejected rather than implicitly migrated or
-rewritten.
+private repositories directly. Runtime persistence v1 is the compatibility baseline. Future persistence
+versions must keep an explicit v1 reader rather than reinterpret or silently
+rewrite v1 data.
 
 ## 7. Runtime state
 

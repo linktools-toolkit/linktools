@@ -7,22 +7,42 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.core import SessionStatus, canonical_json_bytes
+from linktools.ai.core import (
+    OperationKind,
+    OperationLedgerInput,
+    OperationStatus,
+    ResourceKind,
+    SessionStatus,
+    ToolOperationStatus,
+    canonical_json_bytes,
+    canonical_sha256,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeSnapshot, RuntimeState
-from linktools.ai.runtime.state import SnapshotLimits
+from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     encode_envelope,
     encode_record,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import SessionRecord
+from linktools.ai.runtime.state._contracts import SessionRecord, ToolOperationRecord
+from linktools.ai.runtime.state._repository_common import domain_data, project_record
+from linktools.ai.runtime.state._snapshot_validation import (
+    canonical_snapshot_indexes,
+    validate_snapshot_domain,
+)
 from linktools.ai.runtime.state._store import (
+    StoredAlias,
+    StoredOperation,
     StoredRecord,
+    alias_digest,
+    operation_key,
     partition_digest,
     scope_digest,
+    sequence_key,
     sortable_identity,
+    stream_digest,
 )
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
 
@@ -47,7 +67,7 @@ async def test_runtime_snapshot_rejects_coerced_object_ref_fields() -> None:
     store = InMemoryObjectStore("snapshot")
     manifest = {
         "kind": "runtime-snapshot",
-        "format_version": 2,
+        "format_version": 1,
         "namespace": "runtime",
         "tenant_id": "tenant",
         "state": {
@@ -83,7 +103,7 @@ async def test_runtime_snapshot_rejects_coerced_format_version() -> None:
     store = InMemoryObjectStore("snapshot")
     manifest = {
         "kind": "runtime-snapshot",
-        "format_version": 2.0,
+        "format_version": 1.0,
         "namespace": "runtime",
         "tenant_id": "tenant",
         "state": {
@@ -161,7 +181,7 @@ async def test_runtime_state_restore_rejects_mismatched_logical_record_key_befor
     )
     manifest = {
         "kind": "runtime-state-snapshot",
-        "format_version": 2,
+        "format_version": 1,
         "namespace": namespace,
         "tenant_id": tenant_id,
         "domains": {
@@ -193,3 +213,136 @@ async def test_runtime_state_restore_rejects_mismatched_logical_record_key_befor
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     assert not target.exists()
+
+
+
+def test_snapshot_aliases_are_rebuilt_from_tool_operation_identity() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    operation = ToolOperationRecord(
+        tool_operation_id=canonical_sha256({"tool_operation": 1}),
+        execution_id="execution",
+        step_run_id="run",
+        tool_call_id="call",
+        idempotency_key_digest=canonical_sha256({"idempotency": 1}),
+        tool_name="tool",
+        arguments_digest=canonical_sha256({"arguments": 1}),
+        binding_digest=canonical_sha256({"binding": 1}),
+        replay_safe=True,
+        status=ToolOperationStatus.PENDING,
+        owner=None,
+        fence=0,
+        lease_expires_at=None,
+        error_code=None,
+        created_at=now,
+        updated_at=now,
+    )
+    record = project_record(
+        namespace="runtime",
+        tenant_id="tenant",
+        domain=RuntimeDomain.RECOVERY,
+        kind="tool_operation",
+        identity=operation.tool_operation_id,
+        value=operation,
+        state=operation.status.value,
+    )
+
+    aliases, sequences = canonical_snapshot_indexes(
+        namespace="runtime",
+        tenant_id="tenant",
+        domain=RuntimeDomain.RECOVERY,
+        records=(record,),
+        facts=(),
+        operations=(),
+    )
+
+    expected_alias = alias_digest(
+        "runtime",
+        "tenant",
+        RuntimeDomain.RECOVERY.value,
+        "tool_call",
+        [operation.step_run_id, operation.tool_call_id],
+    )
+    assert aliases == (StoredAlias(expected_alias, record.key_digest),)
+    assert sequences == {}
+
+    validate_snapshot_domain(
+        namespace="runtime",
+        tenant_id="tenant",
+        domain=RuntimeDomain.RECOVERY,
+        records=(record,),
+        aliases=aliases,
+        facts=(),
+        operations=(),
+        sequences=sequences,
+    )
+    with pytest.raises(AIError) as raised:
+        validate_snapshot_domain(
+            namespace="runtime",
+            tenant_id="tenant",
+            domain=RuntimeDomain.RECOVERY,
+            records=(record,),
+            aliases=(StoredAlias(b"x" * 32, record.key_digest),),
+            facts=(),
+            operations=(),
+            sequences=sequences,
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    operation = OperationLedgerInput(
+        operation_id=canonical_sha256({"operation": 1}),
+        tenant_id="tenant",
+        resource_kind=ResourceKind.SESSION,
+        resource_id="session",
+        execution_id=None,
+        operation_kind=OperationKind.SESSION_UPDATE,
+        status=OperationStatus.SUCCEEDED,
+        request_digest=canonical_sha256({"request": 1}),
+        result_ref=None,
+        result_digest=None,
+        error_code=None,
+        compactable=True,
+        created_at=now,
+        updated_at=now,
+    )
+    stored = StoredOperation(
+        operation_key(
+            "runtime",
+            "tenant",
+            RuntimeDomain.CONVERSATION.value,
+            operation.operation_id,
+        ),
+        stream_digest(
+            "runtime",
+            "tenant",
+            RuntimeDomain.CONVERSATION.value,
+            "operation",
+            [operation.resource_kind.value, operation.resource_id],
+        ),
+        7,
+        operation.status.value,
+        operation.compactable,
+        domain_data(operation),
+    )
+
+    aliases, sequences = canonical_snapshot_indexes(
+        namespace="runtime",
+        tenant_id="tenant",
+        domain=RuntimeDomain.CONVERSATION,
+        records=(),
+        facts=(),
+        operations=(stored,),
+    )
+
+    assert aliases == ()
+    assert sequences == {
+        sequence_key(
+            "runtime",
+            "tenant",
+            RuntimeDomain.CONVERSATION.value,
+            "operation",
+            [operation.resource_kind.value, operation.resource_id],
+        ): 7
+    }

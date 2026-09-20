@@ -40,9 +40,12 @@ from ._store import (
     StateStore,
     StateTransaction,
     StoredAlias,
+    StoredFact,
+    StoredOperation,
+    StoredRecord,
 )
 from ._snapshot import SnapshotLimits
-from ._snapshot_validation import validate_snapshot_domain
+from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from ._codec import (
     decode_fact,
     decode_operation,
@@ -453,7 +456,7 @@ class RuntimeState:
                 ):
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 key = (
-                    "v2/runtime-state-object/"
+                    "v1/runtime-state-object/"
                     f"{source_domain.value}/{reference.digest}"
                 )
                 await object_store.put(
@@ -487,6 +490,9 @@ class RuntimeState:
                 "operations": [],
                 "sequences": [],
             }
+            domain_records: list[StoredRecord] = []
+            domain_facts: list[StoredFact] = []
+            domain_operations: list[StoredOperation] = []
 
             record_cursor: RecordScanCursor | None = None
             while True:
@@ -499,34 +505,12 @@ class RuntimeState:
                 if not page:
                     break
                 for value in page:
+                    domain_records.append(value)
                     encoded = encode_record(value)
                     raw_domain["records"].append(accept(encoded))
                     await copy_references(encoded, domain)
                 last = page[-1]
                 record_cursor = RecordScanCursor(last.kind, last.key_digest)
-                if len(page) < 128:
-                    break
-
-            alias_cursor: bytes | None = None
-            while True:
-                page = await store.read(
-                    lambda transaction, cursor=alias_cursor: transaction.scan_aliases_page(
-                        after=cursor,
-                        limit=128,
-                    )
-                )
-                if not page:
-                    break
-                for value in page:
-                    raw_domain["aliases"].append(
-                        accept(
-                            {
-                                "alias_digest": value.alias_digest.hex(),
-                                "record_key_digest": value.record_key_digest.hex(),
-                            }
-                        )
-                    )
-                alias_cursor = page[-1].alias_digest
                 if len(page) < 128:
                     break
 
@@ -541,6 +525,7 @@ class RuntimeState:
                 if not page:
                     break
                 for value in page:
+                    domain_facts.append(value)
                     encoded = encode_fact(value)
                     raw_domain["facts"].append(accept(encoded))
                     await copy_references(encoded, domain)
@@ -560,6 +545,7 @@ class RuntimeState:
                 if not page:
                     break
                 for value in page:
+                    domain_operations.append(value)
                     encoded = encode_operation(value)
                     raw_domain["operations"].append(accept(encoded))
                     await copy_references(encoded, domain)
@@ -567,29 +553,33 @@ class RuntimeState:
                 if len(page) < 128:
                     break
 
-            sequence_cursor: bytes | None = None
-            while True:
-                page = await store.read(
-                    lambda transaction, cursor=sequence_cursor: transaction.scan_sequences_page(
-                        after=cursor,
-                        limit=128,
+            aliases, sequences = canonical_snapshot_indexes(
+                namespace=self.namespace,
+                tenant_id=self.tenant_id,
+                domain=domain,
+                records=tuple(domain_records),
+                facts=tuple(domain_facts),
+                operations=tuple(domain_operations),
+            )
+            for value in aliases:
+                raw_domain["aliases"].append(
+                    accept(
+                        {
+                            "alias_digest": value.alias_digest.hex(),
+                            "record_key_digest": value.record_key_digest.hex(),
+                        }
                     )
                 )
-                if not page:
-                    break
-                for key in sorted(page):
-                    raw_domain["sequences"].append(
-                        accept({"key_digest": key.hex(), "value": page[key]})
-                    )
-                sequence_cursor = max(page)
-                if len(page) < 128:
-                    break
+            for key in sorted(sequences):
+                raw_domain["sequences"].append(
+                    accept({"key_digest": key.hex(), "value": sequences[key]})
+                )
 
             domains[domain.value] = raw_domain
 
         manifest = {
             "kind": "runtime-state-snapshot",
-            "format_version": 2,
+            "format_version": 1,
             "namespace": self.namespace,
             "tenant_id": self.tenant_id,
             "domains": domains,
@@ -599,7 +589,7 @@ class RuntimeState:
         if len(payload) + object_bytes > limits.max_bytes:
             raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
         digest = hashlib.sha256(payload).hexdigest()
-        key = f"v2/runtime-state-snapshot/{digest}"
+        key = f"v1/runtime-state-snapshot/{digest}"
         await _put_snapshot_object(object_store, key, payload)
         return ObjectRef(object_store.store_id, key, digest, len(payload))
 
@@ -638,7 +628,7 @@ class RuntimeState:
             or format_version < 1
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if format_version != 2:
+        if format_version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if not isinstance(manifest.get("domains"), dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -727,6 +717,7 @@ class RuntimeState:
                 aliases=aliases,
                 facts=facts,
                 operations=operations,
+                sequences=sequences,
             )
             decoded_domains[domain] = (
                 records,

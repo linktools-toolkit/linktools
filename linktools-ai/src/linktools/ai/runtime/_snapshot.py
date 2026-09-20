@@ -126,7 +126,7 @@ class RuntimeSnapshot:
                 )
                 manifest: dict[str, JsonValue] = {
                     "kind": "runtime-snapshot",
-                    "format_version": 2,
+                    "format_version": 1,
                     "namespace": resolved_namespace,
                     "tenant_id": resolved_tenant,
                     "state": _object_ref_payload(state_ref),
@@ -147,7 +147,7 @@ class RuntimeSnapshot:
                 ):
                     raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
                 digest = _digest_bytes(payload)
-                key = f"v2/runtime-snapshot/{digest}"
+                key = f"v1/runtime-snapshot/{digest}"
                 await _put_object(object_store, key, payload)
                 _logger.info(
                     "runtime snapshot published: namespace=%s tenant=%s digest=%s",
@@ -1197,7 +1197,7 @@ async def _read_manifest(
 def _require_snapshot_format_version(value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if value != 2:
+    if value != 1:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 

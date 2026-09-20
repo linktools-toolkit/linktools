@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
-from linktools.ai.core import ToolOperationStatus
+from linktools.ai.core import (
+    OperationKind,
+    OperationLedgerInput,
+    OperationStatus,
+    ResourceKind,
+    ToolOperationStatus,
+    canonical_sha256,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
@@ -477,3 +484,62 @@ async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
         await first.close()
         await second.close()
         await engine.dispose()
+
+
+
+async def test_operation_compaction_keeps_one_stream_anchor() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="operation-anchor", tenant_id="tenant")
+    now = datetime.now(timezone.utc)
+
+    def operation(index: int) -> OperationLedgerInput:
+        return OperationLedgerInput(
+            operation_id=canonical_sha256({"operation": index}),
+            tenant_id="tenant",
+            resource_kind=ResourceKind.SESSION,
+            resource_id="session",
+            execution_id=None,
+            operation_kind=OperationKind.SESSION_UPDATE,
+            status=OperationStatus.SUCCEEDED,
+            request_digest=canonical_sha256({"request": index}),
+            result_ref=None,
+            result_digest=None,
+            error_code=None,
+            compactable=True,
+            created_at=now,
+            updated_at=now,
+        )
+
+    try:
+        values = tuple(
+            [
+                await state.conversation.operations.append(operation(index))
+                for index in range(1, 4)
+            ]
+        )
+        assert tuple(value.sequence for value in values) == (1, 2, 3)
+
+        await state.conversation.operations.compact_terminal(
+            ResourceKind.SESSION,
+            "session",
+            tenant_id="tenant",
+            through_sequence=3,
+        )
+
+        assert await state.conversation.operations.get(
+            values[0].operation_id,
+            tenant_id="tenant",
+        ) is None
+        assert await state.conversation.operations.get(
+            values[1].operation_id,
+            tenant_id="tenant",
+        ) is None
+        assert await state.conversation.operations.get(
+            values[2].operation_id,
+            tenant_id="tenant",
+        ) == values[2]
+
+        next_value = await state.conversation.operations.append(operation(4))
+        assert next_value.sequence == 4
+    finally:
+        await state.close()

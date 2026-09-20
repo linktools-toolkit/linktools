@@ -143,11 +143,11 @@ from ._store import (
     validate_record_identity,
 )
 
-CURRENT_DATA_VERSION = 2
+CURRENT_DATA_VERSION = 1
 DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
-_V2_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
+_V1_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("approval_record", ApprovalRecord),
     ("agent_attempt_claim", AgentAttemptClaim),
     ("artifact_record", ArtifactRecord),
@@ -224,14 +224,14 @@ _V2_WIRE_TYPES: tuple[tuple[str, type[object]], ...] = (
     ("run_record", RunRecord),
     ("step_event", StepEvent),
 )
-_V2_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V2_WIRE_TYPES}
+_V1_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
 )
-_V2_DOMAIN_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V2_WIRE_TYPES}
+_V1_DOMAIN_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
 )
 
-_V2_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
+_V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("approval_decision", ApprovalDecision),
     ("approval_status", ApprovalStatus),
     ("evaluation_status", EvaluationStatus),
@@ -257,14 +257,14 @@ _V2_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
     ("transcript_owner_domain", TranscriptOwnerDomain),
     ("transcript_seek_dimension", TranscriptSeekDimension),
 )
-_V2_ENUM_WIRE_IDS = MappingProxyType(
-    {target: wire_id for wire_id, target in _V2_ENUM_WIRE_TYPES}
+_V1_ENUM_WIRE_IDS = MappingProxyType(
+    {target: wire_id for wire_id, target in _V1_ENUM_WIRE_TYPES}
 )
-_V2_ENUM_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V2_ENUM_WIRE_TYPES}
+_V1_ENUM_TYPES = MappingProxyType(
+    {wire_id: target for wire_id, target in _V1_ENUM_WIRE_TYPES}
 )
 
-_V2_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+_V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "approval_record": ("approval_id", "execution_id", "status", "idempotency_key_digest", "decision", "decided_by", "decision_digest", "created_at", "decided_at", "decision_message", "resolution_metadata"),
         "agent_attempt_claim": ("execution_id", "expected_execution_revision", "expected_agent_run_sequence", "expected_recovery_revision", "expected_recovery_state"),
@@ -332,7 +332,7 @@ _V2_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     }
 )
 
-_V2_GENERIC_DATACLASS_DEFAULTS: Mapping[
+_V1_GENERIC_DATACLASS_DEFAULTS: Mapping[
     str, Mapping[str, object]
 ] = MappingProxyType(
     {
@@ -462,7 +462,7 @@ _V2_GENERIC_DATACLASS_DEFAULTS: Mapping[
     }
 )
 
-_V2_ENUM_VALUES: Mapping[str, frozenset[object]] = MappingProxyType(
+_V1_ENUM_VALUES: Mapping[str, frozenset[object]] = MappingProxyType(
     {
         "approval_decision": frozenset({"APPROVE", "DENY"}),
         "approval_status": frozenset({"PENDING", "APPROVED", "DENIED", "CANCELLED"}),
@@ -1028,7 +1028,7 @@ def _decode_v2_stored_user_input(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
-_V2_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
+_V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "object_ref": _encode_v2_object_ref,
         "stored_user_input": _encode_v2_stored_user_input,
@@ -1038,7 +1038,7 @@ _V2_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "task_result": _encode_v2_task_result,
     }
 )
-_V2_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
+_V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
         "object_ref": _decode_v2_object_ref,
         "stored_user_input": _decode_v2_stored_user_input,
@@ -1049,7 +1049,7 @@ _V2_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     }
 )
 
-_V2_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
+_V1_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
     {
         IdempotencyTerminalUpdate: (
             "linktools.ai.runtime.state.IdempotencyTerminalUpdate"
@@ -1063,20 +1063,20 @@ _V2_EXTERNAL_SCHEMA_TYPES: Mapping[type[object], JsonValue] = MappingProxyType(
     }
 )
 
-_V2_CODEC = _VersionCodec(
-    version=2,
-    wire_ids=_V2_WIRE_IDS,
-    domain_types=_V2_DOMAIN_TYPES,
-    enum_wire_ids=_V2_ENUM_WIRE_IDS,
-    enum_types=_V2_ENUM_TYPES,
-    enum_values=_V2_ENUM_VALUES,
-    dataclass_fields=_V2_GENERIC_DATACLASS_FIELDS,
-    dataclass_defaults=_V2_GENERIC_DATACLASS_DEFAULTS,
-    dataclass_encoders=_V2_DATACLASS_ENCODERS,
-    dataclass_decoders=_V2_DATACLASS_DECODERS,
-    external_schema_types=_V2_EXTERNAL_SCHEMA_TYPES,
+_V1_CODEC = _VersionCodec(
+    version=1,
+    wire_ids=_V1_WIRE_IDS,
+    domain_types=_V1_DOMAIN_TYPES,
+    enum_wire_ids=_V1_ENUM_WIRE_IDS,
+    enum_types=_V1_ENUM_TYPES,
+    enum_values=_V1_ENUM_VALUES,
+    dataclass_fields=_V1_GENERIC_DATACLASS_FIELDS,
+    dataclass_defaults=_V1_GENERIC_DATACLASS_DEFAULTS,
+    dataclass_encoders=_V1_DATACLASS_ENCODERS,
+    dataclass_decoders=_V1_DATACLASS_DECODERS,
+    external_schema_types=_V1_EXTERNAL_SCHEMA_TYPES,
 )
-_VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType({2: _V2_CODEC})
+_VERSION_CODECS: Mapping[int, _VersionCodec] = MappingProxyType({1: _V1_CODEC})
 _CURRENT_CODEC = _VERSION_CODECS[CURRENT_DATA_VERSION]
 _JSON_VALUE_FORWARD_REF = ForwardRef("JsonValue")
 
@@ -2381,13 +2381,13 @@ def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     return _decode_domain(payload, target, codec, persisted=True)
 
 
-def _validate_v2_codec_definition() -> None:
-    if CURRENT_DATA_VERSION != 2 or set(_VERSION_CODECS) != {2}:
-        raise RuntimeError("Runtime v2 codec registry is invalid")
-    if _CURRENT_CODEC is not _VERSION_CODECS[2]:
+def _validate_v1_codec_definition() -> None:
+    if CURRENT_DATA_VERSION != 1 or set(_VERSION_CODECS) != {1}:
+        raise RuntimeError("Runtime v1 codec registry is invalid")
+    if _CURRENT_CODEC is not _VERSION_CODECS[1]:
         raise RuntimeError("Runtime v2 current codec is invalid")
-    wire_ids = tuple(wire_id for wire_id, _target in _V2_WIRE_TYPES)
-    enum_wire_ids = tuple(wire_id for wire_id, _target in _V2_ENUM_WIRE_TYPES)
+    wire_ids = tuple(wire_id for wire_id, _target in _V1_WIRE_TYPES)
+    enum_wire_ids = tuple(wire_id for wire_id, _target in _V1_ENUM_WIRE_TYPES)
     if len(wire_ids) != len(set(wire_ids)):
         raise RuntimeError("Runtime v1 wire ids are not unique")
     if len(enum_wire_ids) != len(set(enum_wire_ids)):
@@ -2416,15 +2416,15 @@ def _validate_v2_codec_definition() -> None:
         "task_node_view",
         "task_result",
     }
-    if set(_V2_DATACLASS_ENCODERS) != custom_encoders:
+    if set(_V1_DATACLASS_ENCODERS) != custom_encoders:
         raise RuntimeError("Runtime v1 dataclass encoder mapping is invalid")
-    if set(_V2_DATACLASS_DECODERS) != custom_decoders:
+    if set(_V1_DATACLASS_DECODERS) != custom_decoders:
         raise RuntimeError("Runtime v1 dataclass decoder mapping is invalid")
-    if not set(_V2_DATACLASS_ENCODERS).issubset(set(wire_ids)):
+    if not set(_V1_DATACLASS_ENCODERS).issubset(set(wire_ids)):
         raise RuntimeError(
             "Runtime v1 dataclass encoder mapping contains an unknown type"
         )
-    if not set(_V2_DATACLASS_DECODERS).issubset(set(wire_ids)):
+    if not set(_V1_DATACLASS_DECODERS).issubset(set(wire_ids)):
         raise RuntimeError(
             "Runtime v1 dataclass decoder mapping contains an unknown type"
         )
@@ -2446,7 +2446,7 @@ def _validate_v2_codec_definition() -> None:
         raise RuntimeError("Runtime v1 task_node source contract changed")
 
 
-_validate_v2_codec_definition()
+_validate_v1_codec_definition()
 
 
 __all__ = [

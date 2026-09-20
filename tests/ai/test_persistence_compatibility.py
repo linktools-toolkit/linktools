@@ -164,7 +164,7 @@ def _decode_custom_wire_values(
     return task, idempotency, operation
 
 
-def test_custom_wire_v2_round_trips_current_shape() -> None:
+def test_custom_wire_v1_round_trips_current_shape() -> None:
     value = _custom_wire_values()
     task, idempotency, operation = _decode_custom_wire_values(value)
 
@@ -193,13 +193,13 @@ def test_custom_wire_v2_round_trips_current_shape() -> None:
     )
 
 
-def test_custom_wire_v1_fixture_is_not_the_current_shape() -> None:
+def test_custom_wire_v1_fixture_matches_current_shape() -> None:
     value = _load_json("runtime_custom_wire_v1.json")
     assert isinstance(value, Mapping)
-    assert value != _custom_wire_values()
+    assert value == _custom_wire_values()
 
 
-def test_generic_v2_envelope_round_trips_current_shape() -> None:
+def test_generic_v1_envelope_round_trips_current_shape() -> None:
     value = ContextProjection(())
     payload = runtime_codec._encode_persisted_domain(value)
     canonical_json_bytes(payload)
