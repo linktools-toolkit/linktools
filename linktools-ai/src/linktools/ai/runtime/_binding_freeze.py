@@ -31,6 +31,8 @@ class _RuntimeBindingFreezer:
         compiler: AgentCompiler,
         skill_sources: SkillSourceRegistry,
         object_store: ObjectStore,
+        *,
+        snapshot_resources: bool,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -42,6 +44,7 @@ class _RuntimeBindingFreezer:
         self._compiler = compiler
         self._skill_sources = skill_sources
         self._objects = object_store
+        self._snapshot_resources = snapshot_resources
 
     @property
     def root_ids(self) -> tuple[str, ...]:
@@ -118,7 +121,11 @@ class _RuntimeBindingFreezer:
                 cast("Mapping[str, object]", pin.contract)
             )
             source_ref = skill.source_ref
-            if source_ref is None or source_ref.snapshot is not None:
+            if (
+                source_ref is None
+                or source_ref.snapshot is not None
+                or not self._snapshot_resources
+            ):
                 selected.append(pin)
                 continue
             source = self._skill_sources.resolve(source_ref.source_id)
