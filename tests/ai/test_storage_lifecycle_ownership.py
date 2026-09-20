@@ -156,7 +156,7 @@ async def test_sql_object_delete_settles_before_propagating_cancellation(
         await engine.dispose()
 
 
-async def test_sql_object_open_does_not_hold_reader_while_consumer_pauses(
+async def test_sqlite_object_open_does_not_hold_reader_while_consumer_pauses(
     tmp_path: Path,
 ) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'objects.db'}")
