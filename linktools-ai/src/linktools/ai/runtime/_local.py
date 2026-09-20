@@ -156,6 +156,7 @@ class _SubagentDispatcher(Protocol):
         refs: "tuple[SubagentRef, ...]",
         binding: AgentBindingSnapshot,
         mode: ExecutionMode,
+        require_frozen_bindings: bool = False,
     ) -> SubagentDelegate: ...
 
     def descriptions_for(
@@ -2950,6 +2951,7 @@ class LocalExecutionBackend:
                                 refs=subagent_refs,
                                 binding=binding.snapshot,
                                 mode=current.mode,
+                                require_frozen_bindings=self._execution_objects_durable,
                             )
                         ),
                         event_sink=sink,
