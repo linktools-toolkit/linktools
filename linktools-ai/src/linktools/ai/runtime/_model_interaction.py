@@ -237,12 +237,20 @@ def context_projection_to_durable(
     owner_id: str,
     source_domain: RuntimeDomain,
     payload: Callable[[str], bytes],
+    local_message_base: int = 0,
 ) -> ContextProjection:
+    if local_message_base < 0:
+        raise ValueError("local message base cannot be negative")
     items = []
     for item in projection.items:
         if isinstance(item, StagedContextSpan):
             items.append(
-                TranscriptSpanRef(source_domain, owner_id, item.start, item.end)
+                TranscriptSpanRef(
+                    source_domain,
+                    owner_id,
+                    local_message_base + item.start,
+                    local_message_base + item.end,
+                )
             )
         elif isinstance(item, TranscriptSpanRef):
             items.append(item)
