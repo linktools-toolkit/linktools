@@ -4,6 +4,8 @@
 
 import asyncio
 import hashlib
+import os
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,7 @@ from ...storage import (
     build_object_sql_metadata,
     create_sql_storage_context,
     namespace_digest,
+    sync_directory,
 )
 from ._contracts import (
     ArtifactState,
@@ -172,23 +175,9 @@ async def materialize_runtime_state(
 
         for key, domains in sql_groups.items():
             route = sql_routes[key]
-            if key[0] == "sqlite":
-                if route.path is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if not read_only:
-                    await asyncio.to_thread(
-                        route.path.parent.mkdir, parents=True, exist_ok=True
-                    )
-                from sqlalchemy.ext.asyncio import create_async_engine
-
-                engine = create_async_engine(f"sqlite+aiosqlite:///{route.path}")
-                context = create_sql_storage_context(engine, owns_engine=True)
-            else:
-                if route.engine is None:
-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                context = create_sql_storage_context(route.engine)
             group_stores: list[SqlStateStore] = []
             group: SqlStateStorageGroup | None = None
+            context: SqlStorageContext | None = None
             try:
                 from sqlalchemy import MetaData
 
@@ -196,23 +185,39 @@ async def materialize_runtime_state(
                 from ._schema import build_runtime_sql_metadata
 
                 build_runtime_sql_metadata(frozenset(domains), metadata=metadata)
-                if key[0] in {"sqlite", "sql"} and object_store is None and any(
+                if object_store is None and any(
                     runtime_domain_uses_object_store(domain)
                     for domain in domains
                 ):
                     build_object_sql_metadata(metadata=metadata)
-                if key[0] == "sqlite" and not read_only:
+
+                if key[0] == "sqlite":
                     if route.path is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    async with FilesystemMutationLock(
-                        route.path.with_name(route.path.name + ".init.lock")
-                    ):
-                        if not route.path.exists():
-                            await context.initialize()
-                            async with context.engine.begin() as connection:
-                                await connection.run_sync(metadata.create_all)
-                elif read_only and key[0] == "sqlite":
-                    await context.initialize()
+                    if not read_only:
+                        async with FilesystemMutationLock(
+                            route.path.with_name(route.path.name + ".init.lock")
+                        ):
+                            if not route.path.exists():
+                                await _provision_sqlite_database(
+                                    route.path,
+                                    metadata,
+                                )
+                    from sqlalchemy import URL
+                    from sqlalchemy.ext.asyncio import create_async_engine
+
+                    engine = create_async_engine(
+                        URL.create(
+                            "sqlite+aiosqlite",
+                            database=str(route.path),
+                        )
+                    )
+                    context = create_sql_storage_context(engine, owns_engine=True)
+                else:
+                    if route.engine is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    context = create_sql_storage_context(route.engine)
+
                 group = SqlStateStorageGroup(
                     context,
                     metadata,
@@ -241,7 +246,7 @@ async def materialize_runtime_state(
                     await store.close()
                 if group is not None:
                     await group.close()
-                elif key[0] == "sqlite":
+                elif context is not None and key[0] == "sqlite":
                     await context.close()
                 raise
             cleanups.extend(store.close for store in group_stores)
@@ -357,6 +362,87 @@ async def materialize_runtime_state(
                 )
         raise
 
+
+
+async def _provision_sqlite_database(path: Path, metadata: object) -> None:
+    from sqlalchemy import URL
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.init-",
+        suffix=".db",
+        dir=path.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(name)
+    engine = create_async_engine(
+        URL.create(
+            "sqlite+aiosqlite",
+            database=str(temporary),
+        )
+    )
+    context = create_sql_storage_context(engine, owns_engine=True)
+    published = False
+    try:
+        await context.initialize()
+        async with context.engine.begin() as connection:
+            await connection.run_sync(metadata.create_all)
+        await context.initialize(metadata=metadata)
+        await context.close()
+        _ensure_sqlite_database_is_self_contained(temporary)
+        await asyncio.to_thread(_sync_file, temporary)
+        try:
+            await asyncio.to_thread(os.replace, temporary, path)
+            published = True
+            await asyncio.to_thread(sync_directory, path.parent)
+        except BaseException as error:
+            if published:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            raise
+    finally:
+        if not context.closed:
+            await context.close()
+        if not published:
+            try:
+                await asyncio.to_thread(_cleanup_sqlite_temporary, temporary)
+            except BaseException:  # noqa: BLE001
+                _logger.exception(
+                    "temporary SQLite cleanup failed: path=%s",
+                    temporary,
+                )
+
+
+def _ensure_sqlite_database_is_self_contained(path: Path) -> None:
+    sidecars = tuple(
+        candidate
+        for candidate in _sqlite_sidecars(path)
+        if candidate.exists()
+    )
+    if sidecars:
+        raise AIError(
+            ErrorCode.STORAGE_RECOVERY_REQUIRED,
+            safe_details={
+                "phase": "sqlite_initial_publish",
+                "reason": "sidecar_present",
+            },
+        )
+
+
+def _sqlite_sidecars(path: Path) -> tuple[Path, ...]:
+    return tuple(
+        Path(str(path) + suffix)
+        for suffix in ("-journal", "-wal", "-shm")
+    )
+
+
+def _cleanup_sqlite_temporary(path: Path) -> None:
+    for candidate in (path, *_sqlite_sidecars(path)):
+        candidate.unlink(missing_ok=True)
+
+
+def _sync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
 
 def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> _RuntimeStates:
     try:
