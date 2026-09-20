@@ -52,6 +52,7 @@ from linktools.ai.runtime.state._store import (
     stream_digest,
 )
 from linktools.ai.storage import InMemoryObjectStore, ObjectRef
+from linktools.ai.workspace import Workspace
 
 
 async def _put(store: InMemoryObjectStore, key: str, payload: bytes) -> ObjectRef:
@@ -106,6 +107,10 @@ async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
     writable = RuntimeState.filesystem(root)
     await writable.initialize(namespace="runtime", tenant_id="tenant")
     await writable.close()
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    (workspace_root / "README.md").write_text("workspace", encoding="utf-8")
+    workspace = Workspace.load(workspace_root)
 
     limits = SnapshotLimits(max_entries=1000, max_bytes=1024 * 1024)
     first = InMemoryObjectStore("snapshot-a")
@@ -115,6 +120,7 @@ async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
         tenant_id="tenant",
         state=RuntimeState.from_root(root),
         object_store=first,
+        workspace=workspace,
         exclusive=_SnapshotGuard(),
         limits=limits,
     )
@@ -123,6 +129,7 @@ async def test_runtime_snapshot_identity_ignores_target_store(tmp_path) -> None:
         tenant_id="tenant",
         state=RuntimeState.from_root(root),
         object_store=second,
+        workspace=workspace,
         exclusive=_SnapshotGuard(),
         limits=limits,
     )
