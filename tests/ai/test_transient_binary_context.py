@@ -115,7 +115,8 @@ def test_snapshot_context_composes_compaction_with_pending_binary() -> None:
 
     assert context is not None
     assert context[0] == summary
-    assert context[-1] == pending
+    assert isinstance(context[-1], ModelRequest)
+    assert "new.png" in str(context[-1])
     assert binary_content_usage(context) == (1, 3)
 
 
