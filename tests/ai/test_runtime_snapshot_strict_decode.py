@@ -26,14 +26,20 @@ from linktools.ai.runtime.state._codec import (
     encode_record,
     wire_type_id,
 )
-from linktools.ai.runtime.state._contracts import SessionRecord, ToolOperationRecord
+from linktools.ai.runtime.state._contracts import (
+    ExecutionRecord,
+    SessionRecord,
+    ToolOperationRecord,
+)
 from linktools.ai.runtime.state._repository_common import domain_data, project_record
+from linktools.ai.runtime.state import _snapshot_validation as snapshot_validation
 from linktools.ai.runtime.state._snapshot_validation import (
     canonical_snapshot_indexes,
     validate_snapshot_domain,
 )
 from linktools.ai.runtime.state._store import (
     StoredAlias,
+    StoredFact,
     StoredOperation,
     StoredRecord,
     alias_digest,
@@ -346,3 +352,75 @@ def test_snapshot_operation_sequence_is_rebuilt_from_ledger_anchor() -> None:
             [operation.resource_kind.value, operation.resource_id],
         ): 7
     }
+
+
+
+def _execution_stub(*, event_sequence: int) -> ExecutionRecord:
+    execution = object.__new__(ExecutionRecord)
+    object.__setattr__(execution, "execution_id", "execution")
+    object.__setattr__(execution, "event_sequence", event_sequence)
+    return execution
+
+
+def _execution_fact(owner_key: bytes, sequence: int = 1) -> StoredFact:
+    return StoredFact(
+        stream_digest(
+            "runtime",
+            "tenant",
+            RuntimeDomain.EXECUTION.value,
+            "execution",
+            "execution",
+        ),
+        sequence,
+        owner_key,
+        "EVENT",
+        None,
+        None,
+        {},
+    )
+
+
+def test_snapshot_execution_facts_do_not_create_sequence_rows() -> None:
+    owner_key = b"e" * 32
+    execution = _execution_stub(event_sequence=1)
+    sequences = snapshot_validation._canonical_sequences(
+        "runtime",
+        "tenant",
+        RuntimeDomain.EXECUTION,
+        (_execution_fact(owner_key),),
+        (),
+        {owner_key: execution},
+    )
+
+    assert sequences == {}
+
+
+def test_snapshot_rejects_truncated_execution_event_stream() -> None:
+    owner_key = b"e" * 32
+    execution = _execution_stub(event_sequence=2)
+    owner_record = StoredRecord(
+        owner_key,
+        b"p" * 32,
+        None,
+        None,
+        "execution",
+        "execution",
+        None,
+        0,
+        None,
+        0,
+        None,
+        {},
+    )
+
+    with pytest.raises(AIError) as raised:
+        snapshot_validation._validate_facts(
+            "runtime",
+            "tenant",
+            RuntimeDomain.EXECUTION,
+            (_execution_fact(owner_key),),
+            {owner_key: owner_record},
+            {owner_key: execution},
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

@@ -665,8 +665,12 @@ def _validate_facts(
 ) -> None:
     previous_stream: bytes | None = None
     previous_sequence = 0
+    previous_owner: object | None = None
+    fact_owners: set[bytes] = set()
     for fact in facts:
         if previous_stream is None or fact.stream_digest > previous_stream:
+            if previous_owner is not None:
+                _validate_fact_high_water(previous_owner, previous_sequence)
             if fact.sequence != 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             previous_stream = fact.stream_digest
@@ -684,10 +688,26 @@ def _validate_facts(
             namespace, tenant_id, domain, fact, owner
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if isinstance(owner, ExecutionRecord) and fact.sequence > owner.event_sequence:
+        previous_owner = owner
+        fact_owners.add(fact.owner_key_digest)
+
+    if previous_owner is not None:
+        _validate_fact_high_water(previous_owner, previous_sequence)
+
+    for owner_key, owner in values.items():
+        if owner_key in fact_owners:
+            continue
+        if isinstance(owner, ExecutionRecord) and owner.event_sequence != 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if isinstance(owner, TranscriptHeadRecord) and fact.sequence > owner.chunk_count:
+        if isinstance(owner, TranscriptHeadRecord) and owner.chunk_count != 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _validate_fact_high_water(owner: object, sequence: int) -> None:
+    if isinstance(owner, ExecutionRecord) and owner.event_sequence != sequence:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if isinstance(owner, TranscriptHeadRecord) and owner.chunk_count != sequence:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _fact_stream(
@@ -697,14 +717,7 @@ def _fact_stream(
     fact: StoredFact,
     owner: object,
 ) -> bytes:
-    identity = _fact_storage_identity(domain, fact, owner)
-    if identity is None:
-        if not isinstance(owner, ExecutionRecord):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        relation = "execution"
-        value: object = owner.execution_id
-    else:
-        relation, value = identity
+    relation, value = _fact_storage_identity(domain, fact, owner)
     return stream_digest(
         namespace,
         tenant_id,
@@ -718,9 +731,9 @@ def _fact_storage_identity(
     domain: RuntimeDomain,
     fact: StoredFact,
     owner: object,
-) -> tuple[str, object] | None:
+) -> tuple[str, object]:
     if isinstance(owner, ExecutionRecord):
-        return None
+        return "execution", owner.execution_id
     if isinstance(owner, SessionRecord):
         if fact.kind != "session_turn":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -776,16 +789,9 @@ def _canonical_sequences(
         owner = values.get(fact.owner_key_digest)
         if owner is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        identity = _fact_storage_identity(domain, fact, owner)
-        relation: str
-        value: object
-        if identity is None:
-            if not isinstance(owner, ExecutionRecord):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            relation = "execution"
-            value = owner.execution_id
-        else:
-            relation, value = identity
+        if isinstance(owner, ExecutionRecord):
+            continue
+        relation, value = _fact_storage_identity(domain, fact, owner)
         key = sequence_key(
             namespace,
             tenant_id,
