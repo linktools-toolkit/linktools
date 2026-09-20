@@ -94,10 +94,20 @@ async def read_object(
     digest = hashlib.sha256()
     size = 0
     data = bytearray()
-    async for chunk in store.open(key):
-        data.extend(chunk)
-        digest.update(chunk)
-        size += len(chunk)
+    stream = store.open(key)
+    try:
+        async for chunk in stream:
+            next_size = size + len(chunk)
+            if next_size > expected_size:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            data.extend(chunk)
+            digest.update(chunk)
+            size = next_size
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            close_task = asyncio.create_task(close())
+            await _finish_owned_task(close_task)
     if size != expected_size or digest.hexdigest() != expected_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return bytes(data)
