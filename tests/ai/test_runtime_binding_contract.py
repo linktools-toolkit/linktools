@@ -150,7 +150,7 @@ def test_skill_snapshot_semantics_ignore_physical_store_id() -> None:
 
     assert first.semantic_contract == second.semantic_contract
     snapshot = first.semantic_contract["source"]["snapshot"]
-    assert "store_id" not in snapshot
+    assert snapshot["store_id"] == "runtime"
     restored = SkillDefinition.from_semantic_contract(first.semantic_contract)
     assert restored.source_ref is not None
     assert restored.source_ref.snapshot is not None
