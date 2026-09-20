@@ -1296,6 +1296,143 @@ class StateStepArchive(StepStore):
         run: RunRecord,
         snapshots: Sequence[ContinuableSnapshot],
     ) -> PreparedStepSnapshotBatch:
+        values = tuple(snapshots)
+        if not values:
+            head_owner = (
+                self._history_id(run)
+                if self._runtime_domain is RuntimeDomain.CONVERSATION
+                else run.run_id
+            )
+            head = await self._history.get_head(head_owner)
+            return PreparedStepSnapshotBatch(
+                run.run_id,
+                (),
+                0,
+                0,
+                0 if head is None else head.message_count,
+            )
+        explicit = tuple(
+            snapshot.transcript_message_count_before is not None
+            for snapshot in values
+        )
+        if all(explicit):
+            return await self._prepare_explicit_snapshots(run, values)
+        if any(explicit):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._prepare_legacy_snapshots(run, values)
+
+    async def _prepare_explicit_snapshots(
+        self,
+        run: RunRecord,
+        snapshots: Sequence[ContinuableSnapshot],
+    ) -> PreparedStepSnapshotBatch:
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run.run_id
+        )
+        head = await self._history.get_head(owner_id)
+        if head is None:
+            if await self.get_run(run_id=run.run_id) is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            head = self._history.empty_head(owner_id)
+
+        first_before = snapshots[0].transcript_message_count_before
+        if first_before is None or first_before > head.message_count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        archive_base = head.message_count - first_before
+        target_message_count = head.message_count
+        baseline = self._context_baselines.get(run.run_id, LoadedModelContext(()))
+        baseline_messages = baseline.model_messages()
+        baseline_sources = tuple(
+            value.source
+            if value.source is not None
+            and (
+                value.source.source_domain is self._runtime_domain
+                or value.source.source_domain is RuntimeDomain.CONVERSATION
+            )
+            else None
+            for value in baseline.messages
+        )
+        prepared: list[PreparedStepSnapshot] = []
+
+        for snapshot in snapshots:
+            before = snapshot.transcript_message_count_before
+            incoming = tuple(snapshot.messages)
+            if (
+                before is None
+                or before > len(incoming)
+                or archive_base + before != target_message_count
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            delta = incoming[before:]
+            capture = TranscriptCapture(
+                target_message_count,
+                delta,
+                (TranscriptOrigin.RAW,) * len(delta),
+                head.quality,
+            )
+            chunks = await self._prepare_captured_chunks(owner_id, capture)
+            raw_sources = tuple(
+                TranscriptMessageRef(
+                    self._runtime_domain,
+                    owner_id,
+                    archive_base + index,
+                )
+                for index in range(len(incoming))
+            )
+            source_messages = (*baseline_messages, *incoming)
+            source_refs = (*baseline_sources, *raw_sources)
+            projection_messages = (
+                source_messages
+                if snapshot.context_messages is None
+                else tuple(snapshot.context_messages)
+            )
+            projection_sources = self._projection_sources(
+                projection_messages,
+                source_messages,
+                source_refs,
+            )
+            projection = self._history.project_context(
+                owner_id,
+                projection_messages,
+                origins=self._message_origins(projection_sources),
+                sources=projection_sources,
+            )
+            self._validate_projection_sources(projection, projection_sources)
+            projection = await self._history.prepare_projection(owner_id, projection)
+            prepared.append(
+                PreparedStepSnapshot(
+                    owner_id,
+                    StoredStepSnapshot(
+                        run.run_id,
+                        snapshot.step_index,
+                        snapshot.timestamp,
+                        snapshot.state,
+                        projection.digest,
+                        snapshot.context_messages is not None,
+                        snapshot.pending_request_index,
+                    ),
+                    chunks,
+                    projection,
+                    head.quality,
+                )
+            )
+            target_message_count += len(delta)
+
+        return PreparedStepSnapshotBatch(
+            run.run_id,
+            tuple(prepared),
+            0,
+            0,
+            target_message_count,
+        )
+
+    async def _prepare_legacy_snapshots(
+        self,
+        run: RunRecord,
+        snapshots: Sequence[ContinuableSnapshot],
+    ) -> PreparedStepSnapshotBatch:
         prepared: list[PreparedStepSnapshot] = []
         owner_id = run.run_id
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
@@ -1405,6 +1542,7 @@ class StateStepArchive(StepStore):
                         snapshot.state,
                         projection.digest,
                         snapshot.context_messages is not None,
+                        snapshot.pending_request_index,
                     ),
                     chunks,
                     projection,
