@@ -336,6 +336,7 @@ async def test_shared_runtime_state_group_is_validated_once(
         inspection = RuntimeStorageInspection(
             stores,
             state,
+            namespace="test",
             durable_domains=frozenset(stores),
             state_validators=(validate_semantics,),
         )
@@ -426,6 +427,7 @@ async def test_compaction_validates_once_and_preserves_referenced_objects(
     inspection = RuntimeStorageInspection(
         stores,
         _Objects(),
+        namespace="test",
         durable_domains=frozenset(stores),
         state_validators=(validate_semantics,),
     )
