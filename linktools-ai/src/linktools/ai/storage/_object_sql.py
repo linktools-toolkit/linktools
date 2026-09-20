@@ -350,8 +350,12 @@ class SqlObjectStore:
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
         if self._context.dialect.name != "sqlite":
-            async for value in self._stream_open(key):
-                yield value
+            stream = self._stream_open(key)
+            try:
+                async for value in stream:
+                    yield value
+            finally:
+                await stream.aclose()
             return
 
         temporary = await asyncio.to_thread(tempfile.TemporaryFile)
@@ -416,8 +420,12 @@ class SqlObjectStore:
             await session.close()
 
     async def _stage_open(self, key: str, handle: BinaryIO) -> None:
-        async for value in self._stream_open(key):
-            await asyncio.to_thread(handle.write, value)
+        stream = self._stream_open(key)
+        try:
+            async for value in stream:
+                await asyncio.to_thread(handle.write, value)
+        finally:
+            await stream.aclose()
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)
