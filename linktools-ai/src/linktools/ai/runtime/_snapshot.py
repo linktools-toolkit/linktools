@@ -329,79 +329,89 @@ class RuntimeSnapshot:
 
         async def restore_generation() -> RestoredRuntime:
             generation = secrets.token_hex(16)
+            locks = root / ".runtime-snapshot-locks"
+            locks.mkdir(parents=True, exist_ok=True)
+            generation_lock = FileLock(
+                str(locks / f"{generation}.lock"),
+                thread_local=False,
+            )
+            await asyncio.to_thread(generation_lock.acquire)
             staging = root / ".staging" / generation
-            staging.mkdir(parents=True, exist_ok=False)
-            (staging / ".runtime-snapshot-staging").write_text(
-                generation,
-                encoding="utf-8",
-            )
-            state_root = staging / "state"
-            await RuntimeState.restore_snapshot(
-                _object_ref_from_payload(manifest["state"]),
-                object_store=object_store,
-                root=state_root,
-                limits=limits,
-            )
-            workspace_root = await _restore_workspace(
-                manifest.get("workspace"),
-                object_store=object_store,
-                target=staging / "workspace",
-                limits=limits,
-            )
-            snapshot_payload = canonical_json_bytes(
-                cast(dict[str, JsonValue], manifest)
-            )
-            (staging / "snapshot.json").write_bytes(snapshot_payload)
-            generation_root = root / "generations" / generation
-            generation_root.parent.mkdir(parents=True, exist_ok=True)
-            publish_lock = root / ".runtime-snapshot-locks" / "publish.lock"
-            published = False
             try:
-                async with FilesystemMutationLock(publish_lock):
-                    latest = _read_current(current_file)
-                    if replace_policy == "missing" and latest is not None:
-                        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                    if replace_policy == "same" and latest is not None:
-                        if latest.get("snapshot_digest") != ref.digest:
+                staging.mkdir(parents=True, exist_ok=False)
+                (staging / ".runtime-snapshot-staging").write_text(
+                    generation,
+                    encoding="utf-8",
+                )
+                state_root = staging / "state"
+                await RuntimeState.restore_snapshot(
+                    _object_ref_from_payload(manifest["state"]),
+                    object_store=object_store,
+                    root=state_root,
+                    limits=limits,
+                )
+                workspace_root = await _restore_workspace(
+                    manifest.get("workspace"),
+                    object_store=object_store,
+                    target=staging / "workspace",
+                    limits=limits,
+                )
+                snapshot_payload = canonical_json_bytes(
+                    cast(dict[str, JsonValue], manifest)
+                )
+                (staging / "snapshot.json").write_bytes(snapshot_payload)
+                generation_root = root / "generations" / generation
+                generation_root.parent.mkdir(parents=True, exist_ok=True)
+                publish_lock = locks / "publish.lock"
+                published = False
+                try:
+                    async with FilesystemMutationLock(publish_lock):
+                        latest = _read_current(current_file)
+                        if replace_policy == "missing" and latest is not None:
                             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                        inspection = await cls.inspect_target(
-                            root,
-                            ref,
-                            object_store=object_store,
-                            limits=limits,
+                        if replace_policy == "same" and latest is not None:
+                            if latest.get("snapshot_digest") != ref.digest:
+                                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                            inspection = await cls.inspect_target(
+                                root,
+                                ref,
+                                object_store=object_store,
+                                limits=limits,
+                            )
+                            if inspection.status != "matching":
+                                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                            return _restored_runtime(root, latest)
+                        if replace_policy == "replace":
+                            if (
+                                latest is None
+                                or latest.get("generation") != expected_generation
+                            ):
+                                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+                        staging.rename(generation_root)
+                        value = {
+                            "snapshot_digest": ref.digest,
+                            "generation": generation,
+                            "namespace": resolved_namespace,
+                            "tenant_id": resolved_tenant,
+                            "state_root": str(generation_root / "state"),
+                            "workspace_root": (
+                                None
+                                if workspace_root is None
+                                else str(generation_root / "workspace")
+                            ),
+                        }
+                        _write_current(current_file, value)
+                        published = True
+                        return _restored_runtime(root, value)
+                finally:
+                    if not published:
+                        await asyncio.to_thread(
+                            shutil.rmtree,
+                            generation_root if generation_root.exists() else staging,
+                            True,
                         )
-                        if inspection.status != "matching":
-                            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                        return _restored_runtime(root, latest)
-                    if replace_policy == "replace":
-                        if (
-                            latest is None
-                            or latest.get("generation") != expected_generation
-                        ):
-                            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-                    staging.rename(generation_root)
-                    value = {
-                        "snapshot_digest": ref.digest,
-                        "generation": generation,
-                        "namespace": resolved_namespace,
-                        "tenant_id": resolved_tenant,
-                        "state_root": str(generation_root / "state"),
-                        "workspace_root": (
-                            None
-                            if workspace_root is None
-                            else str(generation_root / "workspace")
-                        ),
-                    }
-                    _write_current(current_file, value)
-                    published = True
-                    return _restored_runtime(root, value)
             finally:
-                if not published:
-                    await asyncio.to_thread(
-                        shutil.rmtree,
-                        generation_root if generation_root.exists() else staging,
-                        True,
-                    )
+                await asyncio.to_thread(generation_lock.release)
 
         if replace_policy != "replace":
             return await restore_generation()
