@@ -113,13 +113,18 @@ async def _materialize(
         execution_id=run_id,
     )
     now = datetime.now(timezone.utc)
+    session = await state.conversation.sessions.get("session", tenant_id="tenant")
+    assert session is not None and session.history_id is not None
     await state.steps.register_run(
         RunRecord(
             run_id=run_id,
             conversation_id=conversation_id,
             parent_run_id=None,
             agent_name="default",
-            metadata={"agent_name": "default"},
+            metadata={
+                "agent_name": "default",
+                "history_id": session.history_id,
+            },
             started_at=now,
         )
     )
