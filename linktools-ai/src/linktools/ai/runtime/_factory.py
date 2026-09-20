@@ -468,6 +468,10 @@ async def _build_local_components(
             compiler,
             skill_sources,
             state.object_store(RuntimeDomain.EXECUTION),
+            snapshot_resources=(
+                state.plan.route(RuntimeDomain.EXECUTION).retention
+                is RuntimeRetentionMode.DURABLE
+            ),
         )
         execution = DefaultExecutionService(
             state.execution,
