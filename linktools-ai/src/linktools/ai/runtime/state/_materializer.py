@@ -29,7 +29,6 @@ from ._contracts import (
     TaskState,
 )
 from ._filesystem import FilesystemStateStorageGroup, FilesystemStateStore
-from ._maintenance import RuntimeStorageInspection
 from ._memory import MemoryStateStorageGroup, MemoryStateStore
 from ._object_router import _RuntimeObjectRouter, build_runtime_object_router
 from ._plan import (
@@ -63,7 +62,6 @@ class _MaterializedRuntimeState:
     objects: _RuntimeObjectRouter
     steps: RuntimeStepStore
     retention: RuntimeRetentionController
-    maintenance: RuntimeStorageInspection
     stores: Mapping[RuntimeDomain, StateStore]
     close_actions: tuple[Callable[[], Awaitable[None]], ...]
 
@@ -313,13 +311,6 @@ async def materialize_runtime_state(
             plan=plan,
             namespace=namespace,
         )
-        maintenance = RuntimeStorageInspection(
-            {domain: stores[domain] for domain in RuntimeDomain},
-            objects,
-            namespace=namespace,
-            durable_domains=plan.durable_domains,
-            state_validators=(steps.validate_integrity,),
-        )
         actions: list[Callable[[], Awaitable[None]]] = [
             steps.preflight_close,
             objects.preflight_close,
@@ -343,7 +334,6 @@ async def materialize_runtime_state(
             objects=objects,
             steps=steps,
             retention=retention,
-            maintenance=maintenance,
             stores=dict(stores),
             close_actions=tuple(actions),
         )
