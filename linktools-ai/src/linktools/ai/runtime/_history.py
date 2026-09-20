@@ -905,6 +905,21 @@ class StepExecutionHistoryReader:
             execution_id=execution_id,
             segment_sequence=record.agent_run_sequence,
         )
+        run = await self._store.get_run(run_id=final_run_id)
+        if run is None:
+            if record.status is ExecutionStatus.SUCCEEDED:
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+            return Page((), None)
+        _validate_run(
+            run,
+            final_run_id,
+            step_conversation_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+            ),
+            record.agent_run_sequence,
+        )
         message_index, item_offset = _decode_transcript_cursor(
             cursor,
             tenant_id=tenant_id,
