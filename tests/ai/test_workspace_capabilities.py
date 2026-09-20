@@ -7,6 +7,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
     CapabilityGroup,
     ToolCallFailed,
@@ -14,6 +15,8 @@ from linktools.ai.capability import (
     workspace_capabilities,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.storage import StorageOverlay
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -231,6 +234,43 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
     assert tuple(item.fingerprint for item in contributions) == tuple(
         item.fingerprint for item in _workspace_tool_contributions(workspace)
     )
+
+
+@pytest.mark.asyncio
+async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path / "workspace")
+    declaration_root = tmp_path / "declarations"
+    agent_dir = declaration_root / "custom-agents"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "audit").write_bytes(
+        AgentSpecCodec().encode(AgentSpec("audit", model="default"))
+    )
+    backend = DirectoryAssetBackend(
+        str(declaration_root),
+        path_adapter=PrefixAssetPathAdapter(
+            {
+                "agent": "custom-agents",
+                "skill": "custom-skills",
+                "mcp": "custom-mcp",
+            }
+        ),
+        kinds=("agent", "skill", "mcp"),
+    )
+    store = AssetStore(StorageOverlay(backend))
+    await store.initialize()
+    try:
+        frozen = await CapabilityGroup(
+            "workspace",
+            workspace=workspace,
+            assets=store,
+        ).freeze()
+    finally:
+        await store.close()
+
+    identities = {(item.kind, item.id) for item in frozen}
+    assert ("agent", "audit") in identities
+    assert ("tool", "read_file") in identities
+    assert ("tool", "run_command") in identities
 
 
 def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(tmp_path: Path) -> None:
