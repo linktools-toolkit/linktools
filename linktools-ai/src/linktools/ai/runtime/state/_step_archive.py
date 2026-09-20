@@ -1345,13 +1345,7 @@ class StateStepArchive(StepStore):
         baseline = self._context_baselines.get(run.run_id, LoadedModelContext(()))
         baseline_messages = baseline.model_messages()
         baseline_sources = tuple(
-            value.source
-            if value.source is not None
-            and (
-                value.source.source_domain is self._runtime_domain
-                or value.source.source_domain is RuntimeDomain.CONVERSATION
-            )
-            else None
+            self._reusable_context_source(value.source)
             for value in baseline.messages
         )
         prepared: list[PreparedStepSnapshot] = []
@@ -1366,13 +1360,15 @@ class StateStepArchive(StepStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             delta = incoming[before:]
-            capture = TranscriptCapture(
-                target_message_count,
-                delta,
-                (TranscriptOrigin.RAW,) * len(delta),
-                head.quality,
+            chunks = await self._prepare_captured_chunks(
+                owner_id,
+                TranscriptCapture(
+                    target_message_count,
+                    delta,
+                    (TranscriptOrigin.RAW,) * len(delta),
+                    head.quality,
+                ),
             )
-            chunks = await self._prepare_captured_chunks(owner_id, capture)
             raw_sources = tuple(
                 TranscriptMessageRef(
                     self._runtime_domain,
@@ -1427,6 +1423,18 @@ class StateStepArchive(StepStore):
             0,
             target_message_count,
         )
+
+    def _reusable_context_source(
+        self,
+        source: TranscriptMessageRef | None,
+    ) -> TranscriptMessageRef | None:
+        if source is None:
+            return None
+        if source.source_domain is self._runtime_domain:
+            return source
+        if source.source_domain is RuntimeDomain.CONVERSATION:
+            return source
+        return None
 
     async def _prepare_legacy_snapshots(
         self,
