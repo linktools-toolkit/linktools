@@ -122,5 +122,5 @@ async def test_from_root_uses_runtime_sqlite_and_filesystem_objects(
     assert "ai_objects" not in tables
     assert "ai_object_chunks" not in tables
     assert objects_path.is_dir()
-    assert list(objects_path.glob("*/*.bin"))
-    assert list(objects_path.glob("*/*.json"))
+    assert list(objects_path.glob("*/*/data"))
+    assert list(objects_path.glob("*/*/metadata.json"))
