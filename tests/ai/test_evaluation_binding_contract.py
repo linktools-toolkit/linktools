@@ -199,6 +199,9 @@ async def test_evaluation_status_cannot_lead_source_execution() -> None:
     source = replace(
         _execution(_binding("agent"), execution_id="source-execution"),
         status=ExecutionStatus.PENDING_START,
+        revision=0,
+        event_sequence=0,
+        agent_run_sequence=0,
     )
     now = datetime.now(timezone.utc)
     await state.execution.executions.create(source)
