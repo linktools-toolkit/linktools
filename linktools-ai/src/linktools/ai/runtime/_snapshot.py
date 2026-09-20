@@ -33,7 +33,7 @@ from ..storage import (
 )
 from ._snapshot_contract import RunSnapshot, snapshot_digest
 from ._runtime_history import RuntimeHistory
-from .state import OfflineExclusiveStorage, RuntimeState, SnapshotLimits
+from .state import SnapshotExclusiveGuard, RuntimeState, SnapshotLimits
 
 if TYPE_CHECKING:
     from ..workspace import Workspace
@@ -78,7 +78,7 @@ class RuntimeSnapshot:
         state: "RuntimeState",
         object_store: ObjectStore,
         workspace: "Workspace | None" = None,
-        exclusive: OfflineExclusiveStorage,
+        exclusive: SnapshotExclusiveGuard,
         metadata: Mapping[str, JsonValue] | None = None,
         limits: SnapshotLimits,
     ) -> ObjectRef:
@@ -292,7 +292,7 @@ class RuntimeSnapshot:
         limits: SnapshotLimits,
         replace_policy: str = "same",
         expected_generation: str | None = None,
-        exclusive: OfflineExclusiveStorage | None = None,
+        exclusive: SnapshotExclusiveGuard | None = None,
     ) -> RestoredRuntime:
         manifest = await cls._verified_manifest(ref, object_store, limits)
         resolved_namespace = validate_persistence_namespace(namespace)
