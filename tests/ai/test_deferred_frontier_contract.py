@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -61,11 +61,25 @@ class _Store:
     def __init__(self) -> None:
         self.snapshots: list[object] = []
 
-    async def save_snapshot(self, snapshot: object) -> None:
+    async def register_run(self, record: object, *, execution_id: str | None = None) -> None:
+        del record, execution_id
+
+    async def save_snapshot(
+        self,
+        snapshot: object,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
+        del execution_id
         self.snapshots.append(snapshot)
 
-    async def append_event(self, event: object) -> None:
-        del event
+    async def append_event(
+        self,
+        event: object,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
+        del event, execution_id
 
 
 def _context() -> RunContext[None]:
@@ -83,7 +97,11 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
     store = _Store()
     captured: list[int] = []
     persistence = _RuntimeStepPersistence(
-        store=HarnessStepStoreAdapter(store, execution_id=None),
+        capture=RuntimeCaptureStore(
+            store,  # type: ignore[arg-type]
+            execution_id=None,
+            step_run_id="run",
+        ),
         agent_name="agent",
         run_id="run",
         deferred_pause_sink=captured.append,
@@ -99,6 +117,7 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
         messages=[],
         emit=emit,
     )
+    await persistence.before_run(ctx)  # type: ignore[arg-type]
     assert (
         await persistence.after_node_run(
             ctx,
@@ -121,12 +140,19 @@ async def test_runtime_step_persistence_marks_native_deferred_run_interrupted() 
 @pytest.mark.asyncio
 async def test_runtime_step_persistence_requires_pause_sink_for_native_deferred() -> None:
     persistence = _RuntimeStepPersistence(
-        store=HarnessStepStoreAdapter(_Store(), execution_id=None),
+        capture=RuntimeCaptureStore(
+            _Store(),  # type: ignore[arg-type]
+            execution_id=None,
+            step_run_id="run",
+        ),
         agent_name="agent",
         run_id="run",
     )
     persistence._last_observed_step_index = 3
-    result = SimpleNamespace(output=DeferredToolRequests(approvals=[]))
+    result = SimpleNamespace(
+        output=DeferredToolRequests(approvals=[]),
+        all_messages=lambda: [],
+    )
     with pytest.raises(AIError) as error:
         await persistence.after_run(
             SimpleNamespace(run_step=0),
