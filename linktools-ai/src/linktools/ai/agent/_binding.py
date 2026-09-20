@@ -78,7 +78,7 @@ class SemanticPin:
 
     @classmethod
     def from_payload(cls, value: object) -> "SemanticPin":
-        if not isinstance(value, Mapping) or not _PIN_FIELDS.issubset(value):
+        if not isinstance(value, Mapping) or set(value) != _PIN_FIELDS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         kind = value["kind"]
         identity = value["id"]
@@ -203,7 +203,13 @@ class AgentBindingSnapshot:
 
     @classmethod
     def from_payload(cls, value: object) -> "AgentBindingSnapshot":
-        if not isinstance(value, Mapping) or not _BINDING_FIELDS.issubset(value):
+        if not isinstance(value, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        fields = set(value)
+        if fields not in {
+            _BINDING_FIELDS,
+            _BINDING_FIELDS | {"subagent_bindings"},
+        }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         version = value["version"]
         if (
