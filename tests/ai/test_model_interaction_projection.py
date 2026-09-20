@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.messages import (
     BinaryContent,
+    InstructionPart,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -165,6 +166,7 @@ def test_request_envelope_keeps_capability_visibility_inputs() -> None:
         parameters=ModelRequestParameters(
             deferred_capability_ids={"skill-b", "skill-a"},
             revealed_tool_names={"tool-b", "tool-a"},
+            instruction_parts=[InstructionPart(content="system", dynamic=False)],
         ),
         streaming=True,
     )
@@ -174,6 +176,9 @@ def test_request_envelope_keeps_capability_visibility_inputs() -> None:
     assert isinstance(parameters, Mapping)
     assert parameters["deferred_capability_ids"] == ["skill-a", "skill-b"]
     assert parameters["revealed_tool_names"] == ["tool-a", "tool-b"]
+    instruction_parts = parameters["instruction_parts"]
+    assert isinstance(instruction_parts, list)
+    assert instruction_parts[0]["content"] == "system"  # type: ignore[index]
     assert b'"version":1' in raw
 
 
