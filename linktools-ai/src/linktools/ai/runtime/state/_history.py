@@ -15,7 +15,7 @@ from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
 from .._message import (
     decode_model_messages,
     encode_model_messages,
-    model_message_identity_bytes,
+    model_message_match_bytes,
 )
 from ._codec import (
     _decode_enveloped_domain,
@@ -68,7 +68,7 @@ _TRANSCRIPT_SEEK_BLOCK = 128
 
 def _overlap_signature(message: ModelMessage) -> bytes:
     """Framework-stamp-ignoring signature used for overlap matching."""
-    return model_message_identity_bytes(message)
+    return model_message_match_bytes(message)
 
 
 def _conversation_overlap_signature(message: ModelMessage) -> bytes:
