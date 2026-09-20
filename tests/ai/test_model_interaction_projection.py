@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolCallPart,
     ToolReturn,
     ToolReturnPart,
     UserPromptPart,
@@ -25,6 +26,7 @@ from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime._attachment import (
     bind_tool_return_attachments,
     input_attachment_views,
@@ -45,7 +47,7 @@ from linktools.ai.runtime._model_interaction import (
 from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionStagingStepStore,
 )
-from linktools.ai.runtime.state._step_contracts import RunRecord
+from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import Workspace
 
@@ -458,6 +460,140 @@ async def test_interaction_capture_is_immutable_after_sdk_object_mutation() -> N
         store.staged_payload("run", response_item.payload_digest)
     )
     assert frozen_response[0].parts[0].content == "done"  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_parent_tool_result_round_trip_materializes_two_model_requests() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="interaction-tool-roundtrip", tenant_id="tenant")
+    try:
+        capture = RuntimeCaptureStore(
+            state.steps,
+            execution_id="execution",
+            step_run_id="run",
+        )
+        await capture.register_run(
+            RunRecord(
+                "run",
+                conversation_id="conversation",
+                agent_name="parent",
+            )
+        )
+        journal = ModelRequestJournal(
+            source_namespace="interaction-tool-roundtrip",
+            tenant_id="tenant",
+            execution_id="execution",
+            step_run_id="run",
+        )
+
+        first_request = ModelRequest(
+            parts=[UserPromptPart("start")],
+            conversation_id="conversation",
+        )
+        capture.append_transcript_message(first_request)
+        first_fact = journal.begin(1)
+        capture.begin_model_interaction(
+            first_fact,
+            TestModel(),
+            (first_request,),
+            None,
+            ModelRequestParameters(),
+            False,
+        )
+        first_response = ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="delegate_task",
+                    args={"subagent_id": "child", "task": "work"},
+                    tool_call_id="call-1",
+                )
+            ],
+            conversation_id="conversation",
+        )
+        first_finished = journal.finish(
+            first_fact.request_sequence,
+            status="SUCCEEDED",
+        )
+        capture.finish_model_interaction(
+            first_finished,
+            model=TestModel(),
+            response=first_response,
+            status="SUCCEEDED",
+            error_code=None,
+            duration_ns=1,
+            usage=None,
+        )
+        capture.append_transcript_message(first_response)
+
+        tool_result = ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    "delegate_task",
+                    {"status": "ok", "result": "child done"},
+                    tool_call_id="call-1",
+                )
+            ],
+            conversation_id="conversation",
+        )
+        capture.append_transcript_message(tool_result)
+        second_fact = journal.begin(2)
+        capture.begin_model_interaction(
+            second_fact,
+            TestModel(),
+            capture.transcript_messages(),
+            None,
+            ModelRequestParameters(),
+            False,
+        )
+        second_response = ModelResponse(
+            parts=[TextPart("final")],
+            conversation_id="conversation",
+        )
+        second_finished = journal.finish(
+            second_fact.request_sequence,
+            status="SUCCEEDED",
+        )
+        capture.finish_model_interaction(
+            second_finished,
+            model=TestModel(),
+            response=second_response,
+            status="SUCCEEDED",
+            error_code=None,
+            duration_ns=1,
+            usage=None,
+        )
+        capture.append_transcript_message(second_response)
+        await capture.save_snapshot(
+            ContinuableSnapshot(
+                run_id="run",
+                step_index=2,
+                messages=list(capture.transcript_messages()),
+                conversation_id="conversation",
+                agent_name="parent",
+                state="complete",
+            )
+        )
+
+        await state.steps.materialize_recovery_snapshot(
+            step_run_id="run",
+            require_complete=True,
+        )
+        archive = state.steps.read_store(RuntimeDomain.RECOVERY)
+        interactions = await archive.list_model_interactions(run_id="run")
+        assert [value.request_sequence for value in interactions] == [1, 2]
+        resolved = await archive.resolve_model_interactions(interactions)
+        second_request, second_resolved_response, _envelope = resolved[1]
+        assert len(second_request) == 3
+        assert isinstance(second_request[-1], ModelRequest)
+        part = second_request[-1].parts[0]
+        assert isinstance(part, ToolReturnPart)
+        assert part.tool_name == "delegate_task"
+        assert part.tool_call_id == "call-1"
+        assert part.content == {"status": "ok", "result": "child done"}
+        assert second_resolved_response is not None
+        assert second_resolved_response[0].parts[0].content == "final"  # type: ignore[attr-defined]
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
