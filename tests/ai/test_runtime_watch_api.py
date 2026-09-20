@@ -253,7 +253,9 @@ async def test_task_graph_watch_starts_execution_before_binding_event_yield() ->
     stream = run.watch()
     try:
         await anext(stream)
+        assert started == []
         await anext(stream)
+        assert started == []
         binding = await anext(stream)
         assert isinstance(binding.event, TaskEvent)
         assert binding.event.execution_id == "execution"
