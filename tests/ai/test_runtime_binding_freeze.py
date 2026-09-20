@@ -15,10 +15,19 @@ from linktools.ai.capability import (
     SkillSourceRef,
     SkillSourceRegistry,
 )
+from linktools.ai.core import Principal
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_freeze import _RuntimeBindingFreezer
+from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapshotStore
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import InMemoryObjectStore
+from linktools.ai.task import (
+    TaskGraph,
+    TaskGraphAdmission,
+    TaskGraphLimits,
+    TaskGraphRequest,
+    TaskNode,
+)
 
 
 def _compiler(
@@ -158,3 +167,100 @@ async def test_binding_freeze_is_idempotent_for_frozen_dependencies(
 
     assert second.snapshot == first.snapshot
     assert second.digest == first.digest
+
+
+@pytest.mark.asyncio
+async def test_task_capture_freezes_static_binding_without_root_closure(
+    tmp_path: Path,
+) -> None:
+    skill_root = tmp_path / "skills"
+    package = skill_root / "child-skill"
+    package.mkdir(parents=True)
+    (package / "guide.txt").write_text("child", encoding="utf-8")
+
+    child_skill = SkillDefinition(
+        SkillSpec("child-skill", "Use the child guide."),
+        SkillSourceRef("application", "child-skill"),
+    )
+    unreachable_skill = SkillDefinition(
+        SkillSpec("unreachable-skill", "Not reachable from a child execution."),
+        SkillSourceRef("missing", "unreachable-skill"),
+    )
+    candidates = (
+        CapabilityContribution.from_declaration(child_skill),
+        CapabilityContribution.from_declaration(unreachable_skill),
+    )
+    specs = {
+        "parent": AgentSpec(
+            "parent",
+            allow_skills=(),
+            allow_subagents=("child",),
+        ),
+        "child": AgentSpec(
+            "child",
+            allow_skills=("child-skill",),
+            allow_subagents=("grandchild",),
+        ),
+        "grandchild": AgentSpec(
+            "grandchild",
+            allow_skills=("unreachable-skill",),
+            allow_subagents=(),
+        ),
+    }
+    compiler = _compiler(specs, candidates)
+    catalog = AgentCatalog(
+        {
+            agent_id: compiler.compile(spec)
+            for agent_id, spec in specs.items()
+        }
+    )
+    execution_objects = InMemoryObjectStore("execution")
+    freezer = _RuntimeBindingFreezer(
+        catalog,
+        compiler,
+        SkillSourceRegistry(
+            (LocalSkillResourceSource("application", skill_root),)
+        ),
+        execution_objects,
+    )
+    binding = compiler.bind(catalog.root_definition("parent"))
+    graph = TaskGraph(
+        "graph",
+        (
+            TaskNode(
+                "root",
+                input={
+                    "type": "linktools.ai.agent",
+                    "version": 1,
+                    "binding": binding.snapshot.to_payload(),
+                },
+            ),
+        ),
+    )
+    request = TaskGraphRequest(
+        graph,
+        Principal("principal", "tenant"),
+        "task-capture",
+        TaskGraphLimits(),
+    )
+    admission = TaskGraphAdmission.from_request(request)
+    snapshots = TaskCapabilitySnapshotStore(
+        "namespace",
+        compiler,
+        freezer,
+        InMemoryObjectStore("task"),
+        agent_task_type="linktools.ai.agent",
+    )
+
+    frozen = await snapshots.capture(admission, graph)
+
+    assert frozen.roots == {}
+    captured = frozen.bindings[binding.digest]
+    child = captured.subagent_bindings[0]
+    assert child.agent_spec.id == "child"
+    assert child.subagents == ()
+    child_pin = next(pin for pin in child.selected if pin.kind == "skill")
+    frozen_skill = SkillDefinition.from_semantic_contract(child_pin.contract)
+    assert frozen_skill.source_ref is not None
+    assert frozen_skill.source_ref.snapshot is not None
+    assert frozen_skill.source_ref.snapshot.store_id == execution_objects.store_id
