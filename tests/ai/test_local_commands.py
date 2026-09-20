@@ -5,6 +5,7 @@
 import os
 import subprocess
 import sys
+from argparse import Namespace
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,7 +85,7 @@ def test_ai_acp_uses_shared_local_runtime_composition(
 
 def test_ai_local_runtime_models_fall_back_to_workspace_model(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path, {"model": "workspace/model"})
-    args = run_command.create_parser().parse_args(["hello"])
+    args = Namespace(model=None, vision=False, base_url=None, api_key=None)
 
     binding = _local_runtime_models(workspace, args).snapshot().resolve("default")
 
