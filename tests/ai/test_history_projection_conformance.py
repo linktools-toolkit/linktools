@@ -121,8 +121,10 @@ def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transcript_overlap_ignores_framework_stamped_fields() -> None:
-    state = RuntimeState.in_memory()
+async def test_transcript_overlap_ignores_framework_stamped_fields(
+    tmp_path: Path,
+) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
     await state.initialize(namespace="history-stamping", tenant_id="tenant")
     try:
         archive = state.steps.read_store(RuntimeDomain.RECOVERY)
