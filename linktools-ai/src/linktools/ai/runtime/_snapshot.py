@@ -79,7 +79,6 @@ class RuntimeSnapshot:
         object_store: ObjectStore,
         workspace: "Workspace | None" = None,
         exclusive: SnapshotExclusiveGuard,
-        metadata: Mapping[str, JsonValue] | None = None,
         limits: SnapshotLimits,
     ) -> ObjectRef:
         """Capture state and Workspace under a caller-owned quiescence boundary."""
@@ -132,7 +131,6 @@ class RuntimeSnapshot:
                     "tenant_id": resolved_tenant,
                     "state": _object_ref_payload(state_ref),
                     "workspace": workspace_entries,
-                    "metadata": dict(metadata or {}),
                 }
                 payload = canonical_json_bytes(manifest)
                 workspace_count, workspace_bytes = _workspace_snapshot_usage(
