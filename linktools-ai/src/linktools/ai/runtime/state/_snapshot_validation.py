@@ -53,7 +53,6 @@ from ._store import (
     alias_digest,
     operation_key,
     parent_digest,
-    partition_digest,
     record_key_digest,
     scope_digest,
     sequence_key,
@@ -600,12 +599,6 @@ def _expected_session_turn_commit(
             "session_turn_commit",
             identity,
         ),
-        partition_digest(
-            namespace,
-            tenant_id,
-            domain.value,
-            "session_turn_commit",
-        ),
         scope_digest(
             namespace,
             tenant_id,
@@ -642,7 +635,6 @@ def _require_anchor(
 def _same_physical_identity(left: StoredRecord, right: StoredRecord) -> bool:
     return (
         left.key_digest == right.key_digest
-        and left.partition_digest == right.partition_digest
         and left.scope_digest == right.scope_digest
         and left.parent_digest == right.parent_digest
         and left.kind == right.kind
