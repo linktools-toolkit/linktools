@@ -1028,32 +1028,24 @@ def _decode_v1_evaluation_record(
         ):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
-    def decode_record_field(field_name: str, target: object) -> object:
-        return _decode_domain(
-            raw_fields[field_name],
-            target,
-            codec,
-            persisted=persisted,
-        )
-
     try:
         return EvaluationRecord(
-            evaluation_id=cast(str, decode_record_field("evaluation_id", str)),
-            execution_id=cast(str, decode_record_field("execution_id", str)),
-            dataset_digest=cast(str, decode_record_field(dataset_field, str)),
-            binding_digest=cast(str, decode_record_field("binding_digest", str)),
+            evaluation_id=cast(str, decode("evaluation_id", str)),
+            execution_id=cast(str, decode("execution_id", str)),
+            dataset_digest=cast(str, decode(dataset_field, str)),
+            binding_digest=cast(str, decode("binding_digest", str)),
             status=cast(
                 EvaluationStatus,
-                decode_record_field("status", EvaluationStatus),
+                decode("status", EvaluationStatus),
             ),
-            revision=cast(int, decode_record_field("revision", int)),
+            revision=cast(int, decode("revision", int)),
             created_at=cast(
                 datetime,
-                decode_record_field("created_at", datetime),
+                decode("created_at", datetime),
             ),
             updated_at=cast(
                 datetime,
-                decode_record_field("updated_at", datetime),
+                decode("updated_at", datetime),
             ),
         )
     except (TypeError, ValueError) as error:
