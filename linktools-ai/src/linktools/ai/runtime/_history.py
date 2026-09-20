@@ -54,6 +54,7 @@ from .state._contracts import (
     ExecutionRecord,
     ExecutionRepository,
     ModelInteractionRecord,
+    SessionRepository,
 )
 from .state._step_contracts import RunRecord, StepEvent, StepStore
 from .state._views import (
@@ -1081,9 +1082,16 @@ class StepExecutionHistoryReader:
 class StepSessionHistoryReader:
     """Project one committed Conversation snapshot into Session history."""
 
-    def __init__(self, *, store: StepStore, cursor_signer: CursorSigner) -> None:
+    def __init__(
+        self,
+        *,
+        store: StepStore,
+        cursor_signer: CursorSigner,
+        sessions: SessionRepository | None = None,
+    ) -> None:
         self._store = store
         self._cursor_signer = cursor_signer
+        self._sessions = sessions
 
     async def history(
         self,
@@ -1092,7 +1100,6 @@ class StepSessionHistoryReader:
         tenant_id: str,
         continuation_step_run_id: "str | None",
         continuation_history_id: "str | None" = None,
-        continuation_message_count: "int | None" = None,
         cursor: "str | None",
         limit: int,
     ) -> "Page[SessionHistoryItem]":
@@ -1101,6 +1108,20 @@ class StepSessionHistoryReader:
             if cursor is not None:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             return Page((), None)
+        continuation_message_count: int | None = None
+        if self._sessions is not None:
+            session = await self._sessions.get(session_id, tenant_id=tenant_id)
+            if session is None or session.continuation is None:
+                raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+            current = session.continuation
+            current_history_id = current.history_id or session.history_id
+            if (
+                current.step_run_id != continuation_step_run_id
+                or continuation_history_id is not None
+                and current_history_id != continuation_history_id
+            ):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            continuation_message_count = current.message_count
         cursor_values = None if cursor is None else _decode_session_history_cursor(
             cursor,
             tenant_id,
