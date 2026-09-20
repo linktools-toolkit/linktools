@@ -251,8 +251,9 @@ class RuntimeStorageInspection:
         facts: tuple[StoredFact, ...],
         operations: tuple[StoredOperation, ...],
         references: dict[int, set[str]],
-        pending: list[tuple[RuntimeDomain, ObjectRef]],
+        pending: "list[tuple[RuntimeDomain, ObjectRef]] | None" = None,
     ) -> None:
+        selected_pending = [] if pending is None else pending
         for record in records:
             expected_version = _REFERENCE_FREE_RECORD_VERSIONS.get(record.kind)
             if expected_version is not None:
@@ -261,10 +262,20 @@ class RuntimeStorageInspection:
                     expected_version=expected_version,
                 )
                 continue
-            self._collect_enveloped_references(domain, record.data, references, pending)
+            self._collect_enveloped_references(
+                domain,
+                record.data,
+                references,
+                selected_pending,
+            )
         for fact in facts:
             if fact.kind in _ENVELOPED_FACT_KINDS:
-                self._collect_enveloped_references(domain, fact.data, references, pending)
+                self._collect_enveloped_references(
+                    domain,
+                    fact.data,
+                    references,
+                    selected_pending,
+                )
                 continue
             expected_version = _REFERENCE_FREE_FACT_VERSIONS.get(fact.kind)
             if expected_version is not None:
@@ -277,7 +288,12 @@ class RuntimeStorageInspection:
                 continue
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         for operation in operations:
-            self._collect_enveloped_references(domain, operation.data, references, pending)
+            self._collect_enveloped_references(
+                domain,
+                operation.data,
+                references,
+                selected_pending,
+            )
 
     def _collect_enveloped_references(
         self,
