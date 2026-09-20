@@ -83,12 +83,6 @@ def build_runtime_sql_metadata(
             comment="Canonical SHA-256 identity of the persisted runtime record.",
         ),
         Column(
-            "partition_digest",
-            digest,
-            nullable=False,
-            comment="Canonical SHA-256 partition for records of the same tenant, runtime domain, and record kind.",
-        ),
-        Column(
             "scope_digest",
             digest,
             nullable=True,
@@ -153,8 +147,8 @@ def build_runtime_sql_metadata(
         comment=_RECORD_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(records, "key_digest")
-    sql_query_index(records, "partition_digest", "sort_key", mysql_length=128)
+    sql_unique(records, "store_digest", "key_digest")
+    sql_query_index(records, "store_digest", "kind", "sort_key", mysql_length=128)
     sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
     sql_query_index(records, "scope_digest", "state", "sort_key", mysql_length=128)
     sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
@@ -187,9 +181,8 @@ def build_runtime_sql_metadata(
         comment=_ALIAS_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(aliases, "alias_digest")
+    sql_unique(aliases, "store_digest", "alias_digest")
     sql_query_index(aliases, "record_key_digest")
-    sql_query_index(aliases, "store_digest", "alias_digest")
     sql_audit_indexes(aliases)
 
     facts = Table(
@@ -248,10 +241,9 @@ def build_runtime_sql_metadata(
         comment=_FACT_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(facts, "stream_digest", "sequence")
+    sql_unique(facts, "store_digest", "stream_digest", "sequence")
     sql_query_index(facts, "owner_key_digest")
     sql_query_index(facts, "stream_digest", "subject_digest", "sequence")
-    sql_query_index(facts, "store_digest", "stream_digest", "sequence")
     sql_audit_indexes(facts)
 
     sequences = Table(
@@ -280,8 +272,7 @@ def build_runtime_sql_metadata(
         comment=_SEQUENCE_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(sequences, "key_digest")
-    sql_query_index(sequences, "store_digest", "key_digest")
+    sql_unique(sequences, "store_digest", "key_digest")
     sql_audit_indexes(sequences)
 
     operations = Table(
@@ -334,10 +325,9 @@ def build_runtime_sql_metadata(
         comment=_OPERATION_COMMENT,
         **sql_table_options(),
     )
-    sql_unique(operations, "key_digest")
-    sql_unique(operations, "stream_digest", "sequence")
+    sql_unique(operations, "store_digest", "key_digest")
+    sql_unique(operations, "store_digest", "stream_digest", "sequence")
     sql_query_index(operations, "stream_digest", "state", "sequence")
-    sql_query_index(operations, "store_digest", "key_digest")
     sql_audit_indexes(operations)
     return metadata
 

@@ -150,6 +150,7 @@ class SqlAlchemyDialect(Protocol):
         rows: "Sequence[Mapping[str, SqlValue]]",
         column: str,
         index_elements: "Sequence[str]",
+        returning_key: str,
     ) -> "Mapping[str, int]": ...
 
     async def delete_returning(
@@ -319,6 +320,7 @@ class SQLiteDialect:
         rows: "Sequence[Mapping[str, SqlValue]]",
         column: str,
         index_elements: "Sequence[str]",
+        returning_key: str,
     ) -> "Mapping[str, int]":
         if not rows:
             return {}
@@ -334,7 +336,7 @@ class SQLiteDialect:
         statement = insert_statement.on_conflict_do_update(
             index_elements=list(index_elements),
             set_=set_values,
-        ).returning(table.c[index_elements[0]], value_column)
+        ).returning(table.c[returning_key], value_column)
         result = (await session.execute(statement)).all()
         _logger.debug(
             "SQL batch executed: backend=%s operation=reserve_sequences "
@@ -498,6 +500,7 @@ class PostgreSQLDialect(SQLiteDialect):
         rows: "Sequence[Mapping[str, SqlValue]]",
         column: str,
         index_elements: "Sequence[str]",
+        returning_key: str,
     ) -> "Mapping[str, int]":
         if not rows:
             return {}
@@ -513,7 +516,7 @@ class PostgreSQLDialect(SQLiteDialect):
         statement = insert_statement.on_conflict_do_update(
             index_elements=list(index_elements),
             set_=set_values,
-        ).returning(table.c[index_elements[0]], value_column)
+        ).returning(table.c[returning_key], value_column)
         result = (await session.execute(statement)).all()
         _logger.debug(
             "SQL batch executed: backend=%s operation=reserve_sequences "
@@ -647,10 +650,11 @@ class MySQLDialect(SQLiteDialect):
         rows: "Sequence[Mapping[str, SqlValue]]",
         column: str,
         index_elements: "Sequence[str]",
+        returning_key: str,
     ) -> "Mapping[str, int]":
         if not rows:
             return {}
-        from sqlalchemy import select
+        from sqlalchemy import and_, or_, select
         from sqlalchemy.dialects.mysql import insert
 
         insert_statement = insert(table).values([dict(row) for row in rows])
@@ -661,11 +665,17 @@ class MySQLDialect(SQLiteDialect):
 
             set_values["updated_at"] = func.current_timestamp()
         await session.execute(insert_statement.on_duplicate_key_update(**set_values))
-        key_column = index_elements[0]
-        result = await session.execute(
-            select(table.c[key_column], value_column).where(
-                table.c[key_column].in_([row[key_column] for row in rows])
+        predicates = tuple(
+            and_(
+                *(
+                    table.c[index_element] == row[index_element]
+                    for index_element in index_elements
+                )
             )
+            for row in rows
+        )
+        result = await session.execute(
+            select(table.c[returning_key], value_column).where(or_(*predicates))
         )
         _logger.debug(
             "SQL batch executed: backend=%s operation=reserve_sequences "

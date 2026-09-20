@@ -686,7 +686,6 @@ class _SqlTransaction:
                 table.c.storage_version == bindparam("_replacement_expected_version"),
             )
             .values(
-                partition_digest=bindparam("_replacement_partition_digest"),
                 scope_digest=bindparam("_replacement_scope_digest"),
                 parent_digest=bindparam("_replacement_parent_digest"),
                 kind=bindparam("_replacement_kind"),
@@ -818,8 +817,6 @@ class _SqlTransaction:
 
         table = self._table("ai_state_records")
         conditions = [table.c.store_digest == self._store_hex]
-        if query.partition_digest is not None:
-            conditions.append(table.c.partition_digest == _hex(query.partition_digest))
         if query.scope_digest is not None:
             conditions.append(table.c.scope_digest == _hex(query.scope_digest))
         if query.parent_digest is not None:
@@ -1156,7 +1153,8 @@ class _SqlTransaction:
             table=table,
             rows=rows,
             column="value",
-            index_elements=("key_digest",),
+            index_elements=("store_digest", "key_digest"),
+            returning_key="key_digest",
         )
         result = {
             _row_digest(key): _row_nonnegative_int(value)
@@ -1458,7 +1456,6 @@ def _record_values(
 ) -> dict[str, object]:
     values: dict[str, object] = {
         "key_digest": _hex(record.key_digest),
-        "partition_digest": _hex(record.partition_digest),
         "scope_digest": None
         if record.scope_digest is None
         else _hex(record.scope_digest),
@@ -1486,7 +1483,6 @@ def _record_replacement_values(replacement: RecordReplacement) -> dict[str, obje
     return {
         "_replacement_key_digest": _hex(record.key_digest),
         "_replacement_expected_version": replacement.expected_storage_version,
-        "_replacement_partition_digest": _hex(record.partition_digest),
         "_replacement_scope_digest": None
         if record.scope_digest is None
         else _hex(record.scope_digest),
@@ -1508,7 +1504,6 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
     try:
         record = StoredRecord(
             _row_digest(row["key_digest"]),
-            _row_digest(row["partition_digest"]),
             _row_digest_or_none(row["scope_digest"]),
             _row_digest_or_none(row["parent_digest"]),
             _row_string(row["kind"]),

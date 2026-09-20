@@ -16,6 +16,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     records = metadata.tables["ai_state_records"]
     dialect = mysql.dialect()
 
+    assert "partition_digest" not in records.c
     assert (
         records.c.sort_key.type.compile(dialect=dialect)
         == "LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
@@ -27,7 +28,7 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         if index.info.get("ddl_dialect") == "mysql"
     }
     for name in (
-        "ix_partition_digest_sort_key",
+        "ix_store_digest_kind_sort_key",
         "ix_scope_digest_sort_key",
         "ix_scope_digest_state_sort_key",
         "ix_parent_digest_sort_key",
@@ -46,8 +47,9 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
         in migration
     )
     assert "sort_key VARCHAR(128)" not in migration
+    assert "partition_digest" not in migration
     for fragment in (
-        "ix_partition_digest_sort_key (partition_digest, sort_key(128))",
+        "ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128))",
         "ix_scope_digest_sort_key (scope_digest, sort_key(128))",
         "ix_scope_digest_state_sort_key (scope_digest, state, sort_key(128))",
         "ix_parent_digest_sort_key (parent_digest, sort_key(128))",
