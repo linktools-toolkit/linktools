@@ -39,12 +39,13 @@ def test_ai_local_commands_share_runtime_arguments() -> None:
 
 
 def test_ai_local_memory_scope_argument_is_consistent() -> None:
-    for command in (run_command, acp_command):
-        assert command.create_parser().parse_args([]).memory is None
-        assert (
-            command.create_parser().parse_args(["--memory", "custom"]).memory
-            == "custom"
-        )
+    cases = (
+        (run_command, ["prompt"], ["prompt", "--memory", "custom"]),
+        (acp_command, [], ["--memory", "custom"]),
+    )
+    for command, default_args, custom_args in cases:
+        assert command.create_parser().parse_args(default_args).memory is None
+        assert command.create_parser().parse_args(custom_args).memory == "custom"
 
 
 def test_ai_acp_uses_shared_local_runtime_composition(
