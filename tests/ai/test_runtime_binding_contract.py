@@ -15,6 +15,7 @@ from linktools.ai.agent import (
     AgentCompiler,
 )
 from linktools.ai.agent._output import bind_output
+from linktools.ai.capability import SkillDefinition
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -126,6 +127,29 @@ def _compiler() -> AgentCompiler:
         candidates=(),
         agents={"agent": AgentSpec("agent")},
     )
+
+
+def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
+    with pytest.raises(AIError) as raised:
+        SkillDefinition.from_semantic_contract(
+            {
+                "version": 1,
+                "id": "review",
+                "content": "instructions",
+                "source": {
+                    "source_id": "application",
+                    "root": "review",
+                    "snapshot": {
+                        "store_id": 1,
+                        "key": "snapshot",
+                        "digest": "a" * 64,
+                        "size": "1",
+                    },
+                },
+            }
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
