@@ -112,6 +112,13 @@ class RuntimeStepStore(StepStore):
     ) -> None:
         await self._ensure_business()
         del execution_id
+        recovery = self._archives.get(RuntimeDomain.RECOVERY)
+        if recovery is not None:
+            durable = await recovery.get_run(run_id=record.run_id)
+            if durable is not None:
+                if _run_registration_identity(durable) != _run_registration_identity(record):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                record = durable
         async with self._history_lock.hold(record.run_id):
             self._ensure_run_mutable(record.run_id)
             self._staging.register_run_local(record)
@@ -1548,6 +1555,17 @@ class RuntimeStepStore(StepStore):
     async def _ensure_business(self) -> None:
         if not self._initialized:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+def _run_registration_identity(run: RunRecord) -> tuple[object, ...]:
+    return (
+        run.run_id,
+        run.conversation_id,
+        run.parent_run_id,
+        run.agent_name,
+        tuple(sorted(run.metadata.items())),
+        run.registration_id,
+    )
 
 
 def _interaction_semantic_header(
