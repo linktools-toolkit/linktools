@@ -779,6 +779,53 @@ def _fact_storage_identity(
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
+
+def _canonical_sequences(
+    namespace: str,
+    tenant_id: str,
+    domain: RuntimeDomain,
+    facts: tuple[StoredFact, ...],
+    operations: tuple[StoredOperation, ...],
+    values: Mapping[bytes, object],
+) -> Mapping[bytes, int]:
+    sequences: dict[bytes, int] = {}
+    for fact in facts:
+        owner = values.get(fact.owner_key_digest)
+        if owner is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        identity = _fact_storage_identity(domain, fact, owner)
+        relation: str
+        value: object
+        if identity is None:
+            if not isinstance(owner, ExecutionRecord):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            relation = "execution"
+            value = owner.execution_id
+        else:
+            relation, value = identity
+        key = sequence_key(
+            namespace,
+            tenant_id,
+            domain.value,
+            relation,
+            value,
+        )
+        sequences[key] = max(sequences.get(key, 0), fact.sequence)
+
+    for operation in operations:
+        value = _decode_enveloped_domain(operation.data, OperationLedgerInput)
+        if value.tenant_id != tenant_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        key = sequence_key(
+            namespace,
+            tenant_id,
+            domain.value,
+            "operation",
+            [value.resource_kind.value, value.resource_id],
+        )
+        sequences[key] = max(sequences.get(key, 0), operation.sequence)
+    return sequences
+
 def _validate_operations(
     namespace: str,
     tenant_id: str,
