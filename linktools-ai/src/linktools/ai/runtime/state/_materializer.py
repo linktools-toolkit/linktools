@@ -316,6 +316,7 @@ async def materialize_runtime_state(
         maintenance = RuntimeStorageInspection(
             {domain: stores[domain] for domain in RuntimeDomain},
             objects,
+            namespace=namespace,
             durable_domains=plan.durable_domains,
             state_validators=(steps.validate_integrity,),
         )
