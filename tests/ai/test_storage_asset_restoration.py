@@ -608,7 +608,7 @@ def test_sql_asset_info_v1_rejects_future_and_coerced_versions() -> None:
 async def test_filesystem_asset_v1_rejects_generation_two_manifest(tmp_path: Path) -> None:
     import json
 
-    root = tmp_path / "asset-v2"
+    root = tmp_path / "asset-v1"
     backend = FilesystemAssetBackend(root)
     await backend.initialize()
     await backend.put(AssetKey("sample", "one"), b"value")
@@ -636,3 +636,42 @@ def test_asset_receipt_rejects_non_integer_version() -> None:
     with pytest.raises(AIError) as future:
         decode_asset_batch_receipt({"version": 2})
     assert future.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+
+@pytest.mark.asyncio
+async def test_asset_snapshot_uses_v1_manifest_and_object_namespace() -> None:
+    import json
+
+    from linktools.ai.storage import InMemoryObjectStore, read_object
+
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    objects = InMemoryObjectStore("snapshot")
+    key = AssetKey("sample", "one")
+    await store.initialize()
+    try:
+        await store.put(key, b"value")
+        ref = await store.snapshot((key,), object_store=objects)
+
+        assert ref.key.startswith("v1/asset-snapshot/")
+        payload = await read_object(
+            objects,
+            ref.key,
+            expected_digest=ref.digest,
+            expected_size=ref.size,
+        )
+        manifest = json.loads(payload.decode("utf-8"))
+        assert manifest["format_version"] == 1
+        assert manifest["entries"][0]["content"]["key"].startswith(
+            "v1/asset-content/"
+        )
+
+        restored = AssetStore.from_snapshot(ref, object_store=objects)
+        await restored.initialize()
+        try:
+            assert await restored.get(key) == b"value"
+        finally:
+            await restored.close()
+    finally:
+        await store.close()
