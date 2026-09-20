@@ -1092,6 +1092,7 @@ class StepSessionHistoryReader:
         tenant_id: str,
         continuation_step_run_id: "str | None",
         continuation_history_id: "str | None" = None,
+        continuation_message_count: "int | None" = None,
         cursor: "str | None",
         limit: int,
     ) -> "Page[SessionHistoryItem]":
@@ -1119,16 +1120,34 @@ class StepSessionHistoryReader:
         )
         if cursor_values is not None and cursor_values[0] != requested_history_id:
             raise AIError(ErrorCode.CURSOR_INVALID)
-        message_index = 0 if cursor_values is None else cursor_values[1]
-        item_offset = 0 if cursor_values is None else cursor_values[2]
+        cursor_high_water = None if cursor_values is None else cursor_values[1]
+        message_index = 0 if cursor_values is None else cursor_values[2]
+        item_offset = 0 if cursor_values is None else cursor_values[3]
         if history_store is not None:
             history_id = continuation_history_id
             if history_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            total_messages = await history_store.session_message_count(
+            physical_total = await history_store.session_message_count(
                 history_id,
                 tenant_id=tenant_id,
             )
+            if continuation_message_count is None:
+                total_messages = physical_total
+            else:
+                if (
+                    isinstance(continuation_message_count, bool)
+                    or not isinstance(continuation_message_count, int)
+                    or continuation_message_count < 0
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if continuation_message_count > physical_total:
+                    raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+                total_messages = continuation_message_count
+            if cursor_high_water is None:
+                if cursor_values is not None and continuation_message_count is not None:
+                    raise AIError(ErrorCode.CURSOR_INVALID)
+            elif cursor_high_water != total_messages:
+                raise AIError(ErrorCode.CURSOR_INVALID)
             if message_index > total_messages:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             messages = history_store.iter_session_message_range(
@@ -1158,6 +1177,8 @@ class StepSessionHistoryReader:
             if snapshot.state != "complete":
                 raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
             total_messages = len(snapshot.messages)
+            if cursor_high_water is not None and cursor_high_water != total_messages:
+                raise AIError(ErrorCode.CURSOR_INVALID)
             if message_index > total_messages:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             messages = _iter_sequence(snapshot.messages, start=message_index)
@@ -1184,6 +1205,7 @@ class StepSessionHistoryReader:
                 tenant_id,
                 session_id,
                 history_id,
+                total_messages,
                 next_coordinate[0],
                 next_coordinate[1],
                 self._cursor_signer,
@@ -1736,7 +1758,7 @@ def _decode_session_history_cursor(
     tenant_id: str,
     session_id: str,
     signer: CursorSigner,
-) -> tuple[str, int, int]:
+) -> tuple[str, int | None, int, int]:
     payload = decode_runtime_cursor(
         cursor,
         signer,
@@ -1744,26 +1766,43 @@ def _decode_session_history_cursor(
         resource_kind="session_history",
         filter_digest=_session_history_filter_digest(session_id),
     )
-    coordinate = _decode_position(payload.position, 3)
+    try:
+        coordinate = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if not isinstance(coordinate, list) or len(coordinate) not in {3, 4}:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    if len(coordinate) == 3:
+        history_id, message_index, item_offset = coordinate
+        high_water = None
+    else:
+        history_id, high_water, message_index, item_offset = coordinate
     if (
         payload.revision != 0
-        or not isinstance(coordinate[0], str)
-        or not coordinate[0]
-        or isinstance(coordinate[1], bool)
-        or not isinstance(coordinate[1], int)
-        or coordinate[1] < 0
-        or isinstance(coordinate[2], bool)
-        or not isinstance(coordinate[2], int)
-        or coordinate[2] < 0
+        or not isinstance(history_id, str)
+        or not history_id
+        or high_water is not None
+        and (
+            isinstance(high_water, bool)
+            or not isinstance(high_water, int)
+            or high_water < 0
+        )
+        or isinstance(message_index, bool)
+        or not isinstance(message_index, int)
+        or message_index < 0
+        or isinstance(item_offset, bool)
+        or not isinstance(item_offset, int)
+        or item_offset < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return coordinate[0], coordinate[1], coordinate[2]
+    return history_id, high_water, message_index, item_offset
 
 
 def _session_history_cursor(
     tenant_id: str,
     session_id: str,
     history_id: str,
+    high_water: int,
     next_message_index: int,
     intra_message_item_offset: int,
     signer: CursorSigner,
@@ -1774,7 +1813,12 @@ def _session_history_cursor(
         resource_kind="session_history",
         filter_digest=_session_history_filter_digest(session_id),
         position=json.dumps(
-            [history_id, next_message_index, intra_message_item_offset],
+            [
+                history_id,
+                high_water,
+                next_message_index,
+                intra_message_item_offset,
+            ],
             ensure_ascii=False,
             separators=(",", ":"),
         ),
