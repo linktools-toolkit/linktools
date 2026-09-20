@@ -259,3 +259,25 @@ async def test_runtime_start_admits_frozen_binding(tmp_path: Path) -> None:
     assert execution.binding_digest == execution.binding_snapshot.binding_digest
     snapshot = _skill_snapshot(_frozen_child(execution.binding_snapshot))
     assert snapshot.store_id == fixture.objects.store_id
+
+
+@pytest.mark.asyncio
+async def test_non_durable_binding_does_not_require_skill_snapshots(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    freezer = _RuntimeBindingFreezer(
+        fixture.catalog,
+        fixture.compiler,
+        SkillSourceRegistry(),
+        InMemoryObjectStore("volatile"),
+        snapshot_resources=False,
+    )
+
+    frozen = await freezer.freeze(fixture.binding)
+
+    child = _frozen_child(frozen.snapshot)
+    pin = next(item for item in child.selected if item.kind == "skill")
+    skill = SkillDefinition.from_semantic_contract(pin.contract)
+    assert skill.source_ref is not None
+    assert skill.source_ref.snapshot is None
