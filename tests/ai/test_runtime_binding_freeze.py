@@ -276,8 +276,6 @@ async def test_non_durable_binding_does_not_require_skill_snapshots(
 
     frozen = await freezer.freeze(fixture.binding)
 
-    child = _frozen_child(frozen.snapshot)
-    pin = next(item for item in child.selected if item.kind == "skill")
-    skill = SkillDefinition.from_semantic_contract(pin.contract)
-    assert skill.source_ref is not None
-    assert skill.source_ref.snapshot is None
+    assert frozen is fixture.binding
+    assert frozen.snapshot == fixture.binding.snapshot
+    assert frozen.snapshot.subagent_bindings == ()
