@@ -1822,10 +1822,10 @@ def _iter_agent_binding_object_refs(
         raw = source.get("snapshot")
         if raw is None:
             continue
-        required = {"store_id", "key", "digest", "size"}
+        required = {"key", "digest", "size"}
         if not isinstance(raw, Mapping) or not required.issubset(raw):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        store_id = raw["store_id"]
+        store_id = raw.get("store_id", _RUNTIME_OBJECT_STORE_ID)
         key = raw["key"]
         digest = raw["digest"]
         size = raw["size"]
