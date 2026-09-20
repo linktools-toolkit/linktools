@@ -1052,8 +1052,6 @@ class EvaluationRecord:
             validate_resource_id(self.execution_id)
         except AIError as error:
             raise ValueError("evaluation identity is invalid") from error
-        if not isinstance(self.dataset_digest, str) or not self.dataset_digest.strip():
-            raise ValueError("evaluation dataset identity is required")
         if not isinstance(self.status, EvaluationStatus):
             raise TypeError("evaluation status is invalid")
         if (
