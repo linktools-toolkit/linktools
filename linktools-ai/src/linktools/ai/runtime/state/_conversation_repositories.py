@@ -678,7 +678,24 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 source_head_stored.data,
                 TranscriptHeadRecord,
             )
-            local_messages = source_head.message_count
+            physical_total = (
+                source_history.inherited_message_count
+                + source_head.message_count
+            )
+            committed_total = (
+                physical_total
+                if source.continuation is None
+                or source.continuation.message_count is None
+                else source.continuation.message_count
+            )
+            if (
+                committed_total < source_history.inherited_message_count
+                or committed_total > physical_total
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            local_messages = (
+                committed_total - source_history.inherited_message_count
+            )
             histories = ConversationHistoryRepositoryImpl(
                 self._store,
                 namespace=self._namespace,
@@ -704,7 +721,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                         node,
                     )
                     prefix_head = node.node_id
-            inherited = source_history.inherited_message_count + local_messages
+            inherited = committed_total
             turn_head = await transaction.get_sequence(
                 self._timeline_sequence_key(source_session_id)
             )
