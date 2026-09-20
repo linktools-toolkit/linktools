@@ -1040,15 +1040,10 @@ class ToolOperationRecord:
 class EvaluationRecord:
     evaluation_id: str
     execution_id: str
-    dataset_id: str
-    dataset_revision: int
-    evaluator_id: str
-    evaluator_revision: int
+    dataset_digest: str
     binding_digest: str
-    artifact_digest: str | None
     status: EvaluationStatus
     revision: int
-    metrics: Mapping[str, float | int]
     created_at: datetime
     updated_at: datetime
 
