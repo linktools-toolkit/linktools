@@ -259,25 +259,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         return None
 
     def _identity(self, value: object) -> object:
-        if isinstance(value, SessionRecord):
-            return value.session_id
-        if isinstance(value, ExecutionRecord):
-            return value.execution_id
-        if isinstance(value, MemoryRecord):
-            return value.memory_id
-        if isinstance(value, ArtifactRecord):
-            return value.artifact_id
-        if isinstance(value, EvaluationRecord):
-            return value.evaluation_id
-        if isinstance(value, RecoveryCheckpoint):
-            return value.execution_id
-        if isinstance(value, ApprovalRecord):
-            return value.approval_id
-        if isinstance(value, ExternalCallRecord):
-            return value.call_id
-        if isinstance(value, IdempotencyRecord):
-            return self._identity_key(value.scope, value.idempotency_key_digest)
-        raise TypeError(f"unsupported repository value: {type(value).__name__}")
+        return _canonical_record_identity(self._kind, value)
 
     async def create(self, value: ValueT) -> ValueT:
         _require_tenant(value, self._tenant_id)
@@ -1084,6 +1066,7 @@ ResourceRepository = _ResourceRepository
 append_operation = _append_operation
 decode_operation = _decode_operation
 decode_record_cursor = _decode_record_cursor
+canonical_record_identity = _canonical_record_identity
 domain_data = _domain_data
 insert_operation = _insert_operation
 projected_record = _projected_record
@@ -1105,6 +1088,7 @@ __all__ = [
     "append_operation",
     "decode_operation",
     "decode_record_cursor",
+    "canonical_record_identity",
     "domain_data",
     "insert_operation",
     "projected_record",

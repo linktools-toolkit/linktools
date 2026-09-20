@@ -39,6 +39,7 @@ from ._contracts import (
 )
 from ._plan import RuntimeDomain
 from ._repository_common import (
+    canonical_record_identity,
     project_record,
     record_state,
     restore_lease_fields,
@@ -544,33 +545,13 @@ def _record_identity(
     record: StoredRecord,
     graph_parents: Mapping[bytes, str],
 ) -> object:
-    if isinstance(value, SessionRecord):
-        return value.session_id
     if isinstance(value, ConversationHistoryRecord):
         return value.history_id
     if isinstance(value, ConversationHistoryIndexNodeRecord):
         return value.node_id
-    if isinstance(value, ExecutionRecord):
-        return value.execution_id
     if isinstance(value, (ExecutionHistoryHeadRecord, ExecutionHistorySealRecord)):
         return value.execution_id
-    if isinstance(value, IdempotencyRecord):
-        return [value.scope, value.idempotency_key_digest]
-    if isinstance(value, MemoryRecord):
-        return value.memory_id
-    if isinstance(value, ArtifactRecord):
-        return value.artifact_id
-    if isinstance(value, EvaluationRecord):
-        return value.evaluation_id
-    if isinstance(value, RecoveryCheckpoint):
-        return value.execution_id
-    if isinstance(value, ApprovalRecord):
-        return value.approval_id
-    if isinstance(value, ExternalCallRecord):
-        return value.call_id
-    if isinstance(value, ToolOperationRecord):
-        return value.tool_operation_id
-    if isinstance(value, (TaskGraphView, TaskGraphAdmission)):
+    if isinstance(value, TaskGraphAdmission):
         return value.graph_id
     if isinstance(value, TaskNode):
         graph_id = (
@@ -581,7 +562,7 @@ def _record_identity(
         if graph_id is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return [graph_id, value.node_id]
-    if isinstance(value, (TaskNodeView, TaskResultRecord)):
+    if isinstance(value, TaskResultRecord):
         return [value.graph_id, value.node_id]
     if isinstance(value, TranscriptHeadRecord):
         return value.owner_id
@@ -591,8 +572,10 @@ def _record_identity(
         return value.run_id
     if isinstance(value, ContextProjection):
         return record.sort_key
-    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
+    try:
+        return canonical_record_identity(kind, value)
+    except TypeError as error:
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
 
 def _expected_session_turn_commit(
     namespace: str,
