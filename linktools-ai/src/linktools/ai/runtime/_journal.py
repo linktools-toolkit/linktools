@@ -67,12 +67,19 @@ class ModelRequestJournal:
         tenant_id: str,
         execution_id: str,
         step_run_id: str,
+        next_sequence: int = 1,
     ) -> None:
         self._source_namespace = source_namespace
         self._tenant_id = tenant_id
         self._execution_id = execution_id
+        if (
+            isinstance(next_sequence, bool)
+            or not isinstance(next_sequence, int)
+            or next_sequence < 1
+        ):
+            raise ValueError("next_sequence must be a positive integer")
         self._step_run_id = step_run_id
-        self._next_sequence = 1
+        self._next_sequence = next_sequence
         self._facts: dict[int, ModelRequestFact] = {}
 
     def begin(
