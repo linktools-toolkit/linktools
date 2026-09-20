@@ -143,7 +143,7 @@ async with Runtime.open(
     ...
 ```
 
-For caller-owned declaration storage independent of a Workspace, `CapabilityGroup(..., assets=...)` performs discovery over one borrowed immutable `AssetStore` snapshot.
+For caller-owned declaration storage independent of a Workspace, `CapabilityGroup(..., assets=...)` performs discovery from the borrowed `AssetStore` using metadata captured when freeze starts.
 
 A store-backed group captures the declaration metadata visible when freeze starts. Assets added afterward are ignored for that freeze; assets actually read by a loader must still match their captured metadata through verification. Conflicting identities or layouts fail closed.
 

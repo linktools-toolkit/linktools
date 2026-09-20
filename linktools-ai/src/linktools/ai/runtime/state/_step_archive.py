@@ -1220,7 +1220,6 @@ class StateStepArchive(StepStore):
     def _stored_run(self, record: RunRecord) -> StoredRecord:
         return StoredRecord(
             self._run_key(record.run_id),
-
             None
             if record.conversation_id is None
             else scope_digest(
