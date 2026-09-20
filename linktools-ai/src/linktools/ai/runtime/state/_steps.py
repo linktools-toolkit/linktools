@@ -522,6 +522,14 @@ class RuntimeStepStore(StepStore):
             if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
                 await self._abandon_durability_flight(flight)
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            local_message_count = await destination.transcript_message_count(step_run_id)
+            if local_message_count > len(snapshot.messages):
+                await self._abandon_durability_flight(flight)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            target_snapshot = replace(
+                snapshot,
+                transcript_message_count_before=local_message_count,
+            )
             relocated = await destination.prepare_relocated_interactions(
                 source_interactions,
                 source_resolved,
@@ -531,7 +539,7 @@ class RuntimeStepStore(StepStore):
                 await _materialize_snapshot(
                     destination,
                     run,
-                    snapshot,
+                    target_snapshot,
                     execution_id=execution_id,
                 )
                 if relocated:
@@ -570,9 +578,18 @@ class RuntimeStepStore(StepStore):
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
+                snapshot_matches = (
+                    observed_snapshot == snapshot
+                    or observed_snapshot is not None
+                    and replace(
+                        observed_snapshot,
+                        transcript_message_count_before=None,
+                    )
+                    == snapshot
+                )
                 if (
                     observed_run == run
-                    and observed_snapshot == snapshot
+                    and snapshot_matches
                     and tuple(
                         _interaction_semantic_header(value)
                         for value in observed_interactions
