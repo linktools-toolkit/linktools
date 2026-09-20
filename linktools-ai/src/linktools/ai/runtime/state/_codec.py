@@ -1008,14 +1008,6 @@ def _decode_v1_evaluation_record(
         }
         dataset_field = "dataset_id"
     _require_contract_fields(raw_fields, required, persisted=persisted)
-    for field_name, target in legacy_only.items():
-        if field_name in raw_fields:
-            _decode_domain(
-                raw_fields[field_name],
-                target,
-                codec,
-                persisted=persisted,
-            )
 
     def decode(field_name: str, target: object) -> object:
         return _decode_domain(
@@ -1025,19 +1017,44 @@ def _decode_v1_evaluation_record(
             persisted=persisted,
         )
 
+    if dataset_field == "dataset_id":
+        decode("tenant_id", str)
+        if (
+            decode("dataset_revision", int) != 1
+            or decode("evaluator_id", str) != "default"
+            or decode("evaluator_revision", int) != 1
+            or decode("artifact_digest", str | None) is not None
+            or decode("metrics", Mapping[str, float | int]) != {}
+        ):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+    def decode_record_field(field_name: str, target: object) -> object:
+        return _decode_domain(
+            raw_fields[field_name],
+            target,
+            codec,
+            persisted=persisted,
+        )
+
     try:
         return EvaluationRecord(
-            evaluation_id=cast(str, decode("evaluation_id", str)),
-            execution_id=cast(str, decode("execution_id", str)),
-            dataset_digest=cast(str, decode(dataset_field, str)),
-            binding_digest=cast(str, decode("binding_digest", str)),
+            evaluation_id=cast(str, decode_record_field("evaluation_id", str)),
+            execution_id=cast(str, decode_record_field("execution_id", str)),
+            dataset_digest=cast(str, decode_record_field(dataset_field, str)),
+            binding_digest=cast(str, decode_record_field("binding_digest", str)),
             status=cast(
                 EvaluationStatus,
-                decode("status", EvaluationStatus),
+                decode_record_field("status", EvaluationStatus),
             ),
-            revision=cast(int, decode("revision", int)),
-            created_at=cast(datetime, decode("created_at", datetime)),
-            updated_at=cast(datetime, decode("updated_at", datetime)),
+            revision=cast(int, decode_record_field("revision", int)),
+            created_at=cast(
+                datetime,
+                decode_record_field("created_at", datetime),
+            ),
+            updated_at=cast(
+                datetime,
+                decode_record_field("updated_at", datetime),
+            ),
         )
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
