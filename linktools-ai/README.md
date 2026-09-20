@@ -230,8 +230,8 @@ The exact durable binding stores:
 
 - the v1 `AgentSpec` semantic payload;
 - the resolved model semantic payload;
-- the selected semantic pins;
-- selected Subagent ids;
+- the selected semantic pins, including frozen Skill resource references when Execution state is durable;
+- selected Subagent ids and their direct execution bindings;
 - `output_mode`;
 - the canonical output JSON Schema;
 - one `binding_digest`.
