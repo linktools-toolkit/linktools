@@ -505,6 +505,28 @@ class RuntimeStepStore(StepStore):
             if flight is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
+            source_values = await recovery.list_model_interactions(
+                run_id=step_run_id
+            )
+            source_interactions = tuple(
+                value
+                for value in source_values
+                if isinstance(value, ModelInteractionRecord)
+            )
+            if len(source_interactions) != len(source_values):
+                await self._abandon_durability_flight(flight)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            source_resolved = tuple(
+                await recovery.resolve_model_interactions(source_interactions)
+            )
+            if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
+                await self._abandon_durability_flight(flight)
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            relocated = await destination.prepare_relocated_interactions(
+                source_interactions,
+                source_resolved,
+            )
+
             async def operation() -> None:
                 await _materialize_snapshot(
                     destination,
@@ -512,22 +534,14 @@ class RuntimeStepStore(StepStore):
                     snapshot,
                     execution_id=execution_id,
                 )
-                if isinstance(destination, StateStepArchive):
-                    interactions = await recovery.list_model_interactions(
-                        run_id=step_run_id
+                if relocated:
+                    await destination.sync_projection(
+                        run,
+                        events=(),
+                        snapshots=(),
+                        interactions=relocated,
+                        execution_id=execution_id,
                     )
-                    if interactions:
-                        await destination.sync_projection(
-                            run,
-                            events=(),
-                            snapshots=(),
-                            interactions=tuple(
-                                value
-                                for value in interactions
-                                if isinstance(value, ModelInteractionRecord)
-                            ),
-                            execution_id=execution_id,
-                        )
 
             async def readback() -> CommitObservation[None]:
                 try:
@@ -536,18 +550,38 @@ class RuntimeStepStore(StepStore):
                         run_id=run.run_id,
                         include_interrupted=True,
                     )
-                    source_interactions = await recovery.list_model_interactions(
-                        run_id=step_run_id
-                    )
-                    observed_interactions = await destination.list_model_interactions(
+                    observed_values = await destination.list_model_interactions(
                         run_id=run.run_id
+                    )
+                    observed_interactions = tuple(
+                        value
+                        for value in observed_values
+                        if isinstance(value, ModelInteractionRecord)
+                    )
+                    if len(observed_interactions) != len(observed_values):
+                        return CommitObservation(
+                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
+                            error=AIError(ErrorCode.STORAGE_INTEGRITY_ERROR),
+                        )
+                    observed_resolved = tuple(
+                        await destination.resolve_model_interactions(
+                            observed_interactions
+                        )
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
                 if (
                     observed_run == run
                     and observed_snapshot == snapshot
-                    and tuple(observed_interactions) == tuple(source_interactions)
+                    and tuple(
+                        _interaction_semantic_header(value)
+                        for value in observed_interactions
+                    )
+                    == tuple(
+                        _interaction_semantic_header(value)
+                        for value in source_interactions
+                    )
+                    and observed_resolved == source_resolved
                 ):
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
@@ -1478,6 +1512,24 @@ class RuntimeStepStore(StepStore):
     async def _ensure_business(self) -> None:
         if not self._initialized:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+def _interaction_semantic_header(
+    interaction: ModelInteractionRecord,
+) -> tuple[object, ...]:
+    return (
+        interaction.run_id,
+        interaction.step_index,
+        interaction.request_sequence,
+        interaction.purpose,
+        interaction.output_retry_index,
+        tuple(sorted(interaction.model.items())),
+        interaction.status,
+        interaction.error_code,
+        interaction.duration_ns,
+        interaction.usage,
+        interaction.attachments,
+    )
 
 
 def _interaction_local_range(
