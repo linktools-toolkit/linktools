@@ -438,11 +438,9 @@ class DefaultEvaluationService:
 
     async def replay(
         self,
-        binding_digest: str,
+        agent_id: str,
         snapshot_id: str,
         request: ReplayEvaluationRequest,
-        *,
-        binding_snapshot: "AgentBindingSnapshot | None" = None,
     ) -> ExecutionHandle:
         async with self._evaluation_consumer(snapshot_id, request.principal.tenant_id):
             record = await self._synchronize(
@@ -451,10 +449,17 @@ class DefaultEvaluationService:
                 ),
                 principal=request.principal,
             )
-            if record.binding_digest != binding_digest:
+            source = await self._execution_record(record)
+            if (
+                source is None
+                or not isinstance(source.binding, AgentBindingSnapshot)
+                or source.binding_digest != record.binding_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if source.binding.agent_spec.id != agent_id:
                 raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
             handle = await self._execution.start(
-                binding_digest,
+                source.binding_digest,
                 ExecutionRequest(
                     user_prompt=f"replay:{record.evaluation_id}",
                     principal=request.principal,
@@ -464,7 +469,7 @@ class DefaultEvaluationService:
                     planning=False,
                     thinking=False,
                 ),
-                binding_snapshot=binding_snapshot,
+                binding_snapshot=source.binding,
             )
             if record.status in {
                 EvaluationStatus.SUCCEEDED,
