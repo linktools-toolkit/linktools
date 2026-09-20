@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.agent import AgentCatalog, AgentCompiler
+from linktools.ai.agent import AgentBindingSnapshot, AgentCatalog, AgentCompiler
 from linktools.ai.capability import (
     CapabilityContribution,
     FrozenSkillResourceSource,
@@ -18,7 +18,10 @@ from linktools.ai.capability import (
 from linktools.ai.core import Principal
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_freeze import _RuntimeBindingFreezer
+from linktools.ai.runtime._context import RuntimeContext
+from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapshotStore
+from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import InMemoryObjectStore
 from linktools.ai.task import (
@@ -28,6 +31,25 @@ from linktools.ai.task import (
     TaskGraphRequest,
     TaskNode,
 )
+
+
+class _RecordingExecution:
+    def __init__(self) -> None:
+        self.binding_digest: str | None = None
+        self.binding_snapshot: AgentBindingSnapshot | None = None
+
+    async def start(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        dependency_hold_id: str | None = None,
+        binding_snapshot: AgentBindingSnapshot | None = None,
+    ) -> ExecutionHandle:
+        del request, dependency_hold_id
+        self.binding_digest = binding_digest
+        self.binding_snapshot = binding_snapshot
+        return ExecutionHandle("execution")
 
 
 def _compiler(
@@ -264,3 +286,82 @@ async def test_task_capture_freezes_static_binding_without_root_closure(
     assert frozen_skill.source_ref is not None
     assert frozen_skill.source_ref.snapshot is not None
     assert frozen_skill.source_ref.snapshot.store_id == execution_objects.store_id
+
+
+@pytest.mark.asyncio
+async def test_runtime_start_admits_the_frozen_binding(tmp_path: Path) -> None:
+    skill_root = tmp_path / "skills"
+    package = skill_root / "review"
+    package.mkdir(parents=True)
+    (package / "notes.txt").write_text("runtime", encoding="utf-8")
+
+    skill = SkillDefinition(
+        SkillSpec("review", "Review the notes."),
+        SkillSourceRef("application", "review"),
+    )
+    specs = {
+        "agent": AgentSpec(
+            "agent",
+            allow_skills=("review",),
+            allow_subagents=(),
+        )
+    }
+    compiler = _compiler(
+        specs,
+        (CapabilityContribution.from_declaration(skill),),
+    )
+    definition = compiler.compile(specs["agent"])
+    catalog = AgentCatalog({"agent": definition})
+    objects = InMemoryObjectStore("execution")
+    freezer = _RuntimeBindingFreezer(
+        catalog,
+        compiler,
+        SkillSourceRegistry(
+            (LocalSkillResourceSource("application", skill_root),)
+        ),
+        objects,
+    )
+    execution = _RecordingExecution()
+    runtime = Runtime(
+        catalog,
+        compiler,
+        execution,  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        None,
+        namespace="namespace",
+        context=RuntimeContext(None),
+        binding_freezer=freezer,
+    )
+
+    started = await runtime._start_for_agent(
+        definition.digest,
+        "prompt",
+        files=(),
+        output=None,
+        principal=None,
+        session_id=None,
+        idempotency_key="runtime-freeze",
+        memory_scope=None,
+        mode="run",
+        planning=None,
+        thinking=None,
+    )
+
+    assert started.execution_id == "execution"
+    assert execution.binding_snapshot is not None
+    assert execution.binding_digest == execution.binding_snapshot.binding_digest
+    pin = next(
+        item
+        for item in execution.binding_snapshot.selected
+        if item.kind == "skill"
+    )
+    frozen_skill = SkillDefinition.from_semantic_contract(pin.contract)
+    assert frozen_skill.source_ref is not None
+    assert frozen_skill.source_ref.snapshot is not None
+    assert frozen_skill.source_ref.snapshot.store_id == objects.store_id
