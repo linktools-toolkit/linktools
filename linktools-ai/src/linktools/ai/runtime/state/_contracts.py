@@ -1041,7 +1041,6 @@ class EvaluationRecord:
     evaluation_id: str
     execution_id: str
     dataset_digest: str
-    binding_digest: str
     status: EvaluationStatus
     revision: int
     created_at: datetime
