@@ -519,6 +519,38 @@ class _VersionCodec:
     external_schema_types: Mapping[type[object], JsonValue]
 
 
+def _encode_v1_stored_step_snapshot(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, StoredStepSnapshot):
+        raise TypeError("V1 stored_step_snapshot encoder received the wrong type")
+    fields: dict[str, JsonValue] = {
+        "run_id": _encode_domain(value.run_id, codec, persisted=persisted),
+        "step_index": _encode_domain(value.step_index, codec, persisted=persisted),
+        "timestamp": _encode_domain(value.timestamp, codec, persisted=persisted),
+        "state": _encode_domain(value.state, codec, persisted=persisted),
+        "projection_digest": _encode_domain(
+            value.projection_digest,
+            codec,
+            persisted=persisted,
+        ),
+        "has_context_projection": _encode_domain(
+            value.has_context_projection,
+            codec,
+            persisted=persisted,
+        ),
+    }
+    if not persisted or value.pending_request_index is not None:
+        fields["pending_request_index"] = _encode_domain(
+            value.pending_request_index,
+            codec,
+            persisted=persisted,
+        )
+    return fields
+
+
 def _encode_v1_task_node(
     value: object,
     codec: "_VersionCodec",
@@ -1117,6 +1149,7 @@ def _decode_v1_stored_user_input(
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "object_ref": _encode_v1_object_ref,
+        "stored_step_snapshot": _encode_v1_stored_step_snapshot,
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         "task_node": _encode_v1_task_node,
