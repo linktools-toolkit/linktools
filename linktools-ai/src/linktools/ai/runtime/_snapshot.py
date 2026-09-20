@@ -613,7 +613,6 @@ async def _capture_workspace(
                 "path": relative,
                 "mode": after_publish.st_mode & 0o111,
                 "content": {
-                    "store_id": object_store.store_id,
                     "key": key,
                     "digest": digest,
                     "size": size,
@@ -1247,7 +1246,6 @@ def _require_snapshot_format_version(value: object) -> None:
 
 def _object_ref_payload(ref: ObjectRef) -> dict[str, JsonValue]:
     return {
-        "store_id": ref.store_id,
         "key": ref.key,
         "digest": ref.digest,
         "size": ref.size,
@@ -1255,15 +1253,13 @@ def _object_ref_payload(ref: ObjectRef) -> dict[str, JsonValue]:
 
 
 def _object_ref_from_payload(value: object) -> ObjectRef:
-    if not isinstance(value, Mapping):
+    required = {"key", "digest", "size"}
+    if not isinstance(value, Mapping) or not required.issubset(value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        store_id = value["store_id"]
-        key = value["key"]
-        digest = value["digest"]
-        size = value["size"]
-    except KeyError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    store_id = value.get("store_id", "runtime")
+    key = value["key"]
+    digest = value["digest"]
+    size = value["size"]
     if (
         not isinstance(store_id, str)
         or not store_id
