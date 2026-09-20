@@ -48,7 +48,13 @@ class _StreamingExecution:
     def __init__(self, events: tuple[ExecutionTreeEvent, ...]) -> None:
         self._events = events
 
-    def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
+    def watch(
+        self,
+        *,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        assert include_content is True
+
         async def values() -> AsyncIterator[ExecutionTreeEvent]:
             for event in self._events:
                 yield event
@@ -253,7 +259,13 @@ class _ACPExecution:
     def __init__(self, event_type: str) -> None:
         self._event_type = event_type
 
-    def watch(self) -> AsyncIterator[ExecutionTreeEvent]:
+    def watch(
+        self,
+        *,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        assert include_content is True
+
         async def values() -> AsyncIterator[ExecutionTreeEvent]:
             yield _tree_event(self._event_type, {}, sequence=1)
 

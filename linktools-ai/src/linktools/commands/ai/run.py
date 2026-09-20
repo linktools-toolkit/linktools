@@ -131,7 +131,7 @@ async def _stream_result(execution: "Execution[object]") -> int:
     succeeded = False
     wrote_text = False
 
-    async for item in execution.watch():
+    async for item in execution.watch(include_content=True):
         if item.depth != 0:
             continue
         event = item.event
