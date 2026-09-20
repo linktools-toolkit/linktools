@@ -31,14 +31,14 @@ from linktools.ai.runtime.state._contracts import ArtifactRecord
 from linktools.ai.storage import ObjectRef
 
 
-_GRANT_KEY = b"artifact-grant-test-key"
+_TOKEN_SEED = b"artifact-grant-test-key"
 
 
 def _resign(payload: dict[str, str | int]) -> str:
     current = dict(payload)
     current.pop("hmac", None)
     signature = hmac.new(
-        _GRANT_KEY,
+        _TOKEN_SEED,
         canonical_json_bytes(cast(JsonValue, current)),
         hashlib.sha256,
     ).hexdigest()
@@ -78,8 +78,8 @@ async def test_artifact_list_authorizes_the_execution_identity() -> None:
         service = DefaultArtifactService(
             state.artifact,
             authorization,  # type: ignore[arg-type]
-            token_seed=_GRANT_KEY,
-            cursor_signer=HmacCursorSigner("artifact", _GRANT_KEY),
+            token_seed=_TOKEN_SEED,
+            cursor_signer=HmacCursorSigner("artifact", _TOKEN_SEED),
         )
 
         page = await service.list(
@@ -123,8 +123,8 @@ async def test_artifact_grant_is_bound_to_receipt_identity_and_expiry(
         service = DefaultArtifactService(
             state.artifact,
             TenantAuthorizationPolicy("tenant"),
-            token_seed=_GRANT_KEY,
-            cursor_signer=HmacCursorSigner("artifact", _GRANT_KEY),
+            token_seed=_TOKEN_SEED,
+            cursor_signer=HmacCursorSigner("artifact", _TOKEN_SEED),
         )
         principal = Principal("caller", "tenant", "service")
         download = await service.get("artifact", principal=principal)
