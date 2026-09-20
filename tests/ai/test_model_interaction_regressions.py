@@ -23,11 +23,11 @@ from linktools.ai.runtime._model_interaction import (
     StagedContextSpan,
     StagedModelInteraction,
     build_context_projection,
-    message_prefix_digest,
     model_response_projection,
     project_public_messages,
 )
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state._contracts import TranscriptSpanRef
 from linktools.ai.runtime.state._model_interaction_runtime import (
     ModelInteractionRuntimeStepStore,
 )
@@ -52,7 +52,7 @@ def _interaction(sequence: int) -> StagedModelInteraction:
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
-        request_context=StagedContextProjection(0, "0" * 64, ()),
+        request_context=StagedContextProjection(()),
         request_envelope_digest="a" * 64,
         response_context=None,
         status="CANCELLED",
@@ -146,23 +146,13 @@ async def test_runtime_step_store_pages_plain_staging(enhanced: bool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_interaction_prepare_accepts_framework_stamped_source_equivalent() -> None:
+async def test_interaction_prepare_resolves_explicit_local_span() -> None:
     archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
     await archive.initialize()
     try:
         run = RunRecord("run")
         await archive.register_run(run)
-        source = ModelRequest(
-            parts=[UserPromptPart(content="hello")],
-            timestamp=None,
-        )
-        stamped = replace(
-            source,
-            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            run_id="run",
-            conversation_id="conversation",
-            instructions="instruction",
-        )
+        source = ModelRequest(parts=[UserPromptPart(content="hello")])
         payloads: dict[str, bytes] = {}
 
         def intern(value: bytes) -> tuple[str, int]:
@@ -170,7 +160,12 @@ async def test_interaction_prepare_accepts_framework_stamped_source_equivalent()
             payloads[digest] = value
             return digest, len(value)
 
-        projection = build_context_projection((stamped,), (stamped,), intern)
+        projection = build_context_projection(
+            (source,),
+            (source,),
+            intern,
+            source_refs=(0,),
+        )
         envelope_digest, _ = intern(b"{}")
         interaction = StagedModelInteraction(
             run_id="run",
@@ -192,12 +187,14 @@ async def test_interaction_prepare_accepts_framework_stamped_source_equivalent()
             run,
             (interaction,),
             lambda digest: payloads[digest],
-            source_messages=(source,),
+            local_message_base=4,
+            local_message_count=1,
         )
 
         assert len(prepared) == 1
-        assert projection.items == (StagedContextSpan(0, 1),)
-        assert message_prefix_digest((source,)) == message_prefix_digest((stamped,))
+        assert prepared[0].request_context.items == (
+            TranscriptSpanRef(RuntimeDomain.EXECUTION, "run", 4, 5),
+        )
     finally:
         await archive.close()
 
@@ -226,7 +223,7 @@ def test_interaction_projection_keeps_exact_stamped_request_content() -> None:
     assert isinstance(projection.items[0], StagedContextInline)
 
 
-def test_message_prefix_digest_preserves_nested_business_timestamp() -> None:
+def test_context_projection_preserves_nested_business_timestamp() -> None:
     first = ModelRequest(
         parts=[
             ToolReturnPart(
@@ -246,11 +243,19 @@ def test_message_prefix_digest_preserves_nested_business_timestamp() -> None:
             )
         ],
     )
+    store = StagingStepStore()
 
-    assert message_prefix_digest((first,)) != message_prefix_digest((second,))
+    projection = build_context_projection(
+        (first,),
+        (second,),
+        lambda content: store.intern_payload("run", content),
+    )
+
+    assert len(projection.items) == 1
+    assert isinstance(projection.items[0], StagedContextInline)
 
 
-def test_repeated_message_matching_preserves_first_unused_source() -> None:
+def test_ambiguous_duplicate_projection_does_not_guess_occurrence() -> None:
     message = ModelRequest(parts=[UserPromptPart(content="same")])
     other = ModelRequest(parts=[UserPromptPart(content="other")])
     store = StagingStepStore()
@@ -259,12 +264,11 @@ def test_repeated_message_matching_preserves_first_unused_source() -> None:
         (message, other, message, message),
         lambda content: store.intern_payload("run", content),
     )
-    assert projection.items[:3] == (
-        StagedContextSpan(0, 1),
-        StagedContextSpan(2, 3),
-        StagedContextSpan(1, 2),
-    )
+
     assert len(projection.items) == 4
+    assert isinstance(projection.items[0], StagedContextInline)
+    assert projection.items[1] == StagedContextSpan(2, 3)
+    assert isinstance(projection.items[2], StagedContextInline)
     assert isinstance(projection.items[3], StagedContextInline)
 
 
