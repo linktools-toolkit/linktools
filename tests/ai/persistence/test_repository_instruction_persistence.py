@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Persistence regressions for instruction and deferred-work pins."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from linktools.ai.agent import AgentBindingSnapshot, SemanticPin
@@ -153,13 +154,7 @@ def test_object_ref_traversal_allows_additive_skill_snapshot_fields() -> None:
         output_mode=output.mode,
         output_schema=output.schema_definition,
     )
-    execution = _execution(None)
-    execution = ExecutionRecord(
-        **{
-            **execution.__dict__,
-            "binding": binding,
-        }
-    )
+    execution = replace(_execution(None), binding=binding)
 
     refs = tuple(
         iter_runtime_object_refs(
