@@ -798,7 +798,6 @@ class EvaluationView:
 class EvaluationComparison:
     baseline_id: str
     candidate_id: str
-    compatible: bool
 
     def __post_init__(self) -> None:
         if (
@@ -806,7 +805,6 @@ class EvaluationComparison:
             or not self.baseline_id.strip()
             or not isinstance(self.candidate_id, str)
             or not self.candidate_id.strip()
-            or not isinstance(self.compatible, bool)
         ):
             raise ValueError("evaluation comparison is invalid")
 
