@@ -354,7 +354,12 @@ class RuntimeSnapshot:
                 snapshot_payload = canonical_json_bytes(
                     cast(dict[str, JsonValue], manifest)
                 )
-                (staging / "snapshot.json").write_bytes(snapshot_payload)
+                await asyncio.to_thread(
+                    _write_bytes_durable,
+                    staging / "snapshot.json",
+                    snapshot_payload,
+                )
+                await asyncio.to_thread(_fsync_tree, staging)
                 generation_root = root / "generations" / generation
                 generation_root.parent.mkdir(parents=True, exist_ok=True)
                 publish_lock = locks / "publish.lock"
@@ -383,6 +388,10 @@ class RuntimeSnapshot:
                             ):
                                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
                         staging.rename(generation_root)
+                        await asyncio.to_thread(
+                            _fsync_directory,
+                            generation_root.parent,
+                        )
                         value = {
                             "snapshot_digest": ref.digest,
                             "generation": generation,
@@ -395,7 +404,12 @@ class RuntimeSnapshot:
                                 else str(generation_root / "workspace")
                             ),
                         }
-                        _write_current(current_file, value)
+                        try:
+                            _write_current(current_file, value)
+                        except AIError as error:
+                            if error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN:
+                                published = True
+                            raise
                         published = True
                         return _restored_runtime(root, value)
                 finally:
@@ -1309,19 +1323,45 @@ def _write_current(path: Path, value: Mapping[str, object]) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"))
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
+        _write_bytes_durable(temporary, payload.encode("utf-8"))
         os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
     except OSError as error:
         temporary.unlink(missing_ok=True)
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+    try:
+        _fsync_directory(path.parent)
+    except OSError as error:
+        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+
+
+def _write_bytes_durable(path: Path, value: bytes) -> None:
+    with path.open("wb") as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_tree(root: Path) -> None:
+    for directory, _directory_names, file_names in os.walk(root, topdown=False):
+        base = Path(directory)
+        for name in file_names:
+            path = base / name
+            if path.is_symlink():
+                continue
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _fsync_directory(base)
 
 
 def _restored_runtime(root: Path, value: Mapping[str, object]) -> RestoredRuntime:
