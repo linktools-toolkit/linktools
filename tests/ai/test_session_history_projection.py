@@ -332,6 +332,45 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
 
 
 @pytest.mark.asyncio
+async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="session-history-uncommitted-fork", tenant_id="tenant")
+    try:
+        source = await state.conversation.sessions.create(_session())
+        assert source.history_id is not None
+        await _materialize(
+            state,
+            "session-history-uncommitted-run",
+            ("stale",),
+        )
+        service = _service(state)
+        principal = Principal("owner", "tenant")
+
+        await service.fork(
+            "agent",
+            "session",
+            ForkSessionRequest(
+                principal,
+                "fork",
+                "fork-uncommitted-operation",
+            ),
+        )
+
+        child = await state.conversation.sessions.get("fork", tenant_id="tenant")
+        assert child is not None and child.history_id is not None
+        child_history = await state.conversation.histories.get(
+            child.history_id,
+            tenant_id="tenant",
+        )
+        assert child_history is not None
+        assert child_history.inherited_message_count == 0
+        page = await service.history("fork", principal=principal)
+        assert page.items == ()
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_session_history_fork_copies_continuation_without_execution_lookup() -> (
     None
 ):
