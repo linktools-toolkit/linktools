@@ -12,8 +12,6 @@ class RunSnapshot:
     snapshot_id: str
     execution_id: str
     binding_digest: str
-    trace_digest: str
-    result_digest: "str | None"
     digest: str
 
     def verify(self) -> bool:
@@ -22,8 +20,6 @@ class RunSnapshot:
                 "snapshot_id": self.snapshot_id,
                 "execution_id": self.execution_id,
                 "binding_digest": self.binding_digest,
-                "trace_digest": self.trace_digest,
-                "result_digest": self.result_digest,
             }
         )
 
