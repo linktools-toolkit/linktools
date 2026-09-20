@@ -323,10 +323,10 @@ or raw error diagnostics. `result()`, `history()/trace()`,
 `transcript()/model_interactions()`, `task_graph()`, `list_events()`,
 `usage()/graph_usage()`, `attachment_facts()`,
 `task_result()/task_result_ref()`, and `artifacts()` are owned by the same
-authorized query composition. Execution list and detail cursors are
-HMAC-protected continuations. Paged detail queries fix the committed high-water
-captured by the first page; restarting from the first page can observe newer
-facts.
+authorized query composition. Execution list and detail cursors are opaque namespace-bound continuations;
+authorization is rechecked for every query. Paged detail queries fix the
+committed high-water captured by the first page; restarting from the first page
+can observe newer facts.
 
 Execution and TaskGraph watch events carry opaque resumable cursors. The cursor
 is bound to namespace, tenant, resource identity, content mode, and the durable
