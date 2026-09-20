@@ -702,7 +702,7 @@ def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
 
 
 @pytest.mark.asyncio
-async def test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist() -> None:
+async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="history-in-memory-refs", tenant_id="tenant")
     try:
@@ -715,15 +715,20 @@ async def test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist() -> None:
             execution_id="execution",
             segment_sequence=1,
         )
-        refs = (
-            TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 0),
+        resolved = await archive.resolve_transcript_message_refs(
+            (TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 0),)
+        )
+        assert len(resolved) == 1
+        assert isinstance(resolved[0].message, ModelRequest)
+        assert resolved[0].message.parts[0].content == "in-memory-ref"
+
+        for ref in (
             TranscriptMessageRef(RuntimeDomain.EXECUTION, "missing-run", 0),
             TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 999),
-        )
-        for ref in refs:
+        ):
             with pytest.raises(AIError) as raised:
                 await archive.resolve_transcript_message_refs((ref,))
-            assert raised.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 
