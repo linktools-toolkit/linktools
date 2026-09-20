@@ -271,7 +271,7 @@ async def test_non_durable_binding_does_not_require_skill_snapshots(
         fixture.compiler,
         SkillSourceRegistry(),
         InMemoryObjectStore("volatile"),
-        snapshot_resources=False,
+        freeze_dependencies=False,
     )
 
     frozen = await freezer.freeze(fixture.binding)
