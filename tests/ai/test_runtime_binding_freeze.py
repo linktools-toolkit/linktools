@@ -171,7 +171,7 @@ async def test_binding_freeze_captures_only_direct_child_resources(
     frozen = await fixture.freezer.freeze(fixture.binding)
     snapshot = _skill_snapshot(_frozen_child(frozen.snapshot))
 
-    assert snapshot.store_id == fixture.objects.store_id
+    assert snapshot.store_id == "runtime"
     assert await fixture.objects.stat(snapshot.key) is not None
 
     fixture.resource.write_text("changed", encoding="utf-8")
@@ -223,7 +223,7 @@ async def test_task_capture_does_not_build_static_root_closure(
     snapshot = _skill_snapshot(
         _frozen_child(frozen.bindings[fixture.binding.digest])
     )
-    assert snapshot.store_id == fixture.objects.store_id
+    assert snapshot.store_id == "runtime"
 
 
 @pytest.mark.asyncio
@@ -265,7 +265,7 @@ async def test_runtime_start_admits_frozen_binding(tmp_path: Path) -> None:
     assert execution.binding_snapshot is not None
     assert execution.binding_digest == execution.binding_snapshot.binding_digest
     snapshot = _skill_snapshot(_frozen_child(execution.binding_snapshot))
-    assert snapshot.store_id == fixture.objects.store_id
+    assert snapshot.store_id == "runtime"
 
 
 @pytest.mark.asyncio
