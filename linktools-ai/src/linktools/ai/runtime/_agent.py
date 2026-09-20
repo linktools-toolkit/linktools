@@ -62,7 +62,6 @@ class _ExecutionTreeWatcher(Protocol):
 class Execution(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     execution_id: str
-    _binding_digest: str
     _principal: Principal
     _watch_tree: _ExecutionTreeWatcher
     _task_wait: Callable[[float | None], Awaitable[ExecutionResult]] | None = None
@@ -192,7 +191,6 @@ class Execution(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._retry_execution(
-            self._binding_digest,
             self.execution_id,
             validate_user_input(user_prompt),
             files=files,
@@ -210,7 +208,6 @@ class Execution(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._fork_execution(
-            self._binding_digest,
             self.execution_id,
             validate_user_input(user_prompt),
             files=files,
@@ -631,15 +628,11 @@ class Agent(Generic[AppT]):
         self,
         snapshot_id: str,
         request: ReplayEvaluationRequest,
-        *,
-        output: "type[BaseModel] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._replay_evaluation_for_agent(
-            self._agent_digest,
+            self.id,
             snapshot_id,
             request,
-            output=output,
-            definition=self._definition,
         )
 
     def task(
