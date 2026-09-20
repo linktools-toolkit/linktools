@@ -45,6 +45,10 @@ class _RuntimeBindingFreezer:
         self._skill_sources = skill_sources
         self._objects = object_store
 
+    @property
+    def root_ids(self) -> tuple[str, ...]:
+        return self._catalog.root_ids
+
     async def freeze(self, binding: AgentBinding) -> AgentBinding:
         """Freeze one current binding before its first durable admission."""
         if not isinstance(binding, AgentBinding):
