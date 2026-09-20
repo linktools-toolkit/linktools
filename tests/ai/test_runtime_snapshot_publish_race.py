@@ -118,3 +118,82 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
     assert len(generations) == 1
     staging = target / ".staging"
     assert not staging.exists() or not tuple(staging.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_collect_temporary_skips_active_restore_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryObjectStore("snapshot")
+    state_ref = ObjectRef("snapshot", "state", "a" * 64, 0)
+    snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
+    manifest = {
+        "kind": "runtime-snapshot",
+        "format_version": 1,
+        "namespace": "namespace",
+        "tenant_id": "tenant",
+        "state": {
+            "store_id": state_ref.store_id,
+            "key": state_ref.key,
+            "digest": state_ref.digest,
+            "size": state_ref.size,
+        },
+        "workspace": {"present": False, "entries": []},
+        "metadata": {},
+    }
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def verified_manifest(
+        cls,
+        ref: ObjectRef,
+        object_store,
+        limits: SnapshotLimits,
+    ):
+        del cls, ref, object_store, limits
+        return manifest
+
+    async def restore_state(
+        cls,
+        ref: ObjectRef,
+        *,
+        object_store,
+        root: str | Path,
+        limits: SnapshotLimits,
+    ) -> None:
+        del cls, ref, object_store, limits
+        Path(root).mkdir(parents=True, exist_ok=False)
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(
+        RuntimeSnapshot,
+        "_verified_manifest",
+        classmethod(verified_manifest),
+    )
+    monkeypatch.setattr(
+        RuntimeState,
+        "restore_snapshot",
+        classmethod(restore_state),
+    )
+
+    target = tmp_path / "runtime"
+    restoring = asyncio.create_task(
+        RuntimeSnapshot.restore(
+            snapshot_ref,
+            object_store=store,
+            target=target,
+            namespace="namespace",
+            tenant_id="tenant",
+            limits=SnapshotLimits(max_entries=100, max_bytes=1024 * 1024),
+        )
+    )
+    await entered.wait()
+
+    assert await RuntimeSnapshot.collect_temporary(target) == 0
+
+    release.set()
+    restored = await restoring
+    assert restored.generation
+    assert len(tuple((target / "generations").iterdir())) == 1
