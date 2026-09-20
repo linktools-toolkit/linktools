@@ -436,6 +436,13 @@ class RuntimeStepStore(StepStore):
                 run_id=step_run_id
             )
             if interactions and isinstance(archive, StateStepArchive):
+                head = await archive.transcript_repository.get_head(run.run_id)
+                if head is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                local_base, local_count = _interaction_local_range(
+                    (snapshot,),
+                    head.message_count,
+                )
                 prepared = await archive.prepare_interactions(
                     run,
                     tuple(interactions),
@@ -443,7 +450,8 @@ class RuntimeStepStore(StepStore):
                         step_run_id,
                         digest,
                     ),
-                    source_messages=snapshot.messages,
+                    local_message_base=local_base,
+                    local_message_count=local_count,
                 )
                 await archive.sync_projection(
                     run,
@@ -646,6 +654,10 @@ class RuntimeStepStore(StepStore):
                     projection.run,
                     projection.snapshots,
                 )
+                local_base, local_count = _interaction_local_range(
+                    projection.snapshots,
+                    batch.target_transcript_message_count,
+                )
                 prepared.append(
                     PreparedExecutionProjection(
                         projection.run,
@@ -677,11 +689,8 @@ class RuntimeStepStore(StepStore):
                                     run_id,
                                     digest,
                                 ),
-                                source_messages=(
-                                    projection.snapshots[-1].messages
-                                    if projection.snapshots
-                                    else None
-                                ),
+                                local_message_base=local_base,
+                                local_message_count=local_count,
                             )
                         ),
                         durable_head.interaction_count
@@ -1034,6 +1043,10 @@ class RuntimeStepStore(StepStore):
                 captured.run,
                 captured.snapshots,
             )
+            local_base, local_count = _interaction_local_range(
+                captured.snapshots,
+                prepared.target_transcript_message_count,
+            )
             interactions = await archive.prepare_interactions(
                 captured.run,
                 captured.interactions,
@@ -1041,11 +1054,8 @@ class RuntimeStepStore(StepStore):
                     captured.run.run_id,
                     digest,
                 ),
-                source_messages=(
-                    captured.snapshots[-1].messages
-                    if captured.snapshots
-                    else None
-                ),
+                local_message_base=local_base,
+                local_message_count=local_count,
             )
         except BaseException:
             await self.abandon_execution_projection(flight)
@@ -1468,6 +1478,21 @@ class RuntimeStepStore(StepStore):
     async def _ensure_business(self) -> None:
         if not self._initialized:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+def _interaction_local_range(
+    snapshots: Sequence[ContinuableSnapshot],
+    target_transcript_message_count: int,
+) -> tuple[int, int]:
+    if target_transcript_message_count < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if not snapshots:
+        return target_transcript_message_count, 0
+    local_count = len(snapshots[-1].messages)
+    local_base = target_transcript_message_count - local_count
+    if local_base < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return local_base, local_count
 
 
 __all__ = [
