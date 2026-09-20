@@ -54,3 +54,16 @@ async def test_filesystem_plan_rejects_effective_member_path_overlap(tmp_path) -
         await state.initialize(namespace="runtime", tenant_id="tenant")
 
     assert not execution_root.exists()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_execution_and_recovery_share_object_store(tmp_path) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
+    await state.initialize(namespace="runtime", tenant_id="tenant")
+    try:
+        assert (
+            state.object_store(RuntimeDomain.EXECUTION)
+            is state.object_store(RuntimeDomain.RECOVERY)
+        )
+    finally:
+        await state.close()
