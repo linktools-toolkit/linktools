@@ -167,12 +167,19 @@ async def test_transcript_overlap_ignores_framework_stamped_fields(
         )
 
         messages = [message async for message in archive.iter_messages(run_id="run")]
+        context = await archive.load_loaded_model_context(owner_id="run")
+        context_messages = context.model_messages()
 
         assert len(messages) == 2
         assert isinstance(messages[0], ModelRequest)
         assert isinstance(messages[1], ModelResponse)
         assert messages[0].parts[0].content == "hello"
         assert messages[1].parts[0].content == "done"
+        assert len(context_messages) == 2
+        assert isinstance(context_messages[0], ModelRequest)
+        assert context_messages[0].instructions == "instruction"
+        assert context_messages[0].run_id == "run"
+        assert context_messages[0].conversation_id == "conversation"
     finally:
         await state.close()
 
