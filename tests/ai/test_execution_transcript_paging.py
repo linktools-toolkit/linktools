@@ -114,8 +114,8 @@ class _RangedStore:
                 execution_id="execution",
             ),
             parent_run_id=None,
-            agent_name=None,
-            metadata={"segment_sequence": "1"},
+            agent_name="default",
+            metadata={"segment_sequence": "1", "agent_name": "default"},
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
