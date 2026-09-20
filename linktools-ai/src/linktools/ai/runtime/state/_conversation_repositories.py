@@ -333,7 +333,6 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         identity = [value.session_id, value.sequence]
         return StoredRecord(
             self._timeline_commit_key(value.session_id, value.sequence),
-            self._partition("session_turn_commit"),
             self._scope("session_turn_commit", "session", value.session_id),
             None,
             "session_turn_commit",

@@ -487,8 +487,10 @@ class LiveExecutionEventBroker:
                         item.stream_truncated or execution_id in self._truncated,
                     )
                 )
-            else:
+            elif isinstance(item, _LiveEvent):
                 subscription.put_event(item)
+            else:
+                raise RuntimeError("live broker replay marker leaked into retained buffer")
 
     def _drop_oldest_delta(self, buffer: deque[_OrderedItem], execution_id: str) -> bool:
         for index, value in enumerate(buffer):

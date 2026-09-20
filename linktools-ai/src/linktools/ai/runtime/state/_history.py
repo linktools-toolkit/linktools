@@ -324,7 +324,6 @@ class TranscriptRepository:
         key = self._head_key(head.owner_id)
         return StoredRecord(
             key,
-            self._partition("transcript_head"),
             None,
             None,
             "transcript_head",
@@ -556,7 +555,6 @@ class TranscriptRepository:
                 key = self._seek_key(owner_id, block_start)
                 candidates[key] = StoredRecord(
                     key,
-                    self._partition("transcript_seek"),
                     None,
                     self._head_key(owner_id),
                     "transcript_seek",
@@ -933,7 +931,6 @@ class TranscriptRepository:
         key = self._projection_key(run_id)
         value = StoredRecord(
             key,
-            self._partition("context_projection"),
             None,
             self._owner_key(run_id),
             "context_projection",
