@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from ..errors import AIError, ErrorCode
 from ._database import create_sql_storage_context
@@ -354,23 +354,17 @@ class SqlObjectStore:
                 yield value
             return
 
-        temporary_root = await asyncio.to_thread(
-            lambda: Path(tempfile.mkdtemp(prefix="linktools-object-read-"))
-        )
-        temporary = temporary_root / "payload"
+        temporary = await asyncio.to_thread(tempfile.TemporaryFile)
         try:
             await self._stage_open(key, temporary)
-            handle = await asyncio.to_thread(temporary.open, "rb")
-            try:
-                while True:
-                    value = await asyncio.to_thread(handle.read, _CHUNK_SIZE)
-                    if not value:
-                        break
-                    yield value
-            finally:
-                await asyncio.to_thread(handle.close)
+            await asyncio.to_thread(temporary.seek, 0)
+            while True:
+                value = await asyncio.to_thread(temporary.read, _CHUNK_SIZE)
+                if not value:
+                    break
+                yield value
         finally:
-            await asyncio.to_thread(shutil.rmtree, temporary_root, ignore_errors=True)
+            await asyncio.to_thread(temporary.close)
 
     async def _stream_open(self, key: str) -> AsyncIterator[bytes]:
         from sqlalchemy import select
@@ -421,7 +415,7 @@ class SqlObjectStore:
                 await result.close()
             await session.close()
 
-    async def _stage_open(self, key: str, path: Path) -> None:
+    async def _stage_open(self, key: str, handle: BinaryIO) -> None:
         from sqlalchemy import select
 
         table = self._metadata.tables["ai_objects"]
@@ -444,28 +438,28 @@ class SqlObjectStore:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if header["store_id"] != self.store_id or header["object_key"] != key:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            expected_size = int(header["size"])
             result = await session.stream(
                 select(chunks)
                 .where(chunks.c.key_digest == header["key_digest"])
                 .order_by(chunks.c.chunk_index)
             )
-
-            async def values() -> AsyncIterator[bytes]:
-                expected_index = 0
-                async for row in result.mappings():
-                    if int(row["chunk_index"]) != expected_index:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    expected_index += 1
-                    yield bytes(row["content"])
-
-            size, digest = await _spool_file(
-                values(),
-                path,
-                int(header["size"]),
-            )
+            digest = hashlib.sha256()
+            size = 0
+            expected_index = 0
+            async for row in result.mappings():
+                if int(row["chunk_index"]) != expected_index:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                value = bytes(row["content"])
+                expected_index += 1
+                size += len(value)
+                if size > expected_size:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                digest.update(value)
+                await asyncio.to_thread(handle.write, value)
             if (
-                size != int(header["size"])
-                or digest != str(header["content_digest"])
+                size != expected_size
+                or digest.hexdigest() != str(header["content_digest"])
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         finally:
