@@ -23,6 +23,7 @@ def _inspection() -> RuntimeStorageInspection:
     return RuntimeStorageInspection(
         {},
         _NoObjects(),
+        namespace="test",
         durable_domains=frozenset(),
     )
 
