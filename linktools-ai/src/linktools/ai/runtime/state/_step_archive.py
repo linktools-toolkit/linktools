@@ -76,7 +76,6 @@ from ._store import (
     enter_run_history_lock,
     exit_run_history_lock,
     parent_digest,
-    partition_digest,
     record_key_digest,
     require_no_run_history_lock,
     scope_digest,
@@ -1221,7 +1220,7 @@ class StateStepArchive(StepStore):
     def _stored_run(self, record: RunRecord) -> StoredRecord:
         return StoredRecord(
             self._run_key(record.run_id),
-            partition_digest(self._namespace, self._tenant_id, self._runtime_domain.value, "step_run"),
+
             None
             if record.conversation_id is None
             else scope_digest(
@@ -1288,12 +1287,6 @@ class StateStepArchive(StepStore):
         else:
             query = RecordQuery(
                 kind="step_run",
-                partition_digest=partition_digest(
-                    self._namespace,
-                    self._tenant_id,
-                    self._runtime_domain.value,
-                    "step_run",
-                )
             )
         records = await self._store.read(lambda transaction: transaction.list_records(query))
         values = [_decode_step(record.data) for record in records]

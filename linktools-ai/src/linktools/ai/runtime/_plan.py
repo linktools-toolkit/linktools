@@ -17,7 +17,6 @@ from .state._store import (
     StateStore,
     StateTransaction,
     StoredRecord,
-    partition_digest,
     record_key_digest,
 )
 
@@ -67,7 +66,6 @@ class RuntimePlanStore:
             _KIND,
             [owner_kind, owner_id],
         )
-        self._partition = partition_digest(namespace, tenant_id, domain, _KIND)
 
     @property
     def owner_kind(self) -> PlanOwnerKind:
@@ -157,7 +155,6 @@ class RuntimePlanStore:
     ) -> StoredRecord:
         return StoredRecord(
             key_digest=self._key,
-            partition_digest=self._partition,
             scope_digest=None,
             parent_digest=None,
             kind=_KIND,

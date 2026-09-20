@@ -48,7 +48,6 @@ from ._store import (
     StateTransaction,
     StoredFact,
     StoredRecord,
-    partition_digest,
     record_key_digest,
     require_no_run_history_lock,
     sequence_key,
@@ -755,7 +754,6 @@ class TranscriptRepository:
             page = await self._store.read(
                 lambda transaction, sort_key=after_sort, key_digest=after_key: transaction.list_records(
                     RecordQuery(
-                        partition_digest=self._partition("transcript_head"),
                         kind="transcript_head",
                         after_sort_key=sort_key,
                         after_key_digest=key_digest,
@@ -959,7 +957,6 @@ class TranscriptRepository:
         if not await transaction.replace_record(
             replace(
                 value,
-                partition_digest=current.partition_digest,
                 scope_digest=current.scope_digest,
                 parent_digest=current.parent_digest,
                 storage_version=current.storage_version + 1,
@@ -1484,14 +1481,6 @@ class TranscriptRepository:
     def projection_key(self, run_id: str) -> bytes:
         """Return the physical key for one context projection."""
         return self._projection_key(run_id)
-
-    def _partition(self, kind: str) -> bytes:
-        return partition_digest(
-            self._namespace,
-            self._tenant_id,
-            self._runtime_domain.value,
-            kind,
-        )
 
 
 async def _one_chunk(value: bytes) -> AsyncIterator[bytes]:

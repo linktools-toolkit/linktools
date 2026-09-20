@@ -17,7 +17,7 @@ from ._contracts import ToolOperationRecord
 from ._codec import _decode_enveloped_domain, _encode_persisted_domain, encode_envelope, wire_type_id
 from ._contracts import ApprovalRecord, ArtifactRecord, ConversationHistoryRecord, EvaluationRecord, ExecutionRecord, ExternalCallRecord, IdempotencyRecord, MemoryRecord, RecoveryCheckpoint, SessionRecord
 from ._plan import RuntimeDomain
-from ._store import OperationQuery, RecordQuery, StateStore, StateTransaction, StoredOperation, StoredRecord, operation_key, parent_digest, partition_digest, record_key_digest, scope_digest, sequence_key, sortable_identity, stream_digest
+from ._store import OperationQuery, RecordQuery, StateStore, StateTransaction, StoredOperation, StoredRecord, operation_key, parent_digest, record_key_digest, scope_digest, sequence_key, sortable_identity, stream_digest
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
 
@@ -55,11 +55,6 @@ class _RepositoryBase:
     @property
     def namespace(self) -> str:
         return self._namespace
-
-    def _partition(self, kind: str) -> bytes:
-        return partition_digest(
-            self._namespace, self._tenant_id, self._domain.value, kind
-        )
 
     def _key(self, kind: str, identity: object) -> bytes:
         return record_key_digest(
@@ -134,11 +129,6 @@ class _RepositoryBase:
         async def read(transaction: StateTransaction) -> tuple[StoredRecord, ...]:
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=(
-                        self._partition(kind)
-                        if scope is None and parent is None
-                        else None
-                    ),
                     scope_digest=scope,
                     parent_digest=parent,
                     kind=kind,
@@ -154,11 +144,6 @@ class _RepositoryBase:
             last = records[-1]
             probe = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=(
-                        self._partition(kind)
-                        if scope is None and parent is None
-                        else None
-                    ),
                     scope_digest=scope,
                     parent_digest=parent,
                     kind=kind,
@@ -193,11 +178,6 @@ class _RepositoryBase:
         async def read(transaction: StateTransaction) -> bool:
             records = await transaction.list_records(
                 RecordQuery(
-                    partition_digest=(
-                        self._partition(kind)
-                        if scope is None and parent is None
-                        else None
-                    ),
                     scope_digest=scope,
                     parent_digest=parent,
                     kind=kind,
@@ -600,7 +580,6 @@ def project_record(
     lease_owner, lease_fence, lease_expires_at = _record_lease(value)
     return StoredRecord(
         record_key_digest(namespace, tenant_id, domain.value, kind, identity),
-        partition_digest(namespace, tenant_id, domain.value, kind),
         scope,
         parent,
         kind,
