@@ -416,56 +416,8 @@ class SqlObjectStore:
             await session.close()
 
     async def _stage_open(self, key: str, handle: BinaryIO) -> None:
-        from sqlalchemy import select
-
-        table = self._metadata.tables["ai_objects"]
-        chunks = self._metadata.tables["ai_object_chunks"]
-        session = self._context.sessions()
-        result = None
-        try:
-            header = (
-                (
-                    await session.execute(
-                        select(table).where(
-                            table.c.key_digest == _key_digest(self.store_id, key).hex()
-                        )
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-            if header is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            if header["store_id"] != self.store_id or header["object_key"] != key:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expected_size = int(header["size"])
-            result = await session.stream(
-                select(chunks)
-                .where(chunks.c.key_digest == header["key_digest"])
-                .order_by(chunks.c.chunk_index)
-            )
-            digest = hashlib.sha256()
-            size = 0
-            expected_index = 0
-            async for row in result.mappings():
-                if int(row["chunk_index"]) != expected_index:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                value = bytes(row["content"])
-                expected_index += 1
-                size += len(value)
-                if size > expected_size:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                digest.update(value)
-                await asyncio.to_thread(handle.write, value)
-            if (
-                size != expected_size
-                or digest.hexdigest() != str(header["content_digest"])
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        finally:
-            if result is not None:
-                await result.close()
-            await session.close()
+        async for value in self._stream_open(key):
+            await asyncio.to_thread(handle.write, value)
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)
