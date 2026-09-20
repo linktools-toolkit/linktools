@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol, cast
+from typing import cast
 
 from linktools.core import environ
 from pydantic_ai_harness.planning import (
@@ -16,15 +16,11 @@ from pydantic_ai_harness.planning import (
 )
 
 from ..capability import ToolCallRetry
+from ..errors import AIError, ErrorCode
 from ._plan import PlanItem, RuntimePlanStore
 
 _logger = environ.get_logger("ai.runtime.harness")
 
-
-class _InteractionStagingStore(Protocol):
-    def intern_payload(self, run_id: str, payload: bytes) -> tuple[str, int]: ...
-
-    def stage_model_interaction(self, interaction: object) -> None: ...
 
 
 class HarnessPlanStoreAdapter:
