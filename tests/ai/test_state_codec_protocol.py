@@ -3,6 +3,7 @@
 """Frozen Runtime v1 persistence protocol fixtures."""
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.state._codec import (
     _V1_ENUM_WIRE_TYPES,
     _V1_WIRE_TYPES,
+    _decode_step_envelope,
+    _encode_step_envelope,
     CURRENT_DATA_VERSION,
     decode_alias,
     decode_domain,
@@ -24,6 +27,7 @@ from linktools.ai.runtime.state._codec import (
 from linktools.ai.runtime.state._contracts import (
     ConversationCursor,
     ExecutionHistoryState,
+    StoredStepSnapshot,
     TranscriptMessageRef,
 )
 
@@ -87,3 +91,38 @@ def test_future_envelope_version_is_parseable_but_not_decoded_without_registry()
     with pytest.raises(AIError) as raised:
         decode_envelope(future)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+def test_snapshot_frontier_default_is_wire_compatible() -> None:
+    snapshot = StoredStepSnapshot(
+        "run",
+        1,
+        datetime(2026, 9, 20, tzinfo=timezone.utc),
+        "complete",
+        "projection",
+        True,
+    )
+
+    encoded = _encode_step_envelope(snapshot)
+    fields = encoded["value"]["payload"]["fields"]  # type: ignore[index]
+
+    assert "pending_request_index" not in fields
+    assert _decode_step_envelope(encoded) == snapshot
+
+
+def test_snapshot_frontier_is_written_only_when_present() -> None:
+    snapshot = StoredStepSnapshot(
+        "run",
+        1,
+        datetime(2026, 9, 20, tzinfo=timezone.utc),
+        "complete",
+        "projection",
+        True,
+        3,
+    )
+
+    encoded = _encode_step_envelope(snapshot)
+    fields = encoded["value"]["payload"]["fields"]  # type: ignore[index]
+
+    assert fields["pending_request_index"] == 3
+    assert _decode_step_envelope(encoded) == snapshot
