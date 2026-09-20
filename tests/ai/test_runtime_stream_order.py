@@ -248,7 +248,25 @@ async def test_live_broker_bounds_slow_subscribers_and_pending_events() -> None:
     assert len(second._queue) == 1
     assert broker._pending_event_counts["execution"] == 300
 
-    broker.confirm_events("execution", first_sequence=1, count=300)
+    await broker.wait_for_activity("execution")
+    broker.publish(
+        ExecutionDelta(
+            "execution",
+            ExecutionDeltaType.ASSISTANT_TEXT_DELTA,
+            "discarded-after-replay",
+        )
+    )
+    assert not broker._activity["execution"].is_set()
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.TOOL_CALL_STARTED,
+        {"call_id": "late-call", "tool_name": "tool"},
+        durable_sequence=None,
+    )
+    assert not broker._activity["execution"].is_set()
+
+    broker.confirm_events("execution", first_sequence=1, count=301)
+    assert broker._activity["execution"].is_set()
     assert "execution" not in broker._pending_event_counts
     await first.close()
     await second.close()

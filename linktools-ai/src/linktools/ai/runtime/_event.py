@@ -238,7 +238,6 @@ class LiveExecutionEventBroker:
             return
         if delta.execution_id in self._replay_required:
             self._truncated.add(delta.execution_id)
-            self._signal(delta.execution_id)
             return
         delta = _bounded_delta(delta, self._max_bytes)
         if not delta.content:
@@ -314,7 +313,8 @@ class LiveExecutionEventBroker:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         if execution_id in self._replay_required:
-            self._signal(execution_id)
+            if durable_sequence is not None:
+                self._signal(execution_id)
             return
 
         buffer = self._buffers.setdefault(execution_id, deque())
