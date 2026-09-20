@@ -224,11 +224,110 @@ def _validate_connection_table(connection: "Connection", table: "Table") -> None
         if not column_type_matches(connection, expected=expected_column, actual=actual_column):
             _schema_mismatch(table=table.name, category="type", column=expected_column.name)
 
+    expected_primary = tuple(column.name for column in table.primary_key.columns)
+    actual_primary = tuple(
+        str(column)
+        for column in (
+            inspector.get_pk_constraint(table.name, schema=table.schema).get(
+                "constrained_columns"
+            )
+            or ()
+        )
+    )
+    if expected_primary and actual_primary != expected_primary:
+        _schema_mismatch(
+            table=table.name,
+            category="primary_key",
+            columns=expected_primary,
+        )
 
-def _schema_mismatch(*, table: str, category: str, column: str | None = None) -> NoReturn:
+    expected_unique = _expected_unique_columns(connection, table)
+    actual_unique = _reflected_unique_columns(inspector, table)
+    for columns in expected_unique:
+        if frozenset(columns) not in actual_unique:
+            _schema_mismatch(
+                table=table.name,
+                category="unique",
+                columns=columns,
+            )
+
+
+def _expected_unique_columns(
+    connection: "Connection",
+    table: "Table",
+) -> tuple[tuple[str, ...], ...]:
+    from sqlalchemy import UniqueConstraint
+
+    dialect_name = connection.dialect.name
+    values: set[tuple[str, ...]] = set()
+    for constraint in table.constraints:
+        if not isinstance(constraint, UniqueConstraint):
+            continue
+        if not _ddl_element_applies(constraint, dialect_name):
+            continue
+        columns = tuple(column.name for column in constraint.columns)
+        if columns:
+            values.add(columns)
+    for index in table.indexes:
+        if not index.unique or not _ddl_element_applies(index, dialect_name):
+            continue
+        columns = tuple(column.name for column in index.columns)
+        if columns:
+            values.add(columns)
+    return tuple(sorted(values))
+
+
+def _ddl_element_applies(element: object, dialect_name: str) -> bool:
+    info = getattr(element, "info", {})
+    target = info.get("ddl_dialect") if isinstance(info, dict) else None
+    if target is None:
+        return True
+    if target == "portable":
+        return dialect_name in {"sqlite", "postgresql"}
+    return target == dialect_name
+
+
+def _reflected_unique_columns(inspector: object, table: "Table") -> set[frozenset[str]]:
+    values: set[frozenset[str]] = set()
+    for constraint in inspector.get_unique_constraints(table.name, schema=table.schema):
+        columns = constraint.get("column_names") or ()
+        if columns and all(isinstance(column, str) for column in columns):
+            values.add(frozenset(columns))
+    for index in inspector.get_indexes(table.name, schema=table.schema):
+        if index.get("unique") is not True or not _is_full_unique_index(index):
+            continue
+        columns = index.get("column_names") or ()
+        if columns and all(isinstance(column, str) for column in columns):
+            values.add(frozenset(columns))
+    return values
+
+
+def _is_full_unique_index(index: object) -> bool:
+    if not isinstance(index, dict):
+        return False
+    options = index.get("dialect_options")
+    if not isinstance(options, dict):
+        return True
+    for key, value in options.items():
+        if value in (None, False, {}, ()):
+            continue
+        if "where" in str(key).lower() or "length" in str(key).lower():
+            return False
+    return True
+
+
+def _schema_mismatch(
+    *,
+    table: str,
+    category: str,
+    column: str | None = None,
+    columns: tuple[str, ...] | None = None,
+) -> NoReturn:
     details: dict[str, object] = {"table": table, "category": category}
     if column is not None:
         details["column"] = column
+    if columns is not None:
+        details["columns"] = list(columns)
     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, safe_details=details)
 
 
