@@ -52,10 +52,7 @@ class _RuntimeBindingFreezer:
         if not isinstance(binding, AgentBinding):
             raise TypeError("binding must be AgentBinding")
         snapshot = await self.freeze_snapshot(binding.snapshot)
-        restored = self._compiler.restore(snapshot)
-        if restored.snapshot != snapshot:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return restored
+        return self._compiler.restore(snapshot)
 
     async def freeze_root(
         self,
