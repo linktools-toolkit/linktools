@@ -69,7 +69,7 @@ def test_artifact_content_identity_is_derived_from_object_ref() -> None:
 
 
 def test_session_fork_receipt_is_not_a_durable_wire_type() -> None:
-    assert "session_fork_result" not in runtime_codec._V2_DOMAIN_TYPES
+    assert "session_fork_result" not in runtime_codec._V1_DOMAIN_TYPES
 
 
 def test_transcript_head_uses_stored_record_as_its_only_revision_owner() -> None:
