@@ -256,8 +256,7 @@ class DefaultEvaluationService:
                 evaluation_id,
                 principal,
                 AuthorizationAction.EVALUATION_READ,
-            ),
-            principal=principal,
+            )
         )
         return EvaluationView(record.evaluation_id, record.status)
 
@@ -270,8 +269,7 @@ class DefaultEvaluationService:
                 request.baseline_id,
                 request.principal,
                 AuthorizationAction.EVALUATION_READ,
-            ),
-            principal=request.principal,
+            )
         )
         if request.candidate_id == request.baseline_id:
             candidate = baseline
@@ -282,8 +280,7 @@ class DefaultEvaluationService:
                     request.candidate_id,
                     request.principal,
                     AuthorizationAction.EVALUATION_READ,
-                ),
-                principal=request.principal,
+                )
             )
         await self._authorization.authorize(
             request.principal,
@@ -316,8 +313,7 @@ class DefaultEvaluationService:
                 evaluation_id,
                 principal,
                 AuthorizationAction.EVALUATION_READ,
-            ),
-            principal=principal,
+            )
         )
         digest = canonical_sha256(
             {
@@ -344,8 +340,7 @@ class DefaultEvaluationService:
                 snapshot_id,
                 request.principal,
                 AuthorizationAction.EVALUATION_READ,
-            ),
-            principal=request.principal,
+            )
         )
         if source.binding.agent_spec.id != agent_id:
             raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
@@ -366,18 +361,10 @@ class DefaultEvaluationService:
     async def _synchronize(
         self,
         record: EvaluationRecord,
-        *,
-        principal: Principal,
     ) -> tuple[EvaluationRecord, ExecutionRecord]:
         current = record
         while True:
             execution = await self._require_execution(current)
-            if execution.status not in _TERMINAL_EXECUTION_STATUSES:
-                await self._execution.inspect(
-                    execution.execution_id,
-                    principal=principal,
-                )
-                execution = await self._require_execution(current)
             target_status = _EXECUTION_EVALUATION_STATUS.get(execution.status)
             if target_status is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
