@@ -58,7 +58,7 @@ from ._object import RuntimeObjectKeyFactory
 from ._planner import RuntimeTaskNodeRunner
 from ._runtime_history import RuntimeHistory
 from ._task_capability_snapshot import TaskCapabilitySnapshotStore
-from ._runtime_identity import grant_key as runtime_grant_key
+from ._runtime_identity import token_seed
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader, SessionHistoryReader
@@ -210,7 +210,7 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
-        grant_key = _grant_key(resolved_namespace)
+        grant_key = token_seed(resolved_namespace)
         history_reader = _execution_history_reader(
             resolved_namespace,
             selected_state,
@@ -380,10 +380,6 @@ def _memory_store_factory(
         )
 
     return build
-
-
-def _grant_key(namespace: str) -> bytes:
-    return runtime_grant_key(namespace)
 
 
 def _capture_host_cwd() -> "str | None":
@@ -773,7 +769,7 @@ def _borrowed_runtime_history(
         artifacts=artifact,
         cursor_signer=HmacCursorSigner(
             "runtime-history",
-            runtime_grant_key(state.namespace),
+            token_seed(state.namespace),
         ),
     )
 
