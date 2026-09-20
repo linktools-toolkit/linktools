@@ -160,9 +160,9 @@ def build_context_projection(
 
     signatures: dict[bytes, list[int]] = {}
     for index, message in enumerate(source_values):
-        signatures.setdefault(_message_signature(message), []).append(index)
+        signatures.setdefault(_message_key(message), []).append(index)
     projected_signatures = tuple(
-        _message_signature(message) for message in projected_values
+        _message_key(message) for message in projected_values
     )
     projected_counts = Counter(projected_signatures)
     next_candidate: dict[bytes, int] = {}
@@ -315,8 +315,8 @@ def model_response_projection(response: ModelResponse) -> JsonValue:
     return value
 
 
-def _message_signature(message: ModelMessage) -> bytes:
-    return hashlib.sha256(encode_model_messages((message,))).digest()
+def _message_key(message: ModelMessage) -> bytes:
+    return encode_model_messages((message,))
 
 
 def _json_snapshot(value: object) -> JsonValue:
