@@ -210,15 +210,15 @@ async def compose_runtime_components(
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
         )
-        grant_key = token_seed(resolved_namespace)
+        runtime_token_seed = token_seed(resolved_namespace)
         history_reader = _execution_history_reader(
             resolved_namespace,
             selected_state,
-            grant_key,
+            runtime_token_seed,
         )
         session_history_reader = StepSessionHistoryReader(
             store=selected_state.steps.read_store(RuntimeDomain.CONVERSATION),
-            cursor_signer=HmacCursorSigner("session-history", grant_key),
+            cursor_signer=HmacCursorSigner("session-history", runtime_token_seed),
         )
         memory_store_factory = _memory_store_factory(
             resolved_namespace,
@@ -243,7 +243,7 @@ async def compose_runtime_components(
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
-            grant_key=grant_key,
+            runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
             payload_policy=payload_policy,
@@ -348,13 +348,13 @@ def _validate_candidate_uniqueness(
 def _execution_history_reader(
     namespace: str,
     state: RuntimeState,
-    grant_key: bytes,
+    runtime_token_seed: bytes,
 ) -> StepExecutionHistoryReader:
     return StepExecutionHistoryReader(
         namespace=namespace,
         executions=state.execution.executions,
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
-        cursor_signer=HmacCursorSigner("execution-history", grant_key),
+        cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
     )
 
 
@@ -417,7 +417,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
-    grant_key: bytes,
+    runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
     payload_policy: PayloadPolicy,
@@ -457,7 +457,7 @@ async def _build_local_components(
             state.execution.executions,
             authorization,
             history_reader,
-            HmacCursorSigner("execution", grant_key),
+            HmacCursorSigner("execution", runtime_token_seed),
         )
         binding_freezer = _RuntimeBindingFreezer(
             catalog,
@@ -587,7 +587,7 @@ async def _build_local_components(
             state.execution.executions,
             authorization,
             execution,
-            HmacCursorSigner("session", grant_key),
+            HmacCursorSigner("session", runtime_token_seed),
             history_reader=session_history_reader,
             transcript_store=state.steps,
             release_terminal=state.retention.release_session,
@@ -680,8 +680,8 @@ async def _build_local_components(
         artifact = DefaultArtifactService(
             state.artifact,
             authorization,
-            grant_key=grant_key,
-            cursor_signer=HmacCursorSigner("artifact", grant_key),
+            token_seed=runtime_token_seed,
+            cursor_signer=HmacCursorSigner("artifact", runtime_token_seed),
         )
         local_coordinator = _LocalRuntimeCoordinator(execution, event)
         tree_streamer = ExecutionTreeStreamer(
