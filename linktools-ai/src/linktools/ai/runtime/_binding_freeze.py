@@ -32,7 +32,7 @@ class _RuntimeBindingFreezer:
         skill_sources: SkillSourceRegistry,
         object_store: ObjectStore,
         *,
-        snapshot_resources: bool,
+        freeze_dependencies: bool,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -44,7 +44,7 @@ class _RuntimeBindingFreezer:
         self._compiler = compiler
         self._skill_sources = skill_sources
         self._objects = object_store
-        self._snapshot_resources = snapshot_resources
+        self._freeze_dependencies = freeze_dependencies
 
     @property
     def root_ids(self) -> tuple[str, ...]:
@@ -54,6 +54,8 @@ class _RuntimeBindingFreezer:
         """Freeze one current binding before its first durable admission."""
         if not isinstance(binding, AgentBinding):
             raise TypeError("binding must be AgentBinding")
+        if not self._freeze_dependencies:
+            return binding
         snapshot = await self.freeze_snapshot(binding.snapshot)
         if snapshot == binding.snapshot:
             return binding
@@ -81,6 +83,8 @@ class _RuntimeBindingFreezer:
         """Freeze Skill resources and direct child bindings for one snapshot."""
         if not isinstance(snapshot, AgentBindingSnapshot):
             raise TypeError("snapshot must be AgentBindingSnapshot")
+        if not self._freeze_dependencies:
+            return snapshot
         cache = {} if skill_snapshots is None else skill_snapshots
         frozen = await self._freeze_skills(snapshot, skill_snapshots=cache)
         if frozen.subagent_bindings:
@@ -126,7 +130,7 @@ class _RuntimeBindingFreezer:
             if (
                 source_ref is None
                 or source_ref.snapshot is not None
-                or not self._snapshot_resources
+                or not self._freeze_dependencies
             ):
                 selected.append(pin)
                 continue
