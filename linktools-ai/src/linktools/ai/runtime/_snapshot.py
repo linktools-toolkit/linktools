@@ -611,6 +611,7 @@ async def _capture_workspace(
                 "path": relative,
                 "mode": after_publish.st_mode & 0o111,
                 "content": {
+                    "store_id": "runtime",
                     "key": key,
                     "digest": digest,
                     "size": size,
@@ -1244,6 +1245,7 @@ def _require_snapshot_format_version(value: object) -> None:
 
 def _object_ref_payload(ref: ObjectRef) -> dict[str, JsonValue]:
     return {
+        "store_id": "runtime",
         "key": ref.key,
         "digest": ref.digest,
         "size": ref.size,
