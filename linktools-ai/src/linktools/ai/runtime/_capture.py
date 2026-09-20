@@ -22,7 +22,7 @@ from ._journal import (
     MODEL_USAGE_OUTPUT_METADATA_KEY,
     ModelRequestFact,
 )
-from ._message import freeze_model_messages, project_transient_binary_content
+from ._message import encode_model_messages, freeze_model_messages, project_transient_binary_content
 from ._model_interaction import (
     StagedContextProjection,
     StagedModelInteraction,
@@ -234,34 +234,35 @@ class RuntimeCaptureStore:
         messages: Sequence[ModelMessage],
     ) -> tuple[TranscriptMessageRef | int | None, ...]:
         values = freeze_model_messages(messages)
-        known = tuple(self._source_messages)
-        by_message: dict[ModelMessage, list[int]] = {}
-        for index, message in enumerate(known):
-            try:
-                by_message.setdefault(message, []).append(index)
-            except TypeError:
-                return (None,) * len(values)
-        requested_counts: dict[ModelMessage, int] = {}
-        try:
-            for message in values:
-                requested_counts[message] = requested_counts.get(message, 0) + 1
-        except TypeError:
-            return (None,) * len(values)
-        used: dict[ModelMessage, int] = {}
+        known_keys = tuple(
+            encode_model_messages((message,))
+            for message in self._source_messages
+        )
+        requested_keys = tuple(
+            encode_model_messages((message,))
+            for message in values
+        )
+        by_key: dict[bytes, list[int]] = {}
+        for index, key in enumerate(known_keys):
+            by_key.setdefault(key, []).append(index)
+        requested_counts: dict[bytes, int] = {}
+        for key in requested_keys:
+            requested_counts[key] = requested_counts.get(key, 0) + 1
+        used: dict[bytes, int] = {}
         refs: list[TranscriptMessageRef | int | None] = []
-        for message in values:
-            candidates = by_message.get(message, ())
+        for key in requested_keys:
+            candidates = by_key.get(key, ())
             if not candidates or (
                 len(candidates) > 1
-                and requested_counts.get(message, 0) != len(candidates)
+                and requested_counts.get(key, 0) != len(candidates)
             ):
                 refs.append(None)
                 continue
-            offset = used.get(message, 0)
+            offset = used.get(key, 0)
             if offset >= len(candidates):
                 refs.append(None)
                 continue
-            used[message] = offset + 1
+            used[key] = offset + 1
             refs.append(self._source_refs[candidates[offset]])
         return tuple(refs)
 
