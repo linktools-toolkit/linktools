@@ -208,7 +208,7 @@ async def test_evaluation_status_cannot_lead_source_execution() -> None:
             evaluation_id="state-ahead",
             execution_id=source.execution_id,
             dataset_digest="dataset",
-                status=EvaluationStatus.RUNNING,
+            status=EvaluationStatus.RUNNING,
             revision=1,
             created_at=now,
             updated_at=now,
