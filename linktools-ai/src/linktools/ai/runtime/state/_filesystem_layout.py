@@ -602,7 +602,7 @@ class _CowMap(MutableMapping[KeyT, MapValueT]):
 
 def _matches_record(record: StoredRecord, query: RecordQuery) -> bool:
     return (
-        query.scope_digest is None or record.scope_digest == query.scope_digest
+        (query.scope_digest is None or record.scope_digest == query.scope_digest)
         and (query.parent_digest is None or record.parent_digest == query.parent_digest)
         and (query.kind is None or record.kind == query.kind)
         and (

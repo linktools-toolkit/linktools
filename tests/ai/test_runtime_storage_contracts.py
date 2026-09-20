@@ -358,6 +358,56 @@ async def test_filesystem_unknown_commit_poison_is_fail_closed(
         await store.close()
 
 
+async def test_filesystem_kind_only_query_filters_other_record_kinds(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemStateStore(
+        tmp_path / "kind-query",
+        namespace="n",
+        tenant_id="t",
+        runtime_domain="conversation",
+    )
+    await store.initialize()
+    first = StoredRecord(
+        b"a" * 32,
+        None,
+        None,
+        "first",
+        "a",
+        None,
+        0,
+        None,
+        0,
+        None,
+        {},
+    )
+    second = StoredRecord(
+        b"b" * 32,
+        None,
+        None,
+        "second",
+        "b",
+        None,
+        0,
+        None,
+        0,
+        None,
+        {},
+    )
+    try:
+        await store.mutate(
+            lambda transaction: transaction.insert_records((first, second))
+        )
+        values = await store.read(
+            lambda transaction: transaction.list_records(
+                RecordQuery(kind="second")
+            )
+        )
+        assert values == (second,)
+    finally:
+        await store.close()
+
+
 async def test_sql_state_store_scope_applies_to_point_and_collection_operations(
     tmp_path: Path,
 ) -> None:
