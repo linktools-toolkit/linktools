@@ -137,6 +137,31 @@ def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
     return canonical_json_bytes(value)
 
 
+def model_message_identity_bytes(message: ModelMessage) -> bytes:
+    """Serialize logical message identity across framework metadata stamping."""
+    value = json.loads(encode_model_messages((message,)).decode("utf-8"))
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise RuntimeError("model message identity dump is invalid")
+    encoded = value[0]
+    encoded.pop("run_id", None)
+    encoded.pop("conversation_id", None)
+    if isinstance(message, ModelRequest):
+        encoded.pop("instructions", None)
+
+    def remove_timestamps(candidate: object) -> object:
+        if isinstance(candidate, list):
+            return [remove_timestamps(item) for item in candidate]
+        if isinstance(candidate, dict):
+            return {
+                key: remove_timestamps(item)
+                for key, item in candidate.items()
+                if key != "timestamp"
+            }
+        return candidate
+
+    return canonical_json_bytes(remove_timestamps(value))
+
+
 def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
     try:
         value = json.loads(raw.decode("utf-8"))
