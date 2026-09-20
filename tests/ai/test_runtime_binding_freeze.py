@@ -389,3 +389,115 @@ async def test_runtime_state_snapshot_restores_frozen_skill_objects(
         assert await source.read("child-skill", "guide.txt") == b"original"
     finally:
         await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_snapshot_restores_task_capability_manifest(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    state_root = tmp_path / "task-state"
+    state = RuntimeState.filesystem(state_root)
+    await state.initialize(namespace="namespace", tenant_id="tenant")
+    graph = TaskGraph(
+        "graph",
+        (
+            TaskNode(
+                "root",
+                input={
+                    "type": "linktools.ai.agent",
+                    "version": 1,
+                    "binding": fixture.binding.snapshot.to_payload(),
+                },
+            ),
+        ),
+    )
+    admission = TaskGraphAdmission.from_request(
+        TaskGraphRequest(
+            graph,
+            Principal("principal", "tenant"),
+            "task-snapshot",
+            TaskGraphLimits(),
+        )
+    )
+    try:
+        freezer = _RuntimeBindingFreezer(
+            fixture.catalog,
+            fixture.compiler,
+            SkillSourceRegistry(
+                (
+                    LocalSkillResourceSource(
+                        "application",
+                        fixture.resource.parents[1],
+                    ),
+                )
+            ),
+            state.object_store(RuntimeDomain.EXECUTION),
+            freeze_dependencies=True,
+        )
+        capabilities = TaskCapabilitySnapshotStore(
+            "namespace",
+            fixture.compiler,
+            freezer,
+            state.object_store(RuntimeDomain.TASK),
+            agent_task_type="linktools.ai.agent",
+        )
+        await capabilities.capture(admission, graph)
+        await state.task.admissions.admit(admission, graph)
+    finally:
+        await state.close()
+
+    snapshot_store = InMemoryObjectStore("task-snapshot")
+    read_state = RuntimeState.filesystem(state_root)
+    await read_state.initialize(
+        namespace="namespace",
+        tenant_id="tenant",
+        read_only=True,
+    )
+    try:
+        snapshot_ref = await read_state.export_snapshot(
+            object_store=snapshot_store,
+            limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
+        )
+    finally:
+        await read_state.close()
+
+    restored_root = tmp_path / "task-restored"
+    await RuntimeState.restore_snapshot(
+        snapshot_ref,
+        object_store=snapshot_store,
+        root=restored_root,
+        limits=SnapshotLimits(max_entries=1024, max_bytes=8 * 1024 * 1024),
+    )
+    restored = RuntimeState.from_root(restored_root)
+    await restored.initialize(
+        namespace="namespace",
+        tenant_id="tenant",
+        read_only=True,
+    )
+    try:
+        restored_freezer = _RuntimeBindingFreezer(
+            fixture.catalog,
+            fixture.compiler,
+            SkillSourceRegistry(),
+            restored.object_store(RuntimeDomain.EXECUTION),
+            freeze_dependencies=True,
+        )
+        restored_capabilities = TaskCapabilitySnapshotStore(
+            "namespace",
+            fixture.compiler,
+            restored_freezer,
+            restored.object_store(RuntimeDomain.TASK),
+            agent_task_type="linktools.ai.agent",
+        )
+        loaded = await restored_capabilities.load(admission)
+        binding = loaded.bindings[fixture.binding.digest]
+        skill_ref = _skill_snapshot(_frozen_child(binding))
+        source = FrozenSkillResourceSource(
+            "application",
+            {"child-skill": skill_ref},
+            restored.object_store(RuntimeDomain.EXECUTION),
+        )
+        assert await source.read("child-skill", "guide.txt") == b"original"
+    finally:
+        await restored.close()
