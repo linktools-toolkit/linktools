@@ -21,7 +21,7 @@ from ..core import (
     normalize_json_value,
 )
 from ..storage import StoredPayload
-from ._message import encode_model_messages
+from ._message import encode_model_messages, model_message_identity_bytes
 from .state._contracts import (
     ContextProjection,
     InlineContextBlock,
@@ -151,7 +151,7 @@ def message_prefix_digest(messages: Sequence[ModelMessage]) -> str:
     value = _PREFIX_SEED
     for message in messages:
         value = hashlib.sha256(
-            value + hashlib.sha256(encode_model_messages((message,))).digest()
+            value + hashlib.sha256(model_message_identity_bytes(message)).digest()
         ).digest()
     return value.hex()
 
@@ -162,7 +162,7 @@ def extend_prefix_digest(prefix_digest: str, message: ModelMessage) -> str:
     except ValueError as error:
         raise ValueError("message prefix digest is invalid") from error
     return hashlib.sha256(
-        prefix + hashlib.sha256(encode_model_messages((message,))).digest()
+        prefix + hashlib.sha256(model_message_identity_bytes(message)).digest()
     ).hexdigest()
 
 
@@ -298,7 +298,7 @@ def model_response_projection(response: ModelResponse) -> JsonValue:
 
 
 def _message_signature(message: ModelMessage) -> bytes:
-    return hashlib.sha256(encode_model_messages((message,))).digest()
+    return hashlib.sha256(model_message_identity_bytes(message)).digest()
 
 
 def _json_snapshot(value: object) -> JsonValue:
