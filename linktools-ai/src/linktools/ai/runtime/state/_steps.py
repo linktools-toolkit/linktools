@@ -435,24 +435,54 @@ class RuntimeStepStore(StepStore):
             return
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
+    async def load_committed_conversation_context(
+        self,
+        *,
+        history_id: str | None,
+        step_run_id: str,
+        message_count: int | None,
+        tenant_id: str,
+    ) -> LoadedModelContext:
+        archive = self._archives.get(RuntimeDomain.CONVERSATION)
+        if isinstance(archive, StateStepArchive):
+            if history_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if message_count is None:
+                return await archive.load_loaded_model_context(
+                    owner_id=history_id,
+                )
+            return await archive.load_committed_session_model_context(
+                history_id,
+                step_run_id=step_run_id,
+                message_count=message_count,
+                tenant_id=tenant_id,
+            )
+        if isinstance(archive, InMemoryStepArchive):
+            values = await archive.load_model_context(run_id=step_run_id)
+            return LoadedModelContext(
+                tuple(
+                    LoadedContextMessage(value, None)
+                    for value in values
+                    if isinstance(value, ModelMessage)
+                )
+            )
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+
     async def load_conversation_model_context(
         self,
         *,
         history_id: str | None,
         step_run_id: str,
         tenant_id: str,
+        message_count: int | None = None,
     ) -> tuple[object, ...]:
-        archive = self._archives.get(RuntimeDomain.CONVERSATION)
-        if isinstance(archive, StateStepArchive):
-            if history_id is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await archive.load_session_model_context(
-                history_id,
-                tenant_id=tenant_id,
-            )
-        if isinstance(archive, InMemoryStepArchive):
-            return await archive.load_model_context(run_id=step_run_id)
-        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        context = await self.load_committed_conversation_context(
+            history_id=history_id,
+            step_run_id=step_run_id,
+            message_count=message_count,
+            tenant_id=tenant_id,
+        )
+        return context.model_messages()
 
     async def materialize_recovery_snapshot(self, *, step_run_id: str, require_complete: bool) -> None:
         snapshot = await self._staging.latest_snapshot(run_id=step_run_id, include_interrupted=True)
