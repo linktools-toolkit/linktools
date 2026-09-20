@@ -18,7 +18,7 @@ from linktools.ai.runtime.state._steps import (
     StagingStepStore,
 )
 
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._capabilities import _RuntimeStepPersistence
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -63,9 +63,14 @@ class _RecordingStepStore(StagingStepStore):
         super().__init__()
         self.saved_snapshots: list[ContinuableSnapshot] = []
 
-    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+    async def save_snapshot(
+        self,
+        snapshot: ContinuableSnapshot,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
         self.saved_snapshots.append(snapshot)
-        await super().save_snapshot(snapshot)
+        await super().save_snapshot(snapshot, execution_id=execution_id)
 
 
 async def _read_file(path: str) -> str:
@@ -120,7 +125,11 @@ async def test_ordinary_completed_snapshot_behavior_is_unchanged() -> None:
     run_id = "completed-run"
     store = _RecordingStepStore()
     persistence = _RuntimeStepPersistence(
-        store=HarnessStepStoreAdapter(store, execution_id=None),
+        capture=RuntimeCaptureStore(
+            store,
+            execution_id=None,
+            step_run_id=run_id,
+        ),
         agent_name="agent",
         run_id=run_id,
     )
