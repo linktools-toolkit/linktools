@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
-from ..core import JsonValue
+from ..core import JsonValue, UsageMetrics
 from ..errors import AIError, ErrorCode
 from ._attachment import request_attachment_facts
 from ._journal import (
@@ -31,7 +32,13 @@ from ._model_interaction import (
     request_envelope,
 )
 from .state._contracts import LoadedModelContext, TranscriptMessageRef
-from .state._step_contracts import ContinuableSnapshot, RunRecord, StepEvent, StepStore
+from .state._step_contracts import (
+    ContinuableSnapshot,
+    EventKind,
+    RunRecord,
+    StepEvent,
+    StepStore,
+)
 
 
 class RuntimeCaptureStore:
@@ -55,6 +62,7 @@ class RuntimeCaptureStore:
         self._step_run_id = step_run_id
         self._run: RunRecord | None = None
         self._interrupted = False
+        self._event_sequence = 0
         self._initial_attachments = tuple(dict(value) for value in initial_attachments)
         self._accepted_attachment_ids = {
             attachment_id
@@ -107,6 +115,40 @@ class RuntimeCaptureStore:
         if event.run_id != self._step_run_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._store.append_event(event, execution_id=self._execution_id)
+
+    async def record_event(
+        self,
+        kind: EventKind,
+        step_index: int,
+        *,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
+        error: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> None:
+        run = self._run
+        if run is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        event_index = self._event_sequence
+        self._event_sequence += 1
+        await self.append_event(
+            StepEvent(
+                run_id=run.run_id,
+                kind=kind,
+                step_index=step_index,
+                conversation_id=run.conversation_id,
+                parent_run_id=run.parent_run_id,
+                agent_name=run.agent_name,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                error=error,
+                metadata={} if metadata is None else dict(metadata),
+                idempotency_key=(
+                    f"{event_index}:{step_index}:{kind}:{tool_call_id or ''}"
+                ),
+                event_index=event_index,
+            )
+        )
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         if snapshot.run_id != self._step_run_id:
@@ -303,25 +345,17 @@ class RuntimeCaptureStore:
                     MODEL_USAGE_CACHE_WRITE_METADATA_KEY: str(usage.cache_write_tokens),
                 }
             )
-        await self.append_event(
-            StepEvent(
-                run_id=run.run_id,
-                kind=kind,  # type: ignore[arg-type]
-                step_index=fact.step_index,
-                conversation_id=run.conversation_id,
-                parent_run_id=run.parent_run_id,
-                agent_name=run.agent_name,
-                error=error_code,
-                metadata=metadata,
-            )
+        await self.record_event(
+            cast(EventKind, kind),
+            fact.step_index,
+            error=error_code,
+            metadata=metadata,
         )
 
 
-def _usage_metrics(value: object | None):
+def _usage_metrics(value: object | None) -> UsageMetrics | None:
     if value is None:
         return None
-    from ..core import UsageMetrics
-
     return UsageMetrics(
         model_requests=1,
         input_tokens=int(getattr(value, "input_tokens", 0)),
