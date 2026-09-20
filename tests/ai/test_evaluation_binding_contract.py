@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Evaluation binding ownership and replay regression coverage."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -187,6 +188,45 @@ async def test_evaluation_replay_uses_historical_execution_binding() -> None:
         assert execution.binding_snapshot == source.binding
         assert execution.request is not None
         assert execution.request.user_prompt == "evaluation:dataset"
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_evaluation_status_cannot_lead_source_execution() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="evaluation", tenant_id="tenant")
+    source = replace(
+        _execution(_binding("agent"), execution_id="source-execution"),
+        status=ExecutionStatus.PENDING_START,
+    )
+    now = datetime.now(timezone.utc)
+    await state.execution.executions.create(source)
+    await state.evaluation.records.create(
+        EvaluationRecord(
+            evaluation_id="state-ahead",
+            execution_id=source.execution_id,
+            dataset_digest="dataset",
+            binding_digest=source.binding_digest,
+            status=EvaluationStatus.RUNNING,
+            revision=1,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    service = DefaultEvaluationService(
+        state.evaluation,
+        state.execution.executions,
+        _Allow(),  # type: ignore[arg-type]
+        _RecordingExecution(),  # type: ignore[arg-type]
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            await service.inspect(
+                "state-ahead",
+                principal=Principal("principal", "tenant"),
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 
