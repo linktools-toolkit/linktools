@@ -2656,6 +2656,7 @@ def _validate_v1_codec_definition() -> None:
     custom_encoders = {
         "object_ref",
         "stored_user_input",
+        "stored_step_snapshot",
         "task_graph_view",
         "task_node",
         "task_node_view",
