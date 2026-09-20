@@ -349,11 +349,31 @@ class SqlObjectStore:
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
+        temporary_root = await asyncio.to_thread(
+            lambda: Path(tempfile.mkdtemp(prefix="linktools-object-read-"))
+        )
+        temporary = temporary_root / "payload"
+        try:
+            await self._stage_open(key, temporary)
+            handle = await asyncio.to_thread(temporary.open, "rb")
+            try:
+                while True:
+                    value = await asyncio.to_thread(handle.read, _CHUNK_SIZE)
+                    if not value:
+                        break
+                    yield value
+            finally:
+                await asyncio.to_thread(handle.close)
+        finally:
+            await asyncio.to_thread(shutil.rmtree, temporary_root, ignore_errors=True)
+
+    async def _stage_open(self, key: str, path: Path) -> None:
         from sqlalchemy import select
 
         table = self._metadata.tables["ai_objects"]
         chunks = self._metadata.tables["ai_object_chunks"]
         session = self._context.sessions()
+        result = None
         try:
             header = (
                 (
@@ -375,23 +395,28 @@ class SqlObjectStore:
                 .where(chunks.c.key_digest == header["key_digest"])
                 .order_by(chunks.c.chunk_index)
             )
-            digest = hashlib.sha256()
-            size = 0
-            expected_index = 0
-            async for row in result.mappings():
-                if int(row["chunk_index"]) != expected_index:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                value = bytes(row["content"])
-                expected_index += 1
-                digest.update(value)
-                size += len(value)
-                yield value
+
+            async def values() -> AsyncIterator[bytes]:
+                expected_index = 0
+                async for row in result.mappings():
+                    if int(row["chunk_index"]) != expected_index:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    expected_index += 1
+                    yield bytes(row["content"])
+
+            size, digest = await _spool_file(
+                values(),
+                path,
+                int(header["size"]),
+            )
             if (
                 size != int(header["size"])
-                or digest.hexdigest() != str(header["content_digest"])
+                or digest != str(header["content_digest"])
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         finally:
+            if result is not None:
+                await result.close()
             await session.close()
 
     def open(self, key: str) -> AsyncIterator[bytes]:
