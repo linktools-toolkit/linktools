@@ -551,14 +551,12 @@ class Runtime(Generic[AppT]):
         return Execution(
             self,
             handle.execution_id,
-            binding.digest,
             resolved_principal,
             self._watch_execution_tree,
         )
 
     async def _retry_execution(
         self,
-        binding_digest: str,
         execution_id: str,
         user_prompt: CanonicalUserInput,
         *,
@@ -575,18 +573,16 @@ class Runtime(Generic[AppT]):
             correlation=_request_correlation(correlation),
             files=_request_files(files),
         )
-        handle = await self.execution.retry(binding_digest, execution_id, request)
+        handle = await self.execution.retry(execution_id, request)
         return Execution(
             self,
             handle.execution_id,
-            binding_digest,
             principal,
             self._watch_execution_tree,
         )
 
     async def _fork_execution(
         self,
-        binding_digest: str,
         execution_id: str,
         user_prompt: CanonicalUserInput,
         *,
@@ -603,11 +599,10 @@ class Runtime(Generic[AppT]):
             correlation=_request_correlation(correlation),
             files=_request_files(files),
         )
-        handle = await self.execution.fork(binding_digest, execution_id, request)
+        handle = await self.execution.fork(execution_id, request)
         return Execution(
             self,
             handle.execution_id,
-            binding_digest,
             principal,
             self._watch_execution_tree,
         )
@@ -757,30 +752,18 @@ class Runtime(Generic[AppT]):
 
     async def _replay_evaluation_for_agent(
         self,
-        agent_digest: str,
+        agent_id: str,
         snapshot_id: str,
         request: ReplayEvaluationRequest,
-        *,
-        output: "type[BaseModel] | None",
-        definition: "AgentDefinition | None" = None,
     ) -> "Execution[AppT]":
-        binding = await self._freeze_agent_binding(
-            self._bind_agent(
-                agent_digest,
-                output=output,
-                definition=definition,
-            )
-        )
         handle = await self.evaluation.replay(
-            binding.digest,
+            agent_id,
             snapshot_id,
             request,
-            binding_snapshot=binding.snapshot,
         )
         return Execution(
             self,
             handle.execution_id,
-            binding.digest,
             request.principal,
             self._watch_execution_tree,
         )
@@ -961,7 +944,6 @@ class Runtime(Generic[AppT]):
         return Execution(
             self,
             execution_id,
-            "",
             principal,
             self._watch_execution_tree,
             None,
