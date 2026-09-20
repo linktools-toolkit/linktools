@@ -17,6 +17,7 @@ from ._runtime_history import ExecutionInfo, RuntimeHistory
 from ._snapshot import (
     RestoredRuntime,
     RuntimeSnapshot,
+    SnapshotExclusiveGuard,
     SnapshotLimits,
     SnapshotTargetInspection,
 )
@@ -168,6 +169,7 @@ __all__ = [
     "RuntimeStateRoute",
     "RestoredRuntime",
     "RuntimeSnapshot",
+    "SnapshotExclusiveGuard",
     "SnapshotLimits",
     "SnapshotTargetInspection",
     "SessionHistoryItem",
