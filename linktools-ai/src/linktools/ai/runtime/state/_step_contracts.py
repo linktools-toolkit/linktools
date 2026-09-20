@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal, Protocol
 
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, ModelRequest
 
 EventKind = Literal[
     "run_started",
@@ -64,6 +64,34 @@ class ContinuableSnapshot:
     state: SnapshotState = "complete"
     idempotency_key: str | None = None
     context_messages: list[ModelMessage] | None = None
+    transcript_message_count_before: int | None = None
+    pending_request_index: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.transcript_message_count_before is not None
+            and (
+                isinstance(self.transcript_message_count_before, bool)
+                or not isinstance(self.transcript_message_count_before, int)
+                or self.transcript_message_count_before < 0
+                or self.transcript_message_count_before > len(self.messages)
+            )
+        ):
+            raise ValueError("snapshot transcript boundary is invalid")
+        if self.pending_request_index is None:
+            return
+        if (
+            isinstance(self.pending_request_index, bool)
+            or not isinstance(self.pending_request_index, int)
+            or self.pending_request_index < 0
+        ):
+            raise ValueError("snapshot pending request index is invalid")
+        context = self.messages if self.context_messages is None else self.context_messages
+        if (
+            self.pending_request_index >= len(context)
+            or not isinstance(context[self.pending_request_index], ModelRequest)
+        ):
+            raise ValueError("snapshot pending request must identify a model request")
 
 
 class StepStore(Protocol):

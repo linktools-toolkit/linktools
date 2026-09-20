@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.observe import Observation
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._capabilities import (
     _RuntimeStepPersistence,
 )
@@ -41,17 +41,13 @@ async def _text_model(
 
 
 def _persistence(
-    store: StagingStepStore,
+    capture: RuntimeCaptureStore,
     run_id: str,
-    recorder: _Recorder | None,
-    journal: ModelRequestJournal,
 ) -> _RuntimeStepPersistence:
     return _RuntimeStepPersistence(
-        store=HarnessStepStoreAdapter(store, execution_id=None),
+        capture=capture,
         agent_name="agent",
         run_id=run_id,
-        model_journal=journal,
-        model_observation_enabled=recorder is not None,
     )
 
 
@@ -59,6 +55,7 @@ def _model_metrics(
     recorder: _Recorder | None,
     run_id: str,
     journal: ModelRequestJournal,
+    capture: RuntimeCaptureStore,
 ) -> RuntimeModelObservationCapability:
     return RuntimeModelObservationCapability(
         recorder,
@@ -69,6 +66,7 @@ def _model_metrics(
         step_run_id=run_id,
         agent_id="agent",
         journal=journal,
+        interaction_recorder=capture,
     )
 
 
@@ -95,12 +93,13 @@ async def test_model_metric_and_trace_share_observation_id_and_duration() -> Non
         execution_id="execution",
         step_run_id=run_id,
     )
+    capture = RuntimeCaptureStore(store, execution_id=None, step_run_id=run_id)
     agent = Agent(
         TestModel(custom_output_text="done"),
         deps_type=object,
         capabilities=[
-            _model_metrics(recorder, run_id, journal),
-            _persistence(store, run_id, recorder, journal),
+            _model_metrics(recorder, run_id, journal, capture),
+            _persistence(capture, run_id),
         ],
     )
 
@@ -156,12 +155,13 @@ async def test_failed_model_metric_and_trace_share_observation_id_and_duration()
         execution_id="execution",
         step_run_id=run_id,
     )
+    capture = RuntimeCaptureStore(store, execution_id=None, step_run_id=run_id)
     agent = Agent(
         FunctionModel(fail_model),
         deps_type=object,
         capabilities=[
-            _model_metrics(recorder, run_id, journal),
-            _persistence(store, run_id, recorder, journal),
+            _model_metrics(recorder, run_id, journal, capture),
+            _persistence(capture, run_id),
         ],
     )
 
@@ -210,12 +210,13 @@ async def test_output_retry_metric_lineage_uses_pydantic_retry_state() -> None:
         execution_id="execution",
         step_run_id=run_id,
     )
+    capture = RuntimeCaptureStore(store, execution_id=None, step_run_id=run_id)
     agent = Agent(
         FunctionModel(_text_model),
         deps_type=object,
         capabilities=[
-            _model_metrics(recorder, run_id, journal),
-            _persistence(store, run_id, recorder, journal),
+            _model_metrics(recorder, run_id, journal, capture),
+            _persistence(capture, run_id),
         ],
         retries={"output": 2},
     )
@@ -268,11 +269,12 @@ async def test_output_retry_trace_lineage_does_not_require_metrics() -> None:
         execution_id="execution",
         step_run_id=run_id,
     )
+    capture = RuntimeCaptureStore(store, execution_id=None, step_run_id=run_id)
     agent = Agent(
         FunctionModel(_text_model),
         capabilities=[
-            _model_metrics(None, run_id, journal),
-            _persistence(store, run_id, None, journal),
+            _model_metrics(None, run_id, journal, capture),
+            _persistence(capture, run_id),
         ],
         retries={"output": 1},
     )
@@ -307,11 +309,12 @@ async def test_model_trace_omits_metric_metadata_when_metrics_disabled() -> None
         execution_id="execution",
         step_run_id=run_id,
     )
+    capture = RuntimeCaptureStore(store, execution_id=None, step_run_id=run_id)
     agent = Agent(
         TestModel(custom_output_text="done"),
         capabilities=[
-            _model_metrics(None, run_id, journal),
-            _persistence(store, run_id, None, journal),
+            _model_metrics(None, run_id, journal, capture),
+            _persistence(capture, run_id),
         ],
     )
 

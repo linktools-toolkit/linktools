@@ -137,6 +137,13 @@ def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
     return canonical_json_bytes(value)
 
 
+def freeze_model_messages(
+    messages: Sequence[ModelMessage],
+) -> tuple[ModelMessage, ...]:
+    """Freeze model messages through the canonical persistence codec."""
+    return decode_model_messages(encode_model_messages(messages))
+
+
 def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
     try:
         value = json.loads(raw.decode("utf-8"))
@@ -380,5 +387,6 @@ __all__ = [
     "binary_content_usage",
     "decode_model_messages",
     "encode_model_messages",
+    "freeze_model_messages",
     "project_transient_binary_content",
 ]

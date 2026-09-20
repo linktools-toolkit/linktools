@@ -1521,7 +1521,11 @@ class LocalExecutionBackend:
         )
         if snapshot is None or snapshot.state != "interrupted":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return tuple(snapshot.messages)
+        return tuple(
+            snapshot.messages
+            if snapshot.context_messages is None
+            else snapshot.context_messages
+        )
 
     async def claim_deferred_resume(
         self,
@@ -2829,10 +2833,25 @@ class LocalExecutionBackend:
                 history = list(loaded_context.model_messages())
             elif session_history_source:
                 if session_history_owner is not None:
-                    loaded_context = await self._steps.load_loaded_model_context(
-                        RuntimeDomain.CONVERSATION,
-                        session_history_owner,
-                    )
+                    if (
+                        isinstance(self._steps, RuntimeStepStore)
+                        and session is not None
+                        and session.continuation is not None
+                        and history_id is not None
+                    ):
+                        loaded_context = (
+                            await self._steps.load_committed_conversation_context(
+                                history_id=history_id,
+                                step_run_id=session.continuation.step_run_id,
+                                message_count=session.continuation.message_count,
+                                tenant_id=self._tenant_id,
+                            )
+                        )
+                    else:
+                        loaded_context = await self._steps.load_loaded_model_context(
+                            RuntimeDomain.CONVERSATION,
+                            session_history_owner,
+                        )
                 history = list(loaded_context.model_messages())
             else:
                 history = cast("list[ModelMessage]", await self._history(current))
@@ -2848,7 +2867,11 @@ class LocalExecutionBackend:
                 initial_repository_instructions,
                 repository_overlay,
             )
-            run_user_prompt = None if resumed_deferred_attempt else request.user_prompt
+            run_user_prompt = (
+                None
+                if resumed_deferred_attempt or recovery_history_run_id is not None
+                else request.user_prompt
+            )
 
             async def sink(emission: "LiveDelta | DurableBoundary") -> None:
                 if isinstance(emission, LiveDelta):
@@ -2921,6 +2944,7 @@ class LocalExecutionBackend:
                             current.stored_user_input
                         ),
                         history=history,
+                        initial_context=loaded_context,
                         conversation_id=conversation_id,
                         step_store=self._steps,
                         step_run_id=run_id,

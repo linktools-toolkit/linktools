@@ -59,6 +59,7 @@ def _reader(state: RuntimeState) -> StepSessionHistoryReader:
     return StepSessionHistoryReader(
         store=state.steps.read_store(RuntimeDomain.CONVERSATION),
         cursor_signer=HmacCursorSigner("session-history", b"session-history-key"),
+        sessions=state.conversation.sessions,
     )
 
 
@@ -68,19 +69,35 @@ async def _advance(
     next_cursor: ConversationCursor,
 ) -> None:
     execution_id = "history-execution"
+    session = await state.conversation.sessions.get("session", tenant_id="tenant")
+    assert session is not None and session.history_id is not None
+    effective_expected = expected
+    if expected is not None and session.continuation is not None:
+        assert session.continuation.step_run_id == expected.step_run_id
+        effective_expected = session.continuation
+    message_count = await state.steps.conversation_message_count(
+        history_id=session.history_id,
+        step_run_id=next_cursor.step_run_id,
+        tenant_id="tenant",
+    )
+    effective_next = ConversationCursor(
+        next_cursor.step_run_id,
+        history_id=session.history_id,
+        message_count=message_count,
+    )
     await state.conversation.sessions.admit_execution(
         "session",
         tenant_id="tenant",
         execution_id=execution_id,
-        expected=expected,
+        expected=effective_expected,
     )
     try:
         await state.conversation.sessions.advance_continuation(
             "session",
             tenant_id="tenant",
             execution_id=execution_id,
-            expected=expected,
-            next_cursor=next_cursor,
+            expected=effective_expected,
+            next_cursor=effective_next,
         )
     finally:
         await state.conversation.sessions.release_execution(
@@ -113,13 +130,18 @@ async def _materialize(
         execution_id=run_id,
     )
     now = datetime.now(timezone.utc)
+    session = await state.conversation.sessions.get("session", tenant_id="tenant")
+    assert session is not None and session.history_id is not None
     await state.steps.register_run(
         RunRecord(
             run_id=run_id,
             conversation_id=conversation_id,
             parent_run_id=None,
             agent_name="default",
-            metadata={"agent_name": "default"},
+            metadata={
+                "agent_name": "default",
+                "history_id": session.history_id,
+            },
             started_at=now,
         )
     )
@@ -208,7 +230,7 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
         )
         assert first_page.next_cursor is not None
 
-        await _materialize(state, second_run, ("A", "B", "C"))
+        await _materialize(state, second_run, ("C",))
         await _advance(
             state,
             ConversationCursor(first_run),
@@ -305,6 +327,45 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
         assert page.items[7].tool_name == "lookup"
         assert page.items[7].tool_call_id == "call-1"
         assert [item.sequence for item in page.items] == [1, 1, 1, 1, 1, 2, 2, 2]
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_session_fork_excludes_uncommitted_physical_tail() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="session-history-uncommitted-fork", tenant_id="tenant")
+    try:
+        source = await state.conversation.sessions.create(_session())
+        assert source.history_id is not None
+        await _materialize(
+            state,
+            "session-history-uncommitted-run",
+            ("stale",),
+        )
+        service = _service(state)
+        principal = Principal("owner", "tenant")
+
+        await service.fork(
+            "agent",
+            "session",
+            ForkSessionRequest(
+                principal,
+                "fork",
+                "fork-uncommitted-operation",
+            ),
+        )
+
+        child = await state.conversation.sessions.get("fork", tenant_id="tenant")
+        assert child is not None and child.history_id is not None
+        child_history = await state.conversation.histories.get(
+            child.history_id,
+            tenant_id="tenant",
+        )
+        assert child_history is not None
+        assert child_history.inherited_message_count == 0
+        page = await service.history("fork", principal=principal)
+        assert page.items == ()
     finally:
         await state.close()
 

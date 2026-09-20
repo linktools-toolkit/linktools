@@ -3,7 +3,6 @@
 """Canonical transcript chunks and bounded context projections."""
 
 import hashlib
-import json
 import zlib
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -11,7 +10,6 @@ from dataclasses import dataclass, replace
 from linktools.core import environ
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 
-from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
 from .._message import decode_model_messages, encode_model_messages
@@ -65,23 +63,8 @@ _TRANSCRIPT_SEEK_BLOCK = 128
 
 
 def _overlap_signature(message: ModelMessage) -> bytes:
-    """Timestamp-ignoring signature used only for overlap/dedup matching."""
-    value = json.loads(
-        encode_model_messages((message,)).decode("utf-8")
-    )
-
-    def remove_timestamps(candidate: object) -> object:
-        if isinstance(candidate, list):
-            return [remove_timestamps(item) for item in candidate]
-        if isinstance(candidate, dict):
-            return {
-                key: remove_timestamps(item)
-                for key, item in candidate.items()
-                if key != "timestamp"
-            }
-        return candidate
-
-    return canonical_json_bytes(remove_timestamps(value))
+    """Canonical signature used only by the legacy snapshot merge path."""
+    return encode_model_messages((message,))
 
 
 def _conversation_overlap_signature(message: ModelMessage) -> bytes:
@@ -867,6 +850,54 @@ class TranscriptRepository:
         if head.message_count or history.inherited_message_count:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return LoadedModelContext(())
+
+    async def load_session_raw_model_context(
+        self,
+        history_id: str,
+        *,
+        tenant_id: str,
+        message_count: int,
+    ) -> LoadedModelContext:
+        require_no_run_history_lock(
+            "TranscriptRepository.load_session_raw_model_context"
+        )
+        if (
+            isinstance(message_count, bool)
+            or not isinstance(message_count, int)
+            or message_count < 0
+        ):
+            raise ValueError("session message count must be a non-negative integer")
+        resolution = await self._history_message_segments(
+            history_id,
+            tenant_id=tenant_id,
+            start=0,
+            end=message_count,
+        )
+        values: list[LoadedContextMessage] = []
+        for segment in resolution.segments:
+            index = segment.start
+            async for message in self._iter_range(
+                self.history_stream(segment.history_id),
+                start=segment.start,
+                end=segment.end,
+                seek_owner_id=segment.history_id,
+            ):
+                values.append(
+                    LoadedContextMessage(
+                        message,
+                        TranscriptMessageRef(
+                            RuntimeDomain.CONVERSATION,
+                            segment.history_id,
+                            index,
+                        ),
+                    )
+                )
+                index += 1
+            if index != segment.end:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if len(values) != message_count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return LoadedModelContext(tuple(values))
 
     async def iter_session_messages(
         self,

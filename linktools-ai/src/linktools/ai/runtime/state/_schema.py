@@ -150,9 +150,6 @@ def build_runtime_sql_metadata(
     sql_unique(records, "store_digest", "key_digest")
     sql_query_index(records, "store_digest", "kind", "sort_key", mysql_length=128)
     sql_query_index(records, "scope_digest", "sort_key", mysql_length=128)
-    sql_query_index(records, "scope_digest", "state", "sort_key", mysql_length=128)
-    sql_query_index(records, "parent_digest", "sort_key", mysql_length=128)
-    sql_query_index(records, "store_digest", "kind", "key_digest")
     sql_audit_indexes(records)
 
     aliases = Table(

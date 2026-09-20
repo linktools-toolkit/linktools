@@ -129,6 +129,37 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_step_run_reuses_durable_recovery_identity(tmp_path: Path) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
+    await state.initialize(namespace="step-run-recovery", tenant_id="tenant")
+    try:
+        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        durable = RunRecord(
+            run_id="run",
+            conversation_id="conversation",
+            parent_run_id=None,
+            agent_name="agent",
+            metadata={"scope": "recovery"},
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        await recovery.register_run(durable)
+        candidate = RunRecord(
+            run_id="run",
+            conversation_id="conversation",
+            parent_run_id=None,
+            agent_name="agent",
+            metadata={"scope": "recovery"},
+            started_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        )
+
+        await state.steps.register_run(candidate)
+
+        assert await state.steps.get_run(run_id="run") == durable
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_prepared_local_stream_survives_fast_completion() -> None:
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")

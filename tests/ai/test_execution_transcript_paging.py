@@ -14,10 +14,12 @@ from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
     HmacCursorSigner,
+    step_conversation_id,
     step_run_id,
 )
 from linktools.ai.runtime._history import StepExecutionHistoryReader
 from linktools.ai.runtime.state._contracts import ExecutionRecord
+from linktools.ai.runtime.state._step_contracts import RunRecord
 from linktools.ai.spec import AgentSpec
 
 from ._runtime_test_helpers import execution_owner_fields
@@ -100,6 +102,22 @@ class _RangedStore:
             ModelResponse(parts=[TextPart(content="assistant-2")]),
         )
         self.ranges: list[tuple[int, int]] = []
+
+    async def get_run(self, *, run_id: str) -> RunRecord | None:
+        if run_id != self._run_id:
+            return None
+        return RunRecord(
+            run_id=run_id,
+            conversation_id=step_conversation_id(
+                namespace="history",
+                tenant_id="tenant",
+                execution_id="execution",
+            ),
+            parent_run_id=None,
+            agent_name="default",
+            metadata={"segment_sequence": "1", "agent_name": "default"},
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
 
     async def transcript_message_count(self, owner_id: str) -> int:
         assert owner_id == self._run_id

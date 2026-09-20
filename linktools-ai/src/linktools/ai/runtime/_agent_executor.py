@@ -122,8 +122,8 @@ if TYPE_CHECKING:
     from ..workspace import RepositoryInstructions
 
 from ._capabilities import compose_platform_capabilities
+from ._capture import RuntimeCaptureStore
 from ._compaction import RuntimeCompactionPolicy
-from ._harness import HarnessStepStoreAdapter
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import materialize_mcp_capabilities
@@ -146,6 +146,7 @@ from ._tool_return_codec import (
     rehydrate_deferred_tool_results,
     tool_return_content_digest,
 )
+from .state._contracts import LoadedModelContext
 from .state._step_contracts import StepStore
 
 _logger = environ.get_logger("ai.runtime.agent_executor")
@@ -193,6 +194,7 @@ class _RunScope:
     mcp_cwd: "str | None"
     user_prompt: CanonicalUserInput | None
     history: list[ModelMessage]
+    initial_context: LoadedModelContext
     conversation_id: str
     step_store: StepStore
     step_run_id: str
@@ -529,11 +531,15 @@ class AgentExecutor:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             deferred_step_index = step_index
 
+        interaction_high_water = await scope.step_store.model_interaction_count(
+            run_id=scope.step_run_id
+        )
         model_journal = ModelRequestJournal(
             source_namespace=scope.context.namespace,
             tenant_id=scope.context.principal.tenant_id,
             execution_id=scope.context.execution_id,
             step_run_id=scope.step_run_id,
+            next_sequence=interaction_high_water + 1,
         )
         agent, capabilities = await _materialize_agent(
             scope,
@@ -868,10 +874,12 @@ async def _materialize_agent(
             agent_id=definition.spec.id,
         )
     )
-    harness_store = HarnessStepStoreAdapter(
+    capture_store = RuntimeCaptureStore(
         scope.step_store,
         execution_id=scope.context.execution_id,
         step_run_id=scope.step_run_id,
+        initial_messages=scope.history,
+        initial_context=scope.initial_context,
         initial_attachments=scope.initial_attachments,
     )
     if tool_metrics is not None:
@@ -940,7 +948,7 @@ async def _materialize_agent(
         step_run_id=scope.step_run_id,
         agent_id=definition.spec.id,
         journal=model_journal,
-        interaction_recorder=harness_store,
+        interaction_recorder=capture_store,
     )
     capabilities.append(model_observation)
     platform = await compose_platform_capabilities(
@@ -961,9 +969,8 @@ async def _materialize_agent(
         plan_store_resolver=scope.plan_store_resolver,
         deferred_pause_sink=deferred_pause_sink,
         model_journal=model_journal,
-        model_observation_enabled=metrics is not None,
         model_request_observer=model_observation.record_external_model_request,
-        harness_store=harness_store,
+        capture_store=capture_store,
     )
     capabilities.extend(
         cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform)

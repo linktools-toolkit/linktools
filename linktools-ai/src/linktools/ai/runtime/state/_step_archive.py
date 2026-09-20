@@ -17,13 +17,11 @@ from pydantic_ai.messages import ModelMessage
 from ...core import canonical_json_bytes
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectStore, StoredPayload
-from .._message import decode_model_messages
+from .._message import decode_model_messages, encode_model_messages
 from .._model_interaction import (
     StagedContextSpan,
     StagedModelInteraction,
     context_projection_to_durable,
-    extend_prefix_digest,
-    message_prefix_digest,
 )
 from ._codec import (
     _decode_enveloped_domain,
@@ -707,6 +705,55 @@ class InMemoryStepArchive(StagingStepStore):
         snapshot = await self.latest_snapshot(run_id=run_id, include_interrupted=True)
         return () if snapshot is None else tuple(snapshot.messages)
 
+    async def prepare_relocated_interactions(
+        self,
+        interactions: Sequence[ModelInteractionRecord],
+        resolved: Sequence[
+            tuple[
+                tuple[ModelMessage, ...],
+                tuple[ModelMessage, ...] | None,
+                bytes,
+            ]
+        ],
+    ) -> tuple[ModelInteractionRecord, ...]:
+        if len(interactions) != len(resolved):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        def inline_context(messages: Sequence[ModelMessage]) -> ContextProjection:
+            return ContextProjection(
+                (
+                    InlineContextBlock(
+                        RuntimePayloadRef(
+                            StoredPayload.inline_bytes(
+                                encode_model_messages(tuple(messages))
+                            ),
+                            self._runtime_domain,
+                        )
+                    ),
+                )
+            )
+
+        values: list[ModelInteractionRecord] = []
+        for interaction, (request, response, envelope) in zip(
+            interactions,
+            resolved,
+            strict=True,
+        ):
+            values.append(
+                replace(
+                    interaction,
+                    request_context=inline_context(request),
+                    request_envelope=RuntimePayloadRef(
+                        StoredPayload.inline_bytes(envelope),
+                        self._runtime_domain,
+                    ),
+                    response_context=(
+                        None if response is None else inline_context(response)
+                    ),
+                )
+            )
+        return tuple(values)
+
     async def resolve_model_interaction(
         self,
         interaction: object,
@@ -905,6 +952,67 @@ class StateStepArchive(StepStore):
             )
         return result
 
+    async def prepare_relocated_interactions(
+        self,
+        interactions: Sequence[ModelInteractionRecord],
+        resolved: Sequence[
+            tuple[
+                tuple[ModelMessage, ...],
+                tuple[ModelMessage, ...] | None,
+                bytes,
+            ]
+        ],
+    ) -> tuple[ModelInteractionRecord, ...]:
+        if len(interactions) != len(resolved):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        async def inline_context(
+            run_id: str,
+            messages: Sequence[ModelMessage],
+        ) -> ContextProjection:
+            projection = ContextProjection(
+                (
+                    InlineContextBlock(
+                        RuntimePayloadRef(
+                            StoredPayload.inline_bytes(
+                                encode_model_messages(tuple(messages))
+                            ),
+                            self._runtime_domain,
+                        )
+                    ),
+                )
+            )
+            return await self._history.prepare_projection(run_id, projection)
+
+        values: list[ModelInteractionRecord] = []
+        for interaction, (request, response, envelope) in zip(
+            interactions,
+            resolved,
+            strict=True,
+        ):
+            values.append(
+                replace(
+                    interaction,
+                    request_context=await inline_context(
+                        interaction.run_id,
+                        request,
+                    ),
+                    request_envelope=await self._prepare_inline_payload(
+                        interaction.run_id,
+                        RuntimePayloadRef(
+                            StoredPayload.inline_bytes(envelope),
+                            self._runtime_domain,
+                        ),
+                    ),
+                    response_context=(
+                        None
+                        if response is None
+                        else await inline_context(interaction.run_id, response)
+                    ),
+                )
+            )
+        return tuple(values)
+
     async def resolve_model_interaction(
         self,
         interaction: object,
@@ -980,12 +1088,17 @@ class StateStepArchive(StepStore):
         run: RunRecord,
         interactions: Sequence[StagedModelInteraction],
         payload: Callable[[str], bytes],
-        source_messages: Sequence[ModelMessage] | None = None,
+        *,
+        local_message_base: int = 0,
+        local_message_count: int = 0,
     ) -> tuple[ModelInteractionRecord, ...]:
         values = tuple(interactions)
         if not values:
             return ()
+        if local_message_base < 0 or local_message_count < 0:
+            raise ValueError("local interaction transcript range is invalid")
         request_sequences: set[int] = set()
+        external_refs: list[TranscriptMessageRef] = []
         for interaction in values:
             if (
                 interaction.run_id != run.run_id
@@ -993,40 +1106,6 @@ class StateStepArchive(StepStore):
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             request_sequences.add(interaction.request_sequence)
-        max_source_count = max(
-            (
-                projection.source_message_count
-                for interaction in values
-                for projection in (
-                    interaction.request_context,
-                    *(
-                        ()
-                        if interaction.response_context is None
-                        else (interaction.response_context,)
-                    ),
-                )
-                if projection.source_prefix_digest != "0" * 64
-            ),
-            default=0,
-        )
-        prefix_messages = (
-            tuple(source_messages)
-            if source_messages is not None
-            and len(source_messages) >= max_source_count
-            else await self._history.load_messages(run.run_id)
-        )
-        prefix_checkpoints = {0: message_prefix_digest(())}
-        prefix_digest = prefix_checkpoints[0]
-        for index, message in enumerate(prefix_messages[:max_source_count], 1):
-            prefix_digest = extend_prefix_digest(prefix_digest, message)
-            prefix_checkpoints[index] = prefix_digest
-        _logger.debug(
-            "model interaction prefix checkpoints: run=%s counts=%s kinds=%s",
-            run.run_id,
-            tuple(prefix_checkpoints),
-            tuple(type(message).__name__ for message in prefix_messages),
-        )
-        for interaction in values:
             for projection in (
                 interaction.request_context,
                 *(
@@ -1035,23 +1114,22 @@ class StateStepArchive(StepStore):
                     else (interaction.response_context,)
                 ),
             ):
-                if projection.source_prefix_digest == "0" * 64:
-                    continue
-                if projection.source_message_count > len(prefix_messages):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if any(
-                    isinstance(item, StagedContextSpan)
-                    and item.end > len(prefix_messages)
-                    for item in projection.items
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if prefix_checkpoints[projection.source_message_count] != (
-                    projection.source_prefix_digest
-                ):
-                    raise AIError(
-                        ErrorCode.STORAGE_INTEGRITY_ERROR,
-                        "model interaction source prefix digest mismatch",
-                    )
+                for item in projection.items:
+                    if isinstance(item, StagedContextSpan):
+                        if item.end > local_message_count:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    elif isinstance(item, TranscriptSpanRef):
+                        external_refs.extend(
+                            TranscriptMessageRef(
+                                item.source_domain,
+                                item.owner_id,
+                                index,
+                            )
+                            for index in range(item.start, item.end)
+                        )
+        if external_refs:
+            await self._history.resolve_transcript_message_refs(tuple(external_refs))
+
         result: list[ModelInteractionRecord] = []
         for staged in values:
             request_context = context_projection_to_durable(
@@ -1059,6 +1137,7 @@ class StateStepArchive(StepStore):
                 owner_id=run.run_id,
                 source_domain=self._runtime_domain,
                 payload=payload,
+                local_message_base=local_message_base,
             )
             request_context = await self._history.prepare_projection(
                 run.run_id,
@@ -1078,6 +1157,7 @@ class StateStepArchive(StepStore):
                     owner_id=run.run_id,
                     source_domain=self._runtime_domain,
                     payload=payload,
+                    local_message_base=local_message_base,
                 )
                 response_context = await self._history.prepare_projection(
                     run.run_id,
@@ -1144,6 +1224,20 @@ class StateStepArchive(StepStore):
         context: LoadedModelContext,
     ) -> None:
         self._context_baselines[step_run_id] = context
+
+    async def transcript_message_count_for_run(
+        self,
+        run: RunRecord,
+    ) -> int:
+        require_no_run_history_lock(
+            "StateStepArchive.transcript_message_count_for_run"
+        )
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run.run_id
+        )
+        return await self._history.transcript_message_count(owner_id)
 
     async def prepare_snapshots(
         self,
@@ -1296,6 +1390,151 @@ class StateStepArchive(StepStore):
         run: RunRecord,
         snapshots: Sequence[ContinuableSnapshot],
     ) -> PreparedStepSnapshotBatch:
+        values = tuple(snapshots)
+        if not values:
+            head_owner = (
+                self._history_id(run)
+                if self._runtime_domain is RuntimeDomain.CONVERSATION
+                else run.run_id
+            )
+            head = await self._history.get_head(head_owner)
+            return PreparedStepSnapshotBatch(
+                run.run_id,
+                (),
+                0,
+                0,
+                0 if head is None else head.message_count,
+            )
+        explicit = tuple(
+            snapshot.transcript_message_count_before is not None
+            for snapshot in values
+        )
+        if all(explicit):
+            return await self._prepare_explicit_snapshots(run, values)
+        if any(explicit):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return await self._prepare_legacy_snapshots(run, values)
+
+    async def _prepare_explicit_snapshots(
+        self,
+        run: RunRecord,
+        snapshots: Sequence[ContinuableSnapshot],
+    ) -> PreparedStepSnapshotBatch:
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run.run_id
+        )
+        head = await self._history.get_head(owner_id)
+        if head is None:
+            if await self.get_run(run_id=run.run_id) is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            head = self._history.empty_head(owner_id)
+
+        first_before = snapshots[0].transcript_message_count_before
+        if first_before is None or first_before > head.message_count:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        archive_base = head.message_count - first_before
+        target_message_count = head.message_count
+        baseline = self._context_baselines.get(run.run_id, LoadedModelContext(()))
+        baseline_messages = baseline.model_messages()
+        baseline_sources = tuple(
+            self._reusable_context_source(value.source)
+            for value in baseline.messages
+        )
+        prepared: list[PreparedStepSnapshot] = []
+
+        for snapshot in snapshots:
+            before = snapshot.transcript_message_count_before
+            incoming = tuple(snapshot.messages)
+            if (
+                before is None
+                or before > len(incoming)
+                or archive_base + before != target_message_count
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            delta = incoming[before:]
+            chunks = await self._prepare_captured_chunks(
+                owner_id,
+                TranscriptCapture(
+                    target_message_count,
+                    delta,
+                    (TranscriptOrigin.RAW,) * len(delta),
+                    head.quality,
+                ),
+            )
+            raw_sources = tuple(
+                TranscriptMessageRef(
+                    self._runtime_domain,
+                    owner_id,
+                    archive_base + index,
+                )
+                for index in range(len(incoming))
+            )
+            source_messages = (*baseline_messages, *incoming)
+            source_refs = (*baseline_sources, *raw_sources)
+            projection_messages = (
+                source_messages
+                if snapshot.context_messages is None
+                else tuple(snapshot.context_messages)
+            )
+            projection_sources = self._projection_sources(
+                projection_messages,
+                source_messages,
+                source_refs,
+            )
+            projection = self._history.project_context(
+                owner_id,
+                projection_messages,
+                origins=self._message_origins(projection_sources),
+                sources=projection_sources,
+            )
+            self._validate_projection_sources(projection, projection_sources)
+            projection = await self._history.prepare_projection(owner_id, projection)
+            prepared.append(
+                PreparedStepSnapshot(
+                    owner_id,
+                    StoredStepSnapshot(
+                        run.run_id,
+                        snapshot.step_index,
+                        snapshot.timestamp,
+                        snapshot.state,
+                        projection.digest,
+                        snapshot.context_messages is not None,
+                        snapshot.pending_request_index,
+                    ),
+                    chunks,
+                    projection,
+                    head.quality,
+                )
+            )
+            target_message_count += len(delta)
+
+        return PreparedStepSnapshotBatch(
+            run.run_id,
+            tuple(prepared),
+            0,
+            0,
+            target_message_count,
+        )
+
+    def _reusable_context_source(
+        self,
+        source: TranscriptMessageRef | None,
+    ) -> TranscriptMessageRef | None:
+        if source is None:
+            return None
+        if source.source_domain is self._runtime_domain:
+            return source
+        if source.source_domain is RuntimeDomain.CONVERSATION:
+            return source
+        return None
+
+    async def _prepare_legacy_snapshots(
+        self,
+        run: RunRecord,
+        snapshots: Sequence[ContinuableSnapshot],
+    ) -> PreparedStepSnapshotBatch:
         prepared: list[PreparedStepSnapshot] = []
         owner_id = run.run_id
         if self._runtime_domain is RuntimeDomain.CONVERSATION:
@@ -1405,6 +1644,7 @@ class StateStepArchive(StepStore):
                         snapshot.state,
                         projection.digest,
                         snapshot.context_messages is not None,
+                        snapshot.pending_request_index,
                     ),
                     chunks,
                     projection,
@@ -2215,6 +2455,57 @@ class StateStepArchive(StepStore):
             )
         ).model_messages()
 
+    async def load_committed_session_model_context(
+        self,
+        history_id: str,
+        *,
+        step_run_id: str,
+        message_count: int,
+        tenant_id: str,
+    ) -> LoadedModelContext:
+        require_no_run_history_lock(
+            "StateStepArchive.load_committed_session_model_context"
+        )
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        if (
+            isinstance(message_count, bool)
+            or not isinstance(message_count, int)
+            or message_count < 0
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        total = await self._history.history_message_count(
+            history_id,
+            tenant_id=tenant_id,
+        )
+        if message_count > total:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        values = await self._facts(step_run_id, "snapshot", latest=True)
+        if not values:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        stored = _decode_step(values[0].data)
+        if (
+            not isinstance(stored, StoredStepSnapshot)
+            or stored.run_id != step_run_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if stored.state != "complete":
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        projection = await self._history.load_projection(history_id)
+        if (
+            projection is not None
+            and projection.digest == stored.projection_digest
+        ):
+            return await self._history.load_projected_context(
+                history_id,
+                projection,
+            )
+        return await self._history.load_session_raw_model_context(
+            history_id,
+            tenant_id=tenant_id,
+            message_count=message_count,
+        )
+
     async def verify_snapshot_projection(
         self,
         *,
@@ -2230,10 +2521,18 @@ class StateStepArchive(StepStore):
         stored = _decode_step(values[0].data)
         if not isinstance(stored, StoredStepSnapshot):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        projection = await self._history.load_projection(run_id)
+        run = await self.get_run(run_id=run_id)
+        if run is None:
+            return False
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run_id
+        )
+        projection = await self._history.load_projection(owner_id)
         if projection is None or projection.digest != stored.projection_digest:
             return False
-        context = await self._history.load_model_context(run_id)
+        context = await self._history.load_model_context(owner_id)
         expected_messages = (
             snapshot.messages
             if snapshot.context_messages is None
@@ -2273,15 +2572,23 @@ class StateStepArchive(StepStore):
         latest = _decode_step(values[0].data)
         if not isinstance(latest, StoredStepSnapshot):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        messages = (await self._history.load_model_context(run_id)).model_messages()
-        raw_messages = tuple(
-            [message async for message in self._history.iter_raw_messages(run_id)]
-        )
-        if not raw_messages:
-            raw_messages = tuple(messages)
         run = await self.get_run(run_id=run_id)
         if run is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        owner_id = (
+            self._history_id(run)
+            if self._runtime_domain is RuntimeDomain.CONVERSATION
+            else run_id
+        )
+        messages = (await self._history.load_model_context(owner_id)).model_messages()
+        raw_messages = tuple(
+            [message async for message in self._history.iter_raw_messages(owner_id)]
+        )
+        if not raw_messages and not latest.has_context_projection:
+            raw_messages = tuple(messages)
+        context_messages = (
+            list(messages) if latest.has_context_projection else None
+        )
         latest = ContinuableSnapshot(
             run_id=latest.run_id,
             step_index=latest.step_index,
@@ -2291,9 +2598,8 @@ class StateStepArchive(StepStore):
             agent_name=run.agent_name,
             timestamp=latest.timestamp,
             state=latest.state,
-            context_messages=(
-                list(messages) if latest.has_context_projection else None
-            ),
+            context_messages=context_messages,
+            pending_request_index=latest.pending_request_index,
         )
         return latest if include_interrupted or latest.state == "complete" else None
 

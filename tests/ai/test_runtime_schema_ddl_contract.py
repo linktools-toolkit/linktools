@@ -30,8 +30,6 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     for name in (
         "ix_store_digest_kind_sort_key",
         "ix_scope_digest_sort_key",
-        "ix_scope_digest_state_sort_key",
-        "ix_parent_digest_sort_key",
     ):
         ddl = str(CreateIndex(mysql_indexes[name]).compile(dialect=dialect))
         assert "sort_key(128)" in ddl
@@ -51,38 +49,55 @@ def test_mysql_runtime_sort_key_ddl_matches_canonical_metadata() -> None:
     for fragment in (
         "ix_store_digest_kind_sort_key (store_digest, kind, sort_key(128))",
         "ix_scope_digest_sort_key (scope_digest, sort_key(128))",
-        "ix_scope_digest_state_sort_key (scope_digest, state, sort_key(128))",
-        "ix_parent_digest_sort_key (parent_digest, sort_key(128))",
     ):
         assert fragment in migration
 
 
 
-def test_runtime_state_identity_indexes_are_store_scoped() -> None:
+def test_runtime_state_mysql_indexes_match_reviewed_contract() -> None:
     metadata = build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
     expected = {
         "ai_state_records": {
             "uk_store_digest_key_digest",
-            "ix_store_digest_kind_key_digest",
+            "ix_store_digest_kind_sort_key",
+            "ix_scope_digest_sort_key",
+            "ix_updated_at",
+            "ix_created_at",
         },
         "ai_state_aliases": {
             "uk_store_digest_alias_digest",
             "ix_record_key_digest",
+            "ix_updated_at",
+            "ix_created_at",
         },
         "ai_state_facts": {
             "uk_store_digest_stream_digest_sequence",
             "ix_owner_key_digest",
             "ix_stream_digest_subject_digest_sequence",
+            "ix_updated_at",
+            "ix_created_at",
         },
-        "ai_state_sequences": {"uk_store_digest_key_digest"},
+        "ai_state_sequences": {
+            "uk_store_digest_key_digest",
+            "ix_updated_at",
+            "ix_created_at",
+        },
         "ai_state_operations": {
             "uk_store_digest_key_digest",
             "uk_store_digest_stream_digest_sequence",
             "ix_stream_digest_state_sequence",
+            "ix_updated_at",
+            "ix_created_at",
         },
     }
     forbidden = {
-        "ai_state_records": {"uk_key_digest", "ix_partition_digest_sort_key"},
+        "ai_state_records": {
+            "uk_key_digest",
+            "ix_partition_digest_sort_key",
+            "ix_scope_digest_state_sort_key",
+            "ix_parent_digest_sort_key",
+            "ix_store_digest_kind_key_digest",
+        },
         "ai_state_aliases": {"uk_alias_digest", "ix_store_digest_alias_digest"},
         "ai_state_facts": {
             "uk_stream_digest_sequence",
@@ -103,5 +118,25 @@ def test_runtime_state_identity_indexes_are_store_scoped() -> None:
             for index in table.indexes
             if index.info.get("ddl_dialect") == "mysql"
         }
-        assert names <= mysql_names
+        assert mysql_names == names
         assert not (forbidden[table_name] & mysql_names)
+        assert "ix_updated_at" in mysql_names
+        assert "ix_created_at" in mysql_names
+        if table_name == "ai_state_records":
+            assert len(mysql_names) <= len(table.c) // 3
+
+
+def test_runtime_state_migration_contains_no_known_duplicate_indexes() -> None:
+    migration = (
+        Path(__file__).resolve().parents[2]
+        / "linktools-ai"
+        / "migrations"
+        / "init_schema.sql"
+    ).read_text(encoding="utf-8")
+
+    for fragment in (
+        "KEY ix_store_digest_alias_digest ",
+        "KEY ix_store_digest_stream_digest_sequence ",
+        "KEY ix_store_digest_key_digest ",
+    ):
+        assert fragment not in migration

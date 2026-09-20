@@ -47,6 +47,11 @@ class ModelInteractionRuntimeStepStore(RuntimeStepStore):
             isinstance(archive, ModelInteractionInMemoryStepArchive)
             and captured.interactions
         ):
+            local_count = (
+                len(captured.snapshots[-1].messages)
+                if captured.snapshots
+                else 0
+            )
             prepared = await archive.prepare_interactions(
                 captured.run,
                 captured.interactions,
@@ -54,9 +59,7 @@ class ModelInteractionRuntimeStepStore(RuntimeStepStore):
                     captured.run.run_id,
                     digest,
                 ),
-                source_messages=(
-                    captured.snapshots[-1].messages if captured.snapshots else None
-                ),
+                local_message_count=local_count,
             )
             captured = replace(captured, interactions=prepared)  # type: ignore[arg-type]
         await super().commit_captured_execution_projection(

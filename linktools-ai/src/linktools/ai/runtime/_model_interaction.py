@@ -26,13 +26,12 @@ from .state._contracts import (
     ContextProjection,
     InlineContextBlock,
     RuntimePayloadRef,
+    TranscriptMessageRef,
     TranscriptSpanRef,
 )
 from .state._plan import RuntimeDomain
 
-_PREFIX_SEED = hashlib.sha256(b"linktools.model-context-prefix.v1").digest()
 _ENVELOPE_VERSION = 1
-_INLINE_SOURCE_DIGEST = "0" * 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,27 +58,21 @@ class StagedContextInline:
             raise ValueError("staged context inline is invalid")
 
 
-StagedContextItem = StagedContextSpan | StagedContextInline
+StagedContextItem = StagedContextSpan | StagedContextInline | TranscriptSpanRef
+StagedContextSource = TranscriptMessageRef | int | None
 
 
 @dataclass(frozen=True, slots=True)
 class StagedContextProjection:
-    source_message_count: int
-    source_prefix_digest: str
     items: tuple[StagedContextItem, ...]
 
     def __post_init__(self) -> None:
-        if (
-            self.source_message_count < 0
-            or len(self.source_prefix_digest) != 64
-            or any(
-                value not in "0123456789abcdef"
-                for value in self.source_prefix_digest
+        if any(
+            not isinstance(
+                item,
+                (StagedContextSpan, StagedContextInline, TranscriptSpanRef),
             )
-            or any(
-                not isinstance(item, (StagedContextSpan, StagedContextInline))
-                for item in self.items
-            )
+            for item in self.items
         ):
             raise ValueError("staged context projection is invalid")
 
@@ -147,77 +140,83 @@ class StagedModelInteraction:
 PayloadIntern = Callable[[bytes], tuple[str, int]]
 
 
-def message_prefix_digest(messages: Sequence[ModelMessage]) -> str:
-    value = _PREFIX_SEED
-    for message in messages:
-        value = hashlib.sha256(
-            value + hashlib.sha256(encode_model_messages((message,))).digest()
-        ).digest()
-    return value.hex()
-
-
-def extend_prefix_digest(prefix_digest: str, message: ModelMessage) -> str:
-    try:
-        prefix = bytes.fromhex(prefix_digest)
-    except ValueError as error:
-        raise ValueError("message prefix digest is invalid") from error
-    return hashlib.sha256(
-        prefix + hashlib.sha256(encode_model_messages((message,))).digest()
-    ).hexdigest()
-
-
 def build_context_projection(
     source: Sequence[ModelMessage],
     projected: Sequence[ModelMessage],
     intern_payload: PayloadIntern,
     *,
-    source_prefix_digest: str | None = None,
+    source_refs: Sequence[StagedContextSource] | None = None,
 ) -> StagedContextProjection:
     source_values = tuple(source)
+    projected_values = tuple(projected)
+    refs = (
+        tuple(range(len(source_values)))
+        if source_refs is None
+        else tuple(source_refs)
+    )
+    if len(refs) != len(source_values):
+        raise ValueError("context source references do not match source messages")
+
     signatures: dict[bytes, list[int]] = {}
     for index, message in enumerate(source_values):
-        signatures.setdefault(_message_signature(message), []).append(index)
-    next_candidate: dict[bytes, int] = {}
-    items: list[StagedContextItem] = []
-    span_start: int | None = None
-    span_end = 0
-
-    def flush_span() -> None:
-        nonlocal span_start
-        if span_start is not None:
-            items.append(StagedContextSpan(span_start, span_end))
-            span_start = None
-
-    for message in projected:
-        signature = _message_signature(message)
-        candidates = signatures.get(signature, ())
-        candidate_index = next_candidate.get(signature, 0)
-        source_index = (
-            candidates[candidate_index]
-            if candidate_index < len(candidates)
-            else None
-        )
-        if source_index is None:
-            flush_span()
-            items.append(
-                StagedContextInline(*intern_payload(encode_model_messages((message,))))
-            )
-            continue
-        next_candidate[signature] = candidate_index + 1
-        if span_start is not None and source_index == span_end:
-            span_end += 1
-        else:
-            flush_span()
-            span_start = source_index
-            span_end = source_index + 1
-    flush_span()
-    return StagedContextProjection(
-        len(source_values),
-        message_prefix_digest(source_values)
-        if source_prefix_digest is None
-        else source_prefix_digest,
-        tuple(items),
+        signatures.setdefault(_message_key(message), []).append(index)
+    projected_keys = tuple(
+        _message_key(message) for message in projected_values
     )
+    items: list[StagedContextItem] = []
+
+    def append_source(ref: StagedContextSource) -> bool:
+        if isinstance(ref, int) and not isinstance(ref, bool):
+            if ref < 0:
+                raise ValueError("local transcript source index cannot be negative")
+            if items and isinstance(items[-1], StagedContextSpan):
+                previous = items[-1]
+                if previous.end == ref:
+                    items[-1] = StagedContextSpan(previous.start, ref + 1)
+                    return True
+            items.append(StagedContextSpan(ref, ref + 1))
+            return True
+        if isinstance(ref, TranscriptMessageRef):
+            if items and isinstance(items[-1], TranscriptSpanRef):
+                previous = items[-1]
+                if (
+                    previous.source_domain is ref.source_domain
+                    and previous.owner_id == ref.owner_id
+                    and previous.end == ref.message_index
+                ):
+                    items[-1] = TranscriptSpanRef(
+                        previous.source_domain,
+                        previous.owner_id,
+                        previous.start,
+                        ref.message_index + 1,
+                    )
+                    return True
+            items.append(
+                TranscriptSpanRef(
+                    ref.source_domain,
+                    ref.owner_id,
+                    ref.message_index,
+                    ref.message_index + 1,
+                )
+            )
+            return True
+        if ref is not None:
+            raise TypeError("context source reference is invalid")
+        return False
+
+    for message, key in zip(
+        projected_values,
+        projected_keys,
+        strict=True,
+    ):
+        candidates = signatures.get(key, ())
+        source_index = candidates[0] if len(candidates) == 1 else None
+        if source_index is not None and append_source(refs[source_index]):
+            continue
+        items.append(
+            StagedContextInline(*intern_payload(encode_model_messages((message,))))
+        )
+    return StagedContextProjection(tuple(items))
 
 
 def build_inline_context_projection(
@@ -225,14 +224,11 @@ def build_inline_context_projection(
     intern_payload: PayloadIntern,
 ) -> StagedContextProjection:
     return StagedContextProjection(
-        0,
-        _INLINE_SOURCE_DIGEST,
         tuple(
             StagedContextInline(*intern_payload(encode_model_messages((message,))))
             for message in messages
-        ),
+        )
     )
-
 
 def context_projection_to_durable(
     projection: StagedContextProjection,
@@ -240,13 +236,23 @@ def context_projection_to_durable(
     owner_id: str,
     source_domain: RuntimeDomain,
     payload: Callable[[str], bytes],
+    local_message_base: int = 0,
 ) -> ContextProjection:
+    if local_message_base < 0:
+        raise ValueError("local message base cannot be negative")
     items = []
     for item in projection.items:
         if isinstance(item, StagedContextSpan):
             items.append(
-                TranscriptSpanRef(source_domain, owner_id, item.start, item.end)
+                TranscriptSpanRef(
+                    source_domain,
+                    owner_id,
+                    local_message_base + item.start,
+                    local_message_base + item.end,
+                )
             )
+        elif isinstance(item, TranscriptSpanRef):
+            items.append(item)
         else:
             items.append(
                 InlineContextBlock(
@@ -297,8 +303,8 @@ def model_response_projection(response: ModelResponse) -> JsonValue:
     return value
 
 
-def _message_signature(message: ModelMessage) -> bytes:
-    return hashlib.sha256(encode_model_messages((message,))).digest()
+def _message_key(message: ModelMessage) -> bytes:
+    return encode_model_messages((message,))
 
 
 def _json_snapshot(value: object) -> JsonValue:
@@ -369,11 +375,10 @@ __all__ = [
     "StagedContextItem",
     "StagedContextProjection",
     "StagedContextSpan",
+    "StagedContextSource",
     "StagedModelInteraction",
     "build_context_projection",
     "build_inline_context_projection",
-    "extend_prefix_digest",
-    "message_prefix_digest",
     "model_identity",
     "model_response_projection",
     "project_public_messages",

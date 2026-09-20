@@ -3,6 +3,7 @@
 """Execution history projection for claimed and materialized attempts."""
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,16 +101,17 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
 
 
 def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
     old = ModelRequest(
         parts=(
             SystemPromptPart(content="old"),
-            UserPromptPart(content="hello"),
+            UserPromptPart(content="hello", timestamp=timestamp),
         )
     )
     new = ModelRequest(
         parts=(
             SystemPromptPart(content="new"),
-            UserPromptPart(content="hello"),
+            UserPromptPart(content="hello", timestamp=timestamp),
         )
     )
 
@@ -117,6 +119,72 @@ def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
     assert _overlap_signature(old) != _overlap_signature(new)
     assert len(old.parts) == 2
     assert len(new.parts) == 2
+
+
+@pytest.mark.asyncio
+async def test_legacy_transcript_overlap_keeps_framework_stamped_occurrence(
+    tmp_path: Path,
+) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
+    await state.initialize(namespace="history-stamping", tenant_id="tenant")
+    try:
+        archive = state.steps.read_store(RuntimeDomain.RECOVERY)
+        assert isinstance(archive, StateStepArchive)
+        run = RunRecord("run")
+        await archive.register_run(run)
+        source = ModelRequest(
+            parts=[UserPromptPart(content="hello")],
+            timestamp=None,
+        )
+        await archive.materialize_snapshot(
+            run,
+            ContinuableSnapshot(
+                run_id="run",
+                step_index=1,
+                messages=[source],
+            ),
+        )
+        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        stamped = replace(
+            source,
+            timestamp=timestamp,
+            run_id="run",
+            conversation_id="conversation",
+            instructions="instruction",
+        )
+        response = ModelResponse(
+            parts=[TextPart(content="done")],
+            timestamp=timestamp,
+            run_id="run",
+            conversation_id="conversation",
+        )
+        await archive.materialize_snapshot(
+            run,
+            ContinuableSnapshot(
+                run_id="run",
+                step_index=2,
+                messages=[stamped, response],
+            ),
+        )
+
+        messages = [message async for message in archive.iter_messages(run_id="run")]
+        context = await archive.load_loaded_model_context(owner_id="run")
+        context_messages = context.model_messages()
+
+        assert len(messages) == 3
+        assert isinstance(messages[0], ModelRequest)
+        assert isinstance(messages[1], ModelRequest)
+        assert isinstance(messages[2], ModelResponse)
+        assert messages[0].parts[0].content == "hello"
+        assert messages[1].instructions == "instruction"
+        assert messages[2].parts[0].content == "done"
+        assert len(context_messages) == 2
+        assert isinstance(context_messages[0], ModelRequest)
+        assert context_messages[0].instructions == "instruction"
+        assert context_messages[0].run_id == "run"
+        assert context_messages[0].conversation_id == "conversation"
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio
@@ -634,7 +702,7 @@ def _reader(state: RuntimeState) -> StepExecutionHistoryReader:
 
 
 @pytest.mark.asyncio
-async def test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist() -> None:
+async def test_in_memory_raw_refs_use_the_same_exact_contract_as_durable() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="history-in-memory-refs", tenant_id="tenant")
     try:
@@ -647,15 +715,20 @@ async def test_in_memory_raw_refs_fail_fast_even_when_snapshots_exist() -> None:
             execution_id="execution",
             segment_sequence=1,
         )
-        refs = (
-            TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 0),
+        resolved = await archive.resolve_transcript_message_refs(
+            (TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 0),)
+        )
+        assert len(resolved) == 1
+        assert isinstance(resolved[0].message, ModelRequest)
+        assert resolved[0].message.parts[0].content == "in-memory-ref"
+
+        for ref in (
             TranscriptMessageRef(RuntimeDomain.EXECUTION, "missing-run", 0),
             TranscriptMessageRef(RuntimeDomain.EXECUTION, run_id, 999),
-        )
-        for ref in refs:
+        ):
             with pytest.raises(AIError) as raised:
                 await archive.resolve_transcript_message_refs((ref,))
-            assert raised.value.code is ErrorCode.STORAGE_DEPENDENCY_NOT_READY
+            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()
 

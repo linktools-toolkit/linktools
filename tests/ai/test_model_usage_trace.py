@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionTraceItem
-from linktools.ai.runtime._harness import HarnessStepStoreAdapter
+from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._capabilities import (
     _RuntimeStepPersistence,
 )
@@ -115,11 +115,15 @@ def _persistence(
         execution_id="execution",
         step_run_id=run_id,
     )
+    capture = RuntimeCaptureStore(
+        store,
+        execution_id=None,
+        step_run_id=run_id,
+    )
     persistence = _RuntimeStepPersistence(
-        store=HarnessStepStoreAdapter(store, execution_id=None),
+        capture=capture,
         agent_name="usage-test",
         run_id=run_id,
-        model_journal=journal,
     )
     observation = RuntimeModelObservationCapability(
         None,
@@ -130,6 +134,7 @@ def _persistence(
         step_run_id=run_id,
         agent_id="usage-test",
         journal=journal,
+        interaction_recorder=capture,
     )
     capabilities = [observation, persistence]
     if reverse_registration:
@@ -191,43 +196,6 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
         "cache_read_tokens": 303,
         "cache_write_tokens": 404,
     }
-
-
-@pytest.mark.asyncio
-async def test_model_journal_wiring_failure_happens_before_model_call() -> None:
-    store = StagingStepStore()
-    called = False
-
-    async def model(
-        messages: list[ModelMessage],
-        info: AgentInfo,
-    ) -> ModelResponse:
-        nonlocal called
-        del messages, info
-        called = True
-        return ModelResponse(parts=[TextPart("unexpected")])
-
-    journal = ModelRequestJournal(
-        source_namespace="workspace",
-        tenant_id="tenant",
-        execution_id="execution",
-        step_run_id="broken-wiring-run",
-    )
-    persistence = _RuntimeStepPersistence(
-        store=HarnessStepStoreAdapter(store, execution_id=None),
-        agent_name="usage-test",
-        run_id="broken-wiring-run",
-        model_journal=journal,
-    )
-    agent = Agent(FunctionModel(model), capabilities=[persistence])
-
-    with pytest.raises(AIError) as error:
-        await agent.run("hello")
-
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert called is False
-    events = await store.list_events(run_id="broken-wiring-run")
-    assert not any(event.kind.startswith("model_request_") for event in events)
 
 
 @pytest.mark.asyncio

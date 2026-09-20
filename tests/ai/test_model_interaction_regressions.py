@@ -4,6 +4,7 @@
 
 import hashlib
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 from pydantic_ai.messages import (
@@ -26,6 +27,7 @@ from linktools.ai.runtime._model_interaction import (
     project_public_messages,
 )
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeRetentionMode
+from linktools.ai.runtime.state._contracts import TranscriptSpanRef
 from linktools.ai.runtime.state._model_interaction_runtime import (
     ModelInteractionRuntimeStepStore,
 )
@@ -50,7 +52,7 @@ def _interaction(sequence: int) -> StagedModelInteraction:
         purpose="agent",
         output_retry_index=None,
         model={"route_id": "default"},
-        request_context=StagedContextProjection(0, "0" * 64, ()),
+        request_context=StagedContextProjection(()),
         request_envelope_digest="a" * 64,
         response_context=None,
         status="CANCELLED",
@@ -143,7 +145,154 @@ async def test_runtime_step_store_pages_plain_staging(enhanced: bool) -> None:
         await store.close()
 
 
-def test_repeated_message_matching_preserves_first_unused_source() -> None:
+@pytest.mark.asyncio
+async def test_runtime_step_store_continues_recovery_interaction_high_water() -> None:
+    staging = ModelInteractionStagingStepStore()
+    recovery = ModelInteractionInMemoryStepArchive(RuntimeDomain.RECOVERY)
+    store = RuntimeStepStore(
+        staging,
+        conversation_archive=InMemoryStepArchive(RuntimeDomain.CONVERSATION),
+        execution_archive=None,
+        recovery_archive=recovery,
+        conversation_retention=RuntimeRetentionMode.VOLATILE,
+        execution_retention=RuntimeRetentionMode.VOLATILE,
+        recovery_retention=RuntimeRetentionMode.VOLATILE,
+    )
+    await store.initialize()
+    try:
+        run = RunRecord("run")
+        await recovery.register_run(run)
+        durable = await recovery.prepare_interactions(
+            run,
+            (_interaction(1), _interaction(2)),
+            lambda _digest: b"{}",
+        )
+        await recovery.sync_projection(
+            run,
+            events=(),
+            snapshots=(),
+            interactions=durable,
+        )
+
+        assert await store.model_interaction_count(run_id="run") == 2
+        store.stage_model_interaction(_interaction(3))
+        assert await store.model_interaction_count(run_id="run") == 3
+    finally:
+        await store.preflight_close()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_interaction_prepare_resolves_explicit_local_span() -> None:
+    archive = ModelInteractionInMemoryStepArchive(RuntimeDomain.EXECUTION)
+    await archive.initialize()
+    try:
+        run = RunRecord("run")
+        await archive.register_run(run)
+        source = ModelRequest(parts=[UserPromptPart(content="hello")])
+        payloads: dict[str, bytes] = {}
+
+        def intern(value: bytes) -> tuple[str, int]:
+            digest = hashlib.sha256(value).hexdigest()
+            payloads[digest] = value
+            return digest, len(value)
+
+        projection = build_context_projection(
+            (source,),
+            (source,),
+            intern,
+            source_refs=(0,),
+        )
+        envelope_digest, _ = intern(b"{}")
+        interaction = StagedModelInteraction(
+            run_id="run",
+            step_index=1,
+            request_sequence=1,
+            purpose="agent",
+            output_retry_index=None,
+            model={"route_id": "default"},
+            request_context=projection,
+            request_envelope_digest=envelope_digest,
+            response_context=None,
+            status="CANCELLED",
+            error_code=None,
+            duration_ns=0,
+            usage=None,
+        )
+
+        prepared = await archive.prepare_interactions(
+            run,
+            (interaction,),
+            lambda digest: payloads[digest],
+            local_message_base=4,
+            local_message_count=1,
+        )
+
+        assert len(prepared) == 1
+        assert prepared[0].request_context.items == (
+            TranscriptSpanRef(RuntimeDomain.EXECUTION, "run", 4, 5),
+        )
+    finally:
+        await archive.close()
+
+
+def test_interaction_projection_keeps_exact_stamped_request_content() -> None:
+    source = ModelRequest(
+        parts=[UserPromptPart(content="hello")],
+        timestamp=None,
+    )
+    projected = replace(
+        source,
+        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        run_id="run",
+        conversation_id="conversation",
+        instructions="instruction",
+    )
+    store = StagingStepStore()
+
+    projection = build_context_projection(
+        (source,),
+        (projected,),
+        lambda content: store.intern_payload("run", content),
+    )
+
+    assert len(projection.items) == 1
+    assert isinstance(projection.items[0], StagedContextInline)
+
+
+def test_context_projection_preserves_nested_business_timestamp() -> None:
+    first = ModelRequest(
+        parts=[
+            ToolReturnPart(
+                "tool",
+                {"timestamp": "2026-01-01T00:00:00Z"},
+                tool_call_id="call-1",
+            )
+        ]
+    )
+    second = replace(
+        first,
+        parts=[
+            ToolReturnPart(
+                "tool",
+                {"timestamp": "2026-01-02T00:00:00Z"},
+                tool_call_id="call-1",
+            )
+        ],
+    )
+    store = StagingStepStore()
+
+    projection = build_context_projection(
+        (first,),
+        (second,),
+        lambda content: store.intern_payload("run", content),
+    )
+
+    assert len(projection.items) == 1
+    assert isinstance(projection.items[0], StagedContextInline)
+
+
+def test_ambiguous_duplicate_projection_does_not_guess_occurrence() -> None:
     message = ModelRequest(parts=[UserPromptPart(content="same")])
     other = ModelRequest(parts=[UserPromptPart(content="other")])
     store = StagingStepStore()
@@ -152,12 +301,11 @@ def test_repeated_message_matching_preserves_first_unused_source() -> None:
         (message, other, message, message),
         lambda content: store.intern_payload("run", content),
     )
-    assert projection.items[:3] == (
-        StagedContextSpan(0, 1),
-        StagedContextSpan(2, 3),
-        StagedContextSpan(1, 2),
-    )
+
     assert len(projection.items) == 4
+    assert isinstance(projection.items[0], StagedContextInline)
+    assert projection.items[1] == StagedContextSpan(2, 3)
+    assert isinstance(projection.items[2], StagedContextInline)
     assert isinstance(projection.items[3], StagedContextInline)
 
 
