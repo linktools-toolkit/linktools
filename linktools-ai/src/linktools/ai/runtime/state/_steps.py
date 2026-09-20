@@ -250,6 +250,31 @@ class RuntimeStepStore(StepStore):
             limit=limit,
         )
 
+    async def model_interaction_count(self, *, run_id: str) -> int:
+        await self._ensure_business()
+        staged = await self._staging.list_model_interactions(run_id=run_id)
+        staged_sequences = tuple(
+            value.request_sequence
+            for value in staged
+            if isinstance(value, StagedModelInteraction)
+        )
+        if len(staged_sequences) != len(staged):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if staged_sequences and staged_sequences != tuple(
+            range(staged_sequences[0], staged_sequences[0] + len(staged_sequences))
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        staged_high_water = staged_sequences[-1] if staged_sequences else 0
+        recovery = self._archives.get(RuntimeDomain.RECOVERY)
+        durable_high_water = (
+            0
+            if recovery is None
+            else await recovery.model_interaction_count(run_id=run_id)
+        )
+        if staged_sequences and staged_sequences[0] > durable_high_water + 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return max(staged_high_water, durable_high_water)
+
     async def resolve_model_interaction(self, interaction: object) -> object:
         await self._ensure_business()
         return await self._staging.resolve_model_interaction(interaction)
