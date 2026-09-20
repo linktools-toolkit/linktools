@@ -17,6 +17,8 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import FilesystemObjectStore, ObjectRef, ObjectStore, read_object
+from ...task import TaskGraphAdmission
+from .._runtime_identity import task_capability_snapshot_key
 from ._contracts import (
     ArtifactState,
     ConversationState,
@@ -47,6 +49,7 @@ from ._store import (
 from ._snapshot import SnapshotLimits
 from ._snapshot_validation import canonical_snapshot_indexes, validate_snapshot_domain
 from ._codec import (
+    _decode_enveloped_domain,
     _iter_runtime_object_dependencies,
     decode_fact,
     decode_operation,
@@ -481,7 +484,9 @@ class RuntimeState:
                 }
             )
             copied_objects.add(identity)
-            if reference.key.startswith("v1/skill-source-snapshot/"):
+            if reference.key.startswith(
+                ("v1/skill-source-snapshot/", "v1/task-capability-snapshot/")
+            ):
                 payload = await read_object(
                     source_store,
                     reference.key,
@@ -530,6 +535,32 @@ class RuntimeState:
                     encoded = encode_record(value)
                     raw_domain["records"].append(accept(encoded))
                     await copy_references(encoded, domain)
+                    if (
+                        domain is RuntimeDomain.TASK
+                        and value.kind == "task_admission"
+                    ):
+                        admission = _decode_enveloped_domain(
+                            value.data,
+                            TaskGraphAdmission,
+                        )
+                        key = task_capability_snapshot_key(
+                            self.namespace,
+                            admission.principal.tenant_id,
+                            admission.graph_id,
+                            admission.initial_request_digest,
+                        )
+                        stat = await self.object_store(RuntimeDomain.TASK).stat(key)
+                        if stat is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        await copy_reference(
+                            RuntimeDomain.TASK,
+                            ObjectRef(
+                                self.object_store(RuntimeDomain.TASK).store_id,
+                                stat.key,
+                                stat.digest,
+                                stat.size,
+                            ),
+                        )
                 last = page[-1]
                 record_cursor = RecordScanCursor(last.kind, last.key_digest)
                 if len(page) < 128:
