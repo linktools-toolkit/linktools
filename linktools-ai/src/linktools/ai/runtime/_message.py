@@ -137,8 +137,8 @@ def encode_model_messages(messages: Sequence[ModelMessage]) -> bytes:
     return canonical_json_bytes(value)
 
 
-def model_message_identity_bytes(message: ModelMessage) -> bytes:
-    """Serialize logical identity across Pydantic AI message stamping."""
+def model_message_match_bytes(message: ModelMessage) -> bytes:
+    """Build a match key ignoring only Pydantic AI post-save message stamps."""
     value = json.loads(encode_model_messages((message,)).decode("utf-8"))
     if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
         raise RuntimeError("model message identity dump is invalid")
