@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import hashlib
-from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass
 from typing import cast
@@ -161,11 +160,9 @@ def build_context_projection(
     signatures: dict[bytes, list[int]] = {}
     for index, message in enumerate(source_values):
         signatures.setdefault(_message_key(message), []).append(index)
-    projected_signatures = tuple(
+    projected_keys = tuple(
         _message_key(message) for message in projected_values
     )
-    projected_counts = Counter(projected_signatures)
-    next_candidate: dict[bytes, int] = {}
     items: list[StagedContextItem] = []
 
     def append_source(ref: StagedContextSource) -> bool:
@@ -207,24 +204,15 @@ def build_context_projection(
             raise TypeError("context source reference is invalid")
         return False
 
-    for message, signature in zip(
+    for message, key in zip(
         projected_values,
-        projected_signatures,
+        projected_keys,
         strict=True,
     ):
-        candidates = signatures.get(signature, ())
-        candidate_index = next_candidate.get(signature, 0)
-        source_index = None
-        if len(candidates) == 1 or projected_counts[signature] == len(candidates):
-            source_index = (
-                candidates[candidate_index]
-                if candidate_index < len(candidates)
-                else None
-            )
-        if source_index is not None:
-            next_candidate[signature] = candidate_index + 1
-            if append_source(refs[source_index]):
-                continue
+        candidates = signatures.get(key, ())
+        source_index = candidates[0] if len(candidates) == 1 else None
+        if source_index is not None and append_source(refs[source_index]):
+            continue
         items.append(
             StagedContextInline(*intern_payload(encode_model_messages((message,))))
         )
