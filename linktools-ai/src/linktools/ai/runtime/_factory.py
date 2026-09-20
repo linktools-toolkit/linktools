@@ -655,10 +655,6 @@ async def _build_local_components(
             state.execution.executions,
             authorization,
             execution,
-            release_terminal=state.retention.release_evaluation,
-            acquire_execution_hold=execution.acquire_dependency_hold,
-            release_execution_hold=execution.release_dependency_hold,
-            request_execution_handoff=execution.request_terminal_handoff,
         )
         approval = DefaultApprovalService(
             state.recovery.approvals,
