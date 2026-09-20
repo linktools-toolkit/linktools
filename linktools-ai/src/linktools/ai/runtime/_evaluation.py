@@ -374,8 +374,6 @@ class DefaultEvaluationService:
     ) -> EvaluationRecord:
         current = record
         while True:
-            if current.status in _TERMINAL_EVALUATION_STATUSES:
-                return current
             execution = await self._execution_record(current)
             if (
                 execution is None
@@ -396,6 +394,10 @@ class DefaultEvaluationService:
             target_status = _EXECUTION_EVALUATION_STATUS.get(execution.status)
             if target_status is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status in _TERMINAL_EVALUATION_STATUSES:
+                if target_status is not current.status:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return current
             if (
                 _EVALUATION_STATUS_RANK[target_status]
                 <= _EVALUATION_STATUS_RANK[current.status]
