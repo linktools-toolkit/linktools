@@ -69,6 +69,16 @@ def test_tool_return_content_snapshots_arbitrary_python_values_as_json() -> None
     assert decode_tool_return_content(bytes_encoded) == "YWJj"
 
 
+def test_tool_return_content_snapshots_non_string_mapping_keys() -> None:
+    encoded = encode_tool_return_content({1: "one"})
+
+    assert encoded["value"] == {
+        "type": "json-snapshot",
+        "value": {"1": "one"},
+    }
+    assert decode_tool_return_content(encoded) == {"1": "one"}
+
+
 def test_tool_return_content_uses_explicit_linktools_envelope() -> None:
     encoded = encode_tool_return_content({"type": "business", "value": 1})
 

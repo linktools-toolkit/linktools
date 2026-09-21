@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import cast
 
 from pydantic import TypeAdapter
-from pydantic_core import ErrorDetails
+from pydantic_core import ErrorDetails, PydanticSerializationError, to_jsonable_python
 from pydantic_ai import RequestUsage
 from pydantic_ai.messages import (
     BinaryContent,
@@ -68,7 +68,17 @@ def _portable_json(value: object) -> JsonValue:
         (str, bytes, bytearray),
     ):
         return [_portable_json(item) for item in value]
-    raise TypeError("durable message value is not JSON portable")
+    try:
+        snapshot = to_jsonable_python(
+            value,
+            by_alias=True,
+            bytes_mode="base64",
+        )
+    except PydanticSerializationError as error:
+        raise TypeError("durable message value is not JSON portable") from error
+    if snapshot is value:
+        raise TypeError("durable message value is not JSON portable")
+    return _portable_json(snapshot)
 
 
 def project_transient_binary_content(

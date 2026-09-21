@@ -4,10 +4,9 @@
 
 import binascii
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import cast
 
-from pydantic import ConfigDict, TypeAdapter
-from pydantic_core import PydanticSerializationError
+from pydantic_core import PydanticSerializationError, to_jsonable_python
 from pydantic_ai.messages import ToolReturnContent, is_multi_modal_content
 from pydantic_ai.tools import DeferredToolResults
 
@@ -18,10 +17,6 @@ from ._input import _decode_user_content_item, _encode_user_content_item
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _TOOL_RETURN_CONTRACT = "linktools.tool-return"
 _TOOL_RETURN_VERSION = 1
-_TOOL_RETURN_JSON_ADAPTER = TypeAdapter(
-    Any,
-    config=ConfigDict(ser_json_bytes="base64"),
-)
 
 
 def encode_tool_return_content(value: object) -> JsonValue:
@@ -69,9 +64,9 @@ def _encode_node(value: object) -> JsonValue:
             "type": "multimodal",
             "value": _encode_user_content_item(value),
         }
-    if isinstance(value, Mapping):
-        if any(not isinstance(key, str) for key in value):
-            raise TypeError("tool-return mapping keys must be strings")
+    if isinstance(value, Mapping) and all(
+        isinstance(key, str) for key in value
+    ):
         return {
             "type": "mapping",
             "items": {
@@ -93,10 +88,10 @@ def _encode_node(value: object) -> JsonValue:
             "value": normalize_json_value(value),
         }
     try:
-        snapshot = _TOOL_RETURN_JSON_ADAPTER.dump_python(
+        snapshot = to_jsonable_python(
             value,
-            mode="json",
             by_alias=True,
+            bytes_mode="base64",
         )
     except PydanticSerializationError as error:
         raise TypeError("tool-return content is not JSON serializable") from error

@@ -72,6 +72,29 @@ def test_model_message_round_trip_preserves_usage_extensions() -> None:
     assert decoded[0].usage.__dict__["label"] == "original"
 
 
+def test_model_message_round_trip_snapshots_arbitrary_metadata_as_json() -> None:
+    class Metadata(BaseModel):
+        count: int
+
+    response = ModelResponse(
+        parts=[],
+        metadata={
+            "model": Metadata(count=2),
+            "bytes": b"abc",
+        },
+    )
+
+    restored = decode_model_messages(
+        encode_model_messages((response,))
+    )[0]
+
+    assert isinstance(restored, ModelResponse)
+    assert restored.metadata == {
+        "model": {"count": 2},
+        "bytes": "YWJj",
+    }
+
+
 def test_model_message_round_trip_preserves_retry_error_details() -> None:
     class Payload(BaseModel):
         count: int
