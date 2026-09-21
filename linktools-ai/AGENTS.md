@@ -88,6 +88,6 @@ python manage.py check linktools-ai
 
 Run the project gate after changing architecture boundaries, public exports, persistence contracts, or schema definitions. Current pre-release scope has no obligation to read superseded development data. Use the current wire contract as the single baseline; retain normal defaults of current codecs and current execution recovery semantics. Published-version fixtures are required only after a real compatibility commitment exists.
 
-For the current OpenAI binding, base_url, api_key and transport timeout/retry settings are connection concerns, not model semantic identity. Task execution timeout/retry policies and model-visible tool descriptions/schema have different responsibilities and remain semantic where used.
+For the current OpenAI binding, route_id, base_url, api_key and transport timeout/retry settings are connection concerns, not model semantic identity. Task execution timeout/retry policies and model-visible tool descriptions/schema have different responsibilities and remain semantic where used.
 
 Measure test setup, execution and full check wall time in a matched environment before and after test simplification. Record removed-test responsibility mappings and retain the existing manage.py entry point and CI matrix. Do not infer speedup from fewer files or parametrization alone.
