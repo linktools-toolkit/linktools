@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast, get_type_hints
 
 from linktools.core import environ
+from pydantic import BaseModel
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -1043,15 +1044,14 @@ def _task_output_contract(handler: object) -> JsonValue:
     if not callable(model_schema):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     schema = model_schema()
-    generated_paths: frozenset[tuple[str | int, ...]] = frozenset()
-    config = getattr(output, "model_config", {})
-    if (
-        isinstance(config, Mapping)
-        and config.get("title") is None
+    generated_paths = (
+        frozenset({("title",)})
+        if isinstance(output, type)
+        and issubclass(output, BaseModel)
         and isinstance(schema, Mapping)
-        and schema.get("title") == getattr(output, "__name__", None)
-    ):
-        generated_paths = frozenset({("title",)})
+        and _uses_default_pydantic_model_title(schema, output)
+        else frozenset()
+    )
     return {
         "kind": "schema",
         "schema": canonicalize_json_schema(
@@ -1059,6 +1059,23 @@ def _task_output_contract(handler: object) -> JsonValue:
             generated_title_paths=generated_paths,
         ),
     }
+
+
+def _uses_default_pydantic_model_title(
+    schema: Mapping[str, object],
+    output_type: type[BaseModel],
+) -> bool:
+    config = getattr(output_type, "model_config", {})
+    if (
+        not isinstance(config, Mapping)
+        or config.get("title") is not None
+        or config.get("model_title_generator") is not None
+        or schema.get("title") != output_type.__name__
+    ):
+        return False
+    hook = getattr(output_type, "__get_pydantic_json_schema__", None)
+    base_hook = getattr(BaseModel, "__get_pydantic_json_schema__", None)
+    return getattr(hook, "__func__", hook) is getattr(base_hook, "__func__", base_hook)
 
 
 def _expander_identity(expander: object) -> tuple[str, int]:

@@ -108,8 +108,8 @@ def _reachable_definitions(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
                 if key in _SCHEMA_MAP_KEYWORDS:
                     if not isinstance(child, Mapping):
                         continue
-                    for name, nested in child.items():
-                        collect(nested, owner, (*path, key, name))
+                    for name in sorted(child):
+                        collect(child[name], owner, (*path, key, name))
                     continue
                 if key in _SCHEMA_ARRAY_KEYWORDS:
                     if not isinstance(child, list):
@@ -127,19 +127,17 @@ def _reachable_definitions(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
                         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
                     refs.setdefault(owner, []).append(_decode_definition_pointer(child))
                     continue
-                if isinstance(child, (Mapping, list)):
-                    collect(child, owner, (*path, key))
         elif isinstance(node, list):
             for index, child in enumerate(node):
                 collect(child, owner, (*path, index))
 
     collect(schema, "", ())
     if isinstance(definitions, Mapping):
-        for name, definition in definitions.items():
-            if not isinstance(name, str):
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        if any(not isinstance(name, str) for name in definitions):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        for name in sorted(definitions):
             refs.setdefault(name, [])
-            collect(definition, name, ("$defs", name))
+            collect(definitions[name], name, ("$defs", name))
 
     reachable: list[str] = []
     visiting: set[str] = set()
@@ -198,12 +196,12 @@ def _rewrite_schema(
                     continue
                 result[str(key)] = {
                     str(name): _rewrite_schema(
-                        nested,
+                        child[name],
                         reachable,
                         generated_title_paths,
                         (*path, key, str(name)),
                     )
-                    for name, nested in child.items()
+                    for name in sorted(child, key=str)
                 }
                 continue
             if key in _SCHEMA_ARRAY_KEYWORDS:

@@ -50,6 +50,20 @@ class _ExplicitOutputBeta(BaseModel):
     value: str
 
 
+class _ExplicitSameNameOutput(BaseModel):
+    value: str
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: Any,
+        handler: Any,
+    ) -> dict[str, Any]:
+        schema = handler(core_schema)
+        schema["title"] = cls.__name__
+        return schema
+
+
 def test_output_fingerprint_ignores_generated_type_titles() -> None:
     alpha = bind_output(_GeneratedOutputAlpha)
     beta = bind_output(_GeneratedOutputBeta)
@@ -80,6 +94,55 @@ def test_output_schema_literal_ref_is_not_treated_as_schema_ref() -> None:
     assert normalized["properties"]["payload"]["const"] == {
         "$ref": "literal-value"
     }
+
+
+def test_output_schema_preserves_explicit_same_name_title() -> None:
+    binding = bind_output(_ExplicitSameNameOutput)
+    assert binding.schema_definition["title"] == "_ExplicitSameNameOutput"
+
+
+def test_output_schema_keeps_unknown_extension_refs_literal() -> None:
+    schema = {
+        "type": "object",
+        "x-contract": {
+            "$ref": "literal-value",
+            "$dynamicRef": "also-literal",
+        },
+    }
+
+    normalized = canonicalize_output_schema_v1(schema)
+
+    assert normalized["x-contract"] == {
+        "$ref": "literal-value",
+        "$dynamicRef": "also-literal",
+    }
+
+
+def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
+    first = {
+        "$defs": {
+            "A": {"type": "string"},
+            "B": {"type": "integer"},
+        },
+        "type": "object",
+        "properties": {
+            "a": {"$ref": "#/$defs/A"},
+            "b": {"$ref": "#/$defs/B"},
+        },
+    }
+    second = {
+        "properties": {
+            "b": {"$ref": "#/$defs/B"},
+            "a": {"$ref": "#/$defs/A"},
+        },
+        "type": "object",
+        "$defs": {
+            "B": {"type": "integer"},
+            "A": {"type": "string"},
+        },
+    }
+
+    assert canonicalize_output_schema_v1(first) == canonicalize_output_schema_v1(second)
 
 
 def test_agent_tool_retry_default_is_finite() -> None:

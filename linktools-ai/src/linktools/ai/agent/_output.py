@@ -182,6 +182,23 @@ def _normalize_schema(value: object) -> "dict[str, JsonValue]":
     return canonicalize_output_schema_v1(value)
 
 
+def _uses_default_pydantic_model_title(
+    schema: Mapping[str, JsonValue],
+    output_type: type[BaseModel],
+) -> bool:
+    config = getattr(output_type, "model_config", {})
+    if (
+        not isinstance(config, Mapping)
+        or config.get("title") is not None
+        or config.get("model_title_generator") is not None
+        or schema.get("title") != output_type.__name__
+    ):
+        return False
+    hook = getattr(output_type, "__get_pydantic_json_schema__", None)
+    base_hook = getattr(BaseModel, "__get_pydantic_json_schema__", None)
+    return getattr(hook, "__func__", hook) is getattr(base_hook, "__func__", base_hook)
+
+
 def canonicalize_output_schema_v1(
     value: object,
     output_type: "type[BaseModel] | None" = None,
@@ -189,13 +206,12 @@ def canonicalize_output_schema_v1(
     """Canonicalize one output schema using the shared schema contract."""
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    generated_paths: frozenset[tuple[str | int, ...]] = frozenset()
-    if output_type is not None:
-        title = value.get("title")
-        config = getattr(output_type, "model_config", {})
-        explicit_title = isinstance(config, Mapping) and config.get("title") is not None
-        if not explicit_title and title == output_type.__name__:
-            generated_paths = frozenset({("title",)})
+    generated_paths = (
+        frozenset({("title",)})
+        if output_type is not None
+        and _uses_default_pydantic_model_title(value, output_type)
+        else frozenset()
+    )
     return canonicalize_json_schema(
         cast(Mapping[str, JsonValue], value),
         generated_title_paths=generated_paths,
