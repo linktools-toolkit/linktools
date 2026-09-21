@@ -462,10 +462,16 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "session-tool-crash.db"
+    crash_database = tmp_path / "session-tool-crash-snapshot.db"
     calls: list[str] = []
     application = _application(calls, effect="non_replay_safe")
     original_complete = RuntimeToolOperationBridge.complete
     crashed = False
+
+    def snapshot_database() -> None:
+        with sqlite3.connect(database) as source:
+            with sqlite3.connect(crash_database) as target:
+                source.backup(target)
 
     async def complete_then_exit(
         self: RuntimeToolOperationBridge,
@@ -479,6 +485,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
             result,
         )
         if not crashed:
+            await asyncio.to_thread(snapshot_database)
             crashed = True
             raise _SimulatedProcessExit("simulated process exit")
         return cancelled
@@ -498,7 +505,6 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     )
     runtime = await manager.__aenter__()
     execution_id = ""
-    crash_database = tmp_path / "session-tool-crash-snapshot.db"
     try:
         await runtime.agent("default").create_session("session")
         execution = await runtime.agent("default").session("session").start(
@@ -526,12 +532,6 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
         assert before is not None
         assert before.status is ExecutionStatus.STARTED
 
-        def snapshot_database() -> None:
-            with sqlite3.connect(database) as source:
-                with sqlite3.connect(crash_database) as target:
-                    source.backup(target)
-
-        await asyncio.to_thread(snapshot_database)
     finally:
         await manager.__aexit__(None, None, None)
         if first_state.ready:
