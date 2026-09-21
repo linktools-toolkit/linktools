@@ -4,8 +4,10 @@
 
 import binascii
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Any, cast
 
+from pydantic import ConfigDict, TypeAdapter
+from pydantic_core import PydanticSerializationError
 from pydantic_ai.messages import ToolReturnContent, is_multi_modal_content
 from pydantic_ai.tools import DeferredToolResults
 
@@ -16,6 +18,10 @@ from ._input import _decode_user_content_item, _encode_user_content_item
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _TOOL_RETURN_CONTRACT = "linktools.tool-return"
 _TOOL_RETURN_VERSION = 1
+_TOOL_RETURN_JSON_ADAPTER = TypeAdapter(
+    Any,
+    config=ConfigDict(ser_json_bytes="base64"),
+)
 
 
 def encode_tool_return_content(value: object) -> JsonValue:
@@ -86,7 +92,18 @@ def _encode_node(value: object) -> JsonValue:
             "type": "scalar",
             "value": normalize_json_value(value),
         }
-    raise TypeError("tool-return content is not portable")
+    try:
+        snapshot = _TOOL_RETURN_JSON_ADAPTER.dump_python(
+            value,
+            mode="json",
+            by_alias=True,
+        )
+    except PydanticSerializationError as error:
+        raise TypeError("tool-return content is not JSON serializable") from error
+    return {
+        "type": "json-snapshot",
+        "value": normalize_json_value(snapshot),
+    }
 
 
 def _decode_node(value: object) -> object:
@@ -122,6 +139,9 @@ def _decode_node(value: object) -> object:
         if not is_multi_modal_content(item):
             raise ValueError("tool-return multimodal item is invalid")
         return item
+    if node_type == "json-snapshot":
+        _require_keys(value, {"type", "value"})
+        return normalize_json_value(value["value"])
     raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 

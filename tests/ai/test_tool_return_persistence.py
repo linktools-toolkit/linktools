@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai.messages import BinaryContent, ModelRequest, ToolReturnPart
 
 from linktools.ai.core import canonical_json_bytes
@@ -54,6 +55,14 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
         background_tasks=set(),
         payload_policy=PayloadPolicy(),
     )
+
+
+def test_arbitrary_tool_result_round_trips_as_json_snapshot() -> None:
+    class Result(BaseModel):
+        count: int
+
+    assert _round_trip(Result(count=3)) == {"count": 3}
+    assert _round_trip(b"abc") == "YWJj"
 
 
 def test_media_shaped_tool_json_round_trips_as_plain_mapping() -> None:

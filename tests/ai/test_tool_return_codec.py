@@ -5,6 +5,7 @@
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import BinaryContent, ImageUrl
 from pydantic_ai.models.test import TestModel
@@ -47,6 +48,25 @@ def test_tool_return_content_round_trips_nested_multimodal_values() -> None:
     assert isinstance(items[1], ImageUrl)
     assert items[1].url == "https://example.com/image.png"
     assert restored["plain"] == {"kind": "binary", "label": "not-multimodal"}
+
+
+def test_tool_return_content_snapshots_arbitrary_python_values_as_json() -> None:
+    class Result(BaseModel):
+        count: int
+
+    model_encoded = encode_tool_return_content(Result(count=2))
+    bytes_encoded = encode_tool_return_content(b"abc")
+
+    assert model_encoded["value"] == {
+        "type": "json-snapshot",
+        "value": {"count": 2},
+    }
+    assert decode_tool_return_content(model_encoded) == {"count": 2}
+    assert bytes_encoded["value"] == {
+        "type": "json-snapshot",
+        "value": "YWJj",
+    }
+    assert decode_tool_return_content(bytes_encoded) == "YWJj"
 
 
 def test_tool_return_content_uses_explicit_linktools_envelope() -> None:
