@@ -601,6 +601,76 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
 
 
 @pytest.mark.asyncio
+async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="run-snapshot-relocation", tenant_id="tenant")
+    try:
+        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        assert isinstance(recovery, StateStepArchive)
+        run = RunRecord("run", conversation_id="conversation", agent_name="default")
+        await recovery.register_run(run)
+        first = ContinuableSnapshot(
+            run_id="run",
+            step_index=1,
+            messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
+            state="active",
+            transcript_message_count_before=0,
+        )
+        final = ContinuableSnapshot(
+            run_id="run",
+            step_index=2,
+            messages=[
+                *first.messages,
+                ModelResponse(parts=[TextPart("done")]),
+            ],
+            state="complete",
+            transcript_message_count_before=1,
+        )
+        await recovery.materialize_snapshot(run, first)
+        await recovery.materialize_snapshot(run, final)
+        before = await recovery.transcript_message_count_for_run(run)
+
+        relocated = await recovery.relocate_run_snapshot(run, final)
+        assert relocated.transcript_message_count_before == len(final.messages)
+        await recovery.materialize_snapshot(run, relocated)
+        assert await recovery.transcript_message_count_for_run(run) == before
+
+        bad_run = RunRecord(
+            "bad-run",
+            conversation_id="conversation",
+            agent_name="default",
+        )
+        await recovery.register_run(bad_run)
+        await recovery.materialize_snapshot(
+            bad_run,
+            ContinuableSnapshot(
+                run_id="bad-run",
+                step_index=1,
+                messages=[ModelRequest(parts=[UserPromptPart("stored")])],
+                state="active",
+                transcript_message_count_before=0,
+            ),
+        )
+        with pytest.raises(AIError) as raised:
+            await recovery.relocate_run_snapshot(
+                bad_run,
+                ContinuableSnapshot(
+                    run_id="bad-run",
+                    step_index=2,
+                    messages=[
+                        ModelRequest(parts=[UserPromptPart("different")]),
+                        ModelResponse(parts=[TextPart("done")]),
+                    ],
+                    state="complete",
+                    transcript_message_count_before=1,
+                ),
+            )
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="session-tool-recovery", tenant_id="tenant")
