@@ -220,29 +220,34 @@ def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_skill_snapshot_reference_requires_store_id() -> None:
-    with pytest.raises(AIError) as raised:
-        SkillDefinition.from_semantic_contract(
-            {
-                "version": 1,
-                "id": "review",
-                "content": "instructions",
-                "source": {
-                    "source_id": "application",
-                    "root": "review",
-                    "snapshot": {
-                        "key": "snapshot",
-                        "digest": "a" * 64,
-                        "size": 1,
-                    },
+def test_skill_snapshot_reference_defaults_store_id_to_runtime() -> None:
+    skill = SkillDefinition.from_semantic_contract(
+        {
+            "version": 1,
+            "id": "review",
+            "content": "instructions",
+            "source": {
+                "source_id": "application",
+                "root": "review",
+                "snapshot": {
+                    "key": "snapshot",
+                    "digest": "a" * 64,
+                    "size": 1,
                 },
-            }
-        )
+            },
+        }
+    )
 
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert skill.source_ref is not None
+    assert skill.source_ref.snapshot == ObjectRef(
+        "runtime",
+        "snapshot",
+        "a" * 64,
+        1,
+    )
 
 
-def test_binding_object_dependency_scan_requires_skill_store_id() -> None:
+def test_binding_object_dependency_scan_defaults_skill_store_id() -> None:
     pin = SemanticPin(
         "skill",
         "review",
@@ -263,15 +268,19 @@ def test_binding_object_dependency_scan_requires_skill_store_id() -> None:
     )
     snapshot = replace(_snapshot(), selected=(pin,))
 
-    with pytest.raises(AIError) as raised:
-        tuple(
-            runtime_codec._iter_agent_binding_object_refs(
-                snapshot,
-                RuntimeDomain.EXECUTION,
-            )
+    refs = tuple(
+        runtime_codec._iter_agent_binding_object_refs(
+            snapshot,
+            RuntimeDomain.EXECUTION,
         )
+    )
 
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert refs == (
+        (
+            RuntimeDomain.EXECUTION,
+            ObjectRef("runtime", "snapshot", "a" * 64, 1),
+        ),
+    )
 
 
 def test_agent_declaration_identity_keeps_model_selector() -> None:
