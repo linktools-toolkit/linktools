@@ -98,7 +98,8 @@ def _reachable_definitions(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
 
     def collect(node: object, owner: str, path: tuple[str | int, ...]) -> None:
         if isinstance(node, Mapping):
-            for key, child in node.items():
+            for key in sorted(node):
+                child = node[key]
                 if key == "$defs":
                     if owner:
                         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)

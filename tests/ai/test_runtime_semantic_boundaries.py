@@ -134,12 +134,12 @@ def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
         "type": "object",
         "properties": {
             "a": {"$ref": "#/$defs/A"},
-            "b": {"$ref": "#/$defs/B"},
         },
+        "not": {"$ref": "#/$defs/B"},
     }
     second = {
+        "not": {"$ref": "#/$defs/B"},
         "properties": {
-            "b": {"$ref": "#/$defs/B"},
             "a": {"$ref": "#/$defs/A"},
         },
         "type": "object",
