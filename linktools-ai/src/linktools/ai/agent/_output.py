@@ -16,7 +16,7 @@ from pydantic_core import core_schema
 
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..spec import canonicalize_json_schema
+from ..spec import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
 
 class AssistantTextOutput(BaseModel):
@@ -98,7 +98,7 @@ def bind_output(output: "type[BaseModel] | None" = None) -> OutputBinding:
     if not isinstance(output, type) or not issubclass(output, BaseModel):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     try:
-        schema = canonicalize_output_schema_v1(output.model_json_schema(), output)
+        schema = canonicalize_pydantic_model_schema(output)
         _durable_runtime_type(schema)
     except AIError:
         raise
@@ -182,23 +182,6 @@ def _normalize_schema(value: object) -> "dict[str, JsonValue]":
     return canonicalize_output_schema_v1(value)
 
 
-def _uses_default_pydantic_model_title(
-    schema: Mapping[str, JsonValue],
-    output_type: type[BaseModel],
-) -> bool:
-    config = getattr(output_type, "model_config", {})
-    if (
-        not isinstance(config, Mapping)
-        or config.get("title") is not None
-        or config.get("model_title_generator") is not None
-        or schema.get("title") != output_type.__name__
-    ):
-        return False
-    hook = getattr(output_type, "__get_pydantic_json_schema__", None)
-    base_hook = getattr(BaseModel, "__get_pydantic_json_schema__", None)
-    return getattr(hook, "__func__", hook) is getattr(base_hook, "__func__", base_hook)
-
-
 def canonicalize_output_schema_v1(
     value: object,
     output_type: "type[BaseModel] | None" = None,
@@ -206,16 +189,9 @@ def canonicalize_output_schema_v1(
     """Canonicalize one output schema using the shared schema contract."""
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    generated_paths = (
-        frozenset({("title",)})
-        if output_type is not None
-        and _uses_default_pydantic_model_title(value, output_type)
-        else frozenset()
-    )
-    return canonicalize_json_schema(
-        cast(Mapping[str, JsonValue], value),
-        generated_title_paths=generated_paths,
-    )
+    if output_type is not None:
+        return canonicalize_pydantic_model_schema(output_type)
+    return canonicalize_json_schema(cast(Mapping[str, JsonValue], value))
 
 
 __all__ = [
