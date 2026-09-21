@@ -22,13 +22,18 @@ from ._contract import (
     normalize_thinking,
     parse_mcp_tool_selector,
 )
-from ._identity import binding_identity_payload, capability_identity_payload
+from ._identity import (
+    agent_spec_identity_payload,
+    binding_identity_payload,
+    capability_identity_payload,
+)
 from ._schema import canonicalize_json_schema
 
 __all__ = [
     "AgentSpec",
     "AgentSpecCodec",
     "AgentUsageLimits",
+    "agent_spec_identity_payload",
     "binding_identity_payload",
     "canonicalize_json_schema",
     "capability_identity_payload",
