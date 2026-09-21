@@ -202,6 +202,64 @@ async def test_read_object_rejects_overflow_before_buffering_or_reading_more() -
 
 
 @pytest.mark.asyncio
+async def test_filesystem_object_v1_layout_remains_readable(tmp_path: Path) -> None:
+    root = tmp_path / "objects"
+    store_id = "builtin"
+    key = "v1/runtime/object"
+    payload = b"filesystem-object-v1"
+    content_digest = hashlib.sha256(payload).hexdigest()
+    key_digest = hashlib.sha256(
+        store_id.encode("utf-8") + b"\0" + key.encode("utf-8")
+    ).hexdigest()
+    object_path = root / key_digest[:2] / key_digest
+    object_path.mkdir(parents=True)
+    (object_path / "data").write_bytes(payload)
+    (object_path / "metadata.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "key": key,
+                "digest": content_digest,
+                "size": len(payload),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    store = FilesystemObjectStore(root, store_id=store_id)
+    stat = await store.stat(key)
+    assert stat is not None
+    assert stat.digest == content_digest
+    assert stat.size == len(payload)
+    assert b"".join([chunk async for chunk in store.open(key)]) == payload
+
+
+@pytest.mark.asyncio
+async def test_filesystem_object_future_layout_version_is_rejected(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemObjectStore(tmp_path / "objects")
+    payload = b"future-version"
+    digest = hashlib.sha256(payload).hexdigest()
+    await store.put(
+        "payload",
+        _chunks(payload),
+        expected_size=len(payload),
+        expected_digest=digest,
+    )
+    metadata = store._path("payload") / "metadata.json"
+    document = json.loads(metadata.read_text(encoding="utf-8"))
+    document["version"] = 2
+    metadata.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(AIError) as raised:
+        await store.stat("payload")
+    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("field", "value"),
     (
