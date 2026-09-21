@@ -113,7 +113,7 @@ async def read_object(
     return bytes(data)
 
 
-async def _settle_task(task: "asyncio.Task[_TaskT]") -> tuple[_TaskT, bool]:
+async def _settle_task(task: "asyncio.Future[_TaskT]") -> tuple[_TaskT, bool]:
     cancelled = False
     while True:
         try:
@@ -126,7 +126,7 @@ async def _settle_task(task: "asyncio.Task[_TaskT]") -> tuple[_TaskT, bool]:
             cancelled = True
 
 
-async def _finish_owned_task(task: "asyncio.Task[_TaskT]") -> _TaskT:
+async def _finish_owned_task(task: "asyncio.Future[_TaskT]") -> _TaskT:
     value, cancelled = await _settle_task(task)
     if cancelled:
         raise asyncio.CancelledError
