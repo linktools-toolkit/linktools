@@ -54,7 +54,10 @@ def test_broken_container_surfaces_as_structured_load_error(tmp_path):
     assert error.expected_name == "broken"
 
 
-def test_installed_container_that_fails_to_load_is_reported_not_silently_skipped(tmp_path, caplog):
+def test_installed_container_that_fails_to_load_is_reported_not_silently_skipped(
+    tmp_path,
+    monkeypatch,
+):
     repo = _repo_with_broken_container(tmp_path)
     manager = _fresh_standalone_manager(tmp_path)
     manager.repos.add(str(repo))
@@ -63,10 +66,10 @@ def test_installed_container_that_fails_to_load_is_reported_not_silently_skipped
     # successfully loads in the first place (this simulates a container
     # that loaded fine once, was installed, and later broke).
     manager.installed_state._dump_names(["broken"])
+    warnings = []
+    monkeypatch.setattr(manager.logger, "warning", warnings.append)
 
-    import logging
-    with caplog.at_level(logging.WARNING, logger=manager.logger.name):
-        containers = manager.containers
+    containers = manager.containers
 
     assert "broken" not in containers
-    assert any("failed to load" in record.message for record in caplog.records)
+    assert any("failed to load" in message for message in warnings)
