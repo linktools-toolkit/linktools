@@ -879,45 +879,83 @@ class RuntimeStepStore(StepStore):
         if not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         for projection in plan.projections:
-            completion: asyncio.Future[None] | None = None
-            async with self._history_lock.hold(projection.run.run_id):
-                seal = self._terminal_seals.get(projection.run.run_id)
-                if seal is None or seal.token != plan.token_for(
-                    projection.run.run_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                flight = self._durability_flights.get(projection.run.run_id)
-                if (
-                    flight is None
-                    or flight.kind is not _RunDurabilityKind.TERMINAL
-                    or flight.token != seal.token
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                del self._durability_flights[projection.run.run_id]
-                del self._terminal_seals[projection.run.run_id]
-                completion = flight.completion
-                offset = self._projection_offsets.setdefault(
-                    projection.run.run_id,
-                    _ProjectionOffset(),
-                )
-                offset.events = max(offset.events, projection.target_event_offset)
-                offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
-                offset.transcript_messages = max(
-                    offset.transcript_messages,
-                    projection.target_transcript_message_count,
-                )
-                offset.interactions = max(
-                    offset.interactions,
-                    projection.target_interaction_offset,
-                )
-                self._projection_dirty.discard(projection.run.run_id)
-            if completion is not None and not completion.done():
-                completion.set_result(None)
+            await self._settle_committed_terminal_projection(
+                plan,
+                projection,
+                require_owned=True,
+            )
         _logger.info(
             "execution terminal seal finalized: execution=%s runs=%s",
             plan.execution_id,
             len(plan.projections),
         )
+
+    async def reconcile_execution_terminal_seal(
+        self,
+        plan: ExecutionTerminalSealPlan,
+    ) -> None:
+        for projection in plan.projections:
+            await self._settle_committed_terminal_projection(
+                plan,
+                projection,
+                require_owned=False,
+            )
+        _logger.warning(
+            "execution terminal seal reconciled after local finalization failure: "
+            "execution=%s runs=%s",
+            plan.execution_id,
+            len(plan.projections),
+        )
+
+    async def _settle_committed_terminal_projection(
+        self,
+        plan: ExecutionTerminalSealPlan,
+        projection: PreparedExecutionProjection,
+        *,
+        require_owned: bool,
+    ) -> None:
+        run_id = projection.run.run_id
+        token = plan.token_for(run_id)
+        completion: asyncio.Future[None] | None = None
+        async with self._history_lock.hold(run_id):
+            seal = self._terminal_seals.get(run_id)
+            flight = self._durability_flights.get(run_id)
+            if require_owned and (seal is None or flight is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (seal is None) != (flight is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if seal is not None and (
+                seal.execution_id != plan.execution_id
+                or seal.token != token
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if flight is not None and (
+                flight.kind is not _RunDurabilityKind.TERMINAL
+                or flight.token != token
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if flight is not None:
+                del self._durability_flights[run_id]
+                completion = flight.completion
+            if seal is not None:
+                del self._terminal_seals[run_id]
+            offset = self._projection_offsets.setdefault(
+                run_id,
+                _ProjectionOffset(),
+            )
+            offset.events = max(offset.events, projection.target_event_offset)
+            offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
+            offset.transcript_messages = max(
+                offset.transcript_messages,
+                projection.target_transcript_message_count,
+            )
+            offset.interactions = max(
+                offset.interactions,
+                projection.target_interaction_offset,
+            )
+            self._projection_dirty.discard(run_id)
+        if completion is not None and not completion.done():
+            completion.set_result(None)
 
     async def discard_execution_terminal_seal(
         self,
