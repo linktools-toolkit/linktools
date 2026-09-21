@@ -22,6 +22,7 @@ from ..spec import (
     AgentSpecCodec,
     MCPServerSpecCodec,
     SubagentRef,
+    agent_spec_identity_payload,
     capability_identity_payload,
     parse_mcp_tool_selector,
 )
@@ -387,7 +388,7 @@ class AgentCompiler:
         )
         identity: dict[str, JsonValue] = {
             "contract": "agent-definition-v1",
-            "agent": AgentSpecCodec().to_payload(spec),
+            "agent": agent_spec_identity_payload(AgentSpecCodec().to_payload(spec)),
             "model_fingerprint": model.fingerprint,
             "selected": [
                 {"kind": item.kind, "id": item.id, "fingerprint": item.fingerprint}
