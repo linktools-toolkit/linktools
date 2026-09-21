@@ -3067,13 +3067,54 @@ class LocalExecutionBackend:
                 )
                 metric_status = ExecutionStatus.WAITING_DEFERRED.value
                 return
-            committed = await self._commit_success(
-                current,
-                binding,
-                result.output,
-                result.usage,
-                run_id,
-            )
+            try:
+                committed = await self._commit_success(
+                    current,
+                    binding,
+                    result.output,
+                    result.usage,
+                    run_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as terminal_error:
+                persisted = await self._execution.executions.get(
+                    execution_id,
+                    tenant_id=self._tenant_id,
+                )
+                if persisted is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from terminal_error
+                if persisted.status in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    committed = persisted
+                else:
+                    try:
+                        committed = await self._commit_failure(
+                            persisted,
+                            terminal_error,
+                            run_id=run_id,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as commit_error:
+                        observed = await self._execution.executions.get(
+                            execution_id,
+                            tenant_id=self._tenant_id,
+                        )
+                        if observed is None or observed.status not in {
+                            ExecutionStatus.SUCCEEDED,
+                            ExecutionStatus.FAILED,
+                            ExecutionStatus.CANCELLED,
+                        }:
+                            raise _secondary_execution_error(
+                                commit_error,
+                                terminal_error,
+                            ) from terminal_error
+                        committed = observed
+                await self._publish_persisted_terminal_event(committed)
             metric_status = (
                 "CANCELLED"
                 if committed.status is ExecutionStatus.CANCELLING
@@ -3337,6 +3378,45 @@ class LocalExecutionBackend:
             payload,
             durable_sequence=durable_sequence,
         )
+
+    async def _publish_persisted_terminal_event(
+        self,
+        execution: ExecutionRecord,
+    ) -> None:
+        if execution.status not in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        } or execution.event_sequence < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        page = await self._execution.events.list(
+            execution.execution_id,
+            tenant_id=self._tenant_id,
+            after_sequence=execution.event_sequence - 1,
+            limit=1,
+        )
+        if len(page.items) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        event = page.items[0]
+        expected_type = (
+            ExecutionEventType.EXECUTION_SUCCEEDED
+            if execution.status is ExecutionStatus.SUCCEEDED
+            else ExecutionEventType.EXECUTION_CANCELLED
+            if execution.status is ExecutionStatus.CANCELLED
+            else ExecutionEventType.EXECUTION_FAILED
+        )
+        if (
+            event.sequence != execution.event_sequence
+            or event.event_type != expected_type
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._publish_terminal_event(
+            execution.execution_id,
+            event_type=expected_type,
+            payload=dict(event.payload),
+            durable_sequence=event.sequence,
+        )
+        self._live_broker.complete(execution.execution_id)
 
     def _step_store(self, runtime_domain: RuntimeDomain) -> StepStore:
         return self._step_reads[runtime_domain]
