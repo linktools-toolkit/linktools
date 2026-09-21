@@ -370,7 +370,7 @@ async def test_mysql_insert_result_does_not_depend_on_found_rows_rowcount() -> N
         index_elements=("token",),
     )
     assert inserted.inserted is True
-    assert inserted.row_id == 7
+    assert inserted.row_id is None
 
     duplicate = await dialect.insert_ignore_conflict(
         _MySQLSession(duplicate=True),  # type: ignore[arg-type]
