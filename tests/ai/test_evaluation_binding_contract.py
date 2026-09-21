@@ -146,6 +146,47 @@ async def test_evaluation_start_persists_source_execution_identity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evaluation_idempotency_includes_memory_scope() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="evaluation", tenant_id="tenant")
+    binding = _binding()
+    service = DefaultEvaluationService(
+        state.evaluation,
+        state.execution.executions,
+        _Allow(),  # type: ignore[arg-type]
+        _RecordingExecution(),  # type: ignore[arg-type]
+    )
+    principal = Principal("principal", "tenant")
+    try:
+        await service.start(
+            binding.binding_digest,
+            StartEvaluationRequest(
+                principal,
+                "dataset",
+                "scope-a",
+                "same-key",
+            ),
+            binding_snapshot=binding,
+        )
+
+        with pytest.raises(AIError) as raised:
+            await service.start(
+                binding.binding_digest,
+                StartEvaluationRequest(
+                    principal,
+                    "dataset",
+                    "scope-b",
+                    "same-key",
+                ),
+                binding_snapshot=binding,
+            )
+
+        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_evaluation_replay_uses_historical_execution_binding() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="evaluation", tenant_id="tenant")

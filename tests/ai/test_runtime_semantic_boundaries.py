@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for the remaining runtime audit boundaries."""
 
+import os
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -143,6 +146,28 @@ def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
     }
 
     assert canonicalize_output_schema_v1(first) == canonicalize_output_schema_v1(second)
+
+
+def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:
+    script = (
+        "from linktools.ai.core import canonical_sha256;"
+        "from linktools.ai.runtime._tool import _portable_arguments;"
+        "print(canonical_sha256(_portable_arguments("
+        "{'values': {'alpha', 'beta', 'gamma'}})))"
+    )
+    values = []
+    for seed in ("1", "2"):
+        env = dict(os.environ)
+        env["PYTHONHASHSEED"] = seed
+        values.append(
+            subprocess.check_output(
+                [sys.executable, "-c", script],
+                env=env,
+                text=True,
+            ).strip()
+        )
+
+    assert len(set(values)) == 1
 
 
 def test_agent_tool_retry_default_is_finite() -> None:
