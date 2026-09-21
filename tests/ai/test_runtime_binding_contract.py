@@ -180,6 +180,28 @@ def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+def test_skill_snapshot_reference_requires_store_id() -> None:
+    with pytest.raises(AIError) as raised:
+        SkillDefinition.from_semantic_contract(
+            {
+                "version": 1,
+                "id": "review",
+                "content": "instructions",
+                "source": {
+                    "source_id": "application",
+                    "root": "review",
+                    "snapshot": {
+                        "key": "snapshot",
+                        "digest": "a" * 64,
+                        "size": 1,
+                    },
+                },
+            }
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
     plain = ModelRegistry.openai(
         model="gpt-test",
