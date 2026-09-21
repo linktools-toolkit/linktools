@@ -257,6 +257,17 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup"]
             assert watched[-1].event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+            stored_execution = await state.execution.executions.get(
+                execution.execution_id,
+                tenant_id=runtime.tenant_id,
+            )
+            stored_session = await state.conversation.sessions.get(
+                "session",
+                tenant_id=runtime.tenant_id,
+            )
+            assert stored_execution is not None and stored_execution.retention_closed
+            assert stored_session is not None
+            assert stored_session.active_execution_id is None
     finally:
         await state.close()
 
