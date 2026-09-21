@@ -90,14 +90,13 @@ class SkillDefinition:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             snapshot_ref = None
             if snapshot is not None:
-                if not isinstance(snapshot, Mapping) or set(snapshot) != {
-                    "store_id",
+                if not isinstance(snapshot, Mapping) or not {
                     "key",
                     "digest",
                     "size",
-                }:
+                }.issubset(snapshot):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                store_id = snapshot["store_id"]
+                store_id = snapshot.get("store_id", "runtime")
                 key = snapshot["key"]
                 digest = snapshot["digest"]
                 size = snapshot["size"]
