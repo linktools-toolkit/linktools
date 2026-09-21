@@ -3,6 +3,11 @@
 This note defines the DBA review boundary for the five Runtime StateStore tables.
 `init_schema.sql` and `runtime/state/_schema.py` remain the schema authorities.
 
+This review describes the current pre-release schema and index contract. It is
+not a runtime data migration plan: the Runtime does not read superseded
+development records or create compatibility indexes at startup. Any deployment
+change remains an explicit DBA operation against a known database definition.
+
 ## Target index contract
 
 | Table | Columns | Unique | Business | Audit |

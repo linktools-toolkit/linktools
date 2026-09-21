@@ -146,6 +146,7 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
             step_index=1,
             messages=[pending_request],
             context_messages=pending_capture.snapshot_context([pending_request])[0],
+            transcript_message_count_before=0,
         )
     )
     consumed_raw = [consumed_request, consumed_response]
@@ -155,6 +156,7 @@ async def test_snapshot_recovery_keeps_pending_and_drops_consumed_binary() -> No
             step_index=1,
             messages=consumed_raw,
             context_messages=consumed_capture.snapshot_context(consumed_raw)[0],
+            transcript_message_count_before=0,
         )
     )
 

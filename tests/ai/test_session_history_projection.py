@@ -170,6 +170,7 @@ async def _materialize(
             agent_name="default",
             timestamp=now,
             state="complete",
+            transcript_message_count_before=0,
         )
     )
     await state.steps.materialize_conversation(step_run_id=run_id)

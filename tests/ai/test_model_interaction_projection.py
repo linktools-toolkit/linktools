@@ -571,6 +571,7 @@ async def test_parent_tool_result_round_trip_materializes_two_model_requests() -
                 conversation_id="conversation",
                 agent_name="parent",
                 state="complete",
+                transcript_message_count_before=0,
             )
         )
 

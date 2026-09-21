@@ -337,9 +337,10 @@ with resumable cursors; it does not invoke models, task handlers, or external
 systems.
 
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
-private repositories directly. Runtime persistence v1 is the compatibility baseline. Future persistence
-versions must keep an explicit v1 reader rather than reinterpret or silently
-rewrite v1 data.
+private repositories directly. The current pre-release wire contract is the
+single persistence baseline; superseded development data is not a compatibility
+obligation. Published-version fixtures and readers are added only when a real
+compatibility commitment exists.
 
 ## 7. Runtime state
 
@@ -400,7 +401,7 @@ result.error_diagnostics
 
 `exception_message` is diagnostic data, not a safe/redacted field. It may contain sensitive text already present in the originating exception. Runtime does not add prompts, model responses, headers, request payloads, or URLs to diagnostics, but it also does not redact the exception message. Applications should apply the same authorization and retention controls to diagnostics as to other execution investigation data.
 
-Diagnostics are durable with the failed execution and are returned after Runtime restart through the normal public execution result and terminal event APIs. Historical failed records that predate the field return `error_diagnostics is None`. Successful and cancelled executions never carry diagnostics.
+Diagnostics are durable with the failed execution and are returned after Runtime restart through the normal public execution result and terminal event APIs. Current failed records carry an explicit diagnostic field; malformed records missing it are rejected. Successful and cancelled executions never carry diagnostics.
 
 Diagnostics do not participate in error classification, retry decisions, TaskGraph scheduling, idempotency identity, or terminal-state decisions. The field meanings, truncation limits, and digest input above define `execution-error-diagnostics-v1`; incompatible semantic changes require a new diagnostics contract version.
 

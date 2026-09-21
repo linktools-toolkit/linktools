@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
-from pydantic import BaseModel
+from linktools.core import environ
 
 from ..core import JsonValue, Principal, TaskStatus
 from ..errors import AIError, ErrorCode
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
+_logger = environ.get_logger("ai.runtime.task")
 
 
 class _ExecutionTreeWatcher(Protocol):
@@ -79,8 +80,9 @@ class TaskGraphRun(Generic[AppT]):
         )
         if observer is None:
             return _public_task_result(await wait_task)
+        recovery_started = asyncio.Event()
         observer_task = asyncio.create_task(
-            self._observe(observer),
+            self._observe(observer, recovery_started),
             name=f"task-graph-observer-{self.graph_id}",
         )
         try:
@@ -88,12 +90,18 @@ class TaskGraphRun(Generic[AppT]):
                 (wait_task, observer_task),
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if wait_task in done:
-                return _public_task_result(wait_task.result())
-            error = observer_task.exception()
-            if error is not None:
-                raise error
-            return _public_task_result(await wait_task)
+            if observer_task in done:
+                recovered = observer_task.result()
+                if recovered is not None:
+                    if wait_task.done():
+                        wait_task.result()
+                    return recovered
+            result = _public_task_result(await wait_task)
+            if recovery_started.is_set():
+                recovered = await observer_task
+                if recovered is not None:
+                    return recovered
+            return result
         finally:
             for task in (observer_task, wait_task):
                 if not task.done():
@@ -210,21 +218,7 @@ class TaskGraphRun(Generic[AppT]):
         observer: "Callable[[TaskGraphRunEvent], Awaitable[None]] | None" = None,
     ) -> TaskGraphResult:
         snapshot = await self._snapshot()
-        result = TaskGraphResult(
-            snapshot.graph_id,
-            _public_task_status(snapshot.status, snapshot.node_states),
-            tuple(
-                TaskNodeResult(
-                    state.node_id,
-                    state.status,
-                    state.result_digest,
-                    state.execution_id,
-                    state.error_code,
-                    state.error_digest,
-                )
-                for state in snapshot.node_states
-            ),
-        )
+        result = _snapshot_result(snapshot)
         if observer is not None:
             events = await self._capture_replay_events(snapshot)
             for event in events:
@@ -274,9 +268,88 @@ class TaskGraphRun(Generic[AppT]):
     async def _observe(
         self,
         observer: "Callable[[TaskGraphRunEvent], Awaitable[None]]",
-    ) -> None:
-        async for event in self.watch():
-            await observer(event)
+        recovery_started: asyncio.Event,
+    ) -> TaskGraphResult | None:
+        events = self.watch()
+        cursor = None
+        try:
+            while True:
+                try:
+                    event = await anext(events)
+                except StopAsyncIteration:
+                    return None
+                except AIError as error:
+                    if not _is_event_durability_race(error):
+                        raise
+                    recovery_started.set()
+                    snapshot = await self._snapshot()
+                    if snapshot.status not in {
+                        TaskStatus.SUCCEEDED,
+                        TaskStatus.FAILED,
+                        TaskStatus.BLOCKED,
+                        TaskStatus.CANCELLED,
+                    }:
+                        raise
+                    final_event = await self._terminal_graph_event(snapshot, cursor)
+                    await observer(final_event)
+                    _logger.info(
+                        "Recovered graph observation from terminal snapshot: "
+                        "graph_id=%s status=%s",
+                        self.graph_id,
+                        snapshot.status.value,
+                    )
+                    return _snapshot_result(snapshot)
+                await observer(event)
+                if event.cursor is not None:
+                    cursor = event.cursor
+        finally:
+            await events.aclose()
+
+    async def _terminal_graph_event(
+        self,
+        snapshot: TaskGraphSnapshot,
+        cursor: str | None,
+    ) -> TaskGraphRunEvent:
+        if snapshot.event_sequence < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        page = await self._runtime.graph.list_events(
+            self.graph_id,
+            principal=self._principal,
+            after_sequence=snapshot.event_sequence - 1,
+            limit=1,
+        )
+        if len(page.items) != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        event = page.items[0]
+        if (
+            event.graph_id != snapshot.graph_id
+            or event.sequence != snapshot.event_sequence
+            or event.node_id is not None
+            or event.status is not snapshot.status
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        execution_sequences = {}
+        if cursor is not None:
+            _, execution_sequences = decode_graph_watch_cursor(
+                self._runtime.namespace,
+                self._principal.tenant_id,
+                self.graph_id,
+                cursor,
+                include_content=False,
+            )
+        return TaskGraphRunEvent(
+            self.graph_id,
+            None,
+            event,
+            encode_graph_watch_cursor(
+                self._runtime.namespace,
+                self._principal.tenant_id,
+                self.graph_id,
+                include_content=False,
+                graph_sequence=event.sequence,
+                execution_sequences=execution_sequences,
+            ),
+        )
 
     def watch(
         self,
@@ -387,7 +460,6 @@ class TaskGraphRun(Generic[AppT]):
                     waiters,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-
                 if graph_task is not None and graph_task in done:
                     task = graph_task
                     graph_task = None
@@ -475,6 +547,23 @@ class TaskGraphRun(Generic[AppT]):
                         stream.__anext__(),
                         name=f"task-run-execution-{self.graph_id}-{node_id}",
                     )
+        except AIError as error:
+            if _is_event_durability_race(error):
+                # Other streams may have failed while an observer awaited a callback.
+                tasks = list(execution_tasks.values())
+                if graph_task is not None:
+                    tasks.append(graph_task)
+                for task in tasks:
+                    if not task.done():
+                        continue
+                    other_error = task.exception()
+                    if (
+                        other_error is not None
+                        and not isinstance(other_error, StopAsyncIteration)
+                        and not _is_event_durability_race(other_error)
+                    ):
+                        raise other_error from error
+            raise
         finally:
             tasks = list(execution_tasks.values())
             if graph_task is not None:
@@ -740,15 +829,18 @@ def _public_task_result(result: TaskGraphResult) -> TaskGraphResult:
     return result
 
 
+def _is_event_durability_race(error: BaseException) -> bool:
+    return (
+        isinstance(error, AIError)
+        and error.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        and error.safe_details.get("phase") == "execution_event_durability_race"
+    )
+
+
 def _snapshot_result(snapshot: TaskGraphSnapshot) -> TaskGraphResult:
     return TaskGraphResult(
         snapshot.graph_id,
         _public_task_status(snapshot.status, snapshot.node_states),
-        tuple(
-            state.execution_id
-            for state in snapshot.node_states
-            if state.execution_id is not None
-        ),
         tuple(
             TaskNodeResult(
                 state.node_id,

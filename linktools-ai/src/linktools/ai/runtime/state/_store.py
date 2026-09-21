@@ -113,14 +113,6 @@ def active_state_scope() -> _ActiveStateScope | None:
     return _active_state_scope.get()
 
 
-def bind_state_transaction(store: "StateStore", transaction: "StateTransaction") -> Token:
-    """Bind a compatibility single-store scope around one transaction."""
-    return bind_state_scope(
-        store.storage_group,
-        {store: transaction},
-    )
-
-
 def bind_state_scope(
     group: "StateStorageGroup",
     transactions: Mapping["StateStore", "StateTransaction"],

@@ -15,13 +15,18 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Architecture and release gates encode long-lived invariants only. Do not freeze current package names, module depth, class names, or layout as policy.
 - Build/release tooling must not become a second owner of Runtime semantic truth.
 
+### Durable contracts and identity
+
+- Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
+- Durable wire formats and semantic identities are explicit LinkTools contracts. Honor published or explicitly committed compatibility obligations. Without such an obligation, remove obsolete pre-release readers, aliases, defaults and migrations while updating current writers, readers and verification together. Do not prebuild compatibility paths for hypothetical versions.
+- Define each semantic or idempotency digest from one explicit minimal projection owned by the contract. Include only inputs needed to distinguish execution meaning, accepted request behavior or safe reuse/recovery. Non-semantic additions and default fields must not change that identity; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
+- Separate semantic identity from byte integrity and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter semantic identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
+- Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Identity-affecting data must remain stable after its contract is frozen, and identity comparisons must use the same projection as the digest.
+- Every current writer output must be accepted by its matching reader. Define omitted optional fields in that wire contract, not through changing runtime defaults. Reject corrupt or unsupported durable data with typed errors; never guess, silently repair or reinterpret unknown execution semantics. Verify original stored bytes before adapting decoded values.
+
 ### Persistence and concurrency
 
 - Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
-- Persisted or replayed data is a versioned contract. Compatibility must be based on explicit LinkTools semantics, not incidental dependency serialization or schema.
-- Published or explicitly compatibility-committed persistence protocols must remain evolvable and backward-compatible. Pre-release protocols without real compatibility obligations may make incompatible changes when they simplify the contract, provided owners, codecs, schema, fixtures, and tests change atomically. Corrupt or unsupported durable data must still fail closed with typed errors.
-- Stable hashes and idempotency identities must remain stable when non-semantic optional/default fields change; include codec/version/provenance when they change semantics.
-- Durable contracts must stay minimal. Persist stable references for dependencies intentionally resolved at use time; persist dependency semantics only when exact replay of an already-established durable fact requires them. Do not copy, embed, or recursively snapshot referenced configuration for convenience or speculative future recovery.
 - A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
 - Caller cancellation does not determine durable truth. Resolve commit/readback state before reporting an unknown outcome.
 - Filesystem coordination uses `filelock`. Database concurrency must avoid pessimistic locking.
@@ -77,4 +82,8 @@ python manage.py install --editable
 python manage.py check linktools-ai
 ```
 
-Run the project gate after changing architecture boundaries, public exports, persistence contracts, or schema definitions. Durable-codec verification uses frozen old-version/golden fixtures and should cover public ingress paths, not only same-version encode/decode.
+Run the project gate after changing architecture boundaries, public exports, persistence contracts, or schema definitions. Current pre-release scope has no obligation to read superseded development data. Use the current wire contract as the single baseline; retain normal defaults of current codecs and current execution recovery semantics. Published-version fixtures are required only after a real compatibility commitment exists.
+
+For the current OpenAI binding, base_url, api_key and transport timeout/retry settings are connection concerns, not model semantic identity. Task execution timeout/retry policies and model-visible tool descriptions/schema have different responsibilities and remain semantic where used.
+
+Measure test setup, execution and full check wall time in a matched environment before and after test simplification. Record removed-test responsibility mappings and retain the existing manage.py entry point and CI matrix. Do not infer speedup from fewer files or parametrization alone.

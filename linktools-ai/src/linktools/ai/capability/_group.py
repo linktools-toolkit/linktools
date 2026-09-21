@@ -35,6 +35,8 @@ from ..spec import (
     SkillMarkdownSpecCodec,
     SkillSpecCodec,
     ThinkingValue,
+    canonicalize_json_schema,
+    capability_identity_payload,
     parse_mcp_tool_selector,
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
@@ -1002,12 +1004,7 @@ def capability_fingerprint(
     semantic_contract: Mapping[str, JsonValue],
 ) -> str:
     return canonical_sha256(
-        {
-            "contract": "capability-fingerprint-v1",
-            "kind": kind,
-            "id": identity,
-            "semantic": dict(semantic_contract),
-        }
+        capability_identity_payload(kind, identity, semantic_contract)
     )
 
 
@@ -1042,10 +1039,25 @@ def _task_output_contract(handler: object) -> JsonValue:
     output = getattr(handler, "output", None)
     if output is None:
         return {"kind": "json"}
+    model_schema = getattr(output, "model_json_schema", None)
+    if not callable(model_schema):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    schema = model_schema()
+    generated_paths: frozenset[tuple[str | int, ...]] = frozenset()
+    config = getattr(output, "model_config", {})
+    if (
+        isinstance(config, Mapping)
+        and config.get("title") is None
+        and isinstance(schema, Mapping)
+        and schema.get("title") == getattr(output, "__name__", None)
+    ):
+        generated_paths = frozenset({("title",)})
     return {
         "kind": "schema",
-        "module": getattr(output, "__module__", type(output).__module__),
-        "name": getattr(output, "__qualname__", type(output).__qualname__),
+        "schema": canonicalize_json_schema(
+            schema,
+            generated_title_paths=generated_paths,
+        ),
     }
 
 

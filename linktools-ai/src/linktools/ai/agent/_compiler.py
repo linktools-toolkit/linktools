@@ -22,6 +22,7 @@ from ..spec import (
     AgentSpecCodec,
     MCPServerSpecCodec,
     SubagentRef,
+    capability_identity_payload,
     parse_mcp_tool_selector,
 )
 from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
@@ -221,7 +222,15 @@ class AgentCompiler:
                 current = self._by_identity.get((pin.kind, pin.id))
                 if current is None or current.fingerprint != pin.fingerprint:
                     raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-                if current.semantic_contract != dict(pin.contract):
+                if capability_identity_payload(
+                    current.kind,
+                    current.id,
+                    current.semantic_contract,
+                ) != capability_identity_payload(
+                    pin.kind,
+                    pin.id,
+                    pin.contract,
+                ):
                     raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
                 candidate = current
             selected[pin.kind].append(candidate)

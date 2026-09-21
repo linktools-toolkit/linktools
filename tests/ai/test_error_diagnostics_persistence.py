@@ -256,8 +256,8 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
         await reopened.close()
 
 
-def test_execution_without_defaulted_diagnostics_field_uses_default() -> None:
-    diagnostics = ErrorDiagnostics.from_exception(RuntimeError("legacy"))
+def test_execution_requires_error_diagnostics_field() -> None:
+    diagnostics = ErrorDiagnostics.from_exception(RuntimeError("current"))
     _started, _result, commit = _failed_terminal(
         datetime.now(timezone.utc),
         diagnostics,
@@ -265,29 +265,28 @@ def test_execution_without_defaulted_diagnostics_field_uses_default() -> None:
     payload = _encode_persisted_domain(commit.execution)
     payload["fields"].pop("error_diagnostics")
 
-    decoded = _decode_enveloped_domain(
-        encode_envelope({"type": "execution_record", "payload": payload}),
-        ExecutionRecord,
-    )
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(
+            encode_envelope({"type": "execution_record", "payload": payload}),
+            ExecutionRecord,
+        )
 
-    assert decoded.error_diagnostics is None
-    assert decoded.status is ExecutionStatus.FAILED
-    assert decoded.error_code == ErrorCode.INTERNAL_ERROR.value
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_execution_without_defaulted_started_at_field_uses_default() -> None:
+def test_execution_requires_started_at_field() -> None:
     now = datetime.now(timezone.utc)
     current = replace(_started_execution(now), started_at=now)
     payload = _encode_persisted_domain(current)
     payload["fields"].pop("started_at")
 
-    decoded = _decode_enveloped_domain(
-        encode_envelope({"type": "execution_record", "payload": payload}),
-        ExecutionRecord,
-    )
+    with pytest.raises(AIError) as raised:
+        _decode_enveloped_domain(
+            encode_envelope({"type": "execution_record", "payload": payload}),
+            ExecutionRecord,
+        )
 
-    assert decoded.started_at is None
-    assert decoded.status is ExecutionStatus.STARTED
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_model_timeout_preserves_diagnostics_without_changing_safe_contract() -> None:

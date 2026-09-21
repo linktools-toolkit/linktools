@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..spec import AgentSpec, AgentSpecCodec, SubagentRef
+from ..spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    SubagentRef,
+    binding_identity_payload,
+    capability_identity_payload,
+)
 from ._output import OutputBinding, OutputMode
 
 if TYPE_CHECKING:
@@ -61,12 +67,11 @@ class SemanticPin:
     @property
     def fingerprint(self) -> str:
         return canonical_sha256(
-            {
-                "contract": "capability-fingerprint-v1",
-                "kind": self.kind,
-                "id": self.id,
-                "semantic": dict(self.contract),
-            }
+            capability_identity_payload(
+                self.kind,
+                self.id,
+                self.contract,
+            )
         )
 
     def to_payload(self) -> "dict[str, JsonValue]":
@@ -159,12 +164,7 @@ class AgentBindingSnapshot:
         object.__setattr__(
             self,
             "_binding_digest",
-            canonical_sha256(
-                {
-                    "contract": "agent-binding-v1",
-                    "snapshot": self.to_payload(),
-                }
-            ),
+            canonical_sha256(binding_identity_payload(self.to_payload())),
         )
 
     @property
@@ -262,7 +262,10 @@ class AgentBinding:
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
             or dict(self.definition.model.semantic_payload)
             != dict(self.snapshot.base_model)
-            or _definition_selected_pins(self.definition) != self.snapshot.selected
+            or tuple(
+                item.fingerprint for item in _definition_selected_pins(self.definition)
+            )
+            != tuple(item.fingerprint for item in self.snapshot.selected)
             or self.definition.selected_subagents != self.snapshot.subagent_ids
             or self.output_binding.mode != self.snapshot.output_mode
             or self.output_binding.schema_definition != dict(self.snapshot.output_schema)

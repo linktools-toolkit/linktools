@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 
 from ..core import (
+    ImmutableJsonMapping,
     JsonValue,
     Principal,
     CorrelationData,
@@ -26,6 +27,29 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
+from ..spec import binding_identity_payload
+
+
+def normalize_timeout_seconds(value: object) -> "float | None":
+    """Normalize one finite positive task timeout."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("task timeout must be a finite positive number")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise ValueError("task timeout must be a finite positive number")
+    return normalized
+
+
+def normalize_retry_delay_seconds(value: object) -> float:
+    """Normalize one finite non-negative task retry delay."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("task retry delay must be a finite non-negative number")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError("task retry delay must be a finite non-negative number")
+    return 0.0 if normalized == 0 else normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +171,8 @@ class TaskNode:
             normalized_dependencies = tuple(dependencies)
         except TypeError as error:
             raise TypeError("task node dependencies are invalid") from error
+        normalized_timeout = normalize_timeout_seconds(timeout_seconds)
+        normalized_retry_delay = normalize_retry_delay_seconds(retry_delay_seconds)
         if (
             not isinstance(node_id, str)
             or not node_id.strip()
@@ -162,11 +188,6 @@ class TaskNode:
             or isinstance(max_attempts, bool)
             or not isinstance(max_attempts, int)
             or max_attempts < 1
-            or isinstance(timeout_seconds, bool)
-            or (timeout_seconds is not None and timeout_seconds < 0)
-            or isinstance(retry_delay_seconds, bool)
-            or not isinstance(retry_delay_seconds, (int, float))
-            or retry_delay_seconds < 0
             or effect not in {"none", "replay_safe", "non_replay_safe"}
         ):
             raise ValueError("task node identity is invalid")
@@ -193,15 +214,15 @@ class TaskNode:
             normalized_contract = _normalize_json_value(dict(output_contract))
             if not isinstance(normalized_contract, dict):
                 raise ValueError("task node output contract is invalid")
-            contract = MappingProxyType(normalized_contract)
+            contract = ImmutableJsonMapping(normalized_contract)
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "dependencies", normalized_dependencies)
         object.__setattr__(self, "budget_cost", budget_cost)
         object.__setattr__(self, "expander", expander)
         object.__setattr__(self, "input_refs", MappingProxyType(references))
-        object.__setattr__(self, "timeout_seconds", timeout_seconds)
+        object.__setattr__(self, "timeout_seconds", normalized_timeout)
         object.__setattr__(self, "max_attempts", max_attempts)
-        object.__setattr__(self, "retry_delay_seconds", float(retry_delay_seconds))
+        object.__setattr__(self, "retry_delay_seconds", normalized_retry_delay)
         object.__setattr__(self, "output_schema", output_schema)
         object.__setattr__(self, "output_contract", contract)
         object.__setattr__(self, "effect", effect)
@@ -461,10 +482,20 @@ def _task_graph_request_digest(
 
 
 def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
+    node_input = node.input
+    if (
+        node_input.get("type") == "linktools.ai.agent"
+        and node_input.get("version") == 1
+        and isinstance(node_input.get("binding"), Mapping)
+    ):
+        node_input = dict(node_input)
+        node_input["binding"] = canonical_sha256(
+            binding_identity_payload(node_input["binding"])
+        )
     value: dict[str, JsonValue] = {
         "node_id": node.node_id,
         "dependencies": sorted(node.dependencies),
-        "input": node.input,
+        "input": node_input,
         "budget_cost": node.budget_cost,
         "expander": (
             None

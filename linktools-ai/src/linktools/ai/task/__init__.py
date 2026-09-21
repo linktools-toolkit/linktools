@@ -29,6 +29,8 @@ from ._graph import (
     TaskResultRef,
     TaskStatus,
     TaskTerminalRecord,
+    normalize_retry_delay_seconds,
+    normalize_timeout_seconds,
     ready_nodes,
 )
 from ._handler import (
@@ -102,6 +104,8 @@ __all__ = [
     "TaskResultRef",
     "TaskStatus",
     "TaskTerminalRecord",
+    "normalize_retry_delay_seconds",
+    "normalize_timeout_seconds",
     "open_local_task_graph_service",
     "ready_nodes",
 ]

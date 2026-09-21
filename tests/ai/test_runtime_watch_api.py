@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
+from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -542,6 +544,150 @@ async def _assert_no_graph_observer_tasks() -> None:
     assert "task-graph-wait-graph" not in names
     assert "task-graph-observer-graph" not in names
     assert "task-run-graph-graph" not in names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt_node", ["a", "b"])
+async def test_graph_wait_preserves_simultaneous_stream_corruption(corrupt_node: str) -> None:
+    release = asyncio.Event()
+    started: set[str] = set()
+    corruption = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    class GraphService(_WaitGraphService):
+        async def snapshot(self, graph_id: str, *, principal: Principal) -> object:
+            return SimpleNamespace(
+                graph_id=graph_id,
+                status=TaskStatus.SUCCEEDED,
+                node_states=tuple(
+                    SimpleNamespace(node_id=node, execution_id=node)
+                    for node in ("a", "b")
+                ),
+            )
+
+        async def stream_events(
+            self, graph_id: str, *, principal: Principal, after_sequence: int = 0,
+        ) -> AsyncIterator[TaskEvent]:
+            for sequence, node in enumerate(("a", "b"), 1):
+                yield TaskEvent(
+                    1, graph_id, sequence, TaskEventType.NODE_CHANGED,
+                    datetime.now(timezone.utc), TaskStatus.WAITING,
+                    previous_status=TaskStatus.RUNNING, node_id=node,
+                    fence=1, execution_id=node,
+                )
+            await asyncio.Event().wait()
+
+    async def watch_tree(
+        execution_id: str, *, principal: Principal,
+        after_sequences: Mapping[str, int] | None = None,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        started.add(execution_id)
+        if len(started) == 2:
+            release.set()
+        await release.wait()
+        if execution_id == corrupt_node:
+            raise corruption
+        raise AIError(
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+            safe_details={"phase": "execution_event_durability_race"},
+        )
+        yield  # pragma: no cover
+
+    service = GraphService("block")
+    run = TaskGraphRun(
+        _wait_runtime(service), "graph", Principal("owner", "tenant"), watch_tree,
+    )
+
+    async def observer(event: TaskGraphRunEvent) -> None:
+        pass
+
+    with pytest.raises(AIError) as raised:
+        await asyncio.wait_for(run.wait(observer=observer), 1)
+    assert raised.value is corruption
+    assert service.wait_cancelled.is_set()
+    await _assert_no_graph_observer_tasks()
+
+
+@pytest.mark.asyncio
+async def test_graph_wait_preserves_corruption_during_observer_callback() -> None:
+    race_release = asyncio.Event()
+    race_failed = asyncio.Event()
+    corruption_release = asyncio.Event()
+    corruption_failed = asyncio.Event()
+    closed: set[str] = set()
+    corruption = AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    class GraphService(_WaitGraphService):
+        async def snapshot(self, graph_id: str, *, principal: Principal) -> object:
+            return SimpleNamespace(
+                graph_id=graph_id,
+                status=TaskStatus.SUCCEEDED,
+                node_states=tuple(
+                    SimpleNamespace(node_id=node, execution_id=node)
+                    for node in ("a", "b")
+                ),
+            )
+
+        async def stream_events(
+            self, graph_id: str, *, principal: Principal, after_sequence: int = 0,
+        ) -> AsyncIterator[TaskEvent]:
+            try:
+                for sequence, node in enumerate(("a", "b"), 1):
+                    yield TaskEvent(
+                        1, graph_id, sequence, TaskEventType.NODE_CHANGED,
+                        datetime.now(timezone.utc), TaskStatus.WAITING,
+                        previous_status=TaskStatus.RUNNING, node_id=node,
+                        fence=1, execution_id=node,
+                    )
+                race_release.set()
+                await race_failed.wait()
+                yield TaskEvent(
+                    1, graph_id, 3, TaskEventType.GRAPH_CHANGED,
+                    datetime.now(timezone.utc), TaskStatus.SUCCEEDED,
+                    previous_status=TaskStatus.RUNNING,
+                )
+                await asyncio.Event().wait()
+            finally:
+                closed.add("graph")
+
+    async def watch_tree(
+        execution_id: str, *, principal: Principal,
+        after_sequences: Mapping[str, int] | None = None,
+        include_content: bool = False,
+    ) -> AsyncIterator[ExecutionTreeEvent]:
+        try:
+            if execution_id == "b":
+                await corruption_release.wait()
+                corruption_failed.set()
+                raise corruption
+            await race_release.wait()
+            race_failed.set()
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={"phase": "execution_event_durability_race"},
+            )
+            yield  # pragma: no cover
+        finally:
+            closed.add(execution_id)
+
+    async def observer(event: TaskGraphRunEvent) -> None:
+        if isinstance(event.event, TaskEvent) and event.event.sequence == 3:
+            assert race_failed.is_set()
+            assert not corruption_failed.is_set()
+            corruption_release.set()
+            await corruption_failed.wait()
+
+    service = GraphService("block")
+    run = TaskGraphRun(
+        _wait_runtime(service), "graph", Principal("owner", "tenant"), watch_tree,
+    )
+    with pytest.raises(AIError) as raised:
+        await asyncio.wait_for(run.wait(observer=observer), 1)
+    assert raised.value is corruption
+    assert corruption_failed.is_set()
+    assert service.wait_cancelled.is_set()
+    assert closed == {"graph", "a", "b"}
+    await _assert_no_graph_observer_tasks()
 
 
 @pytest.mark.asyncio

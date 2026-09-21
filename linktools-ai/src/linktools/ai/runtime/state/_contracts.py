@@ -450,26 +450,11 @@ class ContextProjection:
                     }
                 )
                 continue
-            payload = item.content.payload
-            payload_identity: dict[str, JsonValue] = {
-                "kind": payload.kind,
-                "encoding": payload.encoding,
-                "digest": payload.digest,
-                "size": payload.size,
-            }
-            if payload.kind == "inline":
-                payload_identity["value"] = payload.value
-            elif payload.ref is not None:
-                payload_identity["key"] = payload.ref.key
             identities.append(
                 {
                     "kind": "inline",
-                    "source_domain": (
-                        None
-                        if item.content.source_domain is None
-                        else item.content.source_domain.value
-                    ),
-                    "payload": payload_identity,
+                    "digest": item.content.payload.digest,
+                    "size": item.content.payload.size,
                 }
             )
         return canonical_sha256(

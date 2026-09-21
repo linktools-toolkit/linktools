@@ -126,6 +126,7 @@ def canonical_json_bytes(value: JsonValue) -> bytes:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
 
 

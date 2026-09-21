@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from linktools.core import environ
-from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
+from pydantic_ai.messages import ModelMessage
 
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef, ObjectStore, StoredPayload, runtime_object_key
@@ -62,57 +62,9 @@ _TRANSCRIPT_CHUNK_MAX_MESSAGES = 64
 _TRANSCRIPT_SEEK_BLOCK = 128
 
 
-def _overlap_signature(message: ModelMessage) -> bytes:
-    """Canonical signature used only by the legacy snapshot merge path."""
-    return encode_model_messages((message,))
-
-
-def _conversation_overlap_signature(message: ModelMessage) -> bytes:
-    if not isinstance(message, ModelRequest):
-        return _overlap_signature(message)
-    return _overlap_signature(
-        replace(
-            message,
-            parts=tuple(
-                part
-                for part in message.parts
-                if not isinstance(part, SystemPromptPart)
-            ),
-        )
-    )
-
-
 def _exact_message_signature(message: ModelMessage) -> bytes:
     """Full canonical serialization including timestamp, for exact-content proof."""
     return encode_model_messages((message,))
-
-
-def suffix_prefix_overlap(
-    stored: Sequence[bytes],
-    incoming: Sequence[bytes],
-) -> int:
-    """Return the longest suffix/prefix overlap using one linear pass."""
-    if not stored or not incoming:
-        return 0
-    prefix = [0] * len(incoming)
-    matched = 0
-    for index in range(1, len(incoming)):
-        while matched and incoming[index] != incoming[matched]:
-            matched = prefix[matched - 1]
-        if incoming[index] == incoming[matched]:
-            matched += 1
-        prefix[index] = matched
-    matched = 0
-    for index, value in enumerate(stored):
-        while matched and value != incoming[matched]:
-            matched = prefix[matched - 1]
-        if value == incoming[matched]:
-            matched += 1
-        if matched == len(incoming):
-            if index == len(stored) - 1:
-                return matched
-            matched = prefix[matched - 1]
-    return matched
 
 
 @dataclass(frozen=True, slots=True)
