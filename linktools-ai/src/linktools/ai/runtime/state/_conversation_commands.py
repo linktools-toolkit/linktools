@@ -45,9 +45,13 @@ class ConversationStateCommands:
     ) -> SessionRecord:
         if self._steps is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        prepared = await self._steps.prepare_conversation_snapshot(
+        snapshot = await self._steps.relocate_conversation_snapshot(
             step_run,
             snapshot,
+        )
+        prepared = await self._steps.prepare_snapshots(
+            step_run,
+            (snapshot,),
         )
         effective_next = replace(
             next_cursor,
