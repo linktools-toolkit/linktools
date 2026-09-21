@@ -1239,15 +1239,15 @@ class StateStepArchive(StepStore):
         )
         return await self._history.transcript_message_count(owner_id)
 
-    async def prepare_conversation_snapshot(
+    async def relocate_conversation_snapshot(
         self,
         run: RunRecord,
         snapshot: ContinuableSnapshot,
-    ) -> PreparedStepSnapshotBatch:
-        """Relocate one cumulative run snapshot into the conversation owner."""
+    ) -> ContinuableSnapshot:
+        """Rebase one cumulative run snapshot onto the conversation owner."""
         self._ensure_open()
         require_no_run_history_lock(
-            "StateStepArchive.prepare_conversation_snapshot"
+            "StateStepArchive.relocate_conversation_snapshot"
         )
         if self._runtime_domain is not RuntimeDomain.CONVERSATION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1263,14 +1263,9 @@ class StateStepArchive(StepStore):
             if not _conversation_relocated_snapshot_matches(snapshot, observed):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             before = len(snapshot.messages)
-        return await self._prepare_snapshots(
-            run,
-            (
-                replace(
-                    snapshot,
-                    transcript_message_count_before=before,
-                ),
-            ),
+        return replace(
+            snapshot,
+            transcript_message_count_before=before,
         )
 
     async def prepare_snapshots(
