@@ -124,6 +124,7 @@ class FilesystemObjectStore:
 
             async def publish() -> None:
                 nonlocal temporary
+                await asyncio.to_thread(_cleanup_tombstones, self._root)
                 duplicate = await asyncio.to_thread(
                     _publish_filesystem_object,
                     temporary,
@@ -219,6 +220,7 @@ class FilesystemObjectStore:
         destination = self._path(key)
 
         async def delete() -> bool:
+            await asyncio.to_thread(_cleanup_tombstones, self._root)
             current = await asyncio.to_thread(
                 _stat_filesystem_object,
                 destination,
@@ -384,6 +386,16 @@ def _delete_filesystem_object(root: Path, destination: Path) -> bool:
         if moved:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
         raise
+
+
+def _cleanup_tombstones(root: Path) -> None:
+    trash_root = root / ".trash"
+    if not _path_present(trash_root):
+        return
+    _require_directory(trash_root)
+    for path in tuple(trash_root.iterdir()):
+        _remove_tree_if_exists(path)
+    sync_directory(trash_root)
 
 
 def _read_filesystem_metadata(
