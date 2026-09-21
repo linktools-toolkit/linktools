@@ -40,6 +40,7 @@ from ._step_archive import (
     _RunHistoryLock,
     _RunProjectionFlight,
     _StepArchiveBatch,
+    _conversation_relocated_snapshot_matches,
     _materialize_snapshot,
     _sync_projection,
 )
@@ -1641,32 +1642,12 @@ def _relocated_snapshot_matches(
 ) -> bool:
     if observed is None:
         return False
-    if target is not RuntimeDomain.CONVERSATION:
-        return replace(
-            observed,
-            transcript_message_count_before=None,
-        ) == source
-    if (
-        observed.run_id != source.run_id
-        or observed.step_index != source.step_index
-        or observed.conversation_id != source.conversation_id
-        or observed.parent_run_id != source.parent_run_id
-        or observed.agent_name != source.agent_name
-        or observed.timestamp != source.timestamp
-        or observed.state != source.state
-        or observed.idempotency_key != source.idempotency_key
-        or observed.pending_request_index != source.pending_request_index
-        or observed.context_messages != source.context_messages
-    ):
-        return False
-    source_messages = tuple(source.messages)
-    observed_messages = tuple(observed.messages)
-    if not source_messages:
-        return True
-    return (
-        len(observed_messages) >= len(source_messages)
-        and observed_messages[-len(source_messages) :] == source_messages
-    )
+    if target is RuntimeDomain.CONVERSATION:
+        return _conversation_relocated_snapshot_matches(source, observed)
+    return replace(
+        observed,
+        transcript_message_count_before=None,
+    ) == source
 
 
 def _run_registration_identity(run: RunRecord) -> tuple[object, ...]:
