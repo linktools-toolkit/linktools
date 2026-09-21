@@ -347,6 +347,7 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     catalog = AgentCatalog({"agent": first.definition})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is second
+    assert catalog.definition(first.definition.digest) is first.definition
     assert catalog.binding(first.digest) is second
 
 
