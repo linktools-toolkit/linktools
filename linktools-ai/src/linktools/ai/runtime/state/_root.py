@@ -969,10 +969,10 @@ def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
 
 
 def _object_ref_from_payload(value: object) -> ObjectRef:
-    required = {"key", "digest", "size"}
-    if not isinstance(value, Mapping) or not required.issubset(value):
+    required = {"store_id", "key", "digest", "size"}
+    if not isinstance(value, Mapping) or set(value) != required:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    store_id = value.get("store_id", "runtime")
+    store_id = value["store_id"]
     key = value["key"]
     digest = value["digest"]
     size = value["size"]

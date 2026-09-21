@@ -13,12 +13,15 @@ from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
+    SemanticPin,
 )
 from linktools.ai.agent._output import bind_output
 from linktools.ai.capability import SkillDefinition, SkillSourceRef
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
@@ -197,6 +200,38 @@ def test_skill_snapshot_reference_requires_store_id() -> None:
                     },
                 },
             }
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_binding_object_dependency_scan_requires_skill_store_id() -> None:
+    pin = SemanticPin(
+        "skill",
+        "review",
+        {
+            "version": 1,
+            "id": "review",
+            "content": "instructions",
+            "source": {
+                "source_id": "application",
+                "root": "review",
+                "snapshot": {
+                    "key": "snapshot",
+                    "digest": "a" * 64,
+                    "size": 1,
+                },
+            },
+        },
+    )
+    snapshot = replace(_snapshot(), selected=(pin,))
+
+    with pytest.raises(AIError) as raised:
+        tuple(
+            runtime_codec._iter_agent_binding_object_refs(
+                snapshot,
+                RuntimeDomain.EXECUTION,
+            )
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
