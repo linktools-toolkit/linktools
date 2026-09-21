@@ -9,7 +9,7 @@ from typing import cast
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel
-from pydantic.json_schema import GenerateJsonSchema
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaValue
 from pydantic_core import core_schema
 
 from ..core import JsonValue, canonical_json_bytes
@@ -49,7 +49,7 @@ class _GeneratedModelTitleSchemaGenerator(GenerateJsonSchema):
     def model_schema(
         self,
         schema: core_schema.ModelSchema,
-    ) -> dict[str, object]:
+    ) -> JsonSchemaValue:
         result = super().model_schema(schema)
         model = schema["cls"]
         if (
