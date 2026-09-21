@@ -65,8 +65,6 @@ class AgentCatalog:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing = self._bindings.get(binding.digest)
         if existing is not None:
-            if existing.snapshot != binding.snapshot:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return existing
         self._bindings[binding.digest] = binding
         return binding

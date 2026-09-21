@@ -321,6 +321,23 @@ def test_python_only_output_validator_is_not_part_of_durable_contract() -> None:
     assert parsed == {"value": 7}
 
 
+def test_catalog_reuses_binding_for_nonsemantic_snapshot_differences() -> None:
+    compiler = _compiler()
+    first = compiler.bind(
+        compiler.compile(AgentSpec("agent", description="first label"))
+    )
+    second = compiler.bind(
+        compiler.compile(AgentSpec("agent", description="second label"))
+    )
+
+    assert first.snapshot != second.snapshot
+    assert first.digest == second.digest
+
+    catalog = AgentCatalog({"agent": first.definition})
+    assert catalog.register_binding(first) is first
+    assert catalog.register_binding(second) is first
+
+
 def test_same_json_schema_produces_same_binding_identity() -> None:
     compiler = _compiler()
     definition = compiler.compile(AgentSpec("agent"))

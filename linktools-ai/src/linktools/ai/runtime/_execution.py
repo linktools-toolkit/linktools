@@ -564,7 +564,6 @@ class DefaultExecutionService:
             execution.binding_digest != binding.digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
-            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
