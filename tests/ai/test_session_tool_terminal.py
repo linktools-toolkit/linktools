@@ -313,6 +313,15 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
         assert watched[-1].event.event_type is ExecutionEventType.EXECUTION_FAILED
         assert watched[-1].event.payload["error_code"] == result.error_code
 
+        same = await session.start(
+            "inspect",
+            idempotency_key="turn-1",
+        )
+        same_result = await same.wait(timeout_seconds=10)
+        assert same.execution_id == execution.execution_id
+        assert same_result.status is ExecutionStatus.FAILED
+        assert calls == ["lookup"]
+
         retry = await session.run(
             "retry",
             idempotency_key="turn-2",
