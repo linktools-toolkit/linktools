@@ -31,7 +31,11 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
 )
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    capability_identity_payload,
+)
 from ._runtime_test_helpers import semantic_tool
 
 
@@ -146,6 +150,33 @@ def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
     }
 
     assert canonicalize_output_schema_v1(first) == canonicalize_output_schema_v1(second)
+
+
+def test_tool_identity_preserves_absent_return_schema() -> None:
+    base = {
+        "version": 1,
+        "description": None,
+        "parameters": {"type": "object", "properties": {}},
+        "strict": None,
+        "metadata": {
+            "linktools.ai.effect": "none",
+            "linktools.ai.tool_class": "business",
+        },
+    }
+    without_schema = capability_identity_payload(
+        "tool",
+        "sample",
+        {**base, "return_schema": None},
+    )
+    unconstrained_schema = capability_identity_payload(
+        "tool",
+        "sample",
+        {**base, "return_schema": {}},
+    )
+
+    assert without_schema["semantic"]["return_schema"] is None
+    assert unconstrained_schema["semantic"]["return_schema"] == {}
+    assert without_schema != unconstrained_schema
 
 
 def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:

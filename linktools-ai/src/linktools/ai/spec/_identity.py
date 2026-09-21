@@ -215,15 +215,19 @@ def _tool_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         for key in _TOOL_SEMANTIC_METADATA_FIELDS
         if key in metadata
     }
+    raw_return_schema = contract["return_schema"]
+    return_schema = (
+        None
+        if raw_return_schema is None
+        else canonicalize_json_schema(_mapping(raw_return_schema))
+    )
     return {
         "version": 1,
         "description": contract["description"],
         "parameters": canonicalize_json_schema(
             _mapping(contract["parameters"])
         ),
-        "return_schema": canonicalize_json_schema(
-            _mapping(contract["return_schema"])
-        ),
+        "return_schema": return_schema,
         "strict": contract["strict"],
         "metadata": semantic_metadata,
         **(
