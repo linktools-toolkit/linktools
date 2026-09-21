@@ -9,6 +9,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from pydantic_ai import RequestUsage
 from pydantic_ai.messages import (
+    BinaryContent,
     ModelRequest,
     ModelResponse,
     UploadedFile,
@@ -81,6 +82,42 @@ def test_model_message_round_trip_preserves_uploaded_file_media_type() -> None:
     uploaded = decoded[0].parts[0].content[0]
     assert isinstance(uploaded, UploadedFile)
     assert uploaded.media_type == "image/png"
+
+
+def test_model_message_reader_maps_invalid_binary_to_integrity_error() -> None:
+    messages = (
+        ModelRequest(
+            parts=[
+                UserPromptPart(
+                    [
+                        BinaryContent(
+                            b"binary",
+                            media_type="application/octet-stream",
+                        )
+                    ]
+                )
+            ]
+        ),
+    )
+    value = json.loads(encode_model_messages(messages).decode("utf-8"))
+    value[0]["parts"][0]["content"]["items"][0]["data"] = "***"
+
+    with pytest.raises(AIError) as raised:
+        decode_model_messages(canonical_json_bytes(value))
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_model_message_reader_maps_invalid_usage_cost_to_integrity_error() -> None:
+    value = json.loads(
+        encode_model_messages((ModelResponse(parts=[]),)).decode("utf-8")
+    )
+    value[0]["usage"]["cost"] = "not-a-decimal"
+
+    with pytest.raises(AIError) as raised:
+        decode_model_messages(canonical_json_bytes(value))
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_model_message_reader_rejects_noncanonical_json() -> None:

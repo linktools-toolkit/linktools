@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """Canonical persistence conversion and active model-context projection."""
 
+import binascii
 import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import cast
 
 from pydantic_ai import RequestUsage
@@ -31,7 +32,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 
-from ..core import JsonValue, canonical_json_bytes, normalize_json_value
+from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ._input import _decode_user_content_item, _encode_user_content_item
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
@@ -161,7 +162,7 @@ def decode_model_messages(raw: bytes) -> tuple[ModelMessage, ...]:
         return tuple(_decode_message(item) for item in value)
     except AIError:
         raise
-    except (TypeError, ValueError, KeyError) as error:
+    except (TypeError, ValueError, KeyError, binascii.Error) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
@@ -754,15 +755,26 @@ def _decode_usage(value: object) -> RequestUsage:
     extensions = value["extensions"]
     if not isinstance(details, Mapping) or not isinstance(extensions, Mapping):
         raise ValueError("usage details are invalid")
-    if any(not isinstance(key, str) for key in details | extensions):
+    if any(
+        not isinstance(key, str)
+        for key in set(details) | set(extensions)
+    ):
         raise ValueError("usage extension key is invalid")
     cost = value["cost"]
     if cost is not None and not isinstance(cost, str):
         raise ValueError("usage cost is invalid")
+    parsed_cost = None
+    if cost is not None:
+        try:
+            parsed_cost = Decimal(cost)
+        except (InvalidOperation, ValueError) as error:
+            raise ValueError("usage cost is invalid") from error
+        if not parsed_cost.is_finite():
+            raise ValueError("usage cost is invalid")
     return RequestUsage(
         **numbers,
         details=dict(details),
-        cost=None if cost is None else Decimal(cost),
+        cost=parsed_cost,
         **dict(extensions),
     )
 

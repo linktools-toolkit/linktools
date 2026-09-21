@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """LinkTools-owned durable codec for portable tool-return content."""
 
+import binascii
 from collections.abc import Mapping, Sequence
 from typing import cast
 
@@ -52,7 +53,7 @@ def decode_tool_return_content(value: JsonValue) -> ToolReturnContent:
         return cast(ToolReturnContent, _decode_node(value["value"]))
     except AIError:
         raise
-    except (TypeError, ValueError, KeyError) as error:
+    except (TypeError, ValueError, KeyError, binascii.Error) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
