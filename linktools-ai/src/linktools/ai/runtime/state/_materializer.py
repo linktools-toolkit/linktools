@@ -195,6 +195,11 @@ async def materialize_runtime_state(
                     if route.path is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if not read_only:
+                        await asyncio.to_thread(
+                            route.path.parent.mkdir,
+                            parents=True,
+                            exist_ok=True,
+                        )
                         async with FilesystemMutationLock(
                             route.path.with_name(route.path.name + ".init.lock")
                         ):
