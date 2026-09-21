@@ -166,6 +166,37 @@ def test_skill_snapshot_semantics_ignore_physical_store_id() -> None:
     assert restored.source_ref.snapshot.store_id == "runtime"
 
 
+def test_skill_snapshot_identity_ignores_integrity_size() -> None:
+    specification = SkillSpec("review", "review instructions")
+    first = SemanticPin(
+        "skill",
+        "review",
+        SkillDefinition(
+            specification,
+            SkillSourceRef(
+                "application",
+                "review",
+                ObjectRef("store", "skill/snapshot", "a" * 64, 1),
+            ),
+        ).semantic_contract,
+    )
+    second = SemanticPin(
+        "skill",
+        "review",
+        SkillDefinition(
+            specification,
+            SkillSourceRef(
+                "application",
+                "review",
+                ObjectRef("store", "skill/snapshot", "a" * 64, 2),
+            ),
+        ).semantic_contract,
+    )
+
+    assert first.contract != second.contract
+    assert first.fingerprint == second.fingerprint
+
+
 def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
     with pytest.raises(AIError) as raised:
         SkillDefinition.from_semantic_contract(
