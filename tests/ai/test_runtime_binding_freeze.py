@@ -25,8 +25,12 @@ from linktools.ai.capability import (
 from linktools.ai.core import (
     ExecutionLineageKind,
     ExecutionStatus,
+    JsonValue,
     Principal,
+    canonical_json_bytes,
+    canonical_sha256,
 )
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_freeze import _RuntimeBindingFreezer
 from linktools.ai.runtime._context import RuntimeContext
@@ -224,6 +228,70 @@ async def test_task_capture_does_not_build_static_root_closure(
         _frozen_child(frozen.bindings[fixture.binding.digest])
     )
     assert snapshot.store_id == "runtime"
+
+
+@pytest.mark.asyncio
+async def test_task_capability_snapshot_rejects_binding_index_mismatch(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    graph = TaskGraph(
+        "graph",
+        (
+            TaskNode(
+                "root",
+                input={
+                    "type": "linktools.ai.agent",
+                    "version": 1,
+                    "binding": fixture.binding.snapshot.to_payload(),
+                },
+            ),
+        ),
+    )
+    admission = TaskGraphAdmission.from_request(
+        TaskGraphRequest(
+            graph,
+            Principal("principal", "tenant"),
+            "task-corrupt-binding-index",
+            TaskGraphLimits(),
+        )
+    )
+    objects = InMemoryObjectStore("task")
+    snapshots = TaskCapabilitySnapshotStore(
+        "namespace",
+        fixture.compiler,
+        fixture.freezer,
+        objects,
+        agent_task_type="linktools.ai.agent",
+    )
+    manifest: dict[str, JsonValue] = {
+        "kind": "task-capability-snapshot",
+        "format_version": 1,
+        "namespace": "namespace",
+        "tenant_id": "tenant",
+        "graph_id": graph.graph_id,
+        "request_digest": admission.initial_request_digest,
+        "roots": {},
+        "bindings": {"0" * 64: fixture.binding.snapshot.to_payload()},
+    }
+    payload = canonical_json_bytes(manifest)
+    digest = canonical_sha256(manifest)
+    key = snapshots._key(admission)
+
+    async def chunks():
+        yield payload
+
+    await objects.put(
+        key,
+        chunks(),
+        expected_size=len(payload),
+        expected_digest=digest,
+    )
+
+    with pytest.raises(AIError) as raised:
+        await snapshots.load(admission)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio

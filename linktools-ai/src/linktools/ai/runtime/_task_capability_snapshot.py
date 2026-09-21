@@ -263,9 +263,13 @@ class TaskCapabilitySnapshotStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._compiler.restore(snapshot)
         for original_digest, snapshot in bindings.items():
-            if len(original_digest) != 64 or any(
-                character not in "0123456789abcdef"
-                for character in original_digest
+            if (
+                len(original_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in original_digest
+                )
+                or original_digest != snapshot.binding_digest
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._compiler.restore(snapshot)
