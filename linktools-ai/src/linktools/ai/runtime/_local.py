@@ -207,14 +207,6 @@ _logger = environ.get_logger("ai.runtime.local")
 _CheckpointT = TypeVar("_CheckpointT")
 
 
-_HANDOFF_PHASE_RANK = {
-    RecoveryHandoffPhase.PREPARED: 0,
-    RecoveryHandoffPhase.CONVERSATION_RESOLVED: 1,
-    RecoveryHandoffPhase.EXECUTION_COMMITTED: 2,
-    RecoveryHandoffPhase.COMPLETED: 3,
-}
-
-
 
 
 
@@ -1864,36 +1856,6 @@ class LocalExecutionBackend:
                 checkpoint.execution_id,
             )
             return execution
-        if checkpoint.handoff_phase is RecoveryHandoffPhase.CONVERSATION_RESOLVED:
-            execution = await self._commit_reconciled_terminal(checkpoint)
-            checkpoint = await self._advance_handoff(
-                checkpoint,
-                RecoveryHandoffPhase.EXECUTION_COMMITTED,
-            )
-        if checkpoint.handoff_phase is RecoveryHandoffPhase.EXECUTION_COMMITTED:
-            await self._validate_committed_handoff(checkpoint)
-            if execution.session_id is not None:
-                await self._conversation.sessions.release_execution(
-                    execution.session_id,
-                    tenant_id=self._tenant_id,
-                    execution_id=execution.execution_id,
-                )
-                _logger.info(
-                    "session admission released after recovery terminal: execution=%s",
-                    execution.execution_id,
-                )
-            await self._complete_handoff(checkpoint)
-            self._publish_terminal_event(
-                execution.execution_id,
-                event_type=outcome.terminal_event_type,
-                payload=dict(outcome.terminal_event_payload),
-                durable_sequence=execution.event_sequence,
-            )
-            _logger.info(
-                "recovery handoff completed: execution=%s",
-                checkpoint.execution_id,
-            )
-            return execution
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _recovery_idempotency(
@@ -2059,59 +2021,10 @@ class LocalExecutionBackend:
             if latest is None or latest.continuation != effective_next_cursor:
                 raise
 
-    async def _advance_handoff(
-        self, checkpoint: RecoveryCheckpoint, phase: RecoveryHandoffPhase
-    ) -> RecoveryCheckpoint:
-        if checkpoint.terminal_handoff is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        current_rank = _HANDOFF_PHASE_RANK.get(checkpoint.handoff_phase)
-        requested_rank = _HANDOFF_PHASE_RANK.get(phase)
-        if (
-            current_rank is None
-            or requested_rank is None
-            or requested_rank < current_rank
-        ):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if requested_rank == current_rank:
-            return checkpoint
-        if requested_rank != current_rank + 1:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        updated = replace(
-            checkpoint,
-            handoff_phase=phase,
-            state=RecoveryCheckpointState.HANDOFF,
-            pending_tools=None,
-            revision=checkpoint.revision + 1,
-            updated_at=datetime.now(timezone.utc),
-        )
-        try:
-            return await self._recovery.checkpoints.compare_and_swap(
-                checkpoint.execution_id,
-                tenant_id=self._tenant_id,
-                expected_revision=checkpoint.revision,
-                next_record=updated,
-            )
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
-                raise
-            current = await self._recovery.checkpoints.get(
-                checkpoint.execution_id, tenant_id=self._tenant_id
-            )
-            if current is None:
-                raise
-            same_handoff = current.terminal_handoff == checkpoint.terminal_handoff
-            current_rank = _HANDOFF_PHASE_RANK.get(current.handoff_phase, -1)
-            if not same_handoff or current_rank < requested_rank:
-                raise
-            return current
-
     async def _complete_handoff(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:
             return
-        if checkpoint.handoff_phase not in {
-            RecoveryHandoffPhase.PREPARED,
-            RecoveryHandoffPhase.EXECUTION_COMMITTED,
-        }:
+        if checkpoint.handoff_phase is not RecoveryHandoffPhase.PREPARED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         completed = replace(
             checkpoint,
