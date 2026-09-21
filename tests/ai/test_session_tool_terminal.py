@@ -5,6 +5,7 @@
 import asyncio
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -102,14 +103,18 @@ async def _state(
     raise AssertionError(backend)
 
 
-def _application(calls: list[str]) -> CapabilityGroup[None]:
+def _application(
+    calls: list[str],
+    *,
+    effect: Literal["replay_safe", "non_replay_safe"] = "replay_safe",
+) -> CapabilityGroup[None]:
     application: CapabilityGroup[None] = CapabilityGroup("application")
 
     async def lookup(_ctx: RunContext[AgentContext[None]]) -> str:
         calls.append("lookup")
         return "tool-result"
 
-    application.tool(lookup, name="lookup", effect="replay_safe")
+    application.tool(lookup, name="lookup", effect=effect)
     application.agent(
         "default",
         model="default",
@@ -527,7 +532,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
 ) -> None:
     database = tmp_path / "session-tool-crash.db"
     calls: list[str] = []
-    application = _application(calls)
+    application = _application(calls, effect="non_replay_safe")
     controller = _CrashRecoveryController()
     models = _CrashRecoveryModels(controller)
 
