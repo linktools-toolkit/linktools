@@ -5,3 +5,4 @@ pip
 PyYAML==6.0.1; python_version < '3.8'
 PyYAML; python_version >= '3.8'
 ruff>=0.16,<0.17; python_version >= '3.7'
+pytest-xdist>=3.6,<4; python_version >= '3.8'

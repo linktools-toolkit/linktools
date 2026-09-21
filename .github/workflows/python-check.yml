@@ -42,7 +42,7 @@ jobs:
             '
 
   python:
-    name: Python ${{ matrix.python-version }} ${{ matrix.suite }} checks
+    name: Python ${{ matrix.python-version }} ${{ matrix.package }} checks
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -50,9 +50,12 @@ jobs:
         python-version:
           - '3.10'
           - '3.x'
-        suite:
-          - regular
-          - ai
+        package:
+          - linktools
+          - linktools-ai
+          - linktools-cntr
+          - linktools-common
+          - linktools-mobile
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -67,17 +70,7 @@ jobs:
         run: |
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Run regular checks
-        if: ${{ matrix.suite == 'regular' }}
-        run: |
-          python manage.py check \
-            linktools \
-            linktools-common \
-            linktools-cntr \
-            linktools-mobile \
-            --skip-compatibility
-      - name: Run AI checks
-        if: ${{ matrix.suite == 'ai' }}
+      - name: Run checks
         env:
           PYTEST_ADDOPTS: "-n 4 --dist=loadfile --capture=fd"
-        run: python manage.py check linktools-ai --skip-compatibility
+        run: python manage.py check ${{ matrix.package }} --skip-compatibility
