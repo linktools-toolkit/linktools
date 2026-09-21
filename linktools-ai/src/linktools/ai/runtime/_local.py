@@ -3034,12 +3034,14 @@ class LocalExecutionBackend:
                 )
                 if persisted is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from terminal_error
+                publish_readback = False
                 if persisted.status in {
                     ExecutionStatus.SUCCEEDED,
                     ExecutionStatus.FAILED,
                     ExecutionStatus.CANCELLED,
                 }:
                     committed = persisted
+                    publish_readback = True
                 elif (
                     isinstance(terminal_error, AIError)
                     and terminal_error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
@@ -3069,7 +3071,9 @@ class LocalExecutionBackend:
                                 terminal_error,
                             ) from terminal_error
                         committed = observed
-                await self._publish_persisted_terminal_event(committed)
+                        publish_readback = True
+                if publish_readback:
+                    await self._publish_persisted_terminal_event(committed)
             metric_status = (
                 "CANCELLED"
                 if committed.status is ExecutionStatus.CANCELLING
