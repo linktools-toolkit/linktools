@@ -492,6 +492,10 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
             target=RuntimeDomain.CONVERSATION,
             step_run_id=run.run_id,
         )
+        await state.steps.materialize_from_recovery(
+            target=RuntimeDomain.CONVERSATION,
+            step_run_id=run.run_id,
+        )
 
         stored = await conversation.latest_snapshot(run_id=run.run_id)
         assert stored is not None
