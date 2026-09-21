@@ -2141,6 +2141,59 @@ class LocalExecutionBackend:
             ):
                 raise
 
+    async def _claim_session_or_recovery_finalizing(
+        self,
+        execution: ExecutionRecord,
+    ) -> ExecutionRecord:
+        if execution.session_id is None:
+            return execution
+        if execution.status is not ExecutionStatus.STARTED:
+            if execution.status in {
+                ExecutionStatus.FINALIZING,
+                ExecutionStatus.CANCELLING,
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                return execution
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        finalizing = replace(
+            execution,
+            status=ExecutionStatus.FINALIZING,
+            revision=execution.revision + 1,
+            updated_at=datetime.now(timezone.utc),
+        )
+        try:
+            updated = await self._execution.executions.compare_and_swap(
+                execution.execution_id,
+                tenant_id=self._tenant_id,
+                expected_revision=execution.revision,
+                next_record=finalizing,
+            )
+            _logger.debug(
+                "session execution finalization claimed: execution=%s",
+                execution.execution_id,
+            )
+            return updated
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            current = await self._execution.executions.get(
+                execution.execution_id,
+                tenant_id=self._tenant_id,
+            )
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status in {
+                ExecutionStatus.FINALIZING,
+                ExecutionStatus.CANCELLING,
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                return current
+            raise
+
     async def _rewrite_prepared_success_handoff(
         self,
         checkpoint: RecoveryCheckpoint,
