@@ -47,6 +47,40 @@ class _GeneratedOutputBeta(BaseModel):
     title: str
 
 
+class _GeneratedNestedAlpha(BaseModel):
+    value: int
+
+
+class _GeneratedNestedBeta(BaseModel):
+    value: int
+
+
+class _GeneratedNestedOutputAlpha(BaseModel):
+    nested: _GeneratedNestedAlpha
+
+
+class _GeneratedNestedOutputBeta(BaseModel):
+    nested: _GeneratedNestedBeta
+
+
+class _ExplicitNestedAlpha(BaseModel):
+    model_config = ConfigDict(title="nested-alpha")
+    value: int
+
+
+class _ExplicitNestedBeta(BaseModel):
+    model_config = ConfigDict(title="nested-beta")
+    value: int
+
+
+class _ExplicitNestedOutputAlpha(BaseModel):
+    nested: _ExplicitNestedAlpha
+
+
+class _ExplicitNestedOutputBeta(BaseModel):
+    nested: _ExplicitNestedBeta
+
+
 class _ExplicitOutputAlpha(BaseModel):
     model_config = ConfigDict(title="alpha-contract")
     value: str
@@ -80,9 +114,23 @@ def test_output_fingerprint_ignores_generated_type_titles() -> None:
     assert alpha.schema_definition["properties"]["title"]["type"] == "string"
 
 
+def test_output_fingerprint_ignores_generated_nested_model_titles() -> None:
+    alpha = bind_output(_GeneratedNestedOutputAlpha)
+    beta = bind_output(_GeneratedNestedOutputBeta)
+
+    assert alpha.fingerprint == beta.fingerprint
+    assert alpha.schema_definition == beta.schema_definition
+
+
 def test_output_fingerprint_preserves_explicit_schema_titles() -> None:
     assert bind_output(_ExplicitOutputAlpha).fingerprint != bind_output(
         _ExplicitOutputBeta
+    ).fingerprint
+
+
+def test_output_fingerprint_preserves_explicit_nested_model_titles() -> None:
+    assert bind_output(_ExplicitNestedOutputAlpha).fingerprint != bind_output(
+        _ExplicitNestedOutputBeta
     ).fingerprint
 
 
