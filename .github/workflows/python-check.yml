@@ -41,35 +41,43 @@ jobs:
               python manage.py check --compatibility
             '
 
-  python310:
-    name: Python 3.10 checks
+  python:
+    name: Python ${{ matrix.python-version }} ${{ matrix.suite }} checks
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - '3.10'
+          - '3.x'
+        suite:
+          - regular
+          - ai
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.10'
+          python-version: ${{ matrix.python-version }}
+          check-latest: ${{ matrix.python-version == '3.x' }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            linktools*/linktools.yml
       - name: Install tooling
         run: |
-          python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -U -r requirements.txt
           python manage.py install --editable --quiet
-      - name: Run checks
-        run: python manage.py check --skip-compatibility
-
-  python_latest:
-    name: Python latest checks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.x'
-          check-latest: true
-      - name: Install tooling
+      - name: Run regular checks
+        if: ${{ matrix.suite == 'regular' }}
         run: |
-          python -m pip install --quiet --upgrade pip
-          python -m pip install --quiet -U -r requirements.txt
-          python manage.py install --editable --quiet
-      - name: Run checks
-        run: python manage.py check --skip-compatibility
+          python manage.py check \
+            linktools \
+            linktools-common \
+            linktools-cntr \
+            linktools-mobile \
+            --skip-compatibility
+      - name: Run AI checks
+        if: ${{ matrix.suite == 'ai' }}
+        env:
+          PYTEST_ADDOPTS: "-n 4 --dist=loadfile --capture=fd"
+        run: python manage.py check linktools-ai --skip-compatibility
