@@ -274,6 +274,17 @@ def test_binding_object_dependency_scan_requires_skill_store_id() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+def test_agent_declaration_identity_keeps_model_selector() -> None:
+    first = CapabilityContribution.from_declaration(
+        AgentSpec("agent", model="first")
+    )
+    second = CapabilityContribution.from_declaration(
+        AgentSpec("agent", model="second")
+    )
+
+    assert first.fingerprint != second.fingerprint
+
+
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
     plain = ModelRegistry.openai(
         model="gpt-test",
