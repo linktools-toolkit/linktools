@@ -567,8 +567,8 @@ class MySQLDialect(SQLiteDialect):
             if existing is None:
                 raise
             return InsertResult(False, None)
-        row_id = result.lastrowid
-        return InsertResult(True, None if row_id is None else int(row_id))
+        del result
+        return InsertResult(True, None)
 
     async def insert_ignore_conflict_many(
         self,
