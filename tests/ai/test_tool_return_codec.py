@@ -49,6 +49,23 @@ def test_tool_return_content_round_trips_nested_multimodal_values() -> None:
     assert restored["plain"] == {"kind": "binary", "label": "not-multimodal"}
 
 
+def test_tool_return_content_uses_explicit_linktools_envelope() -> None:
+    encoded = encode_tool_return_content({"type": "business", "value": 1})
+
+    assert encoded["contract"] == "linktools.tool-return"
+    assert encoded["version"] == 1
+    assert encoded["value"]["type"] == "mapping"
+
+
+def test_deferred_rehydrate_does_not_guess_plain_business_mapping() -> None:
+    plain = {"type": "business", "value": 1}
+    source = DeferredToolResults(calls={"plain": plain})
+
+    restored = rehydrate_deferred_tool_results(source)
+
+    assert restored.calls["plain"] is plain
+
+
 def test_deferred_rehydrate_preserves_control_results() -> None:
     portable = encode_tool_return_content(
         {"image": BinaryContent(data=b"binary", media_type="image/png")}

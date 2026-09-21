@@ -70,8 +70,10 @@ def test_media_shaped_tool_json_round_trips_as_plain_mapping() -> None:
     assert isinstance(part.content, dict)
     assert project_public_messages(decoded)[0]["parts"][0]["content"] == value
     encoded = _encoded_part(value)["content"]
-    assert encoded["type"] == "mapping"
-    assert encoded["items"]["kind"] == {
+    assert encoded["contract"] == "linktools.tool-return"
+    assert encoded["version"] == 1
+    assert encoded["value"]["type"] == "mapping"
+    assert encoded["value"]["items"]["kind"] == {
         "type": "scalar",
         "value": "binary",
     }

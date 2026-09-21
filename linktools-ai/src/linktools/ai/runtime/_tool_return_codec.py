@@ -13,12 +13,18 @@ from ..errors import AIError, ErrorCode
 from ._input import _decode_user_content_item, _encode_user_content_item
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
+_TOOL_RETURN_CONTRACT = "linktools.tool-return"
+_TOOL_RETURN_VERSION = 1
 
 
 def encode_tool_return_content(value: object) -> JsonValue:
     """Encode portable tool content without depending on Pydantic wire serialization."""
     try:
-        return _encode_node(value)
+        return {
+            "contract": _TOOL_RETURN_CONTRACT,
+            "version": _TOOL_RETURN_VERSION,
+            "value": _encode_node(value),
+        }
     except AIError:
         raise
     except (TypeError, ValueError) as error:
@@ -31,7 +37,19 @@ def encode_tool_return_content(value: object) -> JsonValue:
 def decode_tool_return_content(value: JsonValue) -> ToolReturnContent:
     """Restore one LinkTools durable tool-return value."""
     try:
-        return cast(ToolReturnContent, _decode_node(value))
+        if not isinstance(value, Mapping):
+            raise ValueError("tool-return envelope must be an object")
+        _require_keys(value, {"contract", "version", "value"})
+        if value["contract"] != _TOOL_RETURN_CONTRACT:
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        version = value["version"]
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != _TOOL_RETURN_VERSION
+        ):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        return cast(ToolReturnContent, _decode_node(value["value"]))
     except AIError:
         raise
     except (TypeError, ValueError, KeyError) as error:
@@ -115,7 +133,10 @@ def rehydrate_deferred_tool_results(results: DeferredToolResults) -> DeferredToo
     """Restore successful external durable values before the Pydantic boundary."""
     calls: dict[str, object] = {}
     for tool_call_id, result in results.calls.items():
-        if isinstance(result, Mapping) and "type" in result:
+        if (
+            isinstance(result, Mapping)
+            and result.get("contract") == _TOOL_RETURN_CONTRACT
+        ):
             try:
                 calls[tool_call_id] = decode_tool_return_content(
                     cast(JsonValue, normalize_json_value(result))
