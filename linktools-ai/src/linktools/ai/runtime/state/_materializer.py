@@ -364,7 +364,7 @@ async def materialize_runtime_state(
 
 
 
-async def _provision_sqlite_database(path: Path, metadata: object) -> None:
+async def _provision_sqlite_database(path: Path, metadata: "MetaData") -> None:
     from sqlalchemy import URL
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -443,6 +443,7 @@ def _cleanup_sqlite_temporary(path: Path) -> None:
 def _sync_file(path: Path) -> None:
     with path.open("rb") as handle:
         os.fsync(handle.fileno())
+
 
 def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> _RuntimeStates:
     try:
