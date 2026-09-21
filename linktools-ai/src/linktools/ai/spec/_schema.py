@@ -8,6 +8,9 @@ from typing import cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
+from pydantic import BaseModel
+from pydantic.json_schema import GenerateJsonSchema
+from pydantic_core import core_schema
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
@@ -37,6 +40,50 @@ _SCHEMA_ARRAY_KEYWORDS = frozenset(
 _LITERAL_JSON_KEYWORDS = frozenset(
     {"const", "default", "enum", "examples"}
 )
+_GENERATED_MODEL_TITLE_MARKER: dict[str, JsonValue] = {
+    "__linktools_generated_model_title__": True,
+}
+
+
+class _GeneratedModelTitleSchemaGenerator(GenerateJsonSchema):
+    def model_schema(
+        self,
+        schema: core_schema.ModelSchema,
+    ) -> dict[str, object]:
+        result = super().model_schema(schema)
+        model = schema["cls"]
+        if (
+            isinstance(model, type)
+            and issubclass(model, BaseModel)
+            and _uses_default_model_title(model, result)
+        ):
+            result["title"] = _GENERATED_MODEL_TITLE_MARKER
+        return result
+
+
+def canonicalize_pydantic_model_schema(
+    model: type[BaseModel],
+) -> "dict[str, JsonValue]":
+    """Canonicalize a Pydantic model schema without generated model titles."""
+    if not isinstance(model, type) or not issubclass(model, BaseModel):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    try:
+        generated = cast(
+            "dict[str, object]",
+            model.model_json_schema(
+                schema_generator=_GeneratedModelTitleSchemaGenerator,
+            ),
+        )
+        title_paths: set[tuple[str | int, ...]] = set()
+        _replace_generated_title_markers(generated, (), title_paths)
+        return canonicalize_json_schema(
+            cast(Mapping[str, JsonValue], generated),
+            generated_title_paths=frozenset(title_paths),
+        )
+    except AIError:
+        raise
+    except Exception as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
 
 def canonicalize_json_schema(
@@ -88,6 +135,46 @@ def canonicalize_json_schema(
         raise
     except (TypeError, ValueError, SchemaError) as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+
+
+def _uses_default_model_title(
+    model: type[BaseModel],
+    schema: Mapping[str, object],
+) -> bool:
+    config = model.model_config
+    extra = config.get("json_schema_extra")
+    if (
+        config.get("title") is not None
+        or config.get("model_title_generator") is not None
+        or schema.get("title") != model.__name__
+        or callable(extra)
+        or isinstance(extra, Mapping)
+        and "title" in extra
+    ):
+        return False
+    hook = getattr(model, "__get_pydantic_json_schema__", None)
+    base_hook = getattr(BaseModel, "__get_pydantic_json_schema__", None)
+    return getattr(hook, "__func__", hook) is getattr(
+        base_hook,
+        "__func__",
+        base_hook,
+    )
+
+
+def _replace_generated_title_markers(
+    value: object,
+    path: tuple[str | int, ...],
+    paths: set[tuple[str | int, ...]],
+) -> None:
+    if isinstance(value, dict):
+        if value.get("title") == _GENERATED_MODEL_TITLE_MARKER:
+            paths.add((*path, "title"))
+            value["title"] = ""
+        for key, child in value.items():
+            _replace_generated_title_markers(child, (*path, key), paths)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _replace_generated_title_markers(child, (*path, index), paths)
 
 
 def _reachable_definitions(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
@@ -268,4 +355,4 @@ def _decode_definition_pointer(value: str) -> str:
     return "".join(result)
 
 
-__all__ = ["canonicalize_json_schema"]
+__all__ = ["canonicalize_json_schema", "canonicalize_pydantic_model_schema"]
