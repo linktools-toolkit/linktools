@@ -10,18 +10,18 @@ Linktools 是一套面向移动安全研究、逆向分析、合规检测工具�
 | [linktools-common](linktools-common/) | 通用工具：`ct-env`、`ct-grep`、`ct-tools` | [README](linktools-common/README.md) |
 | [linktools-mobile](linktools-mobile/) | 移动设备：Android（`at-*`）和 iOS（`it-*`）工具 | [README](linktools-mobile/README.md) |
 | [linktools-cntr](linktools-cntr/) | 容器管理：Docker/Compose 部署工具（`ct-cntr`） | [README](linktools-cntr/README.md) |
-| [linktools-ai](linktools-ai/) | AI agent 运行时：session/execution/swarm，基于 pydantic-ai（纯库，无 CLI） | [README](linktools-ai/README.md) |
+| [linktools-ai](linktools-ai/) | AI agent 运行时：session/execution/swarm，基于 pydantic-ai，并提供本地调试 CLI | [README](linktools-ai/README.md) |
 
 ## 快速开始
 
 ### 依赖项
 
-Python & pip（3.6 及以上）：<https://www.python.org/downloads/>
+Python & pip：除 `linktools-ai` 外的子包支持 Python 3.6 及以上；`linktools-ai` 需要 Python 3.10 及以上。<https://www.python.org/downloads/>
 
 ### 安装
 
 ```bash
-# 安装方式一：安装所有包
+# 安装方式一：安装 linktools 的全部可选能力（包含 common/mobile/cntr，不包含独立的 linktools-ai）
 python3 -m pip install -U "linktools[all]"
 
 # 安装方式二：按需安装子包

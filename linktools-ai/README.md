@@ -42,10 +42,11 @@ python3 -m linktools ai run "review this change" --project /workspace/project --
 Useful options:
 
 - `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
-- `--storage filesystem|sqlite` selects Runtime state storage.
 - `--planning` enables planning for the execution.
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
+
+The local CLI stores Runtime state under `<workspace>/.linktools/runtime` through `RuntimeState.from_root()`; storage is not selected with a CLI flag.
 
 ### Python
 
