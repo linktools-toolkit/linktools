@@ -328,6 +328,44 @@ def test_workspace_discovery_does_not_walk_up_without_configuration(
     assert not (nested / ".linktools").exists()
 
 
+def test_workspace_loader_preserves_configured_ancestor_and_explicit_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = tmp_path / ".linktools"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("model: configured\n", encoding="utf-8")
+    nested = tmp_path / "src" / "package"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    discovered = _load_workspace()
+    explicit = _load_workspace(tmp_path)
+
+    assert discovered.root == tmp_path
+    assert explicit.root == tmp_path
+    assert discovered.config == {"model": "configured"}
+    assert explicit.config == {"model": "configured"}
+
+
+def test_invalid_ancestor_workspace_config_fails_without_creating_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_dir = tmp_path / ".linktools"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text("invalid: [\n", encoding="utf-8")
+    nested = tmp_path / "src" / "package"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    with pytest.raises(AIError) as error:
+        StatusCommand().run(SimpleNamespace())
+
+    assert error.value.code is ErrorCode.WORKSPACE_CONFIG_INVALID
+    assert not (nested / ".linktools").exists()
+
+
 @pytest.mark.asyncio
 async def test_local_debug_storage_uses_separate_runtime_and_metrics_databases(
     tmp_path: Path,
