@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import linktools.ai.runtime._event as event_module
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output
 from linktools.ai.core import (
@@ -1098,3 +1099,115 @@ async def test_cancel_readback_accepts_own_suffix_after_revision_only_advance() 
         expected_status=ExecutionStatus.STARTED,
     )
     assert committed is advanced
+
+
+@pytest.mark.asyncio
+async def test_local_replay_timeout_keeps_waiting_on_python310_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = LiveExecutionEventBroker()
+    broker.prepare_local_producer("execution")
+    broker.register_local_producer("execution", 0)
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.TOOL_CALL_STARTED,
+        {"call_id": "call", "tool_name": "tool"},
+        durable_sequence=None,
+    )
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        {},
+        durable_sequence=2,
+    )
+    service = _service(
+        _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
+        _EventReader({}),
+        broker,
+    )
+    principal = Principal("user", "tenant", "user")
+    calls = 0
+
+    async def wait_for(awaitable: object, timeout: float) -> None:
+        nonlocal calls
+        del timeout
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError
+        broker.confirm_events("execution", first_sequence=1, count=1)
+
+    monkeypatch.setattr(event_module.asyncio, "wait_for", wait_for)
+    streamed = [
+        item
+        async for item in service.stream(
+            "execution",
+            principal=principal,
+            after_sequence=1,
+        )
+    ]
+
+    assert calls == 2
+    assert len(streamed) == 1
+    assert streamed[0].durable_sequence == 2
+    assert streamed[0].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+    broker.complete("execution")
+
+
+@pytest.mark.asyncio
+async def test_remote_durable_polling_does_not_retain_broker_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = LiveExecutionEventBroker()
+    terminal = ExecutionEvent(
+        "execution",
+        1,
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        {},
+    )
+
+    class _PollingEvents:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list(
+            self,
+            execution_id: str,
+            *,
+            tenant_id: str,
+            after_sequence: int,
+            limit: int,
+        ) -> Page[ExecutionEvent]:
+            del execution_id, tenant_id, after_sequence, limit
+            self.calls += 1
+            return Page((), None) if self.calls == 1 else Page((terminal,), None)
+
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(event_module.asyncio, "sleep", sleep)
+    events = _PollingEvents()
+    service = DefaultEventService(
+        _ExecutionReader(_execution()),
+        events,  # type: ignore[arg-type]
+        _AllowAll(),
+        lambda execution_id, tenant_id: None,
+        broker,
+    )
+    principal = Principal("user", "tenant", "user")
+
+    streamed = [
+        item
+        async for item in service.stream(
+            "execution",
+            principal=principal,
+        )
+    ]
+
+    assert [item.durable_sequence for item in streamed] == [1]
+    assert delays == [1.0]
+    assert broker._activity == {}

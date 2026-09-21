@@ -8,7 +8,7 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast, get_type_hints
 
 from linktools.core import environ
 from pydantic_ai import Tool
@@ -918,6 +918,10 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
     invoke.__signature__ = signature.replace(  # type: ignore[attr-defined]
         parameters=(first, *parameters[1:]),
     )
+    invoke.__annotations__ = {
+        **get_type_hints(function, include_extras=True),
+        parameters[0].name: first.annotation,
+    }
     return Tool(invoke, takes_ctx=True, name=name)
 
 

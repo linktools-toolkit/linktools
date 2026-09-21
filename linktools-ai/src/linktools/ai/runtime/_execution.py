@@ -1524,11 +1524,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         self._validate_replayed_execution(execution, binding, request)
         if existing.status is IdempotencyStatus.COMPLETED:
-            if execution.status not in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
+            if not _terminal_idempotency_matches(existing, execution):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(execution.execution_id)
         if (
@@ -1856,14 +1852,33 @@ class DefaultExecutionService:
                     dependency_hold_id=dependency_hold_id,
                 )
                 return ExecutionHandle(existing.resource_id)
-            if existing.status is IdempotencyStatus.FAILED:
-                raise _stable_idempotency_error(
-                    existing.error_code, ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
+            if existing.status in {
+                IdempotencyStatus.FAILED,
+                IdempotencyStatus.CANCELLED,
+            }:
+                terminal = await self._state.executions.get(
+                    existing.resource_id,
+                    tenant_id=request.principal.tenant_id,
                 )
-            if existing.status is IdempotencyStatus.CANCELLED:
-                raise _stable_idempotency_error(
-                    existing.error_code, ErrorCode.EXECUTION_CANCELLED
+                if terminal is not None:
+                    self._validate_replayed_execution(terminal, binding, request)
+                    if (
+                        scope == "session.resume"
+                        and terminal.started_at is not None
+                    ):
+                        if not _terminal_idempotency_matches(existing, terminal):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        await self._acquire_start_dependency_hold(
+                            terminal,
+                            dependency_hold_id,
+                        )
+                        return ExecutionHandle(existing.resource_id)
+                fallback = (
+                    ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
+                    if existing.status is IdempotencyStatus.FAILED
+                    else ErrorCode.EXECUTION_CANCELLED
                 )
+                raise _stable_idempotency_error(existing.error_code, fallback)
             started = await self._state.executions.get(
                 existing.resource_id, tenant_id=request.principal.tenant_id
             )
@@ -1871,11 +1886,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._validate_replayed_execution(started, binding, request)
             if existing.status is IdempotencyStatus.COMPLETED:
-                if started.status not in {
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
+                if not _terminal_idempotency_matches(existing, started):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self._acquire_start_dependency_hold(
                     started,
@@ -3684,6 +3695,34 @@ def _next_execution(
         ),
         error_diagnostics=error_diagnostics,
         updated_at=now,
+    )
+
+
+def _terminal_idempotency_matches(
+    identity: IdempotencyRecord,
+    execution: ExecutionRecord,
+) -> bool:
+    if execution.started_at is None or execution.result is None:
+        return False
+    expected_status = (
+        ExecutionStatus.SUCCEEDED
+        if identity.status is IdempotencyStatus.COMPLETED
+        else ExecutionStatus.FAILED
+        if identity.status is IdempotencyStatus.FAILED
+        else ExecutionStatus.CANCELLED
+        if identity.status is IdempotencyStatus.CANCELLED
+        else None
+    )
+    if expected_status is None or execution.status is not expected_status:
+        return False
+    expected_digest = (
+        None if execution.result.output is None else execution.result.output.digest
+    )
+    return (
+        identity.resource_kind is ResourceKind.EXECUTION
+        and identity.resource_id == execution.execution_id
+        and identity.result_digest == expected_digest
+        and identity.error_code == execution.error_code
     )
 
 

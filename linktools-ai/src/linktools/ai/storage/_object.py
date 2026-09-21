@@ -94,16 +94,26 @@ async def read_object(
     digest = hashlib.sha256()
     size = 0
     data = bytearray()
-    async for chunk in store.open(key):
-        data.extend(chunk)
-        digest.update(chunk)
-        size += len(chunk)
+    stream = store.open(key)
+    try:
+        async for chunk in stream:
+            next_size = size + len(chunk)
+            if next_size > expected_size:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            data.extend(chunk)
+            digest.update(chunk)
+            size = next_size
+    finally:
+        close = getattr(stream, "aclose", None)
+        if close is not None:
+            close_task = asyncio.ensure_future(close())
+            await _finish_owned_task(close_task)
     if size != expected_size or digest.hexdigest() != expected_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return bytes(data)
 
 
-async def _settle_task(task: "asyncio.Task[_TaskT]") -> tuple[_TaskT, bool]:
+async def _settle_task(task: "asyncio.Future[_TaskT]") -> tuple[_TaskT, bool]:
     cancelled = False
     while True:
         try:
@@ -116,7 +126,7 @@ async def _settle_task(task: "asyncio.Task[_TaskT]") -> tuple[_TaskT, bool]:
             cancelled = True
 
 
-async def _finish_owned_task(task: "asyncio.Task[_TaskT]") -> _TaskT:
+async def _finish_owned_task(task: "asyncio.Future[_TaskT]") -> _TaskT:
     value, cancelled = await _settle_task(task)
     if cancelled:
         raise asyncio.CancelledError

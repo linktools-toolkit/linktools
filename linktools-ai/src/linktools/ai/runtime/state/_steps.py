@@ -40,6 +40,7 @@ from ._step_archive import (
     _RunHistoryLock,
     _RunProjectionFlight,
     _StepArchiveBatch,
+    _conversation_relocated_snapshot_matches,
     _materialize_snapshot,
     _sync_projection,
 )
@@ -113,17 +114,48 @@ class RuntimeStepStore(StepStore):
         execution_id: str | None = None,
     ) -> None:
         await self._ensure_business()
-        del execution_id
         recovery = self._archives.get(RuntimeDomain.RECOVERY)
+        restored: ContinuableSnapshot | None = None
+        events: Sequence[StepEvent] = ()
+        offset: _ProjectionOffset | None = None
         if recovery is not None:
             durable = await recovery.get_run(run_id=record.run_id)
             if durable is not None:
                 if _run_registration_identity(durable) != _run_registration_identity(record):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 record = durable
+                restored = await recovery.latest_snapshot(
+                    run_id=record.run_id,
+                    include_interrupted=True,
+                )
+                if restored is not None and execution_id is not None:
+                    await self.materialize_from_recovery(
+                        target=RuntimeDomain.EXECUTION,
+                        step_run_id=record.run_id,
+                        execution_id=execution_id,
+                    )
+                    execution = self._archives[RuntimeDomain.EXECUTION]
+                    events = await execution.list_events(run_id=record.run_id)
+                    offset = _ProjectionOffset(
+                        events=len(events),
+                        snapshots=1,
+                        transcript_messages=len(restored.messages),
+                        interactions=await execution.model_interaction_count(
+                            run_id=record.run_id
+                        ),
+                    )
         async with self._history_lock.hold(record.run_id):
             self._ensure_run_mutable(record.run_id)
+            new_registration = self._staging.get_run_local(record.run_id) is None
             self._staging.register_run_local(record)
+            if new_registration and restored is not None:
+                self._staging.save_snapshot_local(
+                    replace(restored, transcript_message_count_before=0)
+                )
+                for event in events:
+                    self._staging.append_event_local(event)
+                if offset is not None:
+                    self._projection_offsets[record.run_id] = offset
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         await self._ensure_business()
@@ -188,11 +220,38 @@ class RuntimeStepStore(StepStore):
             if recovery_run is None or flight is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
 
+            prepared_interactions: tuple[ModelInteractionRecord, ...] = ()
+
             async def operation(
                 target_recovery: StepStore = recovery,
                 target_run: RunRecord = recovery_run,
                 target_snapshot: ContinuableSnapshot = snapshot,
             ) -> None:
+                nonlocal prepared_interactions
+                if isinstance(target_recovery, StateStepArchive):
+                    target_snapshot = await target_recovery.relocate_run_snapshot(
+                        target_run,
+                        target_snapshot,
+                    )
+                    high_water = await target_recovery.model_interaction_count(
+                        run_id=target_run.run_id
+                    )
+                    staged = await self._staging.list_model_interactions(
+                        run_id=target_run.run_id,
+                        after_request_sequence=high_water,
+                    )
+                    prepared_interactions = await target_recovery.prepare_interactions(
+                        target_run,
+                        staged,
+                        lambda digest: self._staging.staged_payload(target_run.run_id, digest),
+                        local_message_count=len(target_snapshot.messages),
+                    )
+                    await target_recovery.materialize_snapshot(
+                        target_run,
+                        target_snapshot,
+                        interactions=prepared_interactions,
+                    )
+                    return
                 await _materialize_snapshot(
                     target_recovery,
                     target_run,
@@ -208,13 +267,33 @@ class RuntimeStepStore(StepStore):
                     observed_run = await target_recovery.get_run(
                         run_id=target_snapshot.run_id
                     )
-                    observed_snapshot = await target_recovery.latest_snapshot(
-                        run_id=target_snapshot.run_id,
-                        include_interrupted=True,
-                    )
+                    if isinstance(target_recovery, StateStepArchive):
+                        snapshot_visible = (
+                            await target_recovery.verify_snapshot_projection(
+                                run_id=target_snapshot.run_id,
+                                snapshot=target_snapshot,
+                            )
+                        )
+                        if snapshot_visible and prepared_interactions:
+                            observed_interactions = await target_recovery.list_model_interactions(
+                                run_id=target_run.run_id,
+                                after_request_sequence=prepared_interactions[0].request_sequence - 1,
+                                limit=len(prepared_interactions),
+                            )
+                            snapshot_visible = tuple(observed_interactions) == prepared_interactions
+                    else:
+                        observed_snapshot = await target_recovery.latest_snapshot(
+                            run_id=target_snapshot.run_id,
+                            include_interrupted=True,
+                        )
+                        snapshot_visible = _relocated_snapshot_matches(
+                            RuntimeDomain.RECOVERY,
+                            target_snapshot,
+                            observed_snapshot,
+                        )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed_run == target_run and observed_snapshot == target_snapshot:
+                if observed_run == target_run and snapshot_visible:
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
@@ -496,6 +575,8 @@ class RuntimeStepStore(StepStore):
         if require_complete and snapshot.state != "complete":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if archive is not None:
+            if isinstance(archive, StateStepArchive):
+                snapshot = await archive.relocate_run_snapshot(run, snapshot)
             await _materialize_snapshot(archive, run, snapshot)
             interactions = await self._staging.list_model_interactions(
                 run_id=step_run_id
@@ -531,6 +612,11 @@ class RuntimeStepStore(StepStore):
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
         if run is None or snapshot is None or archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(archive, StateStepArchive):
+            snapshot = await archive.relocate_conversation_snapshot(
+                run,
+                snapshot,
+            )
         await _materialize_snapshot(archive, run, snapshot)
 
     async def materialize_from_recovery(
@@ -545,7 +631,10 @@ class RuntimeStepStore(StepStore):
         if recovery is None or destination is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         run = await recovery.get_run(run_id=step_run_id)
-        snapshot = await recovery.latest_snapshot(run_id=step_run_id)
+        snapshot = await recovery.latest_snapshot(
+            run_id=step_run_id,
+            include_interrupted=target is RuntimeDomain.EXECUTION,
+        )
         if run is None or snapshot is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if target is RuntimeDomain.EXECUTION and execution_id is None:
@@ -570,79 +659,57 @@ class RuntimeStepStore(StepStore):
             if flight is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-            source_values = await recovery.list_model_interactions(
-                run_id=step_run_id
-            )
-            source_interactions = tuple(
-                value
-                for value in source_values
-                if isinstance(value, ModelInteractionRecord)
-            )
-            if len(source_interactions) != len(source_values):
-                await self._abandon_durability_flight(flight)
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            source_resolved = tuple(
-                await recovery.resolve_model_interactions(source_interactions)
-            )
-            if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
-                await self._abandon_durability_flight(flight)
-                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            if (
-                target is RuntimeDomain.CONVERSATION
-                and isinstance(destination, StateStepArchive)
-            ):
-                existing_run = await destination.get_run(run_id=run.run_id)
-                if existing_run is None:
-                    local_message_count = 0
-                else:
-                    existing_snapshot = await destination.latest_snapshot(
-                        run_id=run.run_id,
-                        include_interrupted=True,
-                    )
-                    if (
-                        existing_run != run
-                        or not _relocated_snapshot_matches(
-                            RuntimeDomain.CONVERSATION,
-                            snapshot,
-                            existing_snapshot,
-                        )
-                    ):
-                        await self._abandon_durability_flight(flight)
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    local_message_count = len(snapshot.messages)
-            else:
-                local_message_count = (
-                    await destination.transcript_message_count_for_run(run)
-                    if isinstance(destination, StateStepArchive)
-                    else await destination.transcript_message_count(step_run_id)
+            try:
+                source_values = await recovery.list_model_interactions(
+                    run_id=step_run_id
                 )
-                if local_message_count > len(snapshot.messages):
-                    await self._abandon_durability_flight(flight)
+                source_interactions = tuple(
+                    value
+                    for value in source_values
+                    if isinstance(value, ModelInteractionRecord)
+                )
+                if len(source_interactions) != len(source_values):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            target_snapshot = replace(
-                snapshot,
-                transcript_message_count_before=local_message_count,
-            )
-            relocated = await destination.prepare_relocated_interactions(
-                source_interactions,
-                source_resolved,
-            )
+                source_resolved = tuple(
+                    await recovery.resolve_model_interactions(source_interactions)
+                )
+                if not isinstance(destination, (StateStepArchive, InMemoryStepArchive)):
+                    raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+                if isinstance(destination, StateStepArchive):
+                    if target is RuntimeDomain.CONVERSATION:
+                        target_snapshot = await destination.relocate_conversation_snapshot(
+                            run, snapshot
+                        )
+                    else:
+                        target_snapshot = await destination.relocate_run_snapshot(
+                            run, snapshot
+                        )
+                else:
+                    local_message_count = await destination.transcript_message_count(
+                        step_run_id
+                    )
+                    if local_message_count > len(snapshot.messages):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    target_snapshot = replace(
+                        snapshot,
+                        transcript_message_count_before=local_message_count,
+                    )
+                relocated = await destination.prepare_relocated_interactions(
+                    source_interactions,
+                    source_resolved,
+                )
+            except BaseException:
+                await self._abandon_durability_flight(flight)
+                raise
 
             async def operation() -> None:
-                await _materialize_snapshot(
-                    destination,
+                await destination.sync_projection(
                     run,
-                    target_snapshot,
+                    events=(),
+                    snapshots=(target_snapshot,),
+                    interactions=relocated,
                     execution_id=execution_id,
                 )
-                if relocated:
-                    await destination.sync_projection(
-                        run,
-                        events=(),
-                        snapshots=(),
-                        interactions=relocated,
-                        execution_id=execution_id,
-                    )
 
             async def readback() -> CommitObservation[None]:
                 try:
@@ -882,45 +949,83 @@ class RuntimeStepStore(StepStore):
         if not isinstance(archive, StateStepArchive):
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
         for projection in plan.projections:
-            completion: asyncio.Future[None] | None = None
-            async with self._history_lock.hold(projection.run.run_id):
-                seal = self._terminal_seals.get(projection.run.run_id)
-                if seal is None or seal.token != plan.token_for(
-                    projection.run.run_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                flight = self._durability_flights.get(projection.run.run_id)
-                if (
-                    flight is None
-                    or flight.kind is not _RunDurabilityKind.TERMINAL
-                    or flight.token != seal.token
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                del self._durability_flights[projection.run.run_id]
-                del self._terminal_seals[projection.run.run_id]
-                completion = flight.completion
-                offset = self._projection_offsets.setdefault(
-                    projection.run.run_id,
-                    _ProjectionOffset(),
-                )
-                offset.events = max(offset.events, projection.target_event_offset)
-                offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
-                offset.transcript_messages = max(
-                    offset.transcript_messages,
-                    projection.target_transcript_message_count,
-                )
-                offset.interactions = max(
-                    offset.interactions,
-                    projection.target_interaction_offset,
-                )
-                self._projection_dirty.discard(projection.run.run_id)
-            if completion is not None and not completion.done():
-                completion.set_result(None)
+            await self._settle_committed_terminal_projection(
+                plan,
+                projection,
+                require_owned=True,
+            )
         _logger.info(
             "execution terminal seal finalized: execution=%s runs=%s",
             plan.execution_id,
             len(plan.projections),
         )
+
+    async def reconcile_execution_terminal_seal(
+        self,
+        plan: ExecutionTerminalSealPlan,
+    ) -> None:
+        for projection in plan.projections:
+            await self._settle_committed_terminal_projection(
+                plan,
+                projection,
+                require_owned=False,
+            )
+        _logger.warning(
+            "execution terminal seal reconciled after local finalization failure: "
+            "execution=%s runs=%s",
+            plan.execution_id,
+            len(plan.projections),
+        )
+
+    async def _settle_committed_terminal_projection(
+        self,
+        plan: ExecutionTerminalSealPlan,
+        projection: PreparedExecutionProjection,
+        *,
+        require_owned: bool,
+    ) -> None:
+        run_id = projection.run.run_id
+        token = plan.token_for(run_id)
+        completion: asyncio.Future[None] | None = None
+        async with self._history_lock.hold(run_id):
+            seal = self._terminal_seals.get(run_id)
+            flight = self._durability_flights.get(run_id)
+            if require_owned and (seal is None or flight is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (seal is None) != (flight is None):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if seal is not None and (
+                seal.execution_id != plan.execution_id
+                or seal.token != token
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if flight is not None and (
+                flight.kind is not _RunDurabilityKind.TERMINAL
+                or flight.token != token
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if flight is not None:
+                del self._durability_flights[run_id]
+                completion = flight.completion
+            if seal is not None:
+                del self._terminal_seals[run_id]
+            offset = self._projection_offsets.setdefault(
+                run_id,
+                _ProjectionOffset(),
+            )
+            offset.events = max(offset.events, projection.target_event_offset)
+            offset.snapshots = max(offset.snapshots, projection.target_snapshot_offset)
+            offset.transcript_messages = max(
+                offset.transcript_messages,
+                projection.target_transcript_message_count,
+            )
+            offset.interactions = max(
+                offset.interactions,
+                projection.target_interaction_offset,
+            )
+            self._projection_dirty.discard(run_id)
+        if completion is not None and not completion.done():
+            completion.set_result(None)
 
     async def discard_execution_terminal_seal(
         self,
@@ -1223,8 +1328,8 @@ class RuntimeStepStore(StepStore):
         )
         expected_head = ExecutionRunSealHead(
             captured.run.run_id,
-            captured.target_event_offset,
-            captured.target_snapshot_offset,
+            durable_head.event_count + len(captured.events),
+            durable_head.snapshot_count + len(prepared.snapshots),
             prepared.target_transcript_message_count,
             prepared.snapshots[-1].projection.digest
             if prepared.snapshots
@@ -1645,31 +1750,14 @@ def _relocated_snapshot_matches(
 ) -> bool:
     if observed is None:
         return False
-    if target is not RuntimeDomain.CONVERSATION:
-        return replace(
-            observed,
-            transcript_message_count_before=None,
-        ) == source
-    if (
-        observed.run_id != source.run_id
-        or observed.step_index != source.step_index
-        or observed.conversation_id != source.conversation_id
-        or observed.parent_run_id != source.parent_run_id
-        or observed.agent_name != source.agent_name
-        or observed.timestamp != source.timestamp
-        or observed.state != source.state
-        or observed.idempotency_key != source.idempotency_key
-        or observed.pending_request_index != source.pending_request_index
-        or observed.context_messages != source.context_messages
-    ):
-        return False
-    source_messages = tuple(source.messages)
-    observed_messages = tuple(observed.messages)
-    if not source_messages:
-        return True
-    return (
-        len(observed_messages) >= len(source_messages)
-        and observed_messages[-len(source_messages) :] == source_messages
+    if target is RuntimeDomain.CONVERSATION:
+        return _conversation_relocated_snapshot_matches(source, observed)
+    return replace(
+        observed,
+        transcript_message_count_before=None,
+    ) == replace(
+        source,
+        transcript_message_count_before=None,
     )
 
 

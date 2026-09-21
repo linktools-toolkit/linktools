@@ -1380,7 +1380,10 @@ class RuntimeStateCommands:
 
         while True:
             try:
-                return await attempt()
+                result = await attempt()
+                if result.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                return result
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
@@ -1456,6 +1459,12 @@ class RuntimeStateCommands:
             and conversation_run is not None
             and conversation_snapshot is not None
         ):
+            conversation_snapshot = (
+                await self._conversation_steps.relocate_conversation_snapshot(
+                    conversation_run,
+                    conversation_snapshot,
+                )
+            )
             prepared_conversation = await self._conversation_steps.prepare_snapshots(
                 conversation_run,
                 (conversation_snapshot,),
@@ -1494,6 +1503,10 @@ class RuntimeStateCommands:
             and recovery_run is not None
             and recovery_snapshot is not None
         ):
+            recovery_snapshot = await self._recovery_steps.relocate_run_snapshot(
+                recovery_run,
+                recovery_snapshot,
+            )
             prepared_recovery = await self._recovery_steps.prepare_snapshots(
                 recovery_run,
                 (recovery_snapshot,),
@@ -2144,69 +2157,6 @@ class RuntimeStateCommands:
         if recovery_pending and recovery_checkpoint is not None:
             await self._complete_recovery_checkpoint(recovery_checkpoint)
         return result
-
-    async def _materialize_recovery_snapshot(
-        self,
-        run: RunRecord | None,
-        snapshot: ContinuableSnapshot | None,
-    ) -> None:
-        if run is None and snapshot is None:
-            return
-        if self._recovery_steps is None or run is None or snapshot is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if await self._step_snapshot_visible(
-            self._recovery_steps,
-            run,
-            snapshot,
-        ):
-            return
-        prepared = await self._recovery_steps.prepare_snapshots(
-            run,
-            (snapshot,),
-        )
-        stores = [self._recovery.state_store, self._recovery_steps.state_store]
-
-        async def materialize(group: StateGroupTransaction) -> None:
-            await self._recovery_steps.materialize_snapshot_in_transaction(
-                group.transaction(self._recovery_steps.state_store),
-                run,
-                prepared[0],
-            )
-
-        if _same_group(stores):
-            async def readback() -> CommitObservation[None]:
-                try:
-                    visible = await self._step_snapshot_visible(
-                        self._recovery_steps,
-                        run,
-                        snapshot,
-                    )
-                except AIError as error:
-                    if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                        return CommitObservation(
-                            DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                            error=error,
-                        )
-                    return CommitObservation(
-                        DurableCommitState.UNRESOLVED,
-                        error=error,
-                    )
-                return CommitObservation(
-                    DurableCommitState.COMMITTED
-                    if visible
-                    else DurableCommitState.NOT_COMMITTED
-                )
-
-            await self._commit_or_raise(
-                lambda: stores[0].storage_group.mutate(stores, materialize),
-                readback,
-            )
-        else:
-            await self._materialize_snapshot_with_reconciliation(
-                self._recovery_steps,
-                run,
-                snapshot,
-            )
 
     async def _materialize_snapshot_with_reconciliation(
         self,

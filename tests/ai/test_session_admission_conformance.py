@@ -384,5 +384,28 @@ async def test_rejected_admission_terminalizes_pending_start() -> None:
         )
         assert len(identities) == 1
         assert identities[0].status.value == "FAILED"
+
+        with pytest.raises(AIError) as replay_error:
+            await service.start_for_session(
+                "agent",
+                _binding().binding_digest,
+                "session",
+                ExecutionRequest(
+                    user_prompt="hello",
+                    principal=Principal("owner", "tenant"),
+                    idempotency_key="rejected-start",
+                    memory_scope=None,
+                    mode="run",
+                    planning=False,
+                    thinking=False,
+                ),
+            )
+        assert replay_error.value.code is ErrorCode.SESSION_BUSY
+        assert backend.aborted == [execution.execution_id]
+        replayed = await state.execution.executions.list_by_session(
+            "session",
+            tenant_id="tenant",
+        )
+        assert [item.execution_id for item in replayed] == [execution.execution_id]
     finally:
         await state.close()

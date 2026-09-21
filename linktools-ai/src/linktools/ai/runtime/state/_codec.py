@@ -483,7 +483,7 @@ _V1_ENUM_VALUES: Mapping[str, frozenset[object]] = MappingProxyType(
         "runtime_domain": frozenset({"conversation", "execution", "memory", "artifact", "task", "evaluation", "recovery"}),
         "runtime_retention_mode": frozenset({"durable", "volatile", "transient"}),
         "recovery_checkpoint_state": frozenset({"admitted", "active", "waiting", "handoff", "completed"}),
-        "recovery_handoff_phase": frozenset({"none", "prepared", "conversation_resolved", "execution_committed", "completed"}),
+        "recovery_handoff_phase": frozenset({"none", "prepared", "completed"}),
         "session_status": frozenset({"OPEN", "CLOSING", "CLOSED", "CLEANUP_REQUIRED"}),
         "stop_reason": frozenset({"END_TURN", "REFUSAL", "TURN_LIMIT", "OUTPUT_VALIDATION_FAILED", "CANCELLED", "ERROR"}),
         "task_status": frozenset({"PENDING", "READY", "RUNNING", "WAITING", "RECOVERY_REQUIRED", "SUCCEEDED", "FAILED", "CANCELLED", "BLOCKED"}),

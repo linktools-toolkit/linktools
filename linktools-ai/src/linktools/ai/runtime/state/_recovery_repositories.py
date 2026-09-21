@@ -431,6 +431,8 @@ class ToolRepositoryImpl(_RepositoryBase):
                 result.status.value,
                 result.fence,
             )
+            if result.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
             return result
 
         return await self._retry_storage_conflict(attempt)
@@ -590,8 +592,6 @@ class ToolRepositoryImpl(_RepositoryBase):
             else:
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             await self._replace_tool_in_transaction(transaction, record, value)
-            if value.status is ToolOperationStatus.EFFECT_UNKNOWN:
-                raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
             return value
 
         return await mutate(transaction)

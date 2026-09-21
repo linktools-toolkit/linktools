@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Root-contained atomic file primitives."""
 
+import errno
 import hashlib
 import json
 import os
@@ -74,15 +75,20 @@ def unlink_if_exists(path: Path) -> None:
 
 def sync_directory(path: Path) -> None:
     """Flush a directory when the platform exposes directory descriptors."""
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
+    if os.name == "nt":
         return
+    unsupported = {
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+    descriptor = os.open(path, os.O_RDONLY)
     try:
         try:
             os.fsync(descriptor)
-        except OSError:
-            return
+        except OSError as error:
+            if error.errno not in unsupported:
+                raise
     finally:
         os.close(descriptor)
 

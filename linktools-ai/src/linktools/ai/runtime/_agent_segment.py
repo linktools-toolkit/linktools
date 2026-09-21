@@ -82,6 +82,10 @@ class _StepLifecycle(Protocol):
         self,
         plan: ExecutionTerminalSealPlan,
     ) -> None: ...
+    async def reconcile_execution_terminal_seal(
+        self,
+        plan: ExecutionTerminalSealPlan,
+    ) -> None: ...
     async def discard_execution_terminal_seal(
         self,
         plan: ExecutionTerminalSealPlan,

@@ -703,7 +703,7 @@ class DefaultEventService:
                                 self._live.wait_for_activity(execution_id),
                                 timeout=poll_backoff,
                             )
-                        except TimeoutError:
+                        except asyncio.TimeoutError:
                             poll_backoff = min(30.0, poll_backoff * 2)
                         else:
                             poll_backoff = 1.0
@@ -811,15 +811,19 @@ class DefaultEventService:
                 if cursor >= execution.event_sequence:
                     return
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                await asyncio.wait_for(
-                    self._live.wait_for_activity(execution_id),
-                    timeout=poll_backoff,
-                )
-            except TimeoutError:
-                poll_backoff = min(30.0, poll_backoff * 2)
+            if self._live.is_local_producer(execution_id):
+                try:
+                    await asyncio.wait_for(
+                        self._live.wait_for_activity(execution_id),
+                        timeout=poll_backoff,
+                    )
+                except asyncio.TimeoutError:
+                    poll_backoff = min(30.0, poll_backoff * 2)
+                else:
+                    poll_backoff = 1.0
             else:
-                poll_backoff = 1.0
+                await asyncio.sleep(poll_backoff)
+                poll_backoff = min(30.0, poll_backoff * 2)
 
     async def _authorize_stream(self, execution_id: str, principal: Principal) -> None:
         header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)

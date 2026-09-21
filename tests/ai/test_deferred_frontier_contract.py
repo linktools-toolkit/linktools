@@ -73,6 +73,16 @@ class _Store:
         del execution_id
         self.snapshots.append(snapshot)
 
+    async def latest_snapshot(
+        self, *, run_id: str, include_interrupted: bool = False
+    ) -> object | None:
+        del run_id, include_interrupted
+        return self.snapshots[-1] if self.snapshots else None
+
+    async def list_events(self, *, run_id: str) -> list[object]:
+        del run_id
+        return []
+
     async def append_event(
         self,
         event: object,

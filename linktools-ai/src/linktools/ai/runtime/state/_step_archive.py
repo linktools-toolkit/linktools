@@ -1239,6 +1239,74 @@ class StateStepArchive(StepStore):
         )
         return await self._history.transcript_message_count(owner_id)
 
+    async def relocate_conversation_snapshot(
+        self,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+    ) -> ContinuableSnapshot:
+        """Rebase one cumulative run snapshot onto the conversation owner."""
+        self._ensure_open()
+        require_no_run_history_lock(
+            "StateStepArchive.relocate_conversation_snapshot"
+        )
+        if self._runtime_domain is not RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        existing_run = await self.get_run(run_id=run.run_id)
+        before = 0
+        if existing_run is not None:
+            if existing_run != run:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            observed = await self.latest_snapshot(
+                run_id=run.run_id,
+                include_interrupted=True,
+            )
+            if not _conversation_relocated_snapshot_matches(snapshot, observed):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            before = len(snapshot.messages)
+        return replace(
+            snapshot,
+            transcript_message_count_before=before,
+        )
+
+    async def relocate_run_snapshot(
+        self,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+    ) -> ContinuableSnapshot:
+        """Rebase one cumulative snapshot onto its run-owned archive."""
+        self._ensure_open()
+        require_no_run_history_lock(
+            "StateStepArchive.relocate_run_snapshot"
+        )
+        if self._runtime_domain is RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        existing_run = await self.get_run(run_id=run.run_id)
+        if existing_run is None:
+            return replace(snapshot, transcript_message_count_before=0)
+        if existing_run != run:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        before = await self.transcript_message_count_for_run(run)
+        source_messages = tuple(snapshot.messages)
+        if before > len(source_messages):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if before:
+            observed = await self._history.load_message_span(
+                run.run_id,
+                0,
+                before,
+            )
+            if tuple(
+                _exact_message_signature(message) for message in observed
+            ) != tuple(
+                _exact_message_signature(message)
+                for message in source_messages[:before]
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return replace(
+            snapshot,
+            transcript_message_count_before=before,
+        )
+
     async def prepare_snapshots(
         self,
         run: RunRecord,
@@ -2052,6 +2120,7 @@ class StateStepArchive(StepStore):
         snapshot: ContinuableSnapshot,
         *,
         execution_id: str | None = None,
+        interactions: Sequence[ModelInteractionRecord] = (),
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.materialize_snapshot")
@@ -2059,14 +2128,24 @@ class StateStepArchive(StepStore):
             run,
             (snapshot,),
         )
-        await self._store.mutate(
-            lambda transaction: self._materialize_snapshot_in_transaction(
+        async def mutate(transaction: StateTransaction) -> None:
+            await self._materialize_snapshot_in_transaction(
                 transaction,
                 run,
                 prepared.snapshots[0],
                 execution_id=execution_id,
             )
-        )
+            if interactions:
+                await self._sync_projection_in_transaction(
+                    transaction,
+                    run,
+                    events=(),
+                    snapshots=(),
+                    interactions=interactions,
+                    execution_id=execution_id,
+                )
+
+        await self._store.mutate(mutate)
 
     async def _materialize_snapshot_in_transaction(
         self,
@@ -2545,6 +2624,7 @@ class StateStepArchive(StepStore):
             and stored.state == snapshot.state
             and stored.has_context_projection
             == (snapshot.context_messages is not None)
+            and stored.pending_request_index == snapshot.pending_request_index
             and context.model_messages() == tuple(expected_messages)
         )
 
@@ -2726,6 +2806,35 @@ def _validate_interaction_page(
         isinstance(limit, bool) or not isinstance(limit, int) or limit < 1
     ):
         raise ValueError("interaction limit must be positive")
+
+
+def _conversation_relocated_snapshot_matches(
+    source: ContinuableSnapshot,
+    observed: ContinuableSnapshot | None,
+) -> bool:
+    if observed is None:
+        return False
+    if (
+        observed.run_id != source.run_id
+        or observed.step_index != source.step_index
+        or observed.conversation_id != source.conversation_id
+        or observed.parent_run_id != source.parent_run_id
+        or observed.agent_name != source.agent_name
+        or observed.timestamp != source.timestamp
+        or observed.state != source.state
+        or observed.idempotency_key != source.idempotency_key
+        or observed.pending_request_index != source.pending_request_index
+        or observed.context_messages != source.context_messages
+    ):
+        return False
+    source_messages = tuple(source.messages)
+    observed_messages = tuple(observed.messages)
+    if not source_messages:
+        return True
+    return (
+        len(observed_messages) >= len(source_messages)
+        and observed_messages[-len(source_messages) :] == source_messages
+    )
 
 
 async def _sync_projection(

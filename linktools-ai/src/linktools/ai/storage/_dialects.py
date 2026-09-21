@@ -545,15 +545,29 @@ class MySQLDialect(SQLiteDialect):
         values: "Mapping[str, SqlValue]",
         index_elements: "Sequence[str]",
     ) -> InsertResult:
+        from sqlalchemy import select
         from sqlalchemy.dialects.mysql import insert
+        from sqlalchemy.exc import IntegrityError
 
-        statement = insert(table).values(dict(values))
-        column = index_elements[0]
-        statement = statement.on_duplicate_key_update(
-            **{column: statement.inserted[column]}
-        )
-        result = await session.execute(statement)
-        return InsertResult(result.rowcount == 1, None)
+        try:
+            await session.execute(insert(table).values(dict(values)))
+        except IntegrityError as error:
+            if (
+                self.classify_integrity_error(error)
+                is not IntegrityViolationKind.UNIQUE_CONFLICT
+            ):
+                raise
+            predicates = [
+                table.c[column] == values[column]
+                for column in index_elements
+            ]
+            existing = await session.scalar(
+                select(table.c.id).where(*predicates).limit(1)
+            )
+            if existing is None:
+                raise
+            return InsertResult(False, None)
+        return InsertResult(True, None)
 
     async def insert_ignore_conflict_many(
         self,

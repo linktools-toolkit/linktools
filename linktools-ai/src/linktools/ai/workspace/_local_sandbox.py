@@ -40,11 +40,9 @@ from ._local_process import (
     _ProcessState,
     _WindowsJob,
     _command_result,
-    _read_process_output,
     _stop_process,
     _stop_process_state,
     _terminate_unregistered_process,
-    _wait_process,
 )
 
 _logger = environ.get_logger("ai.workspace.local_sandbox")
@@ -974,18 +972,6 @@ class _LocalSandboxSession:
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
         command_id = uuid.uuid4().hex
         state = _ProcessState(command_id, command, process, job=job)
-        state.stdout_reader_task = asyncio.create_task(
-            _read_process_output(state, "stdout"),
-            name=f"sandbox-stdout-{command_id}",
-        )
-        state.stderr_reader_task = asyncio.create_task(
-            _read_process_output(state, "stderr"),
-            name=f"sandbox-stderr-{command_id}",
-        )
-        state.wait_task = asyncio.create_task(
-            _wait_process(state),
-            name=f"sandbox-wait-{command_id}",
-        )
         registered = False
         cleanup_attempted = False
         try:

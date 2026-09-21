@@ -1299,8 +1299,6 @@ class RecoveryHandoffPhase(str, Enum):
     __format__ = str.__format__
     NONE = "none"
     PREPARED = "prepared"
-    CONVERSATION_RESOLVED = "conversation_resolved"
-    EXECUTION_COMMITTED = "execution_committed"
     COMPLETED = "completed"
 
 
