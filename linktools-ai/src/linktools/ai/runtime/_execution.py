@@ -1524,11 +1524,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
         self._validate_replayed_execution(execution, binding, request)
         if existing.status is IdempotencyStatus.COMPLETED:
-            if execution.status not in {
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
+            if not _terminal_idempotency_matches(existing, execution):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(execution.execution_id)
         if existing.status in {
@@ -1901,11 +1897,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._validate_replayed_execution(started, binding, request)
             if existing.status is IdempotencyStatus.COMPLETED:
-                if started.status not in {
-                    ExecutionStatus.SUCCEEDED,
-                    ExecutionStatus.FAILED,
-                    ExecutionStatus.CANCELLED,
-                }:
+                if not _terminal_idempotency_matches(existing, started):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self._acquire_start_dependency_hold(
                     started,
@@ -3724,7 +3716,9 @@ def _terminal_idempotency_matches(
     if execution.started_at is None or execution.result is None:
         return False
     expected_status = (
-        ExecutionStatus.FAILED
+        ExecutionStatus.SUCCEEDED
+        if identity.status is IdempotencyStatus.COMPLETED
+        else ExecutionStatus.FAILED
         if identity.status is IdempotencyStatus.FAILED
         else ExecutionStatus.CANCELLED
         if identity.status is IdempotencyStatus.CANCELLED
