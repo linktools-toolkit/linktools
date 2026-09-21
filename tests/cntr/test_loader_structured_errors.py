@@ -67,7 +67,13 @@ def test_installed_container_that_fails_to_load_is_reported_not_silently_skipped
     # that loaded fine once, was installed, and later broke).
     manager.installed_state._dump_names(["broken"])
     warnings = []
-    monkeypatch.setattr(manager.logger, "warning", warnings.append)
+
+    def record_warning(message, *args, **kwargs):
+        del kwargs
+        text = str(message)
+        warnings.append(text % args if args else text)
+
+    monkeypatch.setattr(manager.logger, "warning", record_warning)
 
     containers = manager.containers
 
