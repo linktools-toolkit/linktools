@@ -4669,11 +4669,19 @@ class LocalExecutionBackend:
                         exc_info=environ.debug,
                     )
                     if plan is not None:
-                        await asyncio.shield(
-                            self._step_lifecycle.discard_execution_terminal_seal(
-                                plan
+                        try:
+                            await asyncio.shield(
+                                self._step_lifecycle.reconcile_execution_terminal_seal(
+                                    plan
+                                )
                             )
-                        )
+                        except BaseException:
+                            _logger.error(
+                                "local terminal seal reconciliation failed after "
+                                "durable commit: execution=%s",
+                                current.execution_id,
+                                exc_info=environ.debug,
+                            )
                 return committed
             except BaseException as error:
                 if (
