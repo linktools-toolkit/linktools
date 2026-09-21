@@ -281,8 +281,16 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "terminal_code",
+    (
+        ErrorCode.STORAGE_INTEGRITY_ERROR,
+        ErrorCode.STORAGE_COMMIT_UNKNOWN,
+    ),
+)
 async def test_terminal_commit_error_converges_to_failed_terminal(
     monkeypatch: pytest.MonkeyPatch,
+    terminal_code: ErrorCode,
 ) -> None:
     calls: list[str] = []
     application = _application(calls)
@@ -303,7 +311,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
         ):
             injected = True
             raise AIError(
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                terminal_code,
                 safe_details={"phase": "terminal_commit"},
             )
         return await original(self, commit, **kwargs)  # type: ignore[arg-type]
@@ -331,7 +339,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
 
         assert injected
         assert result.status is ExecutionStatus.FAILED
-        assert result.error_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+        assert result.error_code == terminal_code.value
         assert calls == ["lookup"]
         assert watched[-1].event.event_type == ExecutionEventType.EXECUTION_FAILED
         assert watched[-1].event.payload["error_code"] == result.error_code
