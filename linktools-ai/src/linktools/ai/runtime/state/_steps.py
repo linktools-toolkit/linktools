@@ -214,20 +214,26 @@ class RuntimeStepStore(StepStore):
                     observed_run = await target_recovery.get_run(
                         run_id=target_snapshot.run_id
                     )
-                    observed_snapshot = await target_recovery.latest_snapshot(
-                        run_id=target_snapshot.run_id,
-                        include_interrupted=True,
-                    )
+                    if isinstance(target_recovery, StateStepArchive):
+                        snapshot_visible = (
+                            await target_recovery.verify_snapshot_projection(
+                                run_id=target_snapshot.run_id,
+                                snapshot=target_snapshot,
+                            )
+                        )
+                    else:
+                        observed_snapshot = await target_recovery.latest_snapshot(
+                            run_id=target_snapshot.run_id,
+                            include_interrupted=True,
+                        )
+                        snapshot_visible = _relocated_snapshot_matches(
+                            RuntimeDomain.RECOVERY,
+                            target_snapshot,
+                            observed_snapshot,
+                        )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if (
-                    observed_run == target_run
-                    and _relocated_snapshot_matches(
-                        RuntimeDomain.RECOVERY,
-                        target_snapshot,
-                        observed_snapshot,
-                    )
-                ):
+                if observed_run == target_run and snapshot_visible:
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
