@@ -3,10 +3,12 @@
 """Session terminal handoff across tool-using turns."""
 
 import asyncio
-import sqlite3
+import multiprocessing
+import os
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -21,6 +23,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
+from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._step_archive import StateStepArchive
@@ -106,11 +109,17 @@ def _application(
     calls: list[str],
     *,
     effect: Literal["replay_safe", "non_replay_safe"] = "replay_safe",
+    effect_log: Path | None = None,
 ) -> CapabilityGroup[None]:
     application: CapabilityGroup[None] = CapabilityGroup("application")
 
-    async def lookup(_ctx: RunContext[AgentContext[None]]) -> str:
+    async def lookup(_ctx: AgentContext[None]) -> str:
         calls.append("lookup")
+        if effect_log is not None:
+            with effect_log.open("a", encoding="utf-8") as handle:
+                handle.write(_ctx.execution_id + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         return "tool-result"
 
     application.tool(lookup, name="lookup", effect=effect)
@@ -250,9 +259,13 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
             capabilities=(application,),
         ) as runtime:
             await runtime.agent("default").create_session("session")
-            execution = await runtime.agent("default").session("session").start(
-                "inspect",
-                idempotency_key="turn-1",
+            execution = (
+                await runtime.agent("default")
+                .session("session")
+                .start(
+                    "inspect",
+                    idempotency_key="turn-1",
+                )
             )
             watched = [
                 item
@@ -263,7 +276,9 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
 
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup"]
-            assert watched[-1].event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+            assert (
+                watched[-1].event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+            )
             stored_execution = await state.execution.executions.get(
                 execution.execution_id,
                 tenant_id=runtime.tenant_id,
@@ -451,110 +466,176 @@ async def test_completed_tool_operation_is_reused_after_reopen(
             await second_engine.dispose()
 
 
+def _crash_session_process(
+    database: str, effect_log: str, backend: str, phase: str
+) -> None:
+    """Exit without cleanup after a selected durable boundary."""
+    original_complete = RuntimeToolOperationBridge.complete
+    original_snapshot = RuntimeStepStore.save_snapshot
+    original_success = LocalExecutionBackend._commit_success
+    original_activate = RuntimeStateCommands.commit_agent_attempt_checkpoint
+    original_admission = RuntimeStateCommands.commit_tool_admission
 
-class _SimulatedProcessExit(BaseException):
-    pass
+    async def admit(self: RuntimeStateCommands, request: Any) -> Any:
+        if phase == "effect_unconfirmed":
+            request = replace(request, lease_seconds=1)
+        return await original_admission(self, request)
+
+    async def activate(self: RuntimeStateCommands, *args: Any, **kwargs: Any) -> Any:
+        result = await original_activate(self, *args, **kwargs)
+        if phase == "activated":
+            os._exit(91)
+        return result
+
+    async def complete(
+        self: RuntimeToolOperationBridge, decision: Any, result: Any
+    ) -> bool:
+        if phase == "effect_unconfirmed":
+            os._exit(91)
+        cancelled = await original_complete(self, decision, result)
+        if phase == "tool_completed":
+            os._exit(91)
+        return cancelled
+
+    async def save_snapshot(
+        self: RuntimeStepStore, snapshot: ContinuableSnapshot, **kwargs: Any
+    ) -> None:
+        await original_snapshot(self, snapshot, **kwargs)
+        if phase == "request_checkpoint" and not any(
+            isinstance(message, ModelResponse) for message in snapshot.messages
+        ):
+            os._exit(91)
+        if (
+            phase in {"tool_checkpoint", "projected_tool_checkpoint"}
+            and snapshot.pending_request_index is not None
+        ):
+            if phase == "projected_tool_checkpoint":
+                await self.flush_execution_projection(
+                    snapshot.run_id, execution_id=kwargs["execution_id"]
+                )
+            os._exit(91)
+
+    async def commit_success(
+        self: LocalExecutionBackend, *args: Any, **kwargs: Any
+    ) -> Any:
+        if phase in {"before_terminal", "recovered_before_terminal"}:
+            os._exit(91)
+        result = await original_success(self, *args, **kwargs)
+        if phase == "after_terminal":
+            os._exit(91)
+        return result
+
+    RuntimeToolOperationBridge.complete = complete
+    RuntimeStateCommands.commit_agent_attempt_checkpoint = activate
+    RuntimeStateCommands.commit_tool_admission = admit
+    RuntimeStepStore.save_snapshot = save_snapshot
+    LocalExecutionBackend._commit_success = commit_success
+
+    async def run() -> None:
+        if backend == "sqlite":
+            state = RuntimeState.sqlite(database)
+        else:
+            engine = create_async_engine(
+                URL.create("sqlite+aiosqlite", database=database)
+            )
+            if phase != "recovered_before_terminal":
+                await provision_runtime_database(engine)
+            state = RuntimeState.sql(engine)
+        application = _application(
+            [], effect="non_replay_safe", effect_log=Path(effect_log)
+        )
+        async with Runtime.open(
+            "session-tool-crash",
+            models=_ToolModels(),
+            state=state,
+            capabilities=(application,),
+        ) as runtime:
+            if phase != "recovered_before_terminal":
+                await runtime.agent("default").create_session("session")
+            execution = (
+                await runtime.agent("default")
+                .session("session")
+                .start("inspect", idempotency_key="turn-1")
+            )
+            await execution.wait(timeout_seconds=15)
+        raise AssertionError("crash boundary was not reached")
+
+    asyncio.run(run())
+
+
+async def _exit_at_boundary(
+    database: Path, effect_log: Path, backend: str, phase: str
+) -> None:
+    process = multiprocessing.get_context("spawn").Process(
+        target=_crash_session_process,
+        args=(str(database), str(effect_log), backend, phase),
+    )
+    process.start()
+    try:
+        await asyncio.to_thread(process.join, 25)
+        assert process.exitcode == 91, (phase, process.exitcode)
+    finally:
+        if process.is_alive():
+            process.kill()
+            await asyncio.to_thread(process.join, 5)
+        process.close()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("sqlite", "sql"))
+@pytest.mark.parametrize(
+    "phase",
+    (
+        "tool_completed",
+        "tool_checkpoint",
+        "projected_tool_checkpoint",
+        "before_terminal",
+        "after_terminal",
+    ),
+)
 async def test_session_tool_turn_recovers_after_process_exit_without_replaying_effect(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    phase: str,
 ) -> None:
-    database = tmp_path / "session-tool-crash.db"
-    crash_database = tmp_path / "session-tool-crash-snapshot.db"
+    database = tmp_path / "runtime.db"
+    effect_log = tmp_path / "effects.txt"
+    await _exit_at_boundary(database, effect_log, backend, phase)
+    committed_effects = effect_log.read_text().splitlines()
+    assert len(committed_effects) == 1
+    execution_id = committed_effects[0]
+    engine = None
+    if backend == "sqlite":
+        state = RuntimeState.sqlite(database)
+    else:
+        engine = create_async_engine(
+            URL.create("sqlite+aiosqlite", database=str(database))
+        )
+        state = RuntimeState.sql(engine)
     calls: list[str] = []
-    application = _application(calls, effect="non_replay_safe")
-    original_complete = RuntimeToolOperationBridge.complete
-    crashed = False
-
-    def snapshot_database() -> None:
-        with sqlite3.connect(database) as source:
-            with sqlite3.connect(crash_database) as target:
-                source.backup(target)
-
-    async def complete_then_exit(
-        self: RuntimeToolOperationBridge,
-        decision: object,
-        result: object,
-    ) -> bool:
-        nonlocal crashed
-        cancelled = await original_complete(
-            self,
-            decision,  # type: ignore[arg-type]
-            result,
-        )
-        if not crashed:
-            await asyncio.to_thread(snapshot_database)
-            crashed = True
-            raise _SimulatedProcessExit("simulated process exit")
-        return cancelled
-
-    monkeypatch.setattr(
-        RuntimeToolOperationBridge,
-        "complete",
-        complete_then_exit,
-    )
-
-    first_state = RuntimeState.sqlite(database)
-    manager = Runtime.open(
-        "session-tool-crash",
-        models=_ToolModels(),  # type: ignore[arg-type]
-        state=first_state,
-        capabilities=(application,),
-    )
-    runtime = await manager.__aenter__()
-    execution_id = ""
-    try:
-        await runtime.agent("default").create_session("session")
-        execution = await runtime.agent("default").session("session").start(
-            "inspect",
-            idempotency_key="turn-1",
-        )
-        execution_id = execution.execution_id
-        for _ in range(200):
-            if crashed:
-                break
-            await asyncio.sleep(0.01)
-        assert crashed
-        assert calls == ["lookup"]
-
-        operations = await first_state.recovery.tools.list_by_execution(
-            execution_id,
-            tenant_id=runtime.tenant_id,
-        )
-        assert len(operations) == 1
-        assert operations[0].status.value == "COMPLETED"
-        before = await first_state.execution.executions.get(
-            execution_id,
-            tenant_id=runtime.tenant_id,
-        )
-        assert before is not None
-        assert before.status is ExecutionStatus.STARTED
-
-    finally:
-        await manager.__aexit__(None, None, None)
-        if first_state.ready:
-            await first_state.close()
-
-    second_state = RuntimeState.sqlite(crash_database)
+    application = _application(calls, effect="non_replay_safe", effect_log=effect_log)
     try:
         async with Runtime.open(
             "session-tool-crash",
-            models=_ToolModels(),  # type: ignore[arg-type]
-            state=second_state,
+            models=_ToolModels(),
+            state=state,
             capabilities=(application,),
-        ) as recovered:
-            session = recovered.agent("default").session("session")
-            same = await session.start(
-                "inspect",
-                idempotency_key="turn-1",
-            )
-            result = await same.wait(timeout_seconds=10)
-
+        ) as runtime:
+            session = runtime.agent("default").session("session")
+            same = await session.start("inspect", idempotency_key="turn-1")
+            result = await same.wait(timeout_seconds=15)
             assert same.execution_id == execution_id
-            assert result.status is ExecutionStatus.SUCCEEDED
-            assert calls == ["lookup"]
+            assert result.status is ExecutionStatus.SUCCEEDED, result
+            assert calls == []
+            assert effect_log.read_text().splitlines() == committed_effects
+            watched = [
+                item
+                async for item in same.watch(include_content=True)
+                if item.depth == 0
+            ]
+            assert (
+                watched[-1].event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+            )
             history = await session.history()
             assert _relevant_kinds(history.items) == [
                 "user",
@@ -562,9 +643,30 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
                 "tool_result",
                 "assistant",
             ]
+            execution_history = await runtime.history.history(
+                execution_id, principal=runtime.default_principal, include_content=True
+            )
+            assert _relevant_kinds(execution_history.items) == _relevant_kinds(
+                history.items
+            )
+            interactions = await same.model_interactions(include_content=True)
+            assert len(interactions.items) >= 2, interactions.items
+            assert interactions.items[-1].response is not None
+            assert "done" in str(interactions.items[-1].response)
+            repeated = await session.start("inspect", idempotency_key="turn-1")
+            assert repeated.execution_id == execution_id
+            assert (
+                await repeated.wait(timeout_seconds=15)
+            ).status is ExecutionStatus.SUCCEEDED
+            following = await session.run(
+                "continue", idempotency_key="turn-2", timeout_seconds=15
+            )
+            assert following.status is ExecutionStatus.SUCCEEDED
+            assert effect_log.read_text().splitlines() == committed_effects
     finally:
-        if second_state.ready:
-            await second_state.close()
+        await state.close()
+        if engine is not None:
+            await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -582,6 +684,7 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
         snapshot: ContinuableSnapshot,
         *,
         execution_id: str | None = None,
+        **kwargs: Any,
     ) -> None:
         nonlocal injected
         await original(
@@ -589,6 +692,7 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
             run,
             snapshot,
             execution_id=execution_id,
+            **kwargs,
         )
         if self.runtime_domain is RuntimeDomain.RECOVERY and not injected:
             injected = True
@@ -617,9 +721,8 @@ async def test_snapshot_save_readback_ignores_transient_before_coordinate(
 
         recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
         assert isinstance(recovery, StateStepArchive)
-        assert (
-            await recovery.transcript_message_count_for_run(run)
-            == len(snapshot.messages)
+        assert await recovery.transcript_message_count_for_run(run) == len(
+            snapshot.messages
         )
         stored = await recovery.latest_snapshot(
             run_id=run.run_id,
@@ -777,10 +880,195 @@ async def test_recovery_to_conversation_rebases_cumulative_tool_snapshot() -> No
         stored = await conversation.latest_snapshot(run_id=run.run_id)
         assert stored is not None
         assert stored.state == "complete"
-        assert tuple(stored.messages[-len(final_messages):]) == tuple(final_messages)
-        assert (
-            await conversation.transcript_message_count_for_run(run)
-            == len(final_messages)
+        assert tuple(stored.messages[-len(final_messages) :]) == tuple(final_messages)
+        assert await conversation.transcript_message_count_for_run(run) == len(
+            final_messages
         )
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase", ("activated", "request_checkpoint", "recovered_before_terminal", "effect_unconfirmed")
+)
+async def test_recovery_preserves_bootstrap_and_effect_confirmation_boundaries(
+    tmp_path: Path, phase: str
+) -> None:
+    database = tmp_path / "runtime.db"
+    effect_log = tmp_path / "effects.txt"
+    if phase == "recovered_before_terminal":
+        await _exit_at_boundary(database, effect_log, "sqlite", "tool_completed")
+    await _exit_at_boundary(database, effect_log, "sqlite", phase)
+    if phase == "effect_unconfirmed":
+        await asyncio.sleep(1.1)
+    calls: list[str] = []
+    async with Runtime.open(
+        "session-tool-crash",
+        models=_ToolModels(),
+        state=RuntimeState.sqlite(database),
+        capabilities=(
+            _application(calls, effect="non_replay_safe", effect_log=effect_log),
+        ),
+    ) as runtime:
+        session = runtime.agent("default").session("session")
+        if phase == "effect_unconfirmed":
+            with pytest.raises(AIError) as raised:
+                same = await session.start("inspect", idempotency_key="turn-1")
+                await same.wait(timeout_seconds=10)
+            assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+            assert calls == []
+        else:
+            same = await session.start("inspect", idempotency_key="turn-1")
+            result = await same.wait(timeout_seconds=10)
+            assert result.status is ExecutionStatus.SUCCEEDED, result
+            assert calls == (["lookup"] if phase in {"activated", "request_checkpoint"} else [])
+            history = await session.history()
+            assert _relevant_kinds(history.items) == [
+                "user",
+                "tool_call",
+                "tool_result",
+                "assistant",
+            ]
+        assert len(effect_log.read_text().splitlines()) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_effect_waits_for_durable_response_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = StateStepArchive.materialize_snapshot
+    calls: list[str] = []
+    rejected = False
+
+    async def reject_response(
+        self: StateStepArchive,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+        **kwargs: Any,
+    ) -> None:
+        nonlocal rejected
+        if self.runtime_domain is RuntimeDomain.RECOVERY and any(
+            isinstance(message, ModelResponse)
+            and any(isinstance(part, ToolCallPart) for part in message.parts)
+            for message in snapshot.messages
+        ):
+            rejected = True
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+        return await original(self, run, snapshot, **kwargs)
+
+    monkeypatch.setattr(StateStepArchive, "materialize_snapshot", reject_response)
+    with pytest.raises(AIError) as raised:
+        async with Runtime.open(
+            "pre-effect-checkpoint",
+            models=_ToolModels(),
+            state=RuntimeState.in_memory(),
+            capabilities=(_application(calls),),
+        ) as runtime:
+            await runtime.agent("default").create_session("session")
+            execution = (
+                await runtime.agent("default")
+                .session("session")
+                .start("inspect", idempotency_key="turn-1")
+            )
+            await execution.wait(timeout_seconds=10)
+    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert rejected
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("memory", "sqlite"))
+async def test_terminal_transaction_rollback_keeps_session_cursor_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    from linktools.ai.runtime.state._conversation_repositories import (
+        SessionRepositoryImpl,
+    )
+
+    original = SessionRepositoryImpl.commit_timeline_turn_in_transaction
+    injected = False
+
+    async def commit_then_fail(
+        self: SessionRepositoryImpl, *args: Any, **kwargs: Any
+    ) -> Any:
+        nonlocal injected
+        result = await original(self, *args, **kwargs)
+        if not injected:
+            injected = True
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result
+
+    monkeypatch.setattr(
+        SessionRepositoryImpl, "commit_timeline_turn_in_transaction", commit_then_fail
+    )
+    state, engine = await _state(backend, tmp_path)
+    calls: list[str] = []
+    try:
+        async with Runtime.open(
+            "session-atomic-terminal",
+            models=_ToolModels(),
+            state=state,
+            capabilities=(_application(calls),),
+        ) as runtime:
+            await runtime.agent("default").create_session("session")
+            session = runtime.agent("default").session("session")
+            execution = await session.start("inspect", idempotency_key="turn-1")
+            result = await execution.wait(timeout_seconds=10)
+            assert injected
+            assert result.status is ExecutionStatus.FAILED
+            assert result.error_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+            assert calls == ["lookup"]
+            history = await session.history()
+            assert "assistant" not in _relevant_kinds(history.items)
+            assert "tool_result" not in _relevant_kinds(history.items)
+            replay = await session.start("inspect", idempotency_key="turn-1")
+            assert replay.execution_id == execution.execution_id
+            assert (
+                await replay.wait(timeout_seconds=10)
+            ).status is ExecutionStatus.FAILED
+            assert calls == ["lookup"]
+            following = await session.run(
+                "next", idempotency_key="turn-2", timeout_seconds=10
+            )
+            assert following.status is ExecutionStatus.SUCCEEDED
+            assert calls == ["lookup", "lookup"]
+    finally:
+        await state.close()
+        if engine is not None:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_preparation_failure_releases_its_owned_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="recovery-preparation", tenant_id="tenant")
+    recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+    run = RunRecord(
+        "run",
+        conversation_id="conversation",
+        agent_name="default",
+        metadata={"history_id": "history"},
+    )
+    snapshot = ContinuableSnapshot(
+        run_id="run",
+        step_index=1,
+        conversation_id=run.conversation_id,
+        agent_name=run.agent_name,
+        messages=[ModelRequest(parts=[UserPromptPart("inspect")])],
+        transcript_message_count_before=0,
+    )
+    await recovery.materialize_snapshot(run, snapshot)
+
+    async def fail_resolution(_interactions: Any) -> Any:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    monkeypatch.setattr(recovery, "resolve_model_interactions", fail_resolution)
+    with pytest.raises(AIError) as raised:
+        await state.steps.materialize_from_recovery(
+            target=RuntimeDomain.CONVERSATION, step_run_id="run"
+        )
+    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    await state.close()

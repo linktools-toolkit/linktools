@@ -586,7 +586,6 @@ class AgentExecutor:
             deps=scope.context,
             message_history=scope.history or None,
             conversation_id=scope.conversation_id,
-            run_id=scope.step_run_id,
             usage_limits=usage_limits,
             usage=run_usage,
             capabilities=capabilities,
@@ -635,7 +634,7 @@ class AgentExecutor:
         binding.output_binding.validate_payload(payload)
         usage = _usage_metrics(run_usage)
         return AgentExecutionResult(
-            final_result.run_id, payload, final_result.all_messages(), usage
+            scope.step_run_id, payload, final_result.all_messages(), usage
         )
 
 

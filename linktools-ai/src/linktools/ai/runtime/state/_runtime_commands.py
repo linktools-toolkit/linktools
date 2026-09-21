@@ -1380,7 +1380,10 @@ class RuntimeStateCommands:
 
         while True:
             try:
-                return await attempt()
+                result = await attempt()
+                if result.status is ToolOperationStatus.EFFECT_UNKNOWN:
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                return result
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise

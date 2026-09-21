@@ -2584,8 +2584,7 @@ class LocalExecutionBackend:
                     if remaining > 0:
                         await asyncio.sleep(min(1.0, remaining))
                         continue
-                    if not current.replay_safe:
-                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                # Admission classifies expired claims in the repository transaction.
                 break
         _logger.info(
             "recovery tool operations reconciled: run=%s count=%s",
@@ -2714,6 +2713,17 @@ class LocalExecutionBackend:
                 if snapshot is None:
                     if recovery_run is not None:
                         raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+                    if (
+                        self._tool_operations is not None
+                        and await self._tool_operations.has_by_step_run(
+                            recovery_history_run_id,
+                            tenant_id=self._tenant_id,
+                        )
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    # Attempt admission can commit before the first model checkpoint.
+                    recovery_history_run_id = None
+                    exact_recovery_context = False
                 elif self._tool_operations is not None:
                     unresolved = tuple(
                         operation

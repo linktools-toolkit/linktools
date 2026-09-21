@@ -2120,6 +2120,7 @@ class StateStepArchive(StepStore):
         snapshot: ContinuableSnapshot,
         *,
         execution_id: str | None = None,
+        interactions: Sequence[ModelInteractionRecord] = (),
     ) -> None:
         self._ensure_open()
         require_no_run_history_lock("StateStepArchive.materialize_snapshot")
@@ -2127,14 +2128,24 @@ class StateStepArchive(StepStore):
             run,
             (snapshot,),
         )
-        await self._store.mutate(
-            lambda transaction: self._materialize_snapshot_in_transaction(
+        async def mutate(transaction: StateTransaction) -> None:
+            await self._materialize_snapshot_in_transaction(
                 transaction,
                 run,
                 prepared.snapshots[0],
                 execution_id=execution_id,
             )
-        )
+            if interactions:
+                await self._sync_projection_in_transaction(
+                    transaction,
+                    run,
+                    events=(),
+                    snapshots=(),
+                    interactions=interactions,
+                    execution_id=execution_id,
+                )
+
+        await self._store.mutate(mutate)
 
     async def _materialize_snapshot_in_transaction(
         self,

@@ -442,3 +442,27 @@ async def test_tool_bridge_requires_terminal_owner_and_fence_identity() -> None:
         )
 
     assert raised.value.code is ErrorCode.TOOL_OPERATION_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_expired_non_replay_safe_admission_commits_unknown_before_raising() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="tool-cas", tenant_id="tenant")
+    try:
+        repository = state.recovery.tools
+        expired = replace(
+            _record(),
+            replay_safe=False,
+            lease_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+        await repository.reserve(expired)
+        with pytest.raises(AIError) as raised:
+            await repository.admit(replace(_admission(owner="replacement"), replay_safe=False))
+        assert raised.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
+        observed = await repository.get_operation("tool-operation", tenant_id="tenant")
+        assert observed is not None
+        assert observed.status is ToolOperationStatus.EFFECT_UNKNOWN
+        assert observed.fence == expired.fence
+        assert observed.owner == expired.owner
+    finally:
+        await state.close()

@@ -104,6 +104,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         repr=False,
         compare=False,
     )
+    _replay_request_captured: bool = field(default=False, init=False, repr=False, compare=False)
     _live_messages: Sequence[ModelMessage] | None = field(
         default=None,
         init=False,
@@ -132,6 +133,9 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
                 started_at=datetime.now(timezone.utc),
             )
         )
+        transcript = self.capture.transcript_messages()
+        self._last_snapshot_transcript_count = len(transcript)
+        self._replay_request_captured = bool(transcript and isinstance(transcript[-1], ModelRequest))
         await self.capture.record_event("run_started", ctx.run_step)
 
     async def before_model_request(
@@ -141,7 +145,12 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
     ) -> ModelRequestContext:
         self._live_messages = ctx.messages
         if ctx.messages and isinstance(ctx.messages[-1], ModelRequest):
-            self.capture.append_transcript_message(ctx.messages[-1])
+            if self._replay_request_captured:
+                # A resumed outstanding request already has its raw occurrence.
+                self._replay_request_captured = False
+            else:
+                self.capture.append_transcript_message(ctx.messages[-1])
+        await self._save_snapshot(ctx, messages=ctx.messages, state="complete")
         return request_context
 
     async def after_node_run(
@@ -161,6 +170,8 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
                 response = ctx.messages[-1]
             if response is not None:
                 self.capture.append_transcript_message(response)
+                # The exact response must be recoverable before any tool effect.
+                await self._save_snapshot(ctx, messages=ctx.messages, state="complete")
         if isinstance(node, CallToolsNode):
             pending = result.request if isinstance(result, ModelRequestNode) else None
             await self._save_snapshot(

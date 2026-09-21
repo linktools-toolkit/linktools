@@ -80,7 +80,7 @@ class RuntimeCaptureStore:
         frozen_initial = freeze_model_messages(initial_messages)
         baseline = initial_context or LoadedModelContext(())
         baseline_messages = baseline.model_messages()
-        baseline_refs: tuple[TranscriptMessageRef | None, ...]
+        baseline_refs: tuple[TranscriptMessageRef | int | None, ...]
         if baseline.messages:
             if (
                 len(baseline_messages) != len(frozen_initial)
@@ -91,7 +91,11 @@ class RuntimeCaptureStore:
                     "initial model context does not match initial messages",
                 )
             baseline_refs = tuple(
-                value.source
+                value.source.message_index
+                if value.source is not None
+                and value.source.source_domain is RuntimeDomain.RECOVERY
+                and value.source.owner_id == step_run_id
+                else value.source
                 if value.source is not None
                 and value.source.source_domain is RuntimeDomain.CONVERSATION
                 else None
@@ -127,6 +131,11 @@ class RuntimeCaptureStore:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._run = record
         await self._store.register_run(record, execution_id=self._execution_id)
+        previous = await self.latest_snapshot(include_interrupted=True)
+        if previous is not None:
+            self._transcript_messages = list(freeze_model_messages(previous.messages))
+        events = await self._store.list_events(run_id=record.run_id)
+        self._event_sequence = max((event.event_index for event in events), default=-1) + 1
 
     async def append_event(self, event: StepEvent) -> None:
         if event.run_id != self._step_run_id:
