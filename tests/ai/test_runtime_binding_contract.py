@@ -16,7 +16,12 @@ from linktools.ai.agent import (
     SemanticPin,
 )
 from linktools.ai.agent._output import bind_output
-from linktools.ai.capability import SkillDefinition, SkillSourceRef
+from linktools.ai.capability import (
+    CapabilityContribution,
+    SkillDefinition,
+    SkillSourceRef,
+    tool_semantic_metadata,
+)
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -25,6 +30,7 @@ from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
+from pydantic_ai import Tool
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -319,6 +325,55 @@ def test_python_only_output_validator_is_not_part_of_durable_contract() -> None:
     parsed = TypeAdapter(binding.runtime_output_type).validate_python({"value": 7})
 
     assert parsed == {"value": 7}
+
+
+def test_restore_accepts_nonsemantic_tool_contract_drift() -> None:
+    def sample(value: str) -> str:
+        return value
+
+    spec = AgentSpec("agent", allow_tools=("sample",))
+    semantic = tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="business",
+    )
+    first_candidate = CapabilityContribution.from_opaque(
+        "tool",
+        "sample",
+        Tool(
+            sample,
+            name="sample",
+            metadata={**semantic, "upstream.trace": "first"},
+        ),
+    )
+    second_candidate = CapabilityContribution.from_opaque(
+        "tool",
+        "sample",
+        Tool(
+            sample,
+            name="sample",
+            metadata={**semantic, "upstream.trace": "second"},
+        ),
+    )
+    assert first_candidate.semantic_contract != second_candidate.semantic_contract
+    assert first_candidate.fingerprint == second_candidate.fingerprint
+
+    first_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(first_candidate,),
+        agents={"agent": spec},
+    )
+    second_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(second_candidate,),
+        agents={"agent": spec},
+    )
+    original = first_compiler.bind(first_compiler.compile(spec))
+
+    restored = second_compiler.restore(original.snapshot)
+
+    assert restored.digest == original.digest
+    assert restored.definition.selected_tools == (second_candidate,)
 
 
 def test_catalog_reuses_binding_for_nonsemantic_snapshot_differences() -> None:
