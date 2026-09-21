@@ -194,6 +194,11 @@ class RuntimeStepStore(StepStore):
                 target_run: RunRecord = recovery_run,
                 target_snapshot: ContinuableSnapshot = snapshot,
             ) -> None:
+                if isinstance(target_recovery, StateStepArchive):
+                    target_snapshot = await target_recovery.relocate_run_snapshot(
+                        target_run,
+                        target_snapshot,
+                    )
                 await _materialize_snapshot(
                     target_recovery,
                     target_run,
@@ -215,7 +220,14 @@ class RuntimeStepStore(StepStore):
                     )
                 except AIError as error:
                     return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-                if observed_run == target_run and observed_snapshot == target_snapshot:
+                if (
+                    observed_run == target_run
+                    and _relocated_snapshot_matches(
+                        RuntimeDomain.RECOVERY,
+                        target_snapshot,
+                        observed_snapshot,
+                    )
+                ):
                     return CommitObservation(DurableCommitState.COMMITTED)
                 return CommitObservation(DurableCommitState.NOT_COMMITTED)
 
@@ -1695,7 +1707,10 @@ def _relocated_snapshot_matches(
     return replace(
         observed,
         transcript_message_count_before=None,
-    ) == source
+    ) == replace(
+        source,
+        transcript_message_count_before=None,
+    )
 
 
 def _run_registration_identity(run: RunRecord) -> tuple[object, ...]:
