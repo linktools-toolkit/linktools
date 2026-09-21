@@ -1,0 +1,36 @@
+name: AI recovery verification environment
+on:
+  push:
+    branches: [fix/ai-stability-hardening]
+    paths: [.github/workflows/ai-recovery-sandbox.yml]
+permissions:
+  contents: read
+jobs:
+  verification-environment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install verification dependencies
+        run: |
+          python -m pip install --quiet -r requirements.txt
+          python manage.py install --editable --quiet
+      - name: Export isolated verification inputs
+        run: |
+          mkdir -p "$RUNNER_TEMP/ai-recovery-inputs"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/ai-recovery-inputs/source.tar.gz" HEAD
+          python -m pip list --format=json > "$RUNNER_TEMP/ai-recovery-inputs/packages.json"
+          python -c 'import sys; print(sys.version)' > "$RUNNER_TEMP/ai-recovery-inputs/python-version.txt"
+          packages=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')
+          tar --exclude='__pycache__' -czf "$RUNNER_TEMP/ai-recovery-inputs/python313-packages.tar.gz" -C "$packages" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-recovery-verification-inputs
+          path: ${{ runner.temp }}/ai-recovery-inputs
+          retention-days: 1
+          compression-level: 0
