@@ -608,18 +608,26 @@ class RuntimeStepStore(StepStore):
                     await self._abandon_durability_flight(flight)
                     raise
             else:
-                local_message_count = (
-                    await destination.transcript_message_count_for_run(run)
-                    if isinstance(destination, StateStepArchive)
-                    else await destination.transcript_message_count(step_run_id)
-                )
-                if local_message_count > len(snapshot.messages):
-                    await self._abandon_durability_flight(flight)
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                target_snapshot = replace(
-                    snapshot,
-                    transcript_message_count_before=local_message_count,
-                )
+                if isinstance(destination, StateStepArchive):
+                    try:
+                        target_snapshot = await destination.relocate_run_snapshot(
+                            run,
+                            snapshot,
+                        )
+                    except BaseException:
+                        await self._abandon_durability_flight(flight)
+                        raise
+                else:
+                    local_message_count = await destination.transcript_message_count(
+                        step_run_id
+                    )
+                    if local_message_count > len(snapshot.messages):
+                        await self._abandon_durability_flight(flight)
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    target_snapshot = replace(
+                        snapshot,
+                        transcript_message_count_before=local_message_count,
+                    )
             relocated = await destination.prepare_relocated_interactions(
                 source_interactions,
                 source_resolved,
