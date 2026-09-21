@@ -216,6 +216,48 @@ async def test_session_tool_turn_commits_terminal_and_history(
 
 
 @pytest.mark.asyncio
+async def test_durable_terminal_survives_local_seal_finalization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    calls: list[str] = []
+    application = _application(calls)
+
+    async def fail_finalize(_plan: object) -> None:
+        raise RuntimeError("injected terminal seal finalization failure")
+
+    monkeypatch.setattr(
+        state.steps,
+        "finalize_execution_terminal_seal",
+        fail_finalize,
+    )
+    try:
+        async with Runtime.open(
+            "session-tool-terminal-finalize",
+            models=_ToolModels(),  # type: ignore[arg-type]
+            state=state,
+            capabilities=(application,),
+        ) as runtime:
+            await runtime.agent("default").create_session("session")
+            execution = await runtime.agent("default").session("session").start(
+                "inspect",
+                idempotency_key="turn-1",
+            )
+            watched = [
+                item
+                async for item in execution.watch(include_content=True)
+                if item.depth == 0
+            ]
+            result = await execution.wait(timeout_seconds=10)
+
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert calls == ["lookup"]
+            assert watched[-1].event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_terminal_commit_error_converges_to_failed_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
