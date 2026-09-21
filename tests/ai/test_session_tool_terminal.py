@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Session terminal handoff across tool-using turns."""
 
+import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
