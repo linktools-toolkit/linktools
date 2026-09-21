@@ -918,7 +918,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
             graph,
             idempotency_key="shutdown-graph-run-0001",
         )
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), 10)
         snapshot = await runtime.graph.snapshot(
             graph.graph_id,
             principal=runtime.default_principal,

@@ -186,6 +186,15 @@ async def _terminate_unregistered_process(
     process: asyncio.subprocess.Process,
     job: _WindowsJob | None,
 ) -> None:
+    if sys.platform.startswith("linux"):
+        state = _ProcessState(
+            f"unregistered-{process.pid}",
+            "",
+            process,
+            job=job,
+        )
+        await _stop_process(state, force=True)
+        return
     cleanup_error: BaseException | None = None
     try:
         if job is not None:
@@ -238,25 +247,29 @@ class _ProcessState:
             errors="replace"
         )
         self.final_status: str | None = None
-        current = asyncio.current_task()
-        if current is None:
-            raise RuntimeError("process state requires an asyncio task")
-        self.stdout_reader_task: asyncio.Task[None] = current  # replaced below
-        self.stderr_reader_task: asyncio.Task[None] = current  # replaced below
-        self.wait_task: asyncio.Task[None] = current  # replaced below
         self.stop_lock = asyncio.Lock()
         self.job = job
-        try:
-            if sys.platform.startswith("linux"):
-                fields = _proc_stat_fields(process.pid)
-                self.process_start_time = fields[19]
-                self.process_session_id = fields[3]
-            else:
-                self.process_start_time = None
-                self.process_session_id = None
-        except OSError:
-            self.process_start_time = None
-            self.process_session_id = None
+        self.process_start_time = None
+        # start_new_session establishes this identity even if asyncio has
+        # already reaped the shell before its process state is registered.
+        self.process_session_id = process.pid if sys.platform.startswith("linux") else None
+        if sys.platform.startswith("linux"):
+            try:
+                self.process_start_time = _proc_start_time(process.pid)
+            except OSError:
+                pass
+        self.stdout_reader_task = asyncio.create_task(
+            _read_process_output(self, "stdout"),
+            name=f"sandbox-stdout-{command_id}",
+        )
+        self.stderr_reader_task = asyncio.create_task(
+            _read_process_output(self, "stderr"),
+            name=f"sandbox-stderr-{command_id}",
+        )
+        self.wait_task = asyncio.create_task(
+            _wait_process(self),
+            name=f"sandbox-wait-{command_id}",
+        )
 
 
 async def _read_process_output(state: _ProcessState, channel: str) -> None:
@@ -414,9 +427,11 @@ async def _observe_process_exit(state: _ProcessState) -> bool:
                 os.WEXITED | os.WNOHANG | os.WNOWAIT,
             )
         except ChildProcessError:
-            return False
+            return _process_group_is_owned(state)
         except OSError as error:
-            if error.errno in {errno.ECHILD, errno.EINVAL}:
+            if error.errno == errno.ECHILD:
+                return _process_group_is_owned(state)
+            if error.errno == errno.EINVAL:
                 return False
             raise
         if result is not None and result.si_pid == process.pid:

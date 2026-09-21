@@ -258,3 +258,102 @@ async def test_local_sandbox_file_info_includes_text_metadata(tmp_path: Path) ->
     assert "binary: false" in result
     assert "lines: 2" in result
     assert f"hash: {hashlib.sha256(content.encode()).hexdigest()}" in result
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux process groups")
+@pytest.mark.parametrize("operation", ("run", "start", "cancel_spawn"))
+@pytest.mark.parametrize("inherit_output", (False, True))
+async def test_local_sandbox_reaps_descendants_when_shell_is_already_reaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    inherit_output: bool,
+) -> None:
+    import signal
+
+    ready = tmp_path / "child.pid"
+    code = (
+        "import os,pathlib,time; "
+        f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    redirect = "" if inherit_output else " >/dev/null 2>&1"
+    command = f"{_python_command(code)}{redirect} &"
+    original = asyncio.create_subprocess_exec
+    reaped = asyncio.Event()
+    release = asyncio.Event()
+    command_task: asyncio.Task[str] | None = None
+
+    async def create_after_reaping(
+        *args: object, **kwargs: object
+    ) -> asyncio.subprocess.Process:
+        process = await original(*args, **kwargs)
+
+        async def wait_until_reaped() -> None:
+            while process.returncode is None or not ready.exists():
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(wait_until_reaped(), 10)
+        assert not Path(f"/proc/{process.pid}").exists()
+        reaped.set()
+        if operation == "cancel_spawn":
+            await release.wait()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_after_reaping)
+    session = await LocalSandbox().open(root=tmp_path)
+    try:
+        if operation == "cancel_spawn":
+            command_task = asyncio.create_task(session.run_command(command))
+            await asyncio.wait_for(reaped.wait(), 10)
+            command_task.cancel()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await command_task
+        elif operation == "run":
+            result = await session.run_command(command, timeout_seconds=5)
+            assert "status: exited" in result
+        else:
+            started = await session.start_command(command)
+            command_id = started.splitlines()[0].split(": ", 1)[1]
+
+            async def wait_until_exited() -> None:
+                while "status: running" in await session.check_command(command_id):
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_until_exited(), 10)
+        child_id = int(ready.read_text())
+        stat = Path(f"/proc/{child_id}/stat")
+        if stat.exists():
+            assert stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    finally:
+        release.set()
+        if command_task is not None and not command_task.done():
+            command_task.cancel()
+            await asyncio.gather(command_task, return_exceptions=True)
+        if ready.exists():
+            try:
+                os.kill(int(ready.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        await session.close()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux child reaping")
+@pytest.mark.parametrize("owned", (False, True))
+async def test_reaped_child_notification_keeps_owned_group_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    owned: bool,
+) -> None:
+    from types import SimpleNamespace
+
+    from linktools.ai.workspace import _local_process
+
+    state = SimpleNamespace(process=SimpleNamespace(pid=123456, returncode=None))
+
+    def already_reaped(*args: object) -> None:
+        raise ChildProcessError("asyncio reaped the shell before returncode delivery")
+
+    monkeypatch.setattr(_local_process.os, "waitid", already_reaped)
+    monkeypatch.setattr(_local_process, "_process_group_is_owned", lambda _: owned)
+    assert await _local_process._observe_process_exit(state) is owned
