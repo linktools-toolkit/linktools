@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.usage import RunUsage
 from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -16,12 +17,16 @@ from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
 from linktools.ai.runtime.state._step_archive import StateStepArchive
 from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
 )
+from linktools.ai.storage import PayloadPolicy
+
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -194,11 +199,175 @@ async def test_session_tool_turn_commits_terminal_and_history(
                 timeout_seconds=10,
             )
             assert second.status is ExecutionStatus.SUCCEEDED
-            assert calls == ["lookup", "lookup"]
+            assert calls == ["lookup"]
+            accumulated = await session.history()
+            assert _relevant_kinds(accumulated.items) == [
+                "user",
+                "tool_call",
+                "tool_result",
+                "assistant",
+                "user",
+                "assistant",
+            ]
     finally:
         await state.close()
         if engine is not None:
             await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_terminal_commit_error_converges_to_failed_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    application = _application(calls)
+    original = RuntimeStateCommands.commit_terminal_checkpoint
+    injected = False
+
+    async def fail_success_once(
+        self: RuntimeStateCommands,
+        commit: object,
+        **kwargs: object,
+    ) -> object:
+        nonlocal injected
+        execution = getattr(commit, "execution", None)
+        if (
+            not injected
+            and execution is not None
+            and execution.status is ExecutionStatus.SUCCEEDED
+        ):
+            injected = True
+            raise AIError(
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+                safe_details={"phase": "terminal_commit"},
+            )
+        return await original(self, commit, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        RuntimeStateCommands,
+        "commit_terminal_checkpoint",
+        fail_success_once,
+    )
+    async with Runtime.open(
+        "session-tool-terminal-failure",
+        models=_ToolModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(application,),
+    ) as runtime:
+        await runtime.agent("default").create_session("session")
+        session = runtime.agent("default").session("session")
+        execution = await session.start("inspect", idempotency_key="turn-1")
+        watched = [
+            item
+            async for item in execution.watch(include_content=True)
+            if item.depth == 0
+        ]
+        result = await execution.wait(timeout_seconds=10)
+
+        assert injected
+        assert result.status is ExecutionStatus.FAILED
+        assert result.error_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+        assert calls == ["lookup"]
+        assert watched[-1].event.event_type is ExecutionEventType.EXECUTION_FAILED
+        assert watched[-1].event.payload["error_code"] == result.error_code
+
+        retry = await session.run(
+            "retry",
+            idempotency_key="turn-2",
+            timeout_seconds=10,
+        )
+        assert retry.status is ExecutionStatus.SUCCEEDED
+        assert calls == ["lookup", "lookup"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ("sqlite", "sql"))
+async def test_completed_tool_operation_is_reused_after_reopen(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    database = tmp_path / f"tool-replay-{backend}.db"
+    first_engine: AsyncEngine | None = None
+    if backend == "sqlite":
+        first = RuntimeState.sqlite(database)
+    else:
+        first_engine = create_async_engine(
+            URL.create("sqlite+aiosqlite", database=str(database))
+        )
+        await provision_runtime_database(first_engine)
+        first = RuntimeState.sql(first_engine)
+    await first.initialize(namespace="tool-replay", tenant_id="tenant")
+    try:
+        first_bridge = RuntimeToolOperationBridge(
+            first.recovery.tools,
+            first.object_store(RuntimeDomain.RECOVERY),
+            namespace="tool-replay",
+            tenant_id="tenant",
+            execution_id="execution",
+            step_run_id="run-1",
+            binding_digest="a" * 64,
+            owner="worker-1",
+            background_tasks=set(),
+            payload_policy=PayloadPolicy(),
+        )
+        context = RunContext(
+            deps=None,
+            model=TestModel(),
+            usage=RunUsage(),
+            run_id="run-1",
+        )
+        call = ToolCallPart("lookup", {}, tool_call_id="call-1")
+        tool = ToolDefinition(name="lookup")
+        decision = await first_bridge.begin(context, call, tool, {}, True)
+        assert not decision.has_cached_result
+        await first_bridge.complete(decision, "tool-result")
+    finally:
+        await first.close()
+        if first_engine is not None:
+            await first_engine.dispose()
+
+    second_engine: AsyncEngine | None = None
+    if backend == "sqlite":
+        second = RuntimeState.sqlite(database)
+    else:
+        second_engine = create_async_engine(
+            URL.create("sqlite+aiosqlite", database=str(database))
+        )
+        second = RuntimeState.sql(second_engine)
+    await second.initialize(namespace="tool-replay", tenant_id="tenant")
+    try:
+        replay_bridge = RuntimeToolOperationBridge(
+            second.recovery.tools,
+            second.object_store(RuntimeDomain.RECOVERY),
+            namespace="tool-replay",
+            tenant_id="tenant",
+            execution_id="execution",
+            step_run_id="run-2",
+            recovery_step_run_id="run-1",
+            binding_digest="a" * 64,
+            owner="worker-2",
+            background_tasks=set(),
+            payload_policy=PayloadPolicy(),
+        )
+        replay_context = RunContext(
+            deps=None,
+            model=TestModel(),
+            usage=RunUsage(),
+            run_id="run-2",
+        )
+        replay = await replay_bridge.begin(
+            replay_context,
+            call,
+            tool,
+            {},
+            True,
+        )
+        assert replay.has_cached_result
+        assert replay.cached_result == "tool-result"
+    finally:
+        await second.close()
+        if second_engine is not None:
+            await second_engine.dispose()
 
 
 @pytest.mark.asyncio
