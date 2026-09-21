@@ -97,7 +97,7 @@ from .recovery import (
 )
 from .service_api import ExecutionRequest
 from .state import RuntimeDomain
-from .state._commands import ConversationStateCommands, RuntimeStateCommands
+from .state._commands import RuntimeStateCommands
 from .state._contracts import (
     ApprovalRecord,
     AgentAttemptClaim,
@@ -332,14 +332,6 @@ class LocalExecutionBackend:
         session_repository: SessionRepository = self._conversation.sessions
         self._session_state_store = session_repository.state_store
         self._execution_state_store = execution_repository.state_store
-        self._conversation_commands = ConversationStateCommands(
-            session_repository.state_store,
-            session_repository,
-            conversation_steps
-            if isinstance(conversation_steps, StateStepArchive)
-            else None,
-            self._conversation.histories,
-        )
         self._runtime_commands = RuntimeStateCommands(
             execution_repository,
             namespace=self._namespace,
@@ -2149,14 +2141,6 @@ class LocalExecutionBackend:
             ):
                 raise
 
-    async def _claim_session_or_recovery_finalizing(
-        self,
-        execution: ExecutionRecord,
-    ) -> ExecutionRecord:
-        if execution.session_id is None:
-            return execution
-        return await self._claim_session_finalizing(execution)
-
     async def _rewrite_prepared_success_handoff(
         self,
         checkpoint: RecoveryCheckpoint,
@@ -3517,166 +3501,6 @@ class LocalExecutionBackend:
                 segment_sequence=base.agent_run_sequence,
             ),
             history_id=history_id,
-        )
-
-    async def _claim_session_finalizing(
-        self,
-        execution: ExecutionRecord,
-    ) -> ExecutionRecord:
-        if (
-            execution.session_id is None
-            or execution.status is not ExecutionStatus.STARTED
-        ):
-            if execution.status in {
-                ExecutionStatus.FINALIZING,
-                ExecutionStatus.CANCELLING,
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
-                return execution
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        finalizing = replace(
-            execution,
-            status=ExecutionStatus.FINALIZING,
-            revision=execution.revision + 1,
-            updated_at=datetime.now(timezone.utc),
-        )
-        try:
-            updated = await self._execution.executions.compare_and_swap(
-                execution.execution_id,
-                tenant_id=self._tenant_id,
-                expected_revision=execution.revision,
-                next_record=finalizing,
-            )
-            _logger.debug(
-                "session execution finalization claimed: execution=%s",
-                execution.execution_id,
-            )
-            return updated
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
-                raise
-            current = await self._execution.executions.get(
-                execution.execution_id,
-                tenant_id=self._tenant_id,
-            )
-            if current is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.status in {
-                ExecutionStatus.FINALIZING,
-                ExecutionStatus.CANCELLING,
-                ExecutionStatus.SUCCEEDED,
-                ExecutionStatus.FAILED,
-                ExecutionStatus.CANCELLED,
-            }:
-                return current
-            raise
-
-    async def _commit_session_conversation(
-        self,
-        execution: ExecutionRecord,
-        *,
-        source_run_id: str,
-        expected_cursor: ConversationCursor | None,
-    ) -> None:
-        snapshot = await self._steps.latest_snapshot(run_id=source_run_id)
-        if snapshot is None or snapshot.state != "complete":
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        session = await self._conversation.sessions.get(
-            execution.session_id or "",
-            tenant_id=self._tenant_id,
-        )
-        if session is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        next_cursor = ConversationCursor(
-            source_run_id,
-            history_id=session.history_id
-            or (
-                None
-                if session.continuation is None
-                else session.continuation.history_id
-            ),
-        )
-        conversation_archive = self._step_reads[RuntimeDomain.CONVERSATION]
-        if isinstance(conversation_archive, StateStepArchive):
-            run = await self._steps.get_run(run_id=source_run_id)
-            if run is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                await self._conversation_commands.commit_snapshot_and_advance(
-                    execution.session_id or "",
-                    tenant_id=self._tenant_id,
-                    execution_id=execution.execution_id,
-                    expected=expected_cursor,
-                    next_cursor=next_cursor,
-                    step_run=run,
-                    snapshot=snapshot,
-                )
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_COMMIT_UNKNOWN:
-                    raise
-                current = await self._conversation.sessions.get(
-                    execution.session_id or "",
-                    tenant_id=self._tenant_id,
-                )
-                if current is None or current.continuation != next_cursor:
-                    raise
-                _logger.warning(
-                    "conversation checkpoint commit unknown but cursor advanced: "
-                    "execution=%s run=%s",
-                    execution.execution_id,
-                    source_run_id,
-                )
-            _logger.info(
-                "conversation snapshot checkpoint committed: execution=%s run=%s",
-                execution.execution_id,
-                source_run_id,
-            )
-            return
-        await self._step_lifecycle.materialize_conversation(step_run_id=source_run_id)
-        if session.continuation == next_cursor:
-            return
-        if session.status is SessionStatus.CLOSED:
-            raise AIError(ErrorCode.SESSION_CONFLICT)
-        if session.active_execution_id != execution.execution_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if session.continuation != expected_cursor:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            await self._conversation.sessions.advance_continuation(
-                execution.session_id or "",
-                tenant_id=self._tenant_id,
-                execution_id=execution.execution_id,
-                expected=expected_cursor,
-                next_cursor=next_cursor,
-            )
-        except AIError as error:
-            if error.code not in {
-                ErrorCode.STORAGE_CONFLICT,
-                ErrorCode.STORAGE_INTEGRITY_ERROR,
-            }:
-                raise
-            latest = await self._conversation.sessions.get(
-                execution.session_id or "",
-                tenant_id=self._tenant_id,
-            )
-            if latest is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if latest.continuation == next_cursor:
-                return
-            if latest.status is SessionStatus.CLOSED:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            if (
-                latest.active_execution_id != execution.execution_id
-                or latest.continuation != expected_cursor
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            raise
-        _logger.info(
-            "session conversation committed: execution=%s run=%s",
-            execution.execution_id,
-            source_run_id,
         )
 
     def _recovery_commands_for(self, execution_id: str) -> RuntimeRecoveryCommands:
