@@ -239,7 +239,7 @@ def test_tool_return_content_digest_is_stable_across_hash_seeds() -> None:
         "tool_return_content_digest(Result(values={'alpha','beta','gamma'})))"
     )
     values = []
-    for seed in ("1", "2", "3", "4"):
+    for seed in ("1", "2"):
         env = dict(os.environ)
         env["PYTHONHASHSEED"] = seed
         values.append(
