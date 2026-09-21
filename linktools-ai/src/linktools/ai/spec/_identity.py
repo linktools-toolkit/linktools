@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Minimal semantic projections for capability and Agent binding identities."""
 
+import math
 from collections.abc import Mapping
 from typing import cast
 
@@ -221,7 +222,7 @@ def _tool_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         if raw_return_schema is None
         else canonicalize_json_schema(_mapping(raw_return_schema))
     )
-    return {
+    result: dict[str, JsonValue] = {
         "version": 1,
         "description": contract["description"],
         "parameters": canonicalize_json_schema(
@@ -230,12 +231,52 @@ def _tool_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         "return_schema": return_schema,
         "strict": contract["strict"],
         "metadata": semantic_metadata,
-        **(
-            {"semantic_revision": contract["semantic_revision"]}
-            if "semantic_revision" in contract
-            else {}
-        ),
     }
+    max_retries = contract.get("max_retries")
+    if max_retries is not None:
+        if (
+            isinstance(max_retries, bool)
+            or not isinstance(max_retries, int)
+            or max_retries < 0
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result["max_retries"] = max_retries
+    sequential = contract.get("sequential", False)
+    if not isinstance(sequential, bool):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if sequential:
+        result["sequential"] = True
+    tool_kind = contract.get("kind", "function")
+    if tool_kind not in {"function", "unapproved"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if tool_kind != "function":
+        result["kind"] = tool_kind
+    timeout = contract.get("timeout")
+    if timeout is not None:
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or timeout <= 0
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result["timeout"] = float(timeout)
+    defer_loading = contract.get("defer_loading", False)
+    if not isinstance(defer_loading, bool):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if defer_loading:
+        result["defer_loading"] = True
+    include_return_schema = contract.get("include_return_schema")
+    if include_return_schema is not None:
+        if not isinstance(include_return_schema, bool):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result["include_return_schema"] = include_return_schema
+    if "semantic_revision" in contract:
+        revision = contract["semantic_revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result["semantic_revision"] = revision
+    return result
 
 
 def _skill_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":

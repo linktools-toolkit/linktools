@@ -87,3 +87,65 @@ def test_tool_fingerprint_changes_with_linktools_execution_semantics() -> None:
         != CapabilityContribution.from_opaque("tool", "sample", second).fingerprint
     )
 
+@pytest.mark.parametrize(
+    ("option", "value"),
+    (
+        ("max_retries", 2),
+        ("sequential", True),
+        ("requires_approval", True),
+        ("timeout", 1.0),
+        ("defer_loading", True),
+        ("include_return_schema", False),
+    ),
+)
+def test_tool_fingerprint_tracks_nondefault_execution_configuration(
+    option: str,
+    value: object,
+) -> None:
+    from pydantic_ai import Tool
+
+    from linktools.ai.capability import CapabilityContribution, tool_semantic_metadata
+
+    def sample(value: str) -> str:
+        return value
+
+    metadata = tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="business",
+    )
+    baseline = Tool(sample, name="sample", metadata=metadata)
+    configured = Tool(
+        sample,
+        name="sample",
+        metadata=metadata,
+        **{option: value},
+    )
+
+    assert (
+        CapabilityContribution.from_opaque("tool", "sample", baseline).fingerprint
+        != CapabilityContribution.from_opaque("tool", "sample", configured).fingerprint
+    )
+
+
+def test_tool_timeout_identity_normalizes_integer_and_float_values() -> None:
+    from pydantic_ai import Tool
+
+    from linktools.ai.capability import CapabilityContribution, tool_semantic_metadata
+
+    def sample(value: str) -> str:
+        return value
+
+    metadata = tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="business",
+    )
+    integer = Tool(sample, name="sample", metadata=metadata, timeout=1)
+    floating = Tool(sample, name="sample", metadata=metadata, timeout=1.0)
+
+    assert (
+        CapabilityContribution.from_opaque("tool", "sample", integer).fingerprint
+        == CapabilityContribution.from_opaque("tool", "sample", floating).fingerprint
+    )
+

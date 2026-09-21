@@ -954,6 +954,18 @@ def contribution_semantic_contract(
             "strict": definition.strict,
             "metadata": cast(JsonValue, definition.metadata),
         }
+        if value.max_retries is not None:
+            contract["max_retries"] = value.max_retries
+        if definition.sequential:
+            contract["sequential"] = True
+        if definition.kind != "function":
+            contract["kind"] = definition.kind
+        if definition.timeout is not None:
+            contract["timeout"] = float(definition.timeout)
+        if definition.defer_loading:
+            contract["defer_loading"] = True
+        if definition.include_return_schema is not None:
+            contract["include_return_schema"] = definition.include_return_schema
         if semantic_revision is not None:
             contract["semantic_revision"] = semantic_revision
         return contract
