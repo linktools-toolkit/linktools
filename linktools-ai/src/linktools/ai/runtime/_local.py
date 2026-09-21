@@ -3090,6 +3090,11 @@ class LocalExecutionBackend:
                     ExecutionStatus.CANCELLED,
                 }:
                     committed = persisted
+                elif (
+                    isinstance(terminal_error, AIError)
+                    and terminal_error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
+                ):
+                    raise terminal_error
                 else:
                     try:
                         committed = await self._commit_failure(
