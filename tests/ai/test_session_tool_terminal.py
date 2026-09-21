@@ -224,7 +224,10 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
     calls: list[str] = []
     application = _application(calls)
 
-    async def fail_finalize(_plan: object) -> None:
+    async def fail_finalize(
+        _store: RuntimeStepStore,
+        _plan: object,
+    ) -> None:
         raise RuntimeError("injected terminal seal finalization failure")
 
     monkeypatch.setattr(
