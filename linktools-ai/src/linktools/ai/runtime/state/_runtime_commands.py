@@ -1500,6 +1500,10 @@ class RuntimeStateCommands:
             and recovery_run is not None
             and recovery_snapshot is not None
         ):
+            recovery_snapshot = await self._recovery_steps.relocate_run_snapshot(
+                recovery_run,
+                recovery_snapshot,
+            )
             prepared_recovery = await self._recovery_steps.prepare_snapshots(
                 recovery_run,
                 (recovery_snapshot,),
