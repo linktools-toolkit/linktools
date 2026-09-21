@@ -4646,23 +4646,29 @@ class LocalExecutionBackend:
                         )
                     )
                     durable_commit = True
+                try:
                     self._confirm_committed_events(
                         current.execution_id,
                         pending_count=pending_count,
                         durable_sequence=committed.execution.event_sequence,
                     )
-                if plan is not None:
-                    try:
+                    if plan is not None:
                         await self._step_lifecycle.finalize_execution_terminal_seal(
                             plan
                         )
-                    except BaseException:
-                        _logger.error(
-                            "terminal seal finalization failed after durable commit: execution=%s",
-                            current.execution_id,
-                            exc_info=environ.debug,
+                except BaseException:
+                    _logger.error(
+                        "local terminal finalization failed after durable commit: "
+                        "execution=%s",
+                        current.execution_id,
+                        exc_info=environ.debug,
+                    )
+                    if plan is not None:
+                        await asyncio.shield(
+                            self._step_lifecycle.discard_execution_terminal_seal(
+                                plan
+                            )
                         )
-                        raise
                 return committed
             except BaseException as error:
                 if (
