@@ -24,6 +24,7 @@ from ._contract import (
 )
 from ._identity import (
     agent_spec_identity_payload,
+    bound_agent_spec_identity_payload,
     binding_identity_payload,
     capability_identity_payload,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "AgentSpecCodec",
     "AgentUsageLimits",
     "agent_spec_identity_payload",
+    "bound_agent_spec_identity_payload",
     "binding_identity_payload",
     "canonicalize_json_schema",
     "canonicalize_pydantic_model_schema",
