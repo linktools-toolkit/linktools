@@ -1268,6 +1268,45 @@ class StateStepArchive(StepStore):
             transcript_message_count_before=before,
         )
 
+    async def relocate_run_snapshot(
+        self,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+    ) -> ContinuableSnapshot:
+        """Rebase one cumulative snapshot onto its run-owned archive."""
+        self._ensure_open()
+        require_no_run_history_lock(
+            "StateStepArchive.relocate_run_snapshot"
+        )
+        if self._runtime_domain is RuntimeDomain.CONVERSATION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        existing_run = await self.get_run(run_id=run.run_id)
+        if existing_run is None:
+            return replace(snapshot, transcript_message_count_before=0)
+        if existing_run != run:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        before = await self.transcript_message_count_for_run(run)
+        source_messages = tuple(snapshot.messages)
+        if before > len(source_messages):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if before:
+            observed = await self._history.load_message_span(
+                run.run_id,
+                0,
+                before,
+            )
+            if tuple(
+                _exact_message_signature(message) for message in observed
+            ) != tuple(
+                _exact_message_signature(message)
+                for message in source_messages[:before]
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return replace(
+            snapshot,
+            transcript_message_count_before=before,
+        )
+
     async def prepare_snapshots(
         self,
         run: RunRecord,
