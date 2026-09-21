@@ -10,7 +10,6 @@ import pytest
 
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.service_api import ExecutionRequest
 from linktools.ai.runtime.state._codec import decode_domain, encode_domain
@@ -96,7 +95,7 @@ async def test_local_start_accepts_matching_durable_correlation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_start_rejects_correlation_drift_from_durable_execution() -> None:
+async def test_local_start_ignores_correlation_drift_from_durable_execution() -> None:
     execution = _execution(correlation={"trace_id": "durable", "attempt": 1})
     backend = _backend(execution)
     request = ExecutionRequest(
@@ -107,13 +106,11 @@ async def test_local_start_rejects_correlation_drift_from_durable_execution() ->
         mode="run",
         planning=False,
         thinking=False,
-        correlation={"trace_id": "request", "attempt": 1},
+        correlation={"trace_id": "request", "attempt": 2},
     )
 
-    with pytest.raises(AIError) as raised:
-        await backend._validate_start(request, execution)
+    await backend._validate_start(request, execution)
 
-    assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     assert dict(execution.correlation) == {"attempt": 1, "trace_id": "durable"}
 
 

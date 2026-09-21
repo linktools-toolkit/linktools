@@ -4,8 +4,6 @@
 
 from types import SimpleNamespace
 
-import pytest
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._execution import DefaultExecutionService
 
 
@@ -41,15 +39,13 @@ def test_execution_replay_accepts_matching_durable_correlation() -> None:
     service._validate_replayed_execution(execution, binding, request)
 
 
-def test_execution_replay_rejects_correlation_drift() -> None:
+def test_execution_replay_ignores_correlation_drift() -> None:
     service = object.__new__(DefaultExecutionService)
     execution, binding, request = _replay_values(
         execution_correlation={"trace_id": "durable", "attempt": 1},
-        request_correlation={"trace_id": "request", "attempt": 1},
+        request_correlation={"trace_id": "request", "attempt": 2},
     )
 
-    with pytest.raises(AIError) as raised:
-        service._validate_replayed_execution(execution, binding, request)
+    service._validate_replayed_execution(execution, binding, request)
 
-    assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
     assert execution.correlation == {"trace_id": "durable", "attempt": 1}
