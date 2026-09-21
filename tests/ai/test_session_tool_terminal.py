@@ -25,6 +25,7 @@ from linktools.ai.runtime.state._step_contracts import (
     ContinuableSnapshot,
     RunRecord,
 )
+from linktools.ai.runtime.state._steps import RuntimeStepStore
 from linktools.ai.storage import PayloadPolicy
 
 from pydantic_ai.messages import (
@@ -227,7 +228,7 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
         raise RuntimeError("injected terminal seal finalization failure")
 
     monkeypatch.setattr(
-        state.steps,
+        RuntimeStepStore,
         "finalize_execution_terminal_seal",
         fail_finalize,
     )
