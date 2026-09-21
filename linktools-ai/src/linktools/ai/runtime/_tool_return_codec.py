@@ -6,13 +6,13 @@ import binascii
 from collections.abc import Mapping, Sequence
 from typing import cast
 
-from pydantic_core import PydanticSerializationError, to_jsonable_python
 from pydantic_ai.messages import ToolReturnContent, is_multi_modal_content
 from pydantic_ai.tools import DeferredToolResults
 
 from ..core import JsonValue, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ._input import _decode_user_content_item, _encode_user_content_item
+from ._json_snapshot import stable_json_snapshot
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
 _TOOL_RETURN_CONTRACT = "linktools.tool-return"
@@ -88,16 +88,12 @@ def _encode_node(value: object) -> JsonValue:
             "value": normalize_json_value(value),
         }
     try:
-        snapshot = to_jsonable_python(
-            value,
-            by_alias=True,
-            bytes_mode="base64",
-        )
-    except PydanticSerializationError as error:
+        snapshot = stable_json_snapshot(value)
+    except (TypeError, ValueError) as error:
         raise TypeError("tool-return content is not JSON serializable") from error
     return {
         "type": "json-snapshot",
-        "value": normalize_json_value(snapshot),
+        "value": snapshot,
     }
 
 
