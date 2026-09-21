@@ -11,7 +11,7 @@ from pydantic_ai.tools import DeferredToolResults
 
 from ..core import JsonValue, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ._input import _decode_user_content_item, _encode_user_content_item
+from ._user_content_codec import decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
 
 _JSON_SCALARS = (str, int, float, bool, type(None))
@@ -62,7 +62,7 @@ def _encode_node(value: object) -> JsonValue:
     if is_multi_modal_content(value):
         return {
             "type": "multimodal",
-            "value": _encode_user_content_item(value),
+            "value": encode_user_content_item(value),
         }
     if isinstance(value, Mapping) and all(
         isinstance(key, str) for key in value
@@ -126,7 +126,7 @@ def _decode_node(value: object) -> object:
         return [_decode_node(item) for item in items]
     if node_type == "multimodal":
         _require_keys(value, {"type", "value"})
-        item = _decode_user_content_item(value["value"])
+        item = decode_user_content_item(value["value"])
         if not is_multi_modal_content(item):
             raise ValueError("tool-return multimodal item is invalid")
         return item
