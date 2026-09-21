@@ -497,6 +497,8 @@ class RuntimeStepStore(StepStore):
         if require_complete and snapshot.state != "complete":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if archive is not None:
+            if isinstance(archive, StateStepArchive):
+                snapshot = await archive.relocate_run_snapshot(run, snapshot)
             await _materialize_snapshot(archive, run, snapshot)
             interactions = await self._staging.list_model_interactions(
                 run_id=step_run_id
