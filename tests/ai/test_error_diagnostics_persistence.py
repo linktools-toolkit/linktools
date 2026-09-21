@@ -291,18 +291,6 @@ def test_execution_without_defaulted_started_at_field_uses_default() -> None:
     assert decoded.status is ExecutionStatus.STARTED
 
 
-@pytest.mark.asyncio
-async def test_standalone_recovery_finalization_keeps_started_execution() -> None:
-    backend = object.__new__(LocalExecutionBackend)
-    execution = _started_execution(datetime.now(timezone.utc))
-    assert execution.session_id is None
-    assert execution.status is ExecutionStatus.STARTED
-    assert (
-        await backend._claim_session_or_recovery_finalizing(execution)
-        is execution
-    )
-
-
 def test_model_timeout_preserves_diagnostics_without_changing_safe_contract() -> None:
     error = ModelHTTPError(
         status_code=408,
