@@ -9,6 +9,7 @@ import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
@@ -50,6 +51,9 @@ from ._steps import RuntimeStepStore
 from ._store import StateStore, state_store_digest
 from ._task_admission_repository import TaskAdmissionRepositoryImpl
 from ._task_repository import TaskRepositoryImpl
+
+if TYPE_CHECKING:
+    from sqlalchemy import MetaData
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 
