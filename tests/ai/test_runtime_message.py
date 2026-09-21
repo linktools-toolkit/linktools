@@ -81,6 +81,7 @@ def test_model_message_round_trip_snapshots_arbitrary_metadata_as_json() -> None
         metadata={
             "model": Metadata(count=2),
             "bytes": b"abc",
+            "values": {"beta", "alpha"},
         },
     )
 
@@ -92,6 +93,7 @@ def test_model_message_round_trip_snapshots_arbitrary_metadata_as_json() -> None
     assert restored.metadata == {
         "model": {"count": 2},
         "bytes": "YWJj",
+        "values": ["alpha", "beta"],
     }
 
 
