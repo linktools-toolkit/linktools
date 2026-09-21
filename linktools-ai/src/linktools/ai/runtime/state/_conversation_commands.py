@@ -53,12 +53,6 @@ class ConversationStateCommands:
             step_run,
             (snapshot,),
         )
-        effective_next = replace(
-            next_cursor,
-            history_id=next_cursor.history_id or prepared[0].owner_id,
-            message_count=prepared.target_transcript_message_count,
-        )
-
         async def mutate(transaction: StateTransaction) -> SessionRecord:
             if self._steps is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -66,14 +60,6 @@ class ConversationStateCommands:
                 transaction,
                 session_id,
                 tenant_id=tenant_id,
-            )
-            if current.continuation == effective_next:
-                return current
-            await self._steps.sync_projection_in_transaction(
-                transaction,
-                step_run,
-                events=(),
-                snapshots=prepared.snapshots,
             )
             if self._histories is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -85,6 +71,22 @@ class ConversationStateCommands:
             )
             if history is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            effective_next = replace(
+                next_cursor,
+                history_id=history_id,
+                message_count=(
+                    history.inherited_message_count
+                    + prepared.target_transcript_message_count
+                ),
+            )
+            if current.continuation == effective_next:
+                return current
+            await self._steps.sync_projection_in_transaction(
+                transaction,
+                step_run,
+                events=(),
+                snapshots=prepared.snapshots,
+            )
             quality = (
                 "conservative"
                 if prepared[0].history_quality is HistoryQuality.CONSERVATIVE
