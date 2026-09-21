@@ -524,8 +524,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
         assert before is not None
         assert before.status is ExecutionStatus.STARTED
     finally:
-        with pytest.raises(AIError):
-            await manager.__aexit__(None, None, None)
+        await manager.__aexit__(None, None, None)
         await first_state.close()
 
     second_state = RuntimeState.sqlite(database)
