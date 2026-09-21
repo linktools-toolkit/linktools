@@ -221,8 +221,10 @@ async def test_task_capture_does_not_build_static_root_closure(
     frozen = await snapshots.capture(admission, graph)
 
     assert frozen.roots == {}
+    frozen_binding = frozen.bindings[fixture.binding.digest]
+    assert frozen_binding.binding_digest != fixture.binding.digest
     snapshot = _skill_snapshot(
-        _frozen_child(frozen.bindings[fixture.binding.digest])
+        _frozen_child(frozen_binding)
     )
     assert snapshot.store_id == "runtime"
 
