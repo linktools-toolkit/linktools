@@ -350,7 +350,7 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     assert catalog.binding(first.digest) is second
 
 
-def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
+def test_current_binding_snapshot_has_minimal_wire_shape() -> None:
     snapshot = _snapshot()
 
     assert set(snapshot.to_payload()) == {
