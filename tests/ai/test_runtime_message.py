@@ -4,6 +4,7 @@
 import json
 
 import pytest
+from pydantic import BaseModel, ValidationError
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
@@ -12,6 +13,7 @@ from pydantic_ai.messages import (
     BinaryContent,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     UploadedFile,
     UserPromptPart,
 )
@@ -68,6 +70,28 @@ def test_model_message_round_trip_preserves_usage_extensions() -> None:
     assert decoded[0].usage == usage
     assert decoded[0].usage.__dict__["future_tokens"] == 42
     assert decoded[0].usage.__dict__["label"] == "original"
+
+
+def test_model_message_round_trip_preserves_retry_error_details() -> None:
+    class Payload(BaseModel):
+        count: int
+
+    try:
+        Payload(count="invalid")  # type: ignore[arg-type]
+    except ValidationError as error:
+        retry = RetryPromptPart.from_error(error)
+    else:
+        raise AssertionError("expected validation error")
+
+    decoded = decode_model_messages(
+        encode_model_messages((ModelRequest(parts=[retry]),))
+    )
+
+    restored = decoded[0].parts[0]
+    assert isinstance(restored, RetryPromptPart)
+    assert restored.content == retry.content
+    assert isinstance(restored.content, list)
+    assert isinstance(restored.content[0]["loc"], tuple)
 
 
 def test_model_message_round_trip_preserves_uploaded_file_media_type() -> None:

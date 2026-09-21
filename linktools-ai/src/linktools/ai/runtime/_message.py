@@ -11,6 +11,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import cast
 
+from pydantic import TypeAdapter
+from pydantic_core import ErrorDetails
 from pydantic_ai import RequestUsage
 from pydantic_ai.messages import (
     BinaryContent,
@@ -44,6 +46,7 @@ _REQUEST_STATES = frozenset({"complete", "interrupted"})
 _RESPONSE_STATES = frozenset({"complete", "incomplete", "suspended", "interrupted"})
 _FINISH_REASONS = frozenset({"stop", "length", "content_filter", "tool_call", "error"})
 _TOOL_OUTCOMES = frozenset({"success", "failed", "denied", "interrupted"})
+_ERROR_DETAILS_ADAPTER = TypeAdapter(list[ErrorDetails])
 
 
 def _portable_json(value: object) -> JsonValue:
@@ -372,10 +375,14 @@ def _decode_request_part(value: object) -> object:
             {"part_kind", "content", "tool_name", "tool_call_id", "timestamp"},
         )
         content = part["content"]
-        if not isinstance(content, (str, list)):
+        if isinstance(content, str):
+            retry_content: object = content
+        elif isinstance(content, list):
+            retry_content = _ERROR_DETAILS_ADAPTER.validate_python(content)
+        else:
             raise ValueError("retry content is invalid")
         return RetryPromptPart(
-            cast(object, content),
+            cast(object, retry_content),
             tool_name=_optional_string(part["tool_name"]),
             tool_call_id=_required_string(part["tool_call_id"]),
             timestamp=_required_datetime(part["timestamp"]),
