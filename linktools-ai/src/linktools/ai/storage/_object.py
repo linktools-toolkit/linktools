@@ -106,7 +106,7 @@ async def read_object(
     finally:
         close = getattr(stream, "aclose", None)
         if close is not None:
-            close_task = asyncio.create_task(close())
+            close_task = asyncio.ensure_future(close())
             await _finish_owned_task(close_task)
     if size != expected_size or digest.hexdigest() != expected_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
