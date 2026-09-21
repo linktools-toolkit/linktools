@@ -16,6 +16,7 @@ _CONTRIBUTION_KINDS = frozenset(
 _AGENT_SPEC_FIELDS = (
     "version",
     "id",
+    "model",
     "system_prompt",
     "instructions",
     "allow_tools",
@@ -55,6 +56,15 @@ def agent_spec_identity_payload(
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _agent_spec_semantic(contract)
+
+
+def bound_agent_spec_identity_payload(
+    contract: Mapping[str, JsonValue],
+) -> "dict[str, JsonValue]":
+    """Return Agent execution semantics after the model route is resolved."""
+    semantic = agent_spec_identity_payload(contract)
+    semantic.pop("model")
+    return semantic
 
 
 def capability_identity_payload(
@@ -149,7 +159,7 @@ def binding_identity_payload(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result: dict[str, JsonValue] = {
         "contract": "agent-binding-v1",
-        "agent_spec": agent_spec_identity_payload(agent_spec),
+        "agent_spec": bound_agent_spec_identity_payload(agent_spec),
         "base_model": dict(base_model),
         "selected": selected_projection,
         "subagents": subagent_projection,
@@ -348,6 +358,7 @@ def _mapping(value: object) -> "dict[str, JsonValue]":
 
 __all__ = [
     "agent_spec_identity_payload",
+    "bound_agent_spec_identity_payload",
     "binding_identity_payload",
     "capability_identity_payload",
 ]
