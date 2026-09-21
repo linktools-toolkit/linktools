@@ -1456,11 +1456,15 @@ class RuntimeStateCommands:
             and conversation_run is not None
             and conversation_snapshot is not None
         ):
-            prepared_conversation = (
-                await self._conversation_steps.prepare_conversation_snapshot(
+            conversation_snapshot = (
+                await self._conversation_steps.relocate_conversation_snapshot(
                     conversation_run,
                     conversation_snapshot,
                 )
+            )
+            prepared_conversation = await self._conversation_steps.prepare_snapshots(
+                conversation_run,
+                (conversation_snapshot,),
             )
         timeline_range: tuple[int, int] | None = None
         if prepared_conversation:
