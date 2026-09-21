@@ -606,6 +606,71 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
 
 
 @pytest.mark.asyncio
+async def test_snapshot_save_readback_ignores_transient_before_coordinate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="snapshot-readback", tenant_id="tenant")
+    original = StateStepArchive.materialize_snapshot
+    injected = False
+
+    async def commit_then_fail(
+        self: StateStepArchive,
+        run: RunRecord,
+        snapshot: ContinuableSnapshot,
+        *,
+        execution_id: str | None = None,
+    ) -> None:
+        nonlocal injected
+        await original(
+            self,
+            run,
+            snapshot,
+            execution_id=execution_id,
+        )
+        if self.runtime_domain is RuntimeDomain.RECOVERY and not injected:
+            injected = True
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    monkeypatch.setattr(
+        StateStepArchive,
+        "materialize_snapshot",
+        commit_then_fail,
+    )
+    try:
+        run = RunRecord("run", conversation_id="conversation", agent_name="default")
+        snapshot = ContinuableSnapshot(
+            run_id="run",
+            step_index=1,
+            messages=[
+                ModelRequest(parts=[UserPromptPart("inspect")]),
+                ModelResponse(parts=[TextPart("done")]),
+            ],
+            state="complete",
+            transcript_message_count_before=0,
+        )
+        await state.steps.register_run(run)
+        await state.steps.save_snapshot(snapshot)
+        assert injected
+
+        recovery = state.steps.read_store(RuntimeDomain.RECOVERY)
+        assert isinstance(recovery, StateStepArchive)
+        assert (
+            await recovery.transcript_message_count_for_run(run)
+            == len(snapshot.messages)
+        )
+        stored = await recovery.latest_snapshot(
+            run_id=run.run_id,
+            include_interrupted=True,
+        )
+        assert stored is not None
+        assert stored.transcript_message_count_before is None
+        assert tuple(stored.messages) == tuple(snapshot.messages)
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_run_snapshot_relocation_is_idempotent_and_validates_prefix() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="run-snapshot-relocation", tenant_id="tenant")
