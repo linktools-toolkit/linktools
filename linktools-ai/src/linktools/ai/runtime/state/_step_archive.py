@@ -2613,6 +2613,7 @@ class StateStepArchive(StepStore):
             and stored.state == snapshot.state
             and stored.has_context_projection
             == (snapshot.context_messages is not None)
+            and stored.pending_request_index == snapshot.pending_request_index
             and context.model_messages() == tuple(expected_messages)
         )
 
