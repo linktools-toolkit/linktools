@@ -29,6 +29,15 @@ _AGENT_SPEC_FIELDS = (
     "output_retries",
 )
 
+_TOOL_SEMANTIC_METADATA_FIELDS = (
+    "linktools.ai.effect",
+    "linktools.ai.plan_safe",
+    "linktools.ai.tool_class",
+    "linktools.ai.path_fields",
+    "linktools.ai.compaction_keep_result",
+    "linktools.ai.context_dedupe",
+)
+
 
 def capability_identity_payload(
     kind: str,
@@ -201,7 +210,11 @@ def _tool_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
     if not required.issubset(contract):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     metadata = _mapping(contract["metadata"])
-    metadata.pop("linktools.tool_metrics_managed", None)
+    semantic_metadata = {
+        key: metadata[key]
+        for key in _TOOL_SEMANTIC_METADATA_FIELDS
+        if key in metadata
+    }
     return {
         "version": 1,
         "description": contract["description"],
@@ -212,7 +225,7 @@ def _tool_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
             _mapping(contract["return_schema"])
         ),
         "strict": contract["strict"],
-        "metadata": dict(metadata),
+        "metadata": semantic_metadata,
         **(
             {"semantic_revision": contract["semantic_revision"]}
             if "semantic_revision" in contract

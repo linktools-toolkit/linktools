@@ -26,7 +26,6 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 
 ### Persistence and concurrency
 
-- Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
 - A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
 - Caller cancellation does not determine durable truth. Resolve commit/readback state before reporting an unknown outcome.
 - Filesystem coordination uses `filelock`. Database concurrency must avoid pessimistic locking.
@@ -51,6 +50,11 @@ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 
 - Durable recovery must not infer external-effect success from process lifetime or caller outcome. External effects that can be retried or recovered must have explicit ownership and idempotency/replay-safety semantics.
 - Define lifetime and recovery semantics before persisting external provider IDs, URLs, handles, tokens, or similar references.
+
+### Verification scope
+
+- Simplifying or consolidating tests must preserve every independent accepted contract and regression obligation. Remove duplicate examples, not distinct backend, concurrency, recovery, external-effect, or failure semantics.
+- Semantic identity changes require paired verification: non-semantic changes must preserve identity, semantic changes must alter it, and current durable writers must round-trip through current readers or current golden fixtures.
 
 ## Guidance
 

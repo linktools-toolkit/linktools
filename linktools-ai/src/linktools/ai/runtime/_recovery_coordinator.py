@@ -588,6 +588,7 @@ class _RecoveryCoordinator:
         error_code: str | None = None
         error_payload: StoredPayload | None = None
         if isinstance(request.resolution, ToolEffectApplied):
+            resolution_kind = "applied"
             target_status = ToolOperationStatus.COMPLETED
             result_payload = await self._port._tool_result_payload(
                 current,
@@ -595,8 +596,10 @@ class _RecoveryCoordinator:
                 request.resolution.result,
             )
         elif isinstance(request.resolution, ToolEffectNotApplied):
+            resolution_kind = "not_applied"
             target_status = ToolOperationStatus.PENDING
         elif isinstance(request.resolution, ToolEffectFailed):
+            resolution_kind = "failed"
             target_status = ToolOperationStatus.FAILED
             error_code = ErrorCode.TOOL_EXECUTION_FAILED.value
             error_payload = await self._port._tool_resolution_error_payload(current)
@@ -616,7 +619,7 @@ class _RecoveryCoordinator:
                 "execution_id": execution_id,
                 "operation_id": request.operation_id,
                 "expected_fence": request.expected_fence,
-                "resolution": type(request.resolution).__name__,
+                "resolution": resolution_kind,
                 "payload_digest": payload_digest,
             }
         )

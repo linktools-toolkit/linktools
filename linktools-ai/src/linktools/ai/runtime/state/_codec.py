@@ -1067,11 +1067,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             "data",
         }
     )
-    keys = frozenset(value)
-    if keys == current_keys | {"partition"}:
-        _digest_wire(_string(value, "partition"))
-    elif keys != current_keys:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _require_exact_keys(value, current_keys)
     lease = value["lease"]
     if not isinstance(lease, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
