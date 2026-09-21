@@ -46,8 +46,7 @@ class AgentCatalog:
         if existing is not None:
             if not _same_definition(existing, definition):
                 raise AIError(ErrorCode.BINDING_CONFLICT)
-            if _same_runtime_definition(existing, definition):
-                return existing
+            return existing
         self._definitions[definition.digest] = definition
         return definition
 
