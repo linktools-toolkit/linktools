@@ -27,6 +27,29 @@ def test_model_message_round_trip_is_canonical() -> None:
     assert decode_model_messages(first) == messages
 
 
+def test_model_message_wire_is_linktools_owned() -> None:
+    message = ModelRequest(parts=[UserPromptPart(content="hello")])
+    value = json.loads(encode_model_messages((message,)).decode("utf-8"))
+
+    assert set(value[0]) == {
+        "version",
+        "kind",
+        "parts",
+        "timestamp",
+        "instructions",
+        "run_id",
+        "conversation_id",
+        "metadata",
+        "state",
+    }
+    assert value[0]["version"] == 1
+    assert set(value[0]["parts"][0]) == {
+        "part_kind",
+        "content",
+        "timestamp",
+    }
+
+
 def test_model_message_round_trip_preserves_usage_extensions() -> None:
     usage = RequestUsage(
         input_tokens=5,
@@ -58,30 +81,6 @@ def test_model_message_round_trip_preserves_uploaded_file_media_type() -> None:
     uploaded = decoded[0].parts[0].content[0]
     assert isinstance(uploaded, UploadedFile)
     assert uploaded.media_type == "image/png"
-
-
-def test_model_message_reader_accepts_pydantic_legacy_usage() -> None:
-    raw = canonical_json_bytes(
-        [
-            {
-                "parts": [],
-                "usage": {
-                    "requests": 0,
-                    "request_tokens": None,
-                    "response_tokens": None,
-                    "total_tokens": None,
-                    "details": None,
-                },
-                "kind": "response",
-            }
-        ]
-    )
-
-    decoded = decode_model_messages(raw)
-
-    assert len(decoded) == 1
-    assert isinstance(decoded[0], ModelResponse)
-    assert decoded[0].usage == RequestUsage()
 
 
 def test_model_message_reader_rejects_noncanonical_json() -> None:

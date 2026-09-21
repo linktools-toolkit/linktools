@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Durable JSON-mode codec for portable Pydantic tool-return content."""
+"""LinkTools-owned durable codec for portable tool-return content."""
 
-import json
+from collections.abc import Mapping, Sequence
 from typing import cast
 
-from pydantic import TypeAdapter, ValidationError
-from pydantic_ai.messages import ToolReturnContent
+from pydantic_ai.messages import ToolReturnContent, is_multi_modal_content
 from pydantic_ai.tools import DeferredToolResults
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256, normalize_json_value
+from ..core import JsonValue, canonical_sha256, normalize_json_value
 from ..errors import AIError, ErrorCode
+from ._input import _decode_user_content_item, _encode_user_content_item
 
-_TOOL_RETURN_CONTENT_ADAPTER = TypeAdapter(ToolReturnContent)
-_JSON_TYPES = (str, int, float, bool, list, dict, type(None))
+_JSON_SCALARS = (str, int, float, bool, type(None))
 
 
 def encode_tool_return_content(value: object) -> JsonValue:
-    """Encode one portable tool result using Pydantic's public JSON-mode contract."""
+    """Encode portable tool content without depending on Pydantic wire serialization."""
     try:
-        encoded = _TOOL_RETURN_CONTENT_ADAPTER.dump_json(value)
-        restored = _TOOL_RETURN_CONTENT_ADAPTER.validate_json(encoded)
-        canonical = _TOOL_RETURN_CONTENT_ADAPTER.dump_json(restored)
-        return normalize_json_value(json.loads(canonical.decode("utf-8")))
-    except (TypeError, ValueError, UnicodeError, ValidationError) as error:
+        return _encode_node(value)
+    except AIError:
+        raise
+    except (TypeError, ValueError) as error:
         raise AIError(
             ErrorCode.REQUEST_FIELD_INVALID,
             safe_details={"field": "external_result"},
@@ -31,26 +29,99 @@ def encode_tool_return_content(value: object) -> JsonValue:
 
 
 def decode_tool_return_content(value: JsonValue) -> ToolReturnContent:
-    """Restore one durable JSON-mode result to the public Pydantic content types."""
+    """Restore one LinkTools durable tool-return value."""
     try:
-        return cast(
-            ToolReturnContent,
-            _TOOL_RETURN_CONTENT_ADAPTER.validate_json(canonical_json_bytes(value)),
-        )
-    except (TypeError, ValueError, ValidationError) as error:
+        return cast(ToolReturnContent, _decode_node(value))
+    except AIError:
+        raise
+    except (TypeError, ValueError, KeyError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
+def _encode_node(value: object) -> JsonValue:
+    if is_multi_modal_content(value):
+        return {
+            "type": "multimodal",
+            "value": _encode_user_content_item(value),
+        }
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("tool-return mapping keys must be strings")
+        return {
+            "type": "mapping",
+            "items": {
+                key: _encode_node(value[key])
+                for key in sorted(value)
+            },
+        }
+    if isinstance(value, Sequence) and not isinstance(
+        value,
+        (str, bytes, bytearray),
+    ):
+        return {
+            "type": "sequence",
+            "items": [_encode_node(item) for item in value],
+        }
+    if isinstance(value, _JSON_SCALARS):
+        return {
+            "type": "scalar",
+            "value": normalize_json_value(value),
+        }
+    raise TypeError("tool-return content is not portable")
+
+
+def _decode_node(value: object) -> object:
+    if not isinstance(value, Mapping):
+        raise ValueError("tool-return node must be an object")
+    node_type = value.get("type")
+    if node_type == "scalar":
+        _require_keys(value, {"type", "value"})
+        scalar = normalize_json_value(value["value"])
+        if not isinstance(scalar, _JSON_SCALARS):
+            raise ValueError("tool-return scalar is invalid")
+        return scalar
+    if node_type == "mapping":
+        _require_keys(value, {"type", "items"})
+        items = value["items"]
+        if not isinstance(items, Mapping) or any(
+            not isinstance(key, str) for key in items
+        ):
+            raise ValueError("tool-return mapping is invalid")
+        return {
+            key: _decode_node(items[key])
+            for key in sorted(items)
+        }
+    if node_type == "sequence":
+        _require_keys(value, {"type", "items"})
+        items = value["items"]
+        if not isinstance(items, list):
+            raise ValueError("tool-return sequence is invalid")
+        return [_decode_node(item) for item in items]
+    if node_type == "multimodal":
+        _require_keys(value, {"type", "value"})
+        item = _decode_user_content_item(value["value"])
+        if not is_multi_modal_content(item):
+            raise ValueError("tool-return multimodal item is invalid")
+        return item
+    raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+
+
+def _require_keys(value: Mapping[object, object], expected: set[str]) -> None:
+    if set(value) != expected:
+        raise ValueError("tool-return durable shape is invalid")
+
+
 def rehydrate_deferred_tool_results(results: DeferredToolResults) -> DeferredToolResults:
-    """Restore successful external JSON values at the Pydantic execution boundary."""
+    """Restore successful external durable values before the Pydantic boundary."""
     calls: dict[str, object] = {}
     for tool_call_id, result in results.calls.items():
-        if isinstance(result, _JSON_TYPES):
+        if isinstance(result, Mapping) and "type" in result:
             try:
-                value = normalize_json_value(result)
+                calls[tool_call_id] = decode_tool_return_content(
+                    cast(JsonValue, normalize_json_value(result))
+                )
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            calls[tool_call_id] = decode_tool_return_content(value)
         else:
             calls[tool_call_id] = result
     return DeferredToolResults(
@@ -61,7 +132,7 @@ def rehydrate_deferred_tool_results(results: DeferredToolResults) -> DeferredToo
 
 
 def tool_return_content_digest(value: object) -> str | None:
-    """Return one stable digest when the tool result has a portable content contract."""
+    """Return a stable digest for content accepted by the durable codec."""
     try:
         return canonical_sha256(encode_tool_return_content(value))
     except AIError:

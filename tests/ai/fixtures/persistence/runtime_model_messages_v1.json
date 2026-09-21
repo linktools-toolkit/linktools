@@ -6,13 +6,17 @@
     "metadata": null,
     "parts": [
       {
-        "content": "runtime-persistence-v1",
+        "content": {
+          "type": "text",
+          "value": "runtime-persistence-v1"
+        },
         "part_kind": "user-prompt",
         "timestamp": "2026-01-01T00:00:00Z"
       }
     ],
     "run_id": null,
     "state": "complete",
-    "timestamp": null
+    "timestamp": null,
+    "version": 1
   }
 ]
