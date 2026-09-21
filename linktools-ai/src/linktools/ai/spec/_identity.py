@@ -16,7 +16,6 @@ _CONTRIBUTION_KINDS = frozenset(
 _AGENT_SPEC_FIELDS = (
     "version",
     "id",
-    "model",
     "system_prompt",
     "instructions",
     "allow_tools",
@@ -38,6 +37,24 @@ _TOOL_SEMANTIC_METADATA_FIELDS = (
     "linktools.ai.compaction_keep_result",
     "linktools.ai.context_dedupe",
 )
+
+
+def agent_spec_identity_payload(
+    contract: Mapping[str, JsonValue],
+) -> "dict[str, JsonValue]":
+    """Return the single semantic projection for an Agent declaration."""
+    if not isinstance(contract, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    version = contract.get("version")
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or version != 1
+    ):
+        if isinstance(version, int) and not isinstance(version, bool):
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _agent_spec_semantic(contract)
 
 
 def capability_identity_payload(
@@ -132,7 +149,7 @@ def binding_identity_payload(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result: dict[str, JsonValue] = {
         "contract": "agent-binding-v1",
-        "agent_spec": _agent_spec_semantic(agent_spec),
+        "agent_spec": agent_spec_identity_payload(agent_spec),
         "base_model": dict(base_model),
         "selected": selected_projection,
         "subagents": subagent_projection,
@@ -179,7 +196,7 @@ def _capability_semantic(
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if kind == "agent":
-        return _agent_spec_semantic(contract)
+        return agent_spec_identity_payload(contract)
     if kind == "tool":
         return _tool_semantic(contract)
     if kind == "skill":
@@ -329,4 +346,8 @@ def _mapping(value: object) -> "dict[str, JsonValue]":
     return dict(cast(Mapping[str, JsonValue], value))
 
 
-__all__ = ["binding_identity_payload", "capability_identity_payload"]
+__all__ = [
+    "agent_spec_identity_payload",
+    "binding_identity_payload",
+    "capability_identity_payload",
+]
