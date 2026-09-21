@@ -37,6 +37,7 @@ from ..spec import (
     SkillSpecCodec,
     ThinkingValue,
     canonicalize_json_schema,
+    canonicalize_pydantic_model_schema,
     capability_identity_payload,
     parse_mcp_tool_selector,
 )
@@ -1055,39 +1056,15 @@ def _task_output_contract(handler: object) -> JsonValue:
     model_schema = getattr(output, "model_json_schema", None)
     if not callable(model_schema):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    schema = model_schema()
-    generated_paths = (
-        frozenset({("title",)})
-        if isinstance(output, type)
-        and issubclass(output, BaseModel)
-        and isinstance(schema, Mapping)
-        and _uses_default_pydantic_model_title(schema, output)
-        else frozenset()
+    schema = (
+        canonicalize_pydantic_model_schema(output)
+        if isinstance(output, type) and issubclass(output, BaseModel)
+        else canonicalize_json_schema(model_schema())
     )
     return {
         "kind": "schema",
-        "schema": canonicalize_json_schema(
-            schema,
-            generated_title_paths=generated_paths,
-        ),
+        "schema": schema,
     }
-
-
-def _uses_default_pydantic_model_title(
-    schema: Mapping[str, object],
-    output_type: type[BaseModel],
-) -> bool:
-    config = getattr(output_type, "model_config", {})
-    if (
-        not isinstance(config, Mapping)
-        or config.get("title") is not None
-        or config.get("model_title_generator") is not None
-        or schema.get("title") != output_type.__name__
-    ):
-        return False
-    hook = getattr(output_type, "__get_pydantic_json_schema__", None)
-    base_hook = getattr(BaseModel, "__get_pydantic_json_schema__", None)
-    return getattr(hook, "__func__", hook) is getattr(base_hook, "__func__", base_hook)
 
 
 def _expander_identity(expander: object) -> tuple[str, int]:
