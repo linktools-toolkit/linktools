@@ -4390,6 +4390,7 @@ class LocalExecutionBackend:
         async def commit_owned() -> ExecutionTerminalCommitResult:
             plan: ExecutionTerminalSealPlan | None = None
             durable_commit = False
+            pending_count = 0
             try:
                 state_archive = isinstance(
                     self._step_reads[RuntimeDomain.EXECUTION],
@@ -4473,15 +4474,63 @@ class LocalExecutionBackend:
                             )
                 return committed
             except BaseException as error:
-                if (
-                    plan is not None
-                    and not durable_commit
-                    and not (
+                if plan is not None and not durable_commit:
+                    if (
                         isinstance(error, AIError)
                         and error.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
-                    )
-                ):
-                    await self._step_lifecycle.discard_execution_terminal_seal(plan)
+                    ):
+                        observed = await self._execution.executions.get(
+                            current.execution_id,
+                            tenant_id=self._tenant_id,
+                        )
+                        if (
+                            observed is not None
+                            and observed.status
+                            in {
+                                ExecutionStatus.SUCCEEDED,
+                                ExecutionStatus.FAILED,
+                                ExecutionStatus.CANCELLED,
+                            }
+                        ):
+                            if (
+                                observed.status is not commit.execution.status
+                                or observed.result != commit.result
+                                or observed.error_code
+                                != commit.execution.error_code
+                            ):
+                                raise AIError(
+                                    ErrorCode.STORAGE_INTEGRITY_ERROR
+                                ) from error
+                            committed = ExecutionTerminalCommitResult(
+                                observed,
+                                commit.result,
+                            )
+                            self._record_committed_terminal(
+                                committed,
+                                session_id=current.session_id,
+                            )
+                            self._pending_audit_events.pop(
+                                current.execution_id,
+                                None,
+                            )
+                            self._confirm_committed_events(
+                                current.execution_id,
+                                pending_count=pending_count,
+                                durable_sequence=observed.event_sequence,
+                            )
+                            await asyncio.shield(
+                                self._step_lifecycle.reconcile_execution_terminal_seal(
+                                    plan
+                                )
+                            )
+                            return committed
+                        await self._step_lifecycle.discard_execution_terminal_seal(
+                            plan
+                        )
+                    else:
+                        await self._step_lifecycle.discard_execution_terminal_seal(
+                            plan
+                        )
                 raise
 
         task = asyncio.create_task(
