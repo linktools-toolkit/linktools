@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """Portable deferred tool-result contract tests."""
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -224,3 +227,27 @@ def test_tool_return_content_digest_is_canonical() -> None:
     }
 
     assert tool_return_content_digest(left) == tool_return_content_digest(right)
+
+
+def test_tool_return_content_digest_is_stable_across_hash_seeds() -> None:
+    script = (
+        "from pydantic import create_model;"
+        "from linktools.ai.runtime._tool_return_codec "
+        "import tool_return_content_digest;"
+        "Result=create_model('Result',values=(set[str],...));"
+        "print(tool_return_content_digest({'values':{'alpha','beta','gamma'}}),"
+        "tool_return_content_digest(Result(values={'alpha','beta','gamma'})))"
+    )
+    values = []
+    for seed in ("1", "2", "3", "4"):
+        env = dict(os.environ)
+        env["PYTHONHASHSEED"] = seed
+        values.append(
+            subprocess.check_output(
+                [sys.executable, "-c", script],
+                env=env,
+                text=True,
+            ).strip()
+        )
+
+    assert len(set(values)) == 1
