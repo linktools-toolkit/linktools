@@ -308,7 +308,7 @@ def _skill_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]"
     snapshot = source_value.get("snapshot")
     if snapshot is not None:
         snapshot_value = _mapping(snapshot)
-        source_projection["snapshot"] = _fields(snapshot_value, ("digest", "size"))
+        source_projection["snapshot"] = _fields(snapshot_value, ("digest",))
     result["source"] = source_projection
     return result
 
