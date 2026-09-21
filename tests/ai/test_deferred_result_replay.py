@@ -41,6 +41,7 @@ from linktools.ai.runtime.state._contracts import (
 )
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy, StoredPayload
 from linktools.ai.runtime._object import RuntimeObjectKeyFactory
+from linktools.ai.runtime._tool_return_codec import encode_tool_return_content
 from linktools.ai.core import Principal, PrincipalKind
 
 
@@ -278,7 +279,9 @@ async def test_external_supply_exact_replay_uses_durable_result() -> None:
 
     assert first == second
     assert second.accepted is True
-    assert calls.record.result_payload == StoredPayload.inline_json({"result": "ok"})
+    assert calls.record.result_payload == StoredPayload.inline_json(
+        encode_tool_return_content({"result": "ok"})
+    )
 
     conflicting = ExternalSupplyRequest(
         principal,
