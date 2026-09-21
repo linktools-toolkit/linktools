@@ -494,8 +494,6 @@ class LocalExecutionBackend:
                 self._tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        if request.correlation != execution.correlation:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         self._execution_binding(execution)
         if (
             request.mode != execution.mode
