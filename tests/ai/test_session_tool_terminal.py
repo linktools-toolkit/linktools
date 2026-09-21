@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
@@ -20,6 +19,7 @@ from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
@@ -32,7 +32,6 @@ from linktools.ai.runtime.state._steps import RuntimeStepStore
 from linktools.ai.storage import PayloadPolicy
 
 from pydantic_ai.messages import (
-    ModelMessage,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -457,97 +456,42 @@ class _SimulatedProcessExit(BaseException):
     pass
 
 
-class _CrashRecoveryController:
-    def __init__(self) -> None:
-        self.crash = True
-        self.replay_tool = False
-        self.crashed = False
-
-    def model(
-        self,
-        messages: list[ModelMessage],
-        _info: AgentInfo,
-    ) -> ModelResponse:
-        has_tool_result = any(
-            isinstance(message, ModelRequest)
-            and any(isinstance(part, ToolReturnPart) for part in message.parts)
-            for message in messages
-        )
-        if not has_tool_result:
-            return ModelResponse(
-                parts=[ToolCallPart("lookup", {}, tool_call_id="call-1")]
-            )
-        if self.crash:
-            self.crash = False
-            self.replay_tool = True
-            self.crashed = True
-            raise _SimulatedProcessExit("simulated process exit")
-        if self.replay_tool:
-            self.replay_tool = False
-            return ModelResponse(
-                parts=[ToolCallPart("lookup", {}, tool_call_id="call-1")]
-            )
-        return ModelResponse(parts=[TextPart("done")])
-
-
-class _CrashRecoveryModelBinding:
-    route_id = "default"
-    provider = "test"
-    model_identity = "test:session-tool-crash"
-    vision = False
-    fingerprint = "b" * 64
-    semantic_payload: dict[str, JsonValue] = {
-        "provider": "test",
-        "model": "session-tool-crash",
-    }
-
-    def __init__(self, controller: _CrashRecoveryController) -> None:
-        self._controller = controller
-
-    def materialize(self) -> FunctionModel:
-        return FunctionModel(self._controller.model)
-
-
-class _CrashRecoveryModels:
-    def __init__(self, controller: _CrashRecoveryController) -> None:
-        self._controller = controller
-
-    def snapshot(self) -> "_CrashRecoveryModels":
-        return self
-
-    def resolve(self, route_id: str) -> _CrashRecoveryModelBinding:
-        if route_id != "default":
-            raise AssertionError(route_id)
-        return _CrashRecoveryModelBinding(self._controller)
-
-    def restore(
-        self,
-        payload: Mapping[str, JsonValue],
-        *,
-        route_id: str | None = None,
-    ) -> _CrashRecoveryModelBinding:
-        if (
-            route_id not in {None, "default"}
-            or dict(payload) != _CrashRecoveryModelBinding.semantic_payload
-        ):
-            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        return _CrashRecoveryModelBinding(self._controller)
-
-
 @pytest.mark.asyncio
 async def test_session_tool_turn_recovers_after_process_exit_without_replaying_effect(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "session-tool-crash.db"
     calls: list[str] = []
     application = _application(calls, effect="non_replay_safe")
-    controller = _CrashRecoveryController()
-    models = _CrashRecoveryModels(controller)
+    original_commit_success = LocalExecutionBackend._commit_success
+    crashed = False
+
+    async def crash_before_terminal(
+        self: LocalExecutionBackend,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise _SimulatedProcessExit("simulated process exit")
+        return await original_commit_success(
+            self,
+            *args,  # type: ignore[arg-type]
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        LocalExecutionBackend,
+        "_commit_success",
+        crash_before_terminal,
+    )
 
     first_state = RuntimeState.sqlite(database)
     manager = Runtime.open(
         "session-tool-crash",
-        models=models,  # type: ignore[arg-type]
+        models=_ToolModels(),  # type: ignore[arg-type]
         state=first_state,
         capabilities=(application,),
     )
@@ -561,10 +505,10 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
         )
         execution_id = execution.execution_id
         for _ in range(200):
-            if controller.crashed:
+            if crashed:
                 break
             await asyncio.sleep(0.01)
-        assert controller.crashed
+        assert crashed
         assert calls == ["lookup"]
 
         operations = await first_state.recovery.tools.list_by_execution(
@@ -588,7 +532,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     try:
         async with Runtime.open(
             "session-tool-crash",
-            models=models,  # type: ignore[arg-type]
+            models=_ToolModels(),  # type: ignore[arg-type]
             state=second_state,
             capabilities=(application,),
         ) as recovered:
