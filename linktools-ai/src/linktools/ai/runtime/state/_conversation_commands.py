@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Conversation state checkpoint commands."""
 
+from dataclasses import replace
+
 from ...errors import AIError, ErrorCode
 from ._contracts import (
     ConversationCursor,
@@ -47,6 +49,11 @@ class ConversationStateCommands:
             step_run,
             snapshot,
         )
+        effective_next = replace(
+            next_cursor,
+            history_id=next_cursor.history_id or prepared[0].owner_id,
+            message_count=prepared.target_transcript_message_count,
+        )
 
         async def mutate(transaction: StateTransaction) -> SessionRecord:
             if self._steps is None:
@@ -56,7 +63,7 @@ class ConversationStateCommands:
                 session_id,
                 tenant_id=tenant_id,
             )
-            if current.continuation == next_cursor:
+            if current.continuation == effective_next:
                 return current
             await self._steps.sync_projection_in_transaction(
                 transaction,
@@ -85,7 +92,7 @@ class ConversationStateCommands:
                 tenant_id=tenant_id,
                 execution_id=execution_id,
                 expected=expected,
-                next_cursor=next_cursor,
+                next_cursor=effective_next,
                 history_quality=quality,
             )
 
