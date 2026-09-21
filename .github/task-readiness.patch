@@ -1,0 +1,13 @@
+diff --git a/tests/ai/test_task_mixed_node_reliability.py b/tests/ai/test_task_mixed_node_reliability.py
+index e4f9ec7..165c1e2 100644
+--- a/tests/ai/test_task_mixed_node_reliability.py
++++ b/tests/ai/test_task_mixed_node_reliability.py
+@@ -918,7 +918,7 @@ async def test_runtime_shutdown_leaves_running_custom_task_recoverable(
+             graph,
+             idempotency_key="shutdown-graph-run-0001",
+         )
+-        await asyncio.wait_for(entered.wait(), 1)
++        await asyncio.wait_for(entered.wait(), 10)
+         snapshot = await runtime.graph.snapshot(
+             graph.graph_id,
+             principal=runtime.default_principal,

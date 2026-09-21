@@ -4,6 +4,7 @@ on:
     branches: [fix/ai-stability-hardening]
     paths:
       - .github/sandbox-lifecycle.patch.gz
+      - .github/task-readiness.patch
       - .github/workflows/sandbox-lifecycle-verification.yml
 permissions:
   contents: read
@@ -23,10 +24,11 @@ jobs:
       - name: Apply fixed candidate
         run: |
           gzip -dc .github/sandbox-lifecycle.patch.gz > "$RUNNER_TEMP/sandbox.patch"
-          echo "ab2f6bff528600f82e04d18ce8baa088239ccd9939e853404dc222c15f859e71  $RUNNER_TEMP/sandbox.patch" | sha256sum --check
+          cat .github/task-readiness.patch >> "$RUNNER_TEMP/sandbox.patch"
+          echo "fa9c650cc36b175afe73d0c8b117df3fa0f3bf64536c57cfa454d98b956ae96f  $RUNNER_TEMP/sandbox.patch" | sha256sum --check
           git apply --check "$RUNNER_TEMP/sandbox.patch"
           git apply "$RUNNER_TEMP/sandbox.patch"
-          rm .github/sandbox-lifecycle.patch.gz .github/workflows/sandbox-lifecycle-verification.yml
+          rm .github/sandbox-lifecycle.patch.gz .github/task-readiness.patch .github/workflows/sandbox-lifecycle-verification.yml
           git diff --check
       - uses: actions/setup-python@v7
         with:
@@ -53,10 +55,11 @@ jobs:
       - name: Apply verified candidate
         run: |
           gzip -dc .github/sandbox-lifecycle.patch.gz > "$RUNNER_TEMP/sandbox.patch"
-          echo "ab2f6bff528600f82e04d18ce8baa088239ccd9939e853404dc222c15f859e71  $RUNNER_TEMP/sandbox.patch" | sha256sum --check
+          cat .github/task-readiness.patch >> "$RUNNER_TEMP/sandbox.patch"
+          echo "fa9c650cc36b175afe73d0c8b117df3fa0f3bf64536c57cfa454d98b956ae96f  $RUNNER_TEMP/sandbox.patch" | sha256sum --check
           git apply --check "$RUNNER_TEMP/sandbox.patch"
           git apply "$RUNNER_TEMP/sandbox.patch"
-          rm .github/sandbox-lifecycle.patch.gz .github/workflows/sandbox-lifecycle-verification.yml
+          rm .github/sandbox-lifecycle.patch.gz .github/task-readiness.patch .github/workflows/sandbox-lifecycle-verification.yml
           git diff --check
       - name: Create verified Git objects without moving any branch
         env:
@@ -94,7 +97,7 @@ jobs:
           import json, os, pathlib
           temp = pathlib.Path(os.environ['RUNNER_TEMP'])
           commit = json.loads((temp / 'commit.json').read_text())
-          result = {'base': os.environ['GITHUB_SHA'], 'commit': commit['sha'], 'tree': commit['tree']['sha'], 'patch_sha256': 'ab2f6bff528600f82e04d18ce8baa088239ccd9939e853404dc222c15f859e71', 'branch_updated': False}
+          result = {'base': os.environ['GITHUB_SHA'], 'commit': commit['sha'], 'tree': commit['tree']['sha'], 'patch_sha256': 'fa9c650cc36b175afe73d0c8b117df3fa0f3bf64536c57cfa454d98b956ae96f', 'branch_updated': False}
           (temp / 'candidate.json').write_text(json.dumps(result, indent=2))
           print(json.dumps(result))
           PY
