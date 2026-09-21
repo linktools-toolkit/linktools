@@ -1120,7 +1120,6 @@ async def test_local_replay_timeout_keeps_waiting_on_python310_semantics(
         {},
         durable_sequence=2,
     )
-    broker.complete("execution")
     service = _service(
         _execution(status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=2),
         _EventReader({}),
@@ -1154,6 +1153,7 @@ async def test_local_replay_timeout_keeps_waiting_on_python310_semantics(
     assert len(streamed) == 1
     assert streamed[0].durable_sequence == 2
     assert streamed[0].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
+    broker.complete("execution")
 
 
 @pytest.mark.asyncio
