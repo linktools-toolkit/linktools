@@ -7,7 +7,7 @@ from types import MappingProxyType
 
 from ..core import validate_agent_id
 from ..errors import AIError, ErrorCode
-from ..spec import AgentSpecCodec
+from ..spec import AgentSpecCodec, agent_spec_identity_payload
 from ._binding import AgentBinding
 from ._definition import AgentDefinition
 
@@ -46,7 +46,8 @@ class AgentCatalog:
         if existing is not None:
             if not _same_definition(existing, definition):
                 raise AIError(ErrorCode.BINDING_CONFLICT)
-            return existing
+            if _same_runtime_definition(existing, definition):
+                return existing
         self._definitions[definition.digest] = definition
         return definition
 
@@ -64,7 +65,10 @@ class AgentCatalog:
         if definition.digest != binding.definition.digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing = self._bindings.get(binding.digest)
-        if existing is not None:
+        if existing is not None and _same_runtime_definition(
+            existing.definition,
+            binding.definition,
+        ):
             return existing
         self._bindings[binding.digest] = binding
         return binding
@@ -82,7 +86,8 @@ class AgentCatalog:
 def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
     return (
         left.digest == right.digest
-        and AgentSpecCodec().to_payload(left.spec) == AgentSpecCodec().to_payload(right.spec)
+        and agent_spec_identity_payload(AgentSpecCodec().to_payload(left.spec))
+        == agent_spec_identity_payload(AgentSpecCodec().to_payload(right.spec))
         and left.model.fingerprint == right.model.fingerprint
         and tuple((item.kind, item.id, item.fingerprint) for item in left.selected_tools) == tuple((item.kind, item.id, item.fingerprint) for item in right.selected_tools)
         and tuple((item.kind, item.id, item.fingerprint) for item in left.selected_skills) == tuple((item.kind, item.id, item.fingerprint) for item in right.selected_skills)
@@ -92,6 +97,30 @@ def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
         and left.ordinary_tool_policy == right.ordinary_tool_policy
         and left.mcp_selector_policy == right.mcp_selector_policy
     )
+
+
+def _same_runtime_definition(
+    left: AgentDefinition,
+    right: AgentDefinition,
+) -> bool:
+    if not _same_definition(left, right) or left.model is not right.model:
+        return False
+    for left_values, right_values in (
+        (left.selected_tools, right.selected_tools),
+        (left.selected_skills, right.selected_skills),
+        (left.selected_mcp, right.selected_mcp),
+        (left.selected_capabilities, right.selected_capabilities),
+    ):
+        if len(left_values) != len(right_values) or any(
+            left_value.value is not right_value.value
+            for left_value, right_value in zip(
+                left_values,
+                right_values,
+                strict=True,
+            )
+        ):
+            return False
+    return True
 
 
 __all__ = ["AgentCatalog"]
