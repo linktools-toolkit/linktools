@@ -1419,7 +1419,6 @@ class RuntimeStateCommands:
         next_cursor: ConversationCursor | None = None,
         conversation_run: RunRecord | None = None,
         conversation_snapshot: ContinuableSnapshot | None = None,
-        conversation_snapshots: Sequence[ContinuableSnapshot] = (),
         recovery_checkpoint: RecoveryCheckpoint | None = None,
         recovery_run: RunRecord | None = None,
         recovery_snapshot: ContinuableSnapshot | None = None,
@@ -1434,16 +1433,7 @@ class RuntimeStateCommands:
             self._execution_steps is None or execution_run is None
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        conversation_values = tuple(conversation_snapshots)
-        if conversation_snapshot is not None:
-            if conversation_values:
-                if conversation_values[-1] != conversation_snapshot:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            else:
-                conversation_values = (conversation_snapshot,)
-        if session_id is None and (conversation_run is not None or conversation_values):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (conversation_run is None) != (not conversation_values):
+        if session_id is None and (conversation_run is not None or conversation_snapshot is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if recovery_checkpoint is None and (recovery_run is not None or recovery_snapshot is not None):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1460,15 +1450,17 @@ class RuntimeStateCommands:
             if background_tasks is None
             else background_tasks
         )
-        prepared_conversation: PreparedStepSnapshotBatch | tuple[()] = ()
+        prepared_conversation = ()
         if (
             self._conversation_steps is not None
             and conversation_run is not None
-            and conversation_values
+            and conversation_snapshot is not None
         ):
-            prepared_conversation = await self._conversation_steps.prepare_snapshots(
-                conversation_run,
-                conversation_values,
+            prepared_conversation = (
+                await self._conversation_steps.prepare_conversation_snapshot(
+                    conversation_run,
+                    conversation_snapshot,
+                )
             )
         timeline_range: tuple[int, int] | None = None
         if prepared_conversation:
@@ -1542,8 +1534,8 @@ class RuntimeStateCommands:
             if self._execution_steps is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stores.append(self._execution_steps.state_store)
-        if conversation_run is not None or conversation_values:
-            if self._conversation_steps is None or conversation_run is None or not conversation_values:
+        if conversation_run is not None or conversation_snapshot is not None:
+            if self._conversation_steps is None or conversation_run is None or conversation_snapshot is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stores.append(self._conversation_steps.state_store)
         if recovery_run is not None or recovery_snapshot is not None:
@@ -1573,16 +1565,10 @@ class RuntimeStateCommands:
                     else:
                         if next_cursor is None or self._conversation_steps is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        if not isinstance(
-                            prepared_conversation,
-                            PreparedStepSnapshotBatch,
-                        ):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await self._conversation_steps.sync_projection_in_transaction(
+                        await self._conversation_steps.materialize_snapshot_in_transaction(
                             group.transaction(self._conversation_steps.state_store),
                             conversation_run,
-                            events=(),
-                            snapshots=prepared_conversation.snapshots,
+                            prepared_conversation[0],
                         )
                         session = await self._conversation.get_in_transaction(
                             conversation_transaction,
@@ -1854,12 +1840,7 @@ class RuntimeStateCommands:
                         ):
                             break
             else:
-                if not isinstance(
-                    prepared_conversation,
-                    PreparedStepSnapshotBatch,
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._sync_prepared_snapshot_batch_with_reconciliation(
+                await self._materialize_prepared_snapshot_with_reconciliation(
                     self._conversation_steps,
                     conversation_run,
                     prepared_conversation,
@@ -2271,50 +2252,6 @@ class RuntimeStateCommands:
             )
 
         await self._commit_or_raise(operation, readback)
-
-    async def _sync_prepared_snapshot_batch_with_reconciliation(
-        self,
-        archive: StateStepArchive,
-        run: RunRecord,
-        batch: PreparedStepSnapshotBatch,
-        *,
-        execution_id: str | None = None,
-    ) -> None:
-        if not batch.snapshots:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        last = batch.snapshots[-1]
-        if await self._prepared_snapshot_visible(archive, run, last):
-            return
-
-        async def sync(transaction: StateTransaction) -> None:
-            await archive.sync_projection_in_transaction(
-                transaction,
-                run,
-                events=(),
-                snapshots=batch.snapshots,
-                execution_id=execution_id,
-            )
-
-        async def readback() -> CommitObservation[None]:
-            try:
-                visible = await self._prepared_snapshot_visible(archive, run, last)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_INTEGRITY_ERROR:
-                    return CommitObservation(
-                        DurableCommitState.PARTIAL_INTEGRITY_ERROR,
-                        error=error,
-                    )
-                return CommitObservation(DurableCommitState.UNRESOLVED, error=error)
-            return CommitObservation(
-                DurableCommitState.COMMITTED
-                if visible
-                else DurableCommitState.NOT_COMMITTED
-            )
-
-        await self._commit_or_raise(
-            lambda: archive.state_store.mutate(sync),
-            readback,
-        )
 
     async def _materialize_prepared_snapshot_with_reconciliation(
         self,
