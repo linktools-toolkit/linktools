@@ -531,6 +531,11 @@ class RuntimeStepStore(StepStore):
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
         if run is None or snapshot is None or archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if isinstance(archive, StateStepArchive):
+            snapshot = await archive.relocate_conversation_snapshot(
+                run,
+                snapshot,
+            )
         await _materialize_snapshot(archive, run, snapshot)
 
     async def materialize_from_recovery(
@@ -591,25 +596,16 @@ class RuntimeStepStore(StepStore):
                 target is RuntimeDomain.CONVERSATION
                 and isinstance(destination, StateStepArchive)
             ):
-                existing_run = await destination.get_run(run_id=run.run_id)
-                if existing_run is None:
-                    local_message_count = 0
-                else:
-                    existing_snapshot = await destination.latest_snapshot(
-                        run_id=run.run_id,
-                        include_interrupted=True,
-                    )
-                    if (
-                        existing_run != run
-                        or not _relocated_snapshot_matches(
-                            RuntimeDomain.CONVERSATION,
+                try:
+                    target_snapshot = (
+                        await destination.relocate_conversation_snapshot(
+                            run,
                             snapshot,
-                            existing_snapshot,
                         )
-                    ):
-                        await self._abandon_durability_flight(flight)
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    local_message_count = len(snapshot.messages)
+                    )
+                except BaseException:
+                    await self._abandon_durability_flight(flight)
+                    raise
             else:
                 local_message_count = (
                     await destination.transcript_message_count_for_run(run)
@@ -619,10 +615,10 @@ class RuntimeStepStore(StepStore):
                 if local_message_count > len(snapshot.messages):
                     await self._abandon_durability_flight(flight)
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            target_snapshot = replace(
-                snapshot,
-                transcript_message_count_before=local_message_count,
-            )
+                target_snapshot = replace(
+                    snapshot,
+                    transcript_message_count_before=local_message_count,
+                )
             relocated = await destination.prepare_relocated_interactions(
                 source_interactions,
                 source_resolved,
