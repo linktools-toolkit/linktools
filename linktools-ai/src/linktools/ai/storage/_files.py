@@ -82,12 +82,7 @@ def sync_directory(path: Path) -> None:
         getattr(errno, "ENOTSUP", errno.EINVAL),
         getattr(errno, "EOPNOTSUPP", errno.EINVAL),
     }
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError as error:
-        if error.errno in unsupported:
-            return
-        raise
+    descriptor = os.open(path, os.O_RDONLY)
     try:
         try:
             os.fsync(descriptor)
