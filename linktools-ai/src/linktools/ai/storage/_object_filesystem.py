@@ -101,6 +101,7 @@ class FilesystemObjectStore:
     ) -> ObjectStat:
         temporary_root = self._root / ".tmp"
         await asyncio.to_thread(temporary_root.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(_require_directory, temporary_root)
         temporary = await asyncio.to_thread(_create_temp_object, temporary_root)
         try:
             data_path = temporary / _DATA_NAME
@@ -119,7 +120,6 @@ class FilesystemObjectStore:
                 },
                 fsync=True,
             )
-            await asyncio.to_thread(sync_directory, temporary)
             destination = self._path(key)
 
             async def publish() -> None:
@@ -328,8 +328,11 @@ def _publish_filesystem_object(
         if current.digest != digest or current.size != size:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return True
+    parent_missing = not _path_present(destination.parent)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    sync_directory(destination.parent.parent)
+    _require_directory(destination.parent)
+    if parent_missing:
+        sync_directory(destination.parent.parent)
     published = False
     try:
         os.replace(temporary, destination)
@@ -367,9 +370,12 @@ def _list_filesystem_objects(root: Path, store_id: str) -> tuple[ObjectStat, ...
 def _delete_filesystem_object(root: Path, destination: Path) -> bool:
     if not _path_present(destination):
         return False
+    trash_missing = not _path_present(root / ".trash")
     trash_root = root / ".trash"
     trash_root.mkdir(parents=True, exist_ok=True)
-    sync_directory(root)
+    _require_directory(trash_root)
+    if trash_missing:
+        sync_directory(root)
     tombstone = trash_root / (
         f"{destination.parent.name}-{destination.name}-{uuid4().hex}"
     )
@@ -393,9 +399,12 @@ def _cleanup_tombstones(root: Path) -> None:
     if not _path_present(trash_root):
         return
     _require_directory(trash_root)
-    for path in tuple(trash_root.iterdir()):
-        _remove_tree_if_exists(path)
-    sync_directory(trash_root)
+    try:
+        for path in tuple(trash_root.iterdir()):
+            _remove_tree_if_exists(path)
+        sync_directory(trash_root)
+    except OSError as error:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
 
 
 def _read_filesystem_metadata(
