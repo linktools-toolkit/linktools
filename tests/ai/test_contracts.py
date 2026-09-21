@@ -204,6 +204,14 @@ def test_recovery_checkpoint_owns_only_the_deferred_frontier() -> None:
     assert waiting.pending_tools.source_step_run_id == waiting.step_run_id
 
 
+def test_recovery_handoff_phase_only_models_reachable_boundaries() -> None:
+    assert tuple(RecoveryHandoffPhase) == (
+        RecoveryHandoffPhase.NONE,
+        RecoveryHandoffPhase.PREPARED,
+        RecoveryHandoffPhase.COMPLETED,
+    )
+
+
 def test_execution_record_owns_binding_and_durable_user_input() -> None:
     snapshot = _binding_snapshot()
     now = datetime.now(timezone.utc)
