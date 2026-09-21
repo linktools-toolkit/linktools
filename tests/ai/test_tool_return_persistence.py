@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai.messages import BinaryContent, ModelRequest, ToolReturnPart
 
 from linktools.ai.core import canonical_json_bytes
@@ -14,9 +15,6 @@ from linktools.ai.runtime._message import decode_model_messages, encode_model_me
 from linktools.ai.runtime._model_interaction import project_public_messages
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge, ToolOperationDecision
 from linktools.ai.storage import InMemoryObjectStore, PayloadPolicy
-
-_HINT = "_linktools_tool_return_content"
-
 
 def _message(content: object) -> tuple[ModelRequest, ...]:
     return (
@@ -59,6 +57,14 @@ def _tool_bridge() -> RuntimeToolOperationBridge:
     )
 
 
+def test_arbitrary_tool_result_round_trips_as_json_snapshot() -> None:
+    class Result(BaseModel):
+        count: int
+
+    assert _round_trip(Result(count=3)) == {"count": 3}
+    assert _round_trip(b"abc") == "YWJj"
+
+
 def test_media_shaped_tool_json_round_trips_as_plain_mapping() -> None:
     value = {
         "kind": "binary",
@@ -72,9 +78,13 @@ def test_media_shaped_tool_json_round_trips_as_plain_mapping() -> None:
     assert part.content == value
     assert isinstance(part.content, dict)
     assert project_public_messages(decoded)[0]["parts"][0]["content"] == value
-    assert _encoded_part(value)[_HINT] == {
-        "version": 1,
-        "mapping_paths": [[]],
+    encoded = _encoded_part(value)["content"]
+    assert encoded["contract"] == "linktools.tool-return"
+    assert encoded["version"] == 1
+    assert encoded["value"]["type"] == "mapping"
+    assert encoded["value"]["items"]["kind"] == {
+        "type": "scalar",
+        "value": "binary",
     }
 
 
@@ -108,41 +118,11 @@ def test_nested_tool_json_and_binary_content_keep_distinct_types() -> None:
     assert restored["attachment"].media_type == binary.media_type
 
 
-def test_tool_return_hint_paths_do_not_depend_on_mapping_insertion_order() -> None:
-    first = {
-        "z": {
-            "kind": "binary",
-            "media_type": "application/octet-stream",
-            "data": "eg==",
-        },
-        "a": {
-            "kind": "binary",
-            "media_type": "application/octet-stream",
-            "data": "YQ==",
-        },
-    }
+def test_tool_return_wire_is_independent_of_mapping_insertion_order() -> None:
+    first = {"z": {"value": 2}, "a": {"value": 1}}
     second = {"a": first["a"], "z": first["z"]}
 
-    expected = {
-        "version": 1,
-        "mapping_paths": [["a"], ["z"]],
-    }
-    assert _encoded_part(first)[_HINT] == expected
-    assert _encoded_part(second)[_HINT] == expected
-
-
-@pytest.mark.parametrize(
-    "content",
-    (
-        {"ok": True},
-        BinaryContent(
-            data=b"real-binary",
-            media_type="application/octet-stream",
-        ),
-    ),
-)
-def test_unambiguous_tool_content_keeps_existing_wire_shape(content: object) -> None:
-    assert _HINT not in _encoded_part(content)
+    assert _encoded_part(first)["content"] == _encoded_part(second)["content"]
 
 
 @pytest.mark.asyncio
@@ -168,41 +148,3 @@ async def test_durable_tool_result_recovery_preserves_media_shaped_json() -> Non
     assert isinstance(restored, dict)
 
 
-def test_tool_return_hint_rejects_unknown_version() -> None:
-    value = json.loads(
-        encode_model_messages(
-            _message(
-                {
-                    "kind": "binary",
-                    "media_type": "application/octet-stream",
-                    "data": "YWJj",
-                }
-            )
-        ).decode("utf-8")
-    )
-    value[0]["parts"][0][_HINT]["version"] = 2
-
-    with pytest.raises(AIError) as raised:
-        decode_model_messages(canonical_json_bytes(value))
-
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-
-
-def test_tool_return_hint_rejects_missing_mapping_path() -> None:
-    value = json.loads(
-        encode_model_messages(
-            _message(
-                {
-                    "kind": "binary",
-                    "media_type": "application/octet-stream",
-                    "data": "YWJj",
-                }
-            )
-        ).decode("utf-8")
-    )
-    value[0]["parts"][0][_HINT]["mapping_paths"] = [["missing"]]
-
-    with pytest.raises(AIError) as raised:
-        decode_model_messages(canonical_json_bytes(value))
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

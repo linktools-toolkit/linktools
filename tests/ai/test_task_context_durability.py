@@ -4,7 +4,6 @@
 
 import pytest
 from linktools.ai.core import Principal, TaskStatus
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.runtime.state._codec import (
     _decode_enveloped_domain,
@@ -36,10 +35,7 @@ class _CaptureLauncher:
 
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
         self.started = launch
-        return TaskGraphHandle(
-            launch.graph_id,
-            f"capture:{launch.principal.tenant_id}:{launch.graph_id}",
-        )
+        return TaskGraphHandle(launch.graph_id)
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         self.cancelled = launch
@@ -88,11 +84,11 @@ async def test_task_admission_correlation_is_durable_but_not_semantic_identity()
 
 
 @pytest.mark.asyncio
-async def test_task_admission_correlation_drift_conflicts() -> None:
+async def test_task_admission_correlation_drift_reuses_durable_admission() -> None:
     state = RuntimeState.in_memory()
-    await state.initialize(namespace="task-correlation-conflict", tenant_id="tenant")
+    await state.initialize(namespace="task-correlation-replay", tenant_id="tenant")
     try:
-        graph = TaskGraph("task-correlation-conflict", (TaskNode("node"),))
+        graph = TaskGraph("task-correlation-replay", (TaskNode("node"),))
         original = TaskGraphAdmission.from_request(
             _request(graph, correlation={"trace_id": "trace-a"})
         )
@@ -101,11 +97,10 @@ async def test_task_admission_correlation_drift_conflicts() -> None:
         )
         assert original.initial_request_digest == drifted.initial_request_digest
 
-        await state.task.admissions.admit(original, graph)
-        with pytest.raises(AIError) as raised:
-            await state.task.admissions.admit(drifted, graph)
+        first = await state.task.admissions.admit(original, graph)
+        replayed = await state.task.admissions.admit(drifted, graph)
 
-        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert replayed == first
         stored = await state.task.admissions.get(graph.graph_id, tenant_id="tenant")
         assert stored == original
         assert dict(stored.correlation) == {"trace_id": "trace-a"}
@@ -114,7 +109,7 @@ async def test_task_admission_correlation_drift_conflicts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_service_replay_rejects_correlation_drift() -> None:
+async def test_task_service_replay_uses_first_durable_correlation() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-correlation-service-replay", tenant_id="tenant")
     launcher = _CaptureLauncher()
@@ -130,13 +125,13 @@ async def test_task_service_replay_rejects_correlation_drift() -> None:
             launcher,
         )
 
-        with pytest.raises(AIError) as raised:
-            await service.start(
-                _request(graph, correlation={"trace_id": "trace-b"})
-            )
+        result = await service.start(
+            _request(graph, correlation={"trace_id": "trace-b"})
+        )
 
-        assert raised.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
-        assert launcher.started is None
+        assert result.graph_id == graph.graph_id
+        assert launcher.started is not None
+        assert dict(launcher.started.correlation) == {"trace_id": "trace-a"}
     finally:
         await state.close()
 

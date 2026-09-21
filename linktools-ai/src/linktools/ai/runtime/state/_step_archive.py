@@ -50,10 +50,7 @@ from ._contracts import (
 from ._history import (
     TranscriptCapture,
     TranscriptRepository,
-    _conversation_overlap_signature,
     _exact_message_signature,
-    _overlap_signature,
-    suffix_prefix_overlap,
 )
 from ._plan import RuntimeDomain
 from ._step_contracts import (
@@ -1479,9 +1476,7 @@ class StateStepArchive(StepStore):
         )
         if all(explicit):
             return await self._prepare_explicit_snapshots(run, values)
-        if any(explicit):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return await self._prepare_legacy_snapshots(run, values)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _prepare_explicit_snapshots(
         self,
@@ -1598,141 +1593,6 @@ class StateStepArchive(StepStore):
             return source
         return None
 
-    async def _prepare_legacy_snapshots(
-        self,
-        run: RunRecord,
-        snapshots: Sequence[ContinuableSnapshot],
-    ) -> PreparedStepSnapshotBatch:
-        prepared: list[PreparedStepSnapshot] = []
-        owner_id = run.run_id
-        if self._runtime_domain is RuntimeDomain.CONVERSATION:
-            owner_id = self._history_id(run)
-        head = await self._history.get_head(owner_id)
-        if head is None:
-            if await self.get_run(run_id=run.run_id) is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            head = self._history.empty_head(owner_id)
-        context_bound = max(
-            (len(snapshot.messages) for snapshot in snapshots),
-            default=0,
-        )
-        suffix_start = max(0, head.message_count - context_bound)
-        suffix_messages = (
-            ()
-            if suffix_start == head.message_count
-            else await self._history.load_message_span(
-                owner_id,
-                suffix_start,
-                head.message_count,
-                observed_head=head,
-            )
-        )
-        working_messages = list(suffix_messages)
-        working_start = suffix_start
-        target_message_count = head.message_count
-        target_quality = head.quality
-        for snapshot in snapshots:
-            incoming = tuple(snapshot.messages)
-            signature = (
-                _conversation_overlap_signature
-                if self._runtime_domain is RuntimeDomain.CONVERSATION
-                else _overlap_signature
-            )
-            incoming_signatures = tuple(signature(message) for message in incoming)
-            stored_signatures = tuple(
-                signature(message) for message in working_messages
-            )
-            overlap = suffix_prefix_overlap(stored_signatures, incoming_signatures)
-            delta = list(incoming[overlap:])
-            if overlap == 0 and stored_signatures and incoming_signatures:
-                target_quality = HistoryQuality.CONSERVATIVE
-            base_message_count = target_message_count
-            capture = TranscriptCapture(
-                base_message_count,
-                tuple(delta),
-                tuple(
-                    TranscriptOrigin.RAW
-                    if message.run_id == run.run_id
-                    else TranscriptOrigin.UNKNOWN
-                    for message in delta
-                ),
-                target_quality,
-            )
-            chunks = await self._prepare_captured_chunks(
-                owner_id,
-                capture,
-                message_index_offset=0,
-            )
-            sources = self._message_sources(
-                owner_id,
-                incoming,
-                tuple(working_messages) + tuple(delta),
-                captured_indices=(
-                    tuple(
-                        range(
-                            working_start,
-                            working_start + len(working_messages),
-                        )
-                    )
-                    + tuple(
-                        range(
-                            base_message_count,
-                            base_message_count + len(delta),
-                        )
-                    )
-                ),
-                overlap=overlap,
-                stored_message_count=len(working_messages),
-            )
-            projection_messages = (
-                incoming
-                if snapshot.context_messages is None
-                else tuple(snapshot.context_messages)
-            )
-            projection_sources = self._projection_sources(
-                projection_messages,
-                incoming,
-                sources,
-            )
-            projection = self._history.project_context(
-                owner_id,
-                projection_messages,
-                origins=self._message_origins(projection_sources),
-                sources=projection_sources,
-            )
-            self._validate_projection_sources(projection, projection_sources)
-            projection = await self._history.prepare_projection(owner_id, projection)
-            prepared.append(
-                PreparedStepSnapshot(
-                    owner_id,
-                    StoredStepSnapshot(
-                        run.run_id,
-                        snapshot.step_index,
-                        snapshot.timestamp,
-                        snapshot.state,
-                        projection.digest,
-                        snapshot.context_messages is not None,
-                        snapshot.pending_request_index,
-                    ),
-                    chunks,
-                    projection,
-                    target_quality,
-                )
-            )
-            working_messages.extend(delta)
-            target_message_count += len(delta)
-            if len(working_messages) > context_bound:
-                trim = len(working_messages) - context_bound
-                working_messages = working_messages[trim:]
-                working_start += trim
-        return PreparedStepSnapshotBatch(
-            run.run_id,
-            tuple(prepared),
-            0,
-            0,
-            target_message_count,
-        )
-
     def _projection_sources(
         self,
         projection_messages: Sequence[ModelMessage],
@@ -1823,54 +1683,6 @@ class StateStepArchive(StepStore):
             offset += end - start
             start = end
         return tuple(result)
-
-    def _message_sources(
-        self,
-        owner_id: str,
-        messages: Sequence[ModelMessage],
-        captured_messages: Sequence[ModelMessage],
-        captured_indices: Sequence[int] | None = None,
-        *,
-        overlap: int,
-        stored_message_count: int,
-    ) -> tuple[TranscriptMessageRef | None, ...]:
-        sources: list[TranscriptMessageRef | None] = []
-        actual_indices = (
-            tuple(range(len(captured_messages)))
-            if captured_indices is None
-            else tuple(captured_indices)
-        )
-        if len(actual_indices) != len(captured_messages):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if overlap < 0 or overlap > len(messages):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if (
-            stored_message_count < overlap
-            or stored_message_count + len(messages) - overlap
-            != len(captured_messages)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-        exact_captured = tuple(
-            _exact_message_signature(value) for value in captured_messages
-        )
-        for index, message in enumerate(messages):
-            if index < overlap:
-                captured_position = stored_message_count - overlap + index
-            else:
-                captured_position = stored_message_count + index - overlap
-            actual_index = actual_indices[captured_position]
-            if exact_captured[captured_position] == _exact_message_signature(message):
-                sources.append(
-                    TranscriptMessageRef(
-                        self._runtime_domain,
-                        owner_id,
-                        actual_index,
-                    )
-                )
-                continue
-            sources.append(None)
-        return tuple(sources)
 
     def _message_origins(
         self,

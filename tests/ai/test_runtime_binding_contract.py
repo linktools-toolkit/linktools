@@ -13,15 +13,24 @@ from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
+    SemanticPin,
 )
 from linktools.ai.agent._output import bind_output
-from linktools.ai.capability import SkillDefinition, SkillSourceRef
+from linktools.ai.capability import (
+    CapabilityContribution,
+    SkillDefinition,
+    SkillSourceRef,
+    tool_semantic_metadata,
+)
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
 from linktools.ai.storage import ObjectRef, StoredPayload
+from pydantic_ai import Tool
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -157,6 +166,37 @@ def test_skill_snapshot_semantics_ignore_physical_store_id() -> None:
     assert restored.source_ref.snapshot.store_id == "runtime"
 
 
+def test_skill_snapshot_identity_ignores_integrity_size() -> None:
+    specification = SkillSpec("review", "review instructions")
+    first = SemanticPin(
+        "skill",
+        "review",
+        SkillDefinition(
+            specification,
+            SkillSourceRef(
+                "application",
+                "review",
+                ObjectRef("store", "skill/snapshot", "a" * 64, 1),
+            ),
+        ).semantic_contract,
+    )
+    second = SemanticPin(
+        "skill",
+        "review",
+        SkillDefinition(
+            specification,
+            SkillSourceRef(
+                "application",
+                "review",
+                ObjectRef("store", "skill/snapshot", "a" * 64, 2),
+            ),
+        ).semantic_contract,
+    )
+
+    assert first.contract != second.contract
+    assert first.fingerprint == second.fingerprint
+
+
 def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
     with pytest.raises(AIError) as raised:
         SkillDefinition.from_semantic_contract(
@@ -178,6 +218,80 @@ def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
         )
 
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_skill_snapshot_reference_defaults_store_id_to_runtime() -> None:
+    skill = SkillDefinition.from_semantic_contract(
+        {
+            "version": 1,
+            "id": "review",
+            "content": "instructions",
+            "source": {
+                "source_id": "application",
+                "root": "review",
+                "snapshot": {
+                    "key": "snapshot",
+                    "digest": "a" * 64,
+                    "size": 1,
+                },
+            },
+        }
+    )
+
+    assert skill.source_ref is not None
+    assert skill.source_ref.snapshot == ObjectRef(
+        "runtime",
+        "snapshot",
+        "a" * 64,
+        1,
+    )
+
+
+def test_binding_object_dependency_scan_defaults_skill_store_id() -> None:
+    pin = SemanticPin(
+        "skill",
+        "review",
+        {
+            "version": 1,
+            "id": "review",
+            "content": "instructions",
+            "source": {
+                "source_id": "application",
+                "root": "review",
+                "snapshot": {
+                    "key": "snapshot",
+                    "digest": "a" * 64,
+                    "size": 1,
+                },
+            },
+        },
+    )
+    snapshot = replace(_snapshot(), selected=(pin,))
+
+    refs = tuple(
+        runtime_codec._iter_agent_binding_object_refs(
+            snapshot,
+            RuntimeDomain.EXECUTION,
+        )
+    )
+
+    assert refs == (
+        (
+            RuntimeDomain.EXECUTION,
+            ObjectRef("runtime", "snapshot", "a" * 64, 1),
+        ),
+    )
+
+
+def test_agent_declaration_identity_keeps_model_selector() -> None:
+    first = CapabilityContribution.from_declaration(
+        AgentSpec("agent", model="first")
+    )
+    second = CapabilityContribution.from_declaration(
+        AgentSpec("agent", model="second")
+    )
+
+    assert first.fingerprint != second.fingerprint
 
 
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
@@ -225,7 +339,39 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     assert first_snapshot.resolve("default") is first
 
 
-def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
+def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -> None:
+    registry = ModelRegistry()
+    registry.register_openai(
+        "first",
+        model="gpt-test",
+        base_url="https://first.example/v1",
+    )
+    registry.register_openai(
+        "second",
+        model="gpt-test",
+        base_url="https://second.example/v1",
+    )
+    compiler = AgentCompiler(
+        model_resolver=registry.snapshot(),
+        candidates=(),
+        agents={"agent": AgentSpec("agent", model="first")},
+    )
+    first = compiler.bind(compiler.compile(AgentSpec("agent", model="first")))
+    second = compiler.bind(compiler.compile(AgentSpec("agent", model="second")))
+
+    assert first.definition.digest == second.definition.digest
+    assert first.digest == second.digest
+    assert first.snapshot != second.snapshot
+    assert first.definition.model is not second.definition.model
+
+    catalog = AgentCatalog({"agent": first.definition})
+    assert catalog.register_binding(first) is first
+    assert catalog.register_binding(second) is second
+    assert catalog.definition(first.definition.digest) is first.definition
+    assert catalog.binding(first.digest) is second
+
+
+def test_current_binding_snapshot_has_minimal_wire_shape() -> None:
     snapshot = _snapshot()
 
     assert set(snapshot.to_payload()) == {
@@ -262,6 +408,72 @@ def test_python_only_output_validator_is_not_part_of_durable_contract() -> None:
     parsed = TypeAdapter(binding.runtime_output_type).validate_python({"value": 7})
 
     assert parsed == {"value": 7}
+
+
+def test_restore_accepts_nonsemantic_tool_contract_drift() -> None:
+    def sample(value: str) -> str:
+        return value
+
+    spec = AgentSpec("agent", allow_tools=("sample",))
+    semantic = tool_semantic_metadata(
+        effect="none",
+        plan_safe=True,
+        tool_class="business",
+    )
+    first_candidate = CapabilityContribution.from_opaque(
+        "tool",
+        "sample",
+        Tool(
+            sample,
+            name="sample",
+            metadata={**semantic, "upstream.trace": "first"},
+        ),
+    )
+    second_candidate = CapabilityContribution.from_opaque(
+        "tool",
+        "sample",
+        Tool(
+            sample,
+            name="sample",
+            metadata={**semantic, "upstream.trace": "second"},
+        ),
+    )
+    assert first_candidate.semantic_contract != second_candidate.semantic_contract
+    assert first_candidate.fingerprint == second_candidate.fingerprint
+
+    first_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(first_candidate,),
+        agents={"agent": spec},
+    )
+    second_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(second_candidate,),
+        agents={"agent": spec},
+    )
+    original = first_compiler.bind(first_compiler.compile(spec))
+
+    restored = second_compiler.restore(original.snapshot)
+
+    assert restored.digest == original.digest
+    assert restored.definition.selected_tools == (second_candidate,)
+
+
+def test_catalog_reuses_binding_for_nonsemantic_definition_differences() -> None:
+    compiler = _compiler()
+    first = compiler.bind(
+        compiler.compile(AgentSpec("agent", description="first label"))
+    )
+    second = compiler.bind(
+        compiler.compile(AgentSpec("agent", description="second label"))
+    )
+
+    assert first.snapshot == second.snapshot
+    assert first.digest == second.digest
+
+    catalog = AgentCatalog({"agent": first.definition})
+    assert catalog.register_binding(first) is first
+    assert catalog.register_binding(second) is first
 
 
 def test_same_json_schema_produces_same_binding_identity() -> None:

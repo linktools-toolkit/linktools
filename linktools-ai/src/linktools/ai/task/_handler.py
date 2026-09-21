@@ -18,7 +18,13 @@ from ..core import (
     normalize_correlation,
 )
 from ..errors import AIError, ErrorCode
-from ._graph import TaskExpanderRef, TaskNode, TaskResultRef
+from ._graph import (
+    TaskExpanderRef,
+    TaskNode,
+    TaskResultRef,
+    normalize_retry_delay_seconds,
+    normalize_timeout_seconds,
+)
 
 AppT = TypeVar("AppT")
 _TASK_TYPE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
@@ -40,6 +46,10 @@ class TaskBindingSnapshot:
     reconcile: bool = False
 
     def __post_init__(self) -> None:
+        normalized_timeout = normalize_timeout_seconds(self.timeout_seconds)
+        normalized_retry_delay = normalize_retry_delay_seconds(
+            self.retry_delay_seconds
+        )
         if (
             not isinstance(self.task_type, str)
             or _TASK_TYPE.fullmatch(self.task_type) is None
@@ -53,17 +63,6 @@ class TaskBindingSnapshot:
             or isinstance(self.max_attempts, bool)
             or not isinstance(self.max_attempts, int)
             or self.max_attempts < 1
-            or isinstance(self.retry_delay_seconds, bool)
-            or not isinstance(self.retry_delay_seconds, (int, float))
-            or self.retry_delay_seconds < 0
-            or (
-                self.timeout_seconds is not None
-                and (
-                    isinstance(self.timeout_seconds, bool)
-                    or not isinstance(self.timeout_seconds, (int, float))
-                    or self.timeout_seconds <= 0
-                )
-            )
             or not isinstance(self.reconcile, bool)
         ):
             raise ValueError("task binding contract is invalid")
@@ -71,9 +70,8 @@ class TaskBindingSnapshot:
         if not isinstance(normalized, dict):
             raise ValueError("task output contract must be a JSON object")
         object.__setattr__(self, "output_contract", ImmutableJsonMapping(normalized))
-        if self.timeout_seconds is not None:
-            object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
-        object.__setattr__(self, "retry_delay_seconds", float(self.retry_delay_seconds))
+        object.__setattr__(self, "timeout_seconds", normalized_timeout)
+        object.__setattr__(self, "retry_delay_seconds", normalized_retry_delay)
 
     @property
     def binding_digest(self) -> str:

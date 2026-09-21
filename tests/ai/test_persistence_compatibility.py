@@ -206,7 +206,7 @@ def test_custom_wire_v1_fixture_matches_current_shape() -> None:
     assert value == _custom_wire_values()
 
 
-def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
+def test_current_evaluation_requires_dataset_digest() -> None:
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     current = EvaluationRecord(
         evaluation_id="evaluation",
@@ -221,11 +221,10 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
         dict[str, object],
         runtime_codec._encode_persisted_domain(current),
     )
-    fields = cast(dict[str, object], payload["fields"])
-    fields["binding_digest"] = runtime_codec._encode_persisted_domain("a" * 64)
+    payload["fields"].pop("dataset_digest")
 
-    def decode() -> EvaluationRecord:
-        return runtime_codec._decode_enveloped_domain(
+    with pytest.raises(AIError) as raised:
+        runtime_codec._decode_enveloped_domain(
             runtime_codec.encode_envelope(
                 {
                     "type": runtime_codec.wire_type_id(current),
@@ -235,32 +234,7 @@ def test_legacy_evaluation_v1_decodes_to_current_record() -> None:
             EvaluationRecord,
         )
 
-    # The convergence branch previously wrote dataset_digest plus a redundant
-    # binding projection. New readers accept and discard that derived field.
-    assert decode() == current
-
-    dataset = fields.pop("dataset_digest")
-    fields.update(
-        {
-            "dataset_id": dataset,
-            "dataset_revision": runtime_codec._encode_persisted_domain(1),
-            "evaluator_id": runtime_codec._encode_persisted_domain("default"),
-            "evaluator_revision": runtime_codec._encode_persisted_domain(1),
-            "artifact_digest": runtime_codec._encode_persisted_domain(None),
-            "metrics": runtime_codec._encode_persisted_domain({}),
-        }
-    )
-
-    assert decode() == current
-
-    fields["tenant_id"] = runtime_codec._encode_persisted_domain("tenant")
-    assert decode() == current
-
-    fields["evaluator_id"] = runtime_codec._encode_persisted_domain("custom")
-    with pytest.raises(AIError) as raised:
-        decode()
-    assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 def test_generic_v1_envelope_round_trips_current_shape() -> None:
     value = ContextProjection(())

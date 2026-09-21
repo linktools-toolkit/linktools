@@ -2,10 +2,17 @@
 # -*- coding: utf-8 -*-
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.core import Principal, TaskStatus
+from linktools.ai.core import (
+    ExecutionStatus,
+    Principal,
+    TaskStatus,
+    ToolOperationStatus,
+    canonical_sha256,
+)
 from linktools.ai.runtime import (
     ExecutionRecoveryEffect,
     ResolveToolEffectRequest,
@@ -13,7 +20,9 @@ from linktools.ai.runtime import (
     ToolEffectFailed,
     ToolEffectNotApplied,
 )
+from linktools.ai.runtime._recovery_coordinator import _RecoveryCoordinator
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.storage import StoredPayload
 from linktools.ai.task import TaskEvent, TaskEventType, TaskGraphSnapshot, TaskNode, TaskNodeView
 
 
@@ -104,6 +113,116 @@ def test_recovered_pending_event_preserves_execution_and_fence() -> None:
 
     assert event.fence == 3
     assert event.execution_id == "execution"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("resolution", "resolution_kind", "expected_status", "payload_digest"),
+    (
+        (
+            ToolEffectApplied({"ok": True}),
+            "applied",
+            ToolOperationStatus.COMPLETED,
+            StoredPayload.inline_json({"ok": True}).digest,
+        ),
+        (
+            ToolEffectNotApplied(),
+            "not_applied",
+            ToolOperationStatus.PENDING,
+            None,
+        ),
+        (
+            ToolEffectFailed(),
+            "failed",
+            ToolOperationStatus.FAILED,
+            StoredPayload.inline_text("failed").digest,
+        ),
+    ),
+)
+async def test_tool_effect_resolution_digest_uses_fixed_protocol_kind(
+    resolution: object,
+    resolution_kind: str,
+    expected_status: ToolOperationStatus,
+    payload_digest: str | None,
+) -> None:
+    class Port:
+        tenant_id = "tenant"
+
+        def __init__(self) -> None:
+            self.ledger = None
+
+        async def load_execution(self, execution_id: str, *, tenant_id: str):
+            assert execution_id == "execution"
+            assert tenant_id == "tenant"
+            return SimpleNamespace(status=ExecutionStatus.RECOVERY_REQUIRED)
+
+        async def _get_tool_operation(self, operation_id: str, *, tenant_id: str):
+            assert operation_id == "operation"
+            assert tenant_id == "tenant"
+            return SimpleNamespace(execution_id="execution")
+
+        async def _tool_result_payload(
+            self,
+            execution: object,
+            operation_id: str,
+            result: object,
+        ) -> StoredPayload:
+            del execution, operation_id
+            assert result == {"ok": True}
+            return StoredPayload.inline_json({"ok": True})
+
+        async def _tool_resolution_error_payload(
+            self,
+            execution: object,
+        ) -> StoredPayload:
+            del execution
+            return StoredPayload.inline_text("failed")
+
+        async def _resolve_tool_effect_command(
+            self,
+            execution_id: str,
+            ledger: object,
+            *,
+            expected_fence: int,
+            target_status: ToolOperationStatus,
+            result_payload: StoredPayload | None,
+            error_code: str | None,
+            error_payload: StoredPayload | None,
+        ):
+            del result_payload, error_code, error_payload
+            self.ledger = ledger
+            return SimpleNamespace(
+                tool_operation_id="operation",
+                execution_id=execution_id,
+                status=target_status,
+                fence=expected_fence,
+            )
+
+    port = Port()
+    coordinator = _RecoveryCoordinator(port, None)  # type: ignore[arg-type]
+    result = await coordinator.resolve_tool_effect(
+        "execution",
+        ResolveToolEffectRequest(
+            principal=Principal("principal", "tenant"),
+            operation_id="operation",
+            expected_fence=2,
+            resolution=resolution,  # type: ignore[arg-type]
+            idempotency_key="effect-key",
+        ),
+    )
+
+    assert port.ledger is not None
+    assert port.ledger.request_digest == canonical_sha256(
+        {
+            "kind": "tool_effect_resolution",
+            "execution_id": "execution",
+            "operation_id": "operation",
+            "expected_fence": 2,
+            "resolution": resolution_kind,
+            "payload_digest": payload_digest,
+        }
+    )
+    assert result.status is expected_status
 
 
 def test_execution_recovery_contracts_validate_identity() -> None:

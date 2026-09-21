@@ -38,6 +38,7 @@ class FrozenTaskCapabilities:
             or any(
                 not isinstance(key, str)
                 or len(key) != 64
+                or any(character not in "0123456789abcdef" for character in key)
                 or not isinstance(value, AgentBindingSnapshot)
                 for key, value in bindings.items()
             )
@@ -261,8 +262,14 @@ class TaskCapabilitySnapshotStore:
             if snapshot.agent_spec.id != agent_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._compiler.restore(snapshot)
-        for original_digest, snapshot in bindings.items():
-            if len(original_digest) != 64:
+        for source_digest, snapshot in bindings.items():
+            if (
+                len(source_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in source_digest
+                )
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._compiler.restore(snapshot)
         return FrozenTaskCapabilities(roots, bindings)

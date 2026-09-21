@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
-from pydantic import BaseModel
+from linktools.core import environ
 
 from ..core import JsonValue, Principal, TaskStatus
 from ..errors import AIError, ErrorCode
@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from ._runtime_service import Runtime
 
 AppT = TypeVar("AppT")
+_logger = environ.get_logger("ai.runtime.task")
 
 
 class _ExecutionTreeWatcher(Protocol):
@@ -88,12 +89,13 @@ class TaskGraphRun(Generic[AppT]):
                 (wait_task, observer_task),
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if wait_task in done:
-                return _public_task_result(wait_task.result())
-            error = observer_task.exception()
-            if error is not None:
-                raise error
-            return _public_task_result(await wait_task)
+            if observer_task in done:
+                observer_task.result()
+                return _public_task_result(await wait_task)
+            result = _public_task_result(await wait_task)
+            if _must_drain_observer(result.status):
+                await observer_task
+            return result
         finally:
             for task in (observer_task, wait_task):
                 if not task.done():
@@ -210,21 +212,7 @@ class TaskGraphRun(Generic[AppT]):
         observer: "Callable[[TaskGraphRunEvent], Awaitable[None]] | None" = None,
     ) -> TaskGraphResult:
         snapshot = await self._snapshot()
-        result = TaskGraphResult(
-            snapshot.graph_id,
-            _public_task_status(snapshot.status, snapshot.node_states),
-            tuple(
-                TaskNodeResult(
-                    state.node_id,
-                    state.status,
-                    state.result_digest,
-                    state.execution_id,
-                    state.error_code,
-                    state.error_digest,
-                )
-                for state in snapshot.node_states
-            ),
-        )
+        result = _snapshot_result(snapshot)
         if observer is not None:
             events = await self._capture_replay_events(snapshot)
             for event in events:
@@ -275,8 +263,12 @@ class TaskGraphRun(Generic[AppT]):
         self,
         observer: "Callable[[TaskGraphRunEvent], Awaitable[None]]",
     ) -> None:
-        async for event in self.watch():
-            await observer(event)
+        events = self.watch()
+        try:
+            async for event in events:
+                await observer(event)
+        finally:
+            await events.aclose()
 
     def watch(
         self,
@@ -387,7 +379,6 @@ class TaskGraphRun(Generic[AppT]):
                     waiters,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-
                 if graph_task is not None and graph_task in done:
                     task = graph_task
                     graph_task = None
@@ -681,6 +672,22 @@ def _is_task_execution_id(value: str) -> bool:
 __all__ = ["TaskGraphRun"]
 
 
+_OBSERVER_DRAIN_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+        TaskStatus.RECOVERY_REQUIRED,
+    }
+)
+
+
+def _must_drain_observer(status: TaskStatus) -> bool:
+    """Return whether wait() must observe the durable graph boundary before returning."""
+    return status in _OBSERVER_DRAIN_STATUSES
+
+
 def _public_task_status(
     status: TaskStatus,
     states: object = (),
@@ -744,11 +751,6 @@ def _snapshot_result(snapshot: TaskGraphSnapshot) -> TaskGraphResult:
     return TaskGraphResult(
         snapshot.graph_id,
         _public_task_status(snapshot.status, snapshot.node_states),
-        tuple(
-            state.execution_id
-            for state in snapshot.node_states
-            if state.execution_id is not None
-        ),
         tuple(
             TaskNodeResult(
                 state.node_id,

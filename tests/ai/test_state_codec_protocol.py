@@ -77,12 +77,21 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     primitives = fixture["stored_primitives"]
     record = decode_record(primitives["record"])
     assert record.kind == "golden"
-    assert "partition" not in encode_record(record)
     assert decode_fact(primitives["fact"]).sequence == 1
     assert decode_operation(primitives["operation"]).sequence == 1
     assert decode_alias(primitives["alias"]).record_key_digest == bytes.fromhex(
         "77" * 32
     )
+
+
+def test_record_reader_rejects_superseded_partition_field() -> None:
+    value = dict(_fixture()["stored_primitives"]["record"])
+    value["partition"] = "11" * 32
+
+    with pytest.raises(AIError) as raised:
+        decode_record(value)
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_future_envelope_version_is_parseable_but_not_decoded_without_registry() -> None:
@@ -93,7 +102,7 @@ def test_future_envelope_version_is_parseable_but_not_decoded_without_registry()
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
 
-def test_snapshot_frontier_default_is_wire_compatible() -> None:
+def test_snapshot_frontier_always_writes_pending_request_index() -> None:
     snapshot = StoredStepSnapshot(
         "run",
         1,
@@ -106,11 +115,11 @@ def test_snapshot_frontier_default_is_wire_compatible() -> None:
     encoded = _encode_step_envelope(snapshot)
     fields = encoded["value"]["payload"]["fields"]  # type: ignore[index]
 
-    assert "pending_request_index" not in fields
+    assert fields["pending_request_index"] is None
     assert _decode_step_envelope(encoded) == snapshot
 
 
-def test_snapshot_frontier_is_written_only_when_present() -> None:
+def test_snapshot_frontier_preserves_pending_request_index() -> None:
     snapshot = StoredStepSnapshot(
         "run",
         1,

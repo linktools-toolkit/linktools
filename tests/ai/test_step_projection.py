@@ -111,6 +111,7 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
             parent_run_id=None,
             agent_name=run.agent_name,
             timestamp=now,
+            transcript_message_count_before=0,
         )
         await state.steps.save_snapshot(snapshot)
         assert await execution.list_events(run_id=run.run_id) == []
@@ -121,9 +122,15 @@ async def test_step_events_wait_for_a_safe_snapshot(tmp_path: Path) -> None:
         )
 
         assert len(await execution.list_events(run_id=run.run_id)) == 3
-        assert await execution.latest_snapshot(run_id=run.run_id) == snapshot
+        latest = await execution.latest_snapshot(run_id=run.run_id)
+        assert latest is not None
+        assert latest.transcript_message_count_before is None
+        assert latest.messages == snapshot.messages
         assert await recovery.get_run(run_id=run.run_id) == run
-        assert await recovery.latest_snapshot(run_id=run.run_id) == snapshot
+        recovery_latest = await recovery.latest_snapshot(run_id=run.run_id)
+        assert recovery_latest is not None
+        assert recovery_latest.transcript_message_count_before is None
+        assert recovery_latest.messages == snapshot.messages
     finally:
         await state.close()
 

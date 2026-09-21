@@ -2,9 +2,13 @@
 # -*- coding: utf-8 -*-
 """Portable deferred tool-result contract tests."""
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import BinaryContent, ImageUrl
 from pydantic_ai.models.test import TestModel
@@ -47,6 +51,52 @@ def test_tool_return_content_round_trips_nested_multimodal_values() -> None:
     assert isinstance(items[1], ImageUrl)
     assert items[1].url == "https://example.com/image.png"
     assert restored["plain"] == {"kind": "binary", "label": "not-multimodal"}
+
+
+def test_tool_return_content_snapshots_arbitrary_python_values_as_json() -> None:
+    class Result(BaseModel):
+        count: int
+
+    model_encoded = encode_tool_return_content(Result(count=2))
+    bytes_encoded = encode_tool_return_content(b"abc")
+
+    assert model_encoded["value"] == {
+        "type": "json-snapshot",
+        "value": {"count": 2},
+    }
+    assert decode_tool_return_content(model_encoded) == {"count": 2}
+    assert bytes_encoded["value"] == {
+        "type": "json-snapshot",
+        "value": "YWJj",
+    }
+    assert decode_tool_return_content(bytes_encoded) == "YWJj"
+
+
+def test_tool_return_content_snapshots_non_string_mapping_keys() -> None:
+    encoded = encode_tool_return_content({1: "one"})
+
+    assert encoded["value"] == {
+        "type": "json-snapshot",
+        "value": {"1": "one"},
+    }
+    assert decode_tool_return_content(encoded) == {"1": "one"}
+
+
+def test_tool_return_content_uses_explicit_linktools_envelope() -> None:
+    encoded = encode_tool_return_content({"type": "business", "value": 1})
+
+    assert encoded["contract"] == "linktools.tool-return"
+    assert encoded["version"] == 1
+    assert encoded["value"]["type"] == "mapping"
+
+
+def test_deferred_rehydrate_does_not_guess_plain_business_mapping() -> None:
+    plain = {"type": "business", "value": 1}
+    source = DeferredToolResults(calls={"plain": plain})
+
+    restored = rehydrate_deferred_tool_results(source)
+
+    assert restored.calls["plain"] is plain
 
 
 def test_deferred_rehydrate_preserves_control_results() -> None:
@@ -177,3 +227,27 @@ def test_tool_return_content_digest_is_canonical() -> None:
     }
 
     assert tool_return_content_digest(left) == tool_return_content_digest(right)
+
+
+def test_tool_return_content_digest_is_stable_across_hash_seeds() -> None:
+    script = (
+        "from pydantic import create_model;"
+        "from linktools.ai.runtime._tool_return_codec "
+        "import tool_return_content_digest;"
+        "Result=create_model('Result',values=(set[str],...));"
+        "print(tool_return_content_digest({'values':{'alpha','beta','gamma'}}),"
+        "tool_return_content_digest(Result(values={'alpha','beta','gamma'})))"
+    )
+    values = []
+    for seed in ("1", "2"):
+        env = dict(os.environ)
+        env["PYTHONHASHSEED"] = seed
+        values.append(
+            subprocess.check_output(
+                [sys.executable, "-c", script],
+                env=env,
+                text=True,
+            ).strip()
+        )
+
+    assert len(set(values)) == 1

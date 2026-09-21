@@ -38,10 +38,6 @@ from linktools.ai.runtime.state._store import (
     StateLockOrderError,
     StateTransactionNestingError,
 )
-from linktools.ai.runtime.state._history import (
-    _conversation_overlap_signature,
-    _overlap_signature,
-)
 from linktools.ai.runtime.state._steps import LockOrderError, _RunHistoryLock
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore
@@ -100,91 +96,6 @@ def _record(status: ExecutionStatus, sequence: int) -> ExecutionRecord:
     )
 
 
-def test_conversation_overlap_ignores_only_standing_system_prompt() -> None:
-    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    old = ModelRequest(
-        parts=(
-            SystemPromptPart(content="old"),
-            UserPromptPart(content="hello", timestamp=timestamp),
-        )
-    )
-    new = ModelRequest(
-        parts=(
-            SystemPromptPart(content="new"),
-            UserPromptPart(content="hello", timestamp=timestamp),
-        )
-    )
-
-    assert _conversation_overlap_signature(old) == _conversation_overlap_signature(new)
-    assert _overlap_signature(old) != _overlap_signature(new)
-    assert len(old.parts) == 2
-    assert len(new.parts) == 2
-
-
-@pytest.mark.asyncio
-async def test_legacy_transcript_overlap_keeps_framework_stamped_occurrence(
-    tmp_path: Path,
-) -> None:
-    state = RuntimeState.filesystem(tmp_path / "runtime")
-    await state.initialize(namespace="history-stamping", tenant_id="tenant")
-    try:
-        archive = state.steps.read_store(RuntimeDomain.RECOVERY)
-        assert isinstance(archive, StateStepArchive)
-        run = RunRecord("run")
-        await archive.register_run(run)
-        source = ModelRequest(
-            parts=[UserPromptPart(content="hello")],
-            timestamp=None,
-        )
-        await archive.materialize_snapshot(
-            run,
-            ContinuableSnapshot(
-                run_id="run",
-                step_index=1,
-                messages=[source],
-            ),
-        )
-        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        stamped = replace(
-            source,
-            timestamp=timestamp,
-            run_id="run",
-            conversation_id="conversation",
-            instructions="instruction",
-        )
-        response = ModelResponse(
-            parts=[TextPart(content="done")],
-            timestamp=timestamp,
-            run_id="run",
-            conversation_id="conversation",
-        )
-        await archive.materialize_snapshot(
-            run,
-            ContinuableSnapshot(
-                run_id="run",
-                step_index=2,
-                messages=[stamped, response],
-            ),
-        )
-
-        messages = [message async for message in archive.iter_messages(run_id="run")]
-        context = await archive.load_loaded_model_context(owner_id="run")
-        context_messages = context.model_messages()
-
-        assert len(messages) == 3
-        assert isinstance(messages[0], ModelRequest)
-        assert isinstance(messages[1], ModelRequest)
-        assert isinstance(messages[2], ModelResponse)
-        assert messages[0].parts[0].content == "hello"
-        assert messages[1].instructions == "instruction"
-        assert messages[2].parts[0].content == "done"
-        assert len(context_messages) == 2
-        assert isinstance(context_messages[0], ModelRequest)
-        assert context_messages[0].instructions == "instruction"
-        assert context_messages[0].run_id == "run"
-        assert context_messages[0].conversation_id == "conversation"
-    finally:
-        await state.close()
 
 
 @pytest.mark.asyncio
@@ -327,6 +238,7 @@ async def test_execution_projection_paths_reject_a_sealed_history_head(
                     parent_run_id=run.parent_run_id,
                     agent_name=run.agent_name,
                     timestamp=now,
+                    transcript_message_count_before=0,
                 ),
                 execution_id="execution",
             )
@@ -435,6 +347,7 @@ async def test_conversation_head_replacement_preserves_physical_identity(
                 parent_run_id=None,
                 agent_name="default",
                 timestamp=now,
+                transcript_message_count_before=0,
             ),
         )
         head = await state.steps.read_store(
@@ -665,6 +578,7 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
             parent_run_id=None,
             agent_name="default",
             timestamp=now,
+            transcript_message_count_before=0,
         )
     )
     await state.steps.flush_execution_projection(

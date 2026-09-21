@@ -66,14 +66,24 @@ def test_semantic_pin_persists_contract_once() -> None:
     pin = SemanticPin(
         "capability",
         "guardrail",
-        {"version": 1, "semantic_revision": 3},
+        {
+            "version": 1,
+            "revision": 3,
+            "defer_loading": False,
+            "config": {},
+        },
     )
     payload = pin.to_payload()
 
     assert payload == {
         "kind": "capability",
         "id": "guardrail",
-        "contract": {"version": 1, "semantic_revision": 3},
+            "contract": {
+                "version": 1,
+                "revision": 3,
+                "defer_loading": False,
+                "config": {},
+            },
     }
     assert SemanticPin.from_payload(payload) == pin
     assert len(pin.fingerprint) == 64
@@ -174,4 +184,3 @@ async def test_session_resume_preserves_mode_planning_and_thinking() -> None:
     assert capture.request.planning is True
     assert capture.request.thinking == "high"
     assert capture.request.user_prompt == "prompt"
-

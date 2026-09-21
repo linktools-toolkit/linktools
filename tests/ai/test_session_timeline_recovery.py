@@ -81,6 +81,7 @@ async def test_recovery_handoff_commits_timeline_with_session_continuation() -> 
             agent_name="agent",
             timestamp=now,
             state="complete",
+            transcript_message_count_before=0,
         )
 
         class Lifecycle:

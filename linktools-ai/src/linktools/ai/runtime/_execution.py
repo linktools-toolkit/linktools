@@ -560,13 +560,10 @@ class DefaultExecutionService:
         binding: AgentBinding,
         request: ExecutionRequest,
     ) -> None:
-        if execution.correlation != request.correlation:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
             execution.binding_digest != binding.digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
-            or execution.binding != binding.snapshot
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
@@ -712,7 +709,6 @@ class DefaultExecutionService:
                 "principal": principal_identity_payload(principal),
                 "binding_digest": binding.binding_digest,
                 "input_digest": stored_input.digest,
-                "correlation": dict(normalized_correlation),
             }
         )
         now = datetime.now(timezone.utc)
@@ -763,7 +759,6 @@ class DefaultExecutionService:
             current.binding_digest != binding.binding_digest
             or current.binding != binding
             or current.stored_user_input.digest != stored_input.digest
-            or current.correlation != normalized_correlation
             or current.principal_id != principal.principal_id
             or current.principal_kind != principal.kind
         ):

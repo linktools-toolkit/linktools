@@ -367,10 +367,7 @@ class LocalExecutionBackend:
             if self._restore_binding is None
             else self._restore_binding(execution.binding)
         )
-        if (
-            binding.digest != execution.binding_digest
-            or binding.snapshot != execution.binding
-        ):
+        if binding.digest != execution.binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 
@@ -494,8 +491,6 @@ class LocalExecutionBackend:
                 self._tenant_id,
             )
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        if request.correlation != execution.correlation:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         self._execution_binding(execution)
         if (
             request.mode != execution.mode

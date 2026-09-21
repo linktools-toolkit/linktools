@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast, get_type_hints
 
 from linktools.core import environ
+from pydantic import BaseModel
 from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
@@ -35,6 +36,9 @@ from ..spec import (
     SkillMarkdownSpecCodec,
     SkillSpecCodec,
     ThinkingValue,
+    canonicalize_json_schema,
+    canonicalize_pydantic_model_schema,
+    capability_identity_payload,
     parse_mcp_tool_selector,
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
@@ -951,6 +955,18 @@ def contribution_semantic_contract(
             "strict": definition.strict,
             "metadata": cast(JsonValue, definition.metadata),
         }
+        if value.max_retries is not None:
+            contract["max_retries"] = value.max_retries
+        if definition.sequential:
+            contract["sequential"] = True
+        if definition.kind != "function":
+            contract["kind"] = definition.kind
+        if definition.timeout is not None:
+            contract["timeout"] = float(definition.timeout)
+        if definition.defer_loading:
+            contract["defer_loading"] = True
+        if definition.include_return_schema is not None:
+            contract["include_return_schema"] = definition.include_return_schema
         if semantic_revision is not None:
             contract["semantic_revision"] = semantic_revision
         return contract
@@ -1002,12 +1018,7 @@ def capability_fingerprint(
     semantic_contract: Mapping[str, JsonValue],
 ) -> str:
     return canonical_sha256(
-        {
-            "contract": "capability-fingerprint-v1",
-            "kind": kind,
-            "id": identity,
-            "semantic": dict(semantic_contract),
-        }
+        capability_identity_payload(kind, identity, semantic_contract)
     )
 
 
@@ -1042,10 +1053,17 @@ def _task_output_contract(handler: object) -> JsonValue:
     output = getattr(handler, "output", None)
     if output is None:
         return {"kind": "json"}
+    model_schema = getattr(output, "model_json_schema", None)
+    if not callable(model_schema):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    schema = (
+        canonicalize_pydantic_model_schema(output)
+        if isinstance(output, type) and issubclass(output, BaseModel)
+        else canonicalize_json_schema(model_schema())
+    )
     return {
         "kind": "schema",
-        "module": getattr(output, "__module__", type(output).__module__),
-        "name": getattr(output, "__qualname__", type(output).__qualname__),
+        "schema": schema,
     }
 
 

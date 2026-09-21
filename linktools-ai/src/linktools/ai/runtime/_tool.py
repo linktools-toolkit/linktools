@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -928,13 +928,34 @@ class RuntimeToolOperationBridge:
 
 def _portable_arguments(args: dict[str, Any]) -> dict[str, Any]:
     try:
-        value = TypeAdapter(object).dump_python(args, mode="json")
+        value = _portable_value(args)
         normalized = normalize_json_value(value)
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
     if not isinstance(normalized, dict):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     return normalized
+
+
+def _portable_value(value: Any) -> Any:
+    if isinstance(value, (set, frozenset)):
+        normalized = [_portable_value(item) for item in value]
+        return [
+            item
+            for _, item in sorted(
+                (canonical_json_bytes(normalize_json_value(item)), item)
+                for item in normalized
+            )
+        ]
+    if isinstance(value, list):
+        return [_portable_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_portable_value(item) for item in value]
+    if isinstance(value, Mapping) and all(
+        isinstance(key, str) for key in value
+    ):
+        return {key: _portable_value(item) for key, item in value.items()}
+    return TypeAdapter(object).dump_python(value, mode="json")
 
 
 def _decision_type(

@@ -194,6 +194,7 @@ async def _materialize_conversation(
             agent_name="agent",
             timestamp=now,
             state="complete",
+            transcript_message_count_before=0,
         )
     )
     await state.steps.materialize_conversation(step_run_id=run_id)
@@ -289,6 +290,7 @@ async def test_session_timeline_restores_original_prompt_without_runtime_instruc
                 agent_name="agent",
                 timestamp=stale_now,
                 state="complete",
+                transcript_message_count_before=0,
             )
         )
         await state.steps.materialize_conversation(step_run_id=stale_run_id)

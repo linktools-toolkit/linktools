@@ -2,6 +2,9 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for the remaining runtime audit boundaries."""
 
+import os
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -28,7 +31,11 @@ from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
 )
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    capability_identity_payload,
+)
 from ._runtime_test_helpers import semantic_tool
 
 
@@ -38,6 +45,40 @@ class _GeneratedOutputAlpha(BaseModel):
 
 class _GeneratedOutputBeta(BaseModel):
     title: str
+
+
+class _GeneratedNestedAlpha(BaseModel):
+    value: int
+
+
+class _GeneratedNestedBeta(BaseModel):
+    value: int
+
+
+class _GeneratedNestedOutputAlpha(BaseModel):
+    nested: _GeneratedNestedAlpha
+
+
+class _GeneratedNestedOutputBeta(BaseModel):
+    nested: _GeneratedNestedBeta
+
+
+class _ExplicitNestedAlpha(BaseModel):
+    model_config = ConfigDict(title="nested-alpha")
+    value: int
+
+
+class _ExplicitNestedBeta(BaseModel):
+    model_config = ConfigDict(title="nested-beta")
+    value: int
+
+
+class _ExplicitNestedOutputAlpha(BaseModel):
+    nested: _ExplicitNestedAlpha
+
+
+class _ExplicitNestedOutputBeta(BaseModel):
+    nested: _ExplicitNestedBeta
 
 
 class _ExplicitOutputAlpha(BaseModel):
@@ -50,6 +91,20 @@ class _ExplicitOutputBeta(BaseModel):
     value: str
 
 
+class _ExplicitSameNameOutput(BaseModel):
+    value: str
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls,
+        core_schema: Any,
+        handler: Any,
+    ) -> dict[str, Any]:
+        schema = handler(core_schema)
+        schema["title"] = cls.__name__
+        return schema
+
+
 def test_output_fingerprint_ignores_generated_type_titles() -> None:
     alpha = bind_output(_GeneratedOutputAlpha)
     beta = bind_output(_GeneratedOutputBeta)
@@ -59,9 +114,23 @@ def test_output_fingerprint_ignores_generated_type_titles() -> None:
     assert alpha.schema_definition["properties"]["title"]["type"] == "string"
 
 
+def test_output_fingerprint_ignores_generated_nested_model_titles() -> None:
+    alpha = bind_output(_GeneratedNestedOutputAlpha)
+    beta = bind_output(_GeneratedNestedOutputBeta)
+
+    assert alpha.fingerprint == beta.fingerprint
+    assert alpha.schema_definition == beta.schema_definition
+
+
 def test_output_fingerprint_preserves_explicit_schema_titles() -> None:
     assert bind_output(_ExplicitOutputAlpha).fingerprint != bind_output(
         _ExplicitOutputBeta
+    ).fingerprint
+
+
+def test_output_fingerprint_preserves_explicit_nested_model_titles() -> None:
+    assert bind_output(_ExplicitNestedOutputAlpha).fingerprint != bind_output(
+        _ExplicitNestedOutputBeta
     ).fingerprint
 
 
@@ -80,6 +149,104 @@ def test_output_schema_literal_ref_is_not_treated_as_schema_ref() -> None:
     assert normalized["properties"]["payload"]["const"] == {
         "$ref": "literal-value"
     }
+
+
+def test_output_schema_preserves_explicit_same_name_title() -> None:
+    binding = bind_output(_ExplicitSameNameOutput)
+    assert binding.schema_definition["title"] == "_ExplicitSameNameOutput"
+
+
+def test_output_schema_keeps_unknown_extension_refs_literal() -> None:
+    schema = {
+        "type": "object",
+        "x-contract": {
+            "$ref": "literal-value",
+            "$dynamicRef": "also-literal",
+        },
+    }
+
+    normalized = canonicalize_output_schema_v1(schema)
+
+    assert normalized["x-contract"] == {
+        "$ref": "literal-value",
+        "$dynamicRef": "also-literal",
+    }
+
+
+def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
+    first = {
+        "$defs": {
+            "A": {"type": "string"},
+            "B": {"type": "integer"},
+        },
+        "type": "object",
+        "properties": {
+            "a": {"$ref": "#/$defs/A"},
+        },
+        "not": {"$ref": "#/$defs/B"},
+    }
+    second = {
+        "not": {"$ref": "#/$defs/B"},
+        "properties": {
+            "a": {"$ref": "#/$defs/A"},
+        },
+        "type": "object",
+        "$defs": {
+            "B": {"type": "integer"},
+            "A": {"type": "string"},
+        },
+    }
+
+    assert canonicalize_output_schema_v1(first) == canonicalize_output_schema_v1(second)
+
+
+def test_tool_identity_preserves_absent_return_schema() -> None:
+    base = {
+        "version": 1,
+        "description": None,
+        "parameters": {"type": "object", "properties": {}},
+        "strict": None,
+        "metadata": {
+            "linktools.ai.effect": "none",
+            "linktools.ai.tool_class": "business",
+        },
+    }
+    without_schema = capability_identity_payload(
+        "tool",
+        "sample",
+        {**base, "return_schema": None},
+    )
+    unconstrained_schema = capability_identity_payload(
+        "tool",
+        "sample",
+        {**base, "return_schema": {}},
+    )
+
+    assert without_schema["semantic"]["return_schema"] is None
+    assert unconstrained_schema["semantic"]["return_schema"] == {}
+    assert without_schema != unconstrained_schema
+
+
+def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:
+    script = (
+        "from linktools.ai.core import canonical_sha256;"
+        "from linktools.ai.runtime._tool import _portable_arguments;"
+        "print(canonical_sha256(_portable_arguments("
+        "{'values': {'alpha', 'beta', 'gamma'}})))"
+    )
+    values = []
+    for seed in ("1", "2"):
+        env = dict(os.environ)
+        env["PYTHONHASHSEED"] = seed
+        values.append(
+            subprocess.check_output(
+                [sys.executable, "-c", script],
+                env=env,
+                text=True,
+            ).strip()
+        )
+
+    assert len(set(values)) == 1
 
 
 def test_agent_tool_retry_default_is_finite() -> None:

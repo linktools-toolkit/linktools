@@ -21,6 +21,7 @@ from ..core import (
     ResourceRef,
     canonical_sha256,
     idempotency_key_digest as compute_idempotency_key_digest,
+    principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
 from ._snapshot_contract import RunSnapshot
@@ -109,9 +110,9 @@ class DefaultEvaluationService:
         request_digest = canonical_sha256(
             {
                 "action": "evaluation.run",
-                "tenant_id": request.principal.tenant_id,
-                "principal_id": request.principal.principal_id,
+                "principal": principal_identity_payload(request.principal),
                 "dataset_digest": request.dataset_digest,
+                "memory_scope": request.memory_scope,
                 "binding_digest": binding_digest,
             }
         )

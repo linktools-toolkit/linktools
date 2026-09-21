@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Canonical execution input and workspace file materialization."""
 
-import base64
 import binascii
 import hashlib
 import json
@@ -12,17 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
 from linktools.core import environ
-from pydantic_ai.messages import (
-    AudioUrl,
-    BinaryContent,
-    CachePoint,
-    DocumentUrl,
-    ImageUrl,
-    TextContent,
-    UserContent,
-    UploadedFile,
-    VideoUrl,
-)
+from pydantic_ai.messages import BinaryContent, UserContent
 
 from ..core import JsonValue, PromptLimits, canonical_json_bytes, normalize_json_value
 from ..errors import AIError, ErrorCode
@@ -34,6 +23,11 @@ from ._input_contract import (
     UserPromptInput,
     validate_user_content,
     validate_user_input,
+)
+from ._user_content_codec import (
+    UnsupportedUserContentKind,
+    decode_user_content_item,
+    encode_user_content_item,
 )
 
 if TYPE_CHECKING:
@@ -511,7 +505,7 @@ def _json_object_or_none(value: object) -> JsonValue:
 
 
 def _encode_user_content(content: Sequence[UserContent]) -> dict[str, JsonValue]:
-    return {"items": [_encode_user_content_item(item) for item in content]}
+    return {"items": [encode_user_content_item(item) for item in content]}
 
 
 def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ...]:
@@ -519,156 +513,18 @@ def _decode_user_content(payload: dict[str, JsonValue]) -> tuple[UserContent, ..
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         content = tuple(
-            _decode_user_content_item(item)
+            decode_user_content_item(item)
             for item in cast(list[object], payload["items"])
         )
     except AIError:
         raise
-    except _UnsupportedUserContentKind as error:
+    except UnsupportedUserContentKind as error:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
     except (TypeError, ValueError, KeyError, binascii.Error) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     validate_user_content(content)
     return content
 
-
-def _encode_user_content_item(item: UserContent) -> JsonValue:
-    try:
-        if isinstance(item, str):
-            return {"kind": "text", "text": item}
-        if isinstance(item, TextContent):
-            return {
-                "kind": "text-content",
-                "content": item.content,
-                "metadata": normalize_json_value(item.metadata),
-            }
-        if isinstance(item, BinaryContent):
-            return {
-                "kind": "binary",
-                "data": base64.b64encode(item.data).decode("ascii"),
-                "media_type": item.media_type,
-                "identifier": item.identifier,
-                "vendor_metadata": normalize_json_value(item.vendor_metadata),
-            }
-        if isinstance(item, (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)):
-            return {
-                "kind": item.kind,
-                "url": item.url,
-                "media_type": item.media_type,
-                "identifier": item.identifier,
-                "force_download": item.force_download,
-                "vendor_metadata": normalize_json_value(item.vendor_metadata),
-            }
-        if isinstance(item, UploadedFile):
-            return {
-                "kind": "uploaded-file",
-                "file_id": item.file_id,
-                "provider_name": item.provider_name,
-                "media_type": item.media_type,
-                "identifier": item.identifier,
-                "vendor_metadata": normalize_json_value(item.vendor_metadata),
-            }
-        if isinstance(item, CachePoint):
-            return {"kind": "cache-point", "ttl": item.ttl}
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
-
-def _decode_user_content_item(value: object) -> UserContent:
-    if not isinstance(value, Mapping) or not isinstance(value.get("kind"), str):
-        raise ValueError("user content item is invalid")
-    kind = value["kind"]
-    if kind == "text":
-        text = value.get("text")
-        if not isinstance(text, str):
-            raise ValueError("text content is invalid")
-        return text
-    if kind == "text-content":
-        content = value.get("content")
-        if not isinstance(content, str) or "metadata" not in value:
-            raise ValueError("text content is invalid")
-        return TextContent(content, metadata=value["metadata"])
-    if kind == "binary":
-        data = value.get("data")
-        media_type = value.get("media_type")
-        if (
-            not isinstance(data, str)
-            or not isinstance(media_type, str)
-            or not media_type
-            or "identifier" not in value
-            or "vendor_metadata" not in value
-        ):
-            raise ValueError("binary content is invalid")
-        return BinaryContent(
-            base64.b64decode(data, validate=True),
-            media_type=media_type,
-            identifier=_optional_string(value["identifier"]),
-            vendor_metadata=value["vendor_metadata"],
-        )
-    url_types = {
-        "image-url": ImageUrl,
-        "audio-url": AudioUrl,
-        "document-url": DocumentUrl,
-        "video-url": VideoUrl,
-    }
-    url_type = url_types.get(kind)
-    if url_type is not None:
-        url = value.get("url")
-        media_type = value.get("media_type")
-        force_download = value.get("force_download")
-        if (
-            not isinstance(url, str)
-            or media_type is not None
-            and not isinstance(media_type, str)
-            or not isinstance(force_download, bool)
-            or "identifier" not in value
-            or "vendor_metadata" not in value
-        ):
-            raise ValueError("URL content is invalid")
-        return url_type(
-            url,
-            media_type=media_type,
-            identifier=_optional_string(value["identifier"]),
-            force_download=force_download,
-            vendor_metadata=value["vendor_metadata"],
-        )
-    if kind == "uploaded-file":
-        file_id = value.get("file_id")
-        provider_name = value.get("provider_name")
-        media_type = value.get("media_type")
-        if (
-            not isinstance(file_id, str)
-            or not isinstance(provider_name, str)
-            or media_type is not None
-            and not isinstance(media_type, str)
-            or "identifier" not in value
-            or "vendor_metadata" not in value
-        ):
-            raise ValueError("uploaded file is invalid")
-        return UploadedFile(
-            file_id,
-            provider_name,
-            media_type=media_type,
-            identifier=_optional_string(value["identifier"]),
-            vendor_metadata=value["vendor_metadata"],
-        )
-    if kind == "cache-point":
-        ttl = value.get("ttl")
-        if ttl not in {"5m", "1h"}:
-            raise ValueError("cache point is invalid")
-        return CachePoint(ttl=cast(str, ttl))
-    raise _UnsupportedUserContentKind("unknown user content kind")
-
-
-class _UnsupportedUserContentKind(ValueError):
-    pass
-
-
-def _optional_string(value: object) -> str | None:
-    if value is not None and not isinstance(value, str):
-        raise ValueError("user content identifier is invalid")
-    return cast(str | None, value)
 
 
 __all__ = [

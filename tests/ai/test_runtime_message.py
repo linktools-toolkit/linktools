@@ -4,13 +4,16 @@
 import json
 
 import pytest
+from pydantic import BaseModel, ValidationError
 from linktools.ai.core import canonical_json_bytes
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._message import decode_model_messages, encode_model_messages
 from pydantic_ai import RequestUsage
 from pydantic_ai.messages import (
+    BinaryContent,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     UploadedFile,
     UserPromptPart,
 )
@@ -25,6 +28,29 @@ def test_model_message_round_trip_is_canonical() -> None:
     assert first == second
     assert first == canonical_json_bytes(json.loads(first.decode("utf-8")))
     assert decode_model_messages(first) == messages
+
+
+def test_model_message_wire_is_linktools_owned() -> None:
+    message = ModelRequest(parts=[UserPromptPart(content="hello")])
+    value = json.loads(encode_model_messages((message,)).decode("utf-8"))
+
+    assert set(value[0]) == {
+        "version",
+        "kind",
+        "parts",
+        "timestamp",
+        "instructions",
+        "run_id",
+        "conversation_id",
+        "metadata",
+        "state",
+    }
+    assert value[0]["version"] == 1
+    assert set(value[0]["parts"][0]) == {
+        "part_kind",
+        "content",
+        "timestamp",
+    }
 
 
 def test_model_message_round_trip_preserves_usage_extensions() -> None:
@@ -46,6 +72,53 @@ def test_model_message_round_trip_preserves_usage_extensions() -> None:
     assert decoded[0].usage.__dict__["label"] == "original"
 
 
+def test_model_message_round_trip_snapshots_arbitrary_metadata_as_json() -> None:
+    class Metadata(BaseModel):
+        count: int
+
+    response = ModelResponse(
+        parts=[],
+        metadata={
+            "model": Metadata(count=2),
+            "bytes": b"abc",
+            "values": {"beta", "alpha"},
+        },
+    )
+
+    restored = decode_model_messages(
+        encode_model_messages((response,))
+    )[0]
+
+    assert isinstance(restored, ModelResponse)
+    assert restored.metadata == {
+        "model": {"count": 2},
+        "bytes": "YWJj",
+        "values": ["alpha", "beta"],
+    }
+
+
+def test_model_message_round_trip_preserves_retry_error_details() -> None:
+    class Payload(BaseModel):
+        count: int
+
+    try:
+        Payload(count="invalid")  # type: ignore[arg-type]
+    except ValidationError as error:
+        retry = RetryPromptPart.from_error(error)
+    else:
+        raise AssertionError("expected validation error")
+
+    decoded = decode_model_messages(
+        encode_model_messages((ModelRequest(parts=[retry]),))
+    )
+
+    restored = decoded[0].parts[0]
+    assert isinstance(restored, RetryPromptPart)
+    assert restored.content == retry.content
+    assert isinstance(restored.content, list)
+    assert isinstance(restored.content[0]["loc"], tuple)
+
+
 def test_model_message_round_trip_preserves_uploaded_file_media_type() -> None:
     messages = (
         ModelRequest(
@@ -60,28 +133,40 @@ def test_model_message_round_trip_preserves_uploaded_file_media_type() -> None:
     assert uploaded.media_type == "image/png"
 
 
-def test_model_message_reader_accepts_pydantic_legacy_usage() -> None:
-    raw = canonical_json_bytes(
-        [
-            {
-                "parts": [],
-                "usage": {
-                    "requests": 0,
-                    "request_tokens": None,
-                    "response_tokens": None,
-                    "total_tokens": None,
-                    "details": None,
-                },
-                "kind": "response",
-            }
-        ]
+def test_model_message_reader_maps_invalid_binary_to_integrity_error() -> None:
+    messages = (
+        ModelRequest(
+            parts=[
+                UserPromptPart(
+                    [
+                        BinaryContent(
+                            b"binary",
+                            media_type="application/octet-stream",
+                        )
+                    ]
+                )
+            ]
+        ),
     )
+    value = json.loads(encode_model_messages(messages).decode("utf-8"))
+    value[0]["parts"][0]["content"]["items"][0]["data"] = "***"
 
-    decoded = decode_model_messages(raw)
+    with pytest.raises(AIError) as raised:
+        decode_model_messages(canonical_json_bytes(value))
 
-    assert len(decoded) == 1
-    assert isinstance(decoded[0], ModelResponse)
-    assert decoded[0].usage == RequestUsage()
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+def test_model_message_reader_maps_invalid_usage_cost_to_integrity_error() -> None:
+    value = json.loads(
+        encode_model_messages((ModelResponse(parts=[]),)).decode("utf-8")
+    )
+    value[0]["usage"]["cost"] = "not-a-decimal"
+
+    with pytest.raises(AIError) as raised:
+        decode_model_messages(canonical_json_bytes(value))
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_model_message_reader_rejects_noncanonical_json() -> None:

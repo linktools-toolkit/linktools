@@ -20,7 +20,9 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeSnapshot, RuntimeState
+from linktools.ai.runtime import _snapshot as runtime_snapshot_module
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
+from linktools.ai.runtime.state import _root as runtime_state_root_module
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
     encode_envelope,
@@ -73,6 +75,26 @@ class _SnapshotGuard:
     @asynccontextmanager
     async def offline_exclusivity(self):
         yield
+
+
+@pytest.mark.parametrize(
+    "decoder",
+    (
+        runtime_snapshot_module._object_ref_from_payload,
+        runtime_state_root_module._object_ref_from_payload,
+    ),
+)
+def test_current_snapshot_object_ref_requires_store_id(decoder) -> None:
+    with pytest.raises(AIError) as raised:
+        decoder(
+            {
+                "key": "snapshot",
+                "digest": "a" * 64,
+                "size": 1,
+            }
+        )
+
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio

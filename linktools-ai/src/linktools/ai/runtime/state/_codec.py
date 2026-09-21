@@ -332,138 +332,6 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     }
 )
 
-_V1_GENERIC_DATACLASS_DEFAULTS: Mapping[
-    str, Mapping[str, object]
-] = MappingProxyType(
-    {
-        "principal": MappingProxyType({"kind": "user"}),
-        "resource_ref": MappingProxyType({"owner_principal_id": None}),
-        "usage_metrics": MappingProxyType(
-            {
-                "model_requests": 0,
-                "tool_calls": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_read_tokens": 0,
-                "cache_write_tokens": 0,
-            }
-        ),
-        "stored_payload": MappingProxyType({"value": None, "ref": None}),
-        "task_graph_limits": MappingProxyType(
-            {
-                "max_concurrency": 8,
-                "max_depth": 8,
-                "max_nodes": 128,
-                "max_budget": 1000,
-            }
-        ),
-        "task_lease": MappingProxyType({"execution_id": None}),
-        "task_terminal": MappingProxyType({"execution_id": None}),
-        "task_graph_admission": MappingProxyType({"correlation": {}}),
-        "task_binding_snapshot": MappingProxyType({"reconcile": False}),
-        "conversation_cursor": MappingProxyType(
-            {"history_id": None, "message_count": None}
-        ),
-        "model_interaction": MappingProxyType({"attachments": ()}),
-        "stored_step_snapshot": MappingProxyType(
-            {
-                "has_context_projection": False,
-                "pending_request_index": None,
-            }
-        ),
-        "session_record": MappingProxyType(
-            {
-                "continuation": None,
-                "history_quality": "complete",
-                "history_id": None,
-                "timeline_parent_session_id": None,
-                "timeline_parent_turn_sequence": 0,
-            }
-        ),
-        "execution_run_seal_head": MappingProxyType(
-            {"interaction_count": 0}
-        ),
-        "execution_record": MappingProxyType(
-            {
-                "parent_invocation_id": None,
-                "memory_scope": None,
-                "conversation_step_run_id": None,
-                "result": None,
-                "repository_instructions": None,
-                "error_diagnostics": None,
-                "correlation": {},
-                "task_attempt": 0,
-                "task_deadline_at": None,
-                "task_next_attempt_at": None,
-                "dependency_hold_ids": (),
-                "retention_closed": False,
-                "started_at": None,
-            }
-        ),
-        "execution_terminal_commit": MappingProxyType(
-            {"idempotency": None, "operation": None}
-        ),
-        "approval_record": MappingProxyType(
-            {"decision_message": None, "resolution_metadata": {}}
-        ),
-        "external_call_record": MappingProxyType(
-            {
-                "resolution_kind": None,
-                "result_payload": None,
-                "resolution_metadata": {},
-            }
-        ),
-        "pending_deferred_call": MappingProxyType({"metadata": {}}),
-        "pending_tool_continuation": MappingProxyType(
-            {"approvals": (), "calls": ()}
-        ),
-        "recovery_checkpoint": MappingProxyType(
-            {
-                "pending_tools": None,
-                "repository_instruction_overlay": None,
-                "repository_instruction_barriers": (),
-                "handoff_phase": RecoveryHandoffPhase.NONE,
-                "terminal_handoff": None,
-                "pending_operation_id": None,
-            }
-        ),
-        "recovery_terminal_outcome": MappingProxyType(
-            {"error_diagnostics": None}
-        ),
-        "tool_operation_admission": MappingProxyType(
-            {"arguments_payload": None}
-        ),
-        "tool_operation": MappingProxyType(
-            {
-                "arguments_payload": None,
-                "result_payload": None,
-                "error_payload": None,
-            }
-        ),
-        "run_record": MappingProxyType(
-            {
-                "conversation_id": None,
-                "parent_run_id": None,
-                "agent_name": None,
-                "metadata": {},
-                "registration_id": None,
-            }
-        ),
-        "step_event": MappingProxyType(
-            {
-                "conversation_id": None,
-                "parent_run_id": None,
-                "agent_name": None,
-                "tool_call_id": None,
-                "tool_name": None,
-                "error": None,
-                "metadata": {},
-                "idempotency_key": None,
-                "event_index": 0,
-            }
-        ),
-    }
-)
 
 _V1_ENUM_VALUES: Mapping[str, frozenset[object]] = MappingProxyType(
     {
@@ -513,42 +381,9 @@ class _VersionCodec:
     enum_types: Mapping[str, type[Enum]]
     enum_values: Mapping[str, frozenset[object]]
     dataclass_fields: Mapping[str, tuple[str, ...]]
-    dataclass_defaults: Mapping[str, Mapping[str, object]]
     dataclass_encoders: Mapping[str, DataclassEncoder]
     dataclass_decoders: Mapping[str, DataclassDecoder]
     external_schema_types: Mapping[type[object], JsonValue]
-
-
-def _encode_v1_stored_step_snapshot(
-    value: object,
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> Mapping[str, JsonValue]:
-    if not isinstance(value, StoredStepSnapshot):
-        raise TypeError("V1 stored_step_snapshot encoder received the wrong type")
-    fields: dict[str, JsonValue] = {
-        "run_id": _encode_domain(value.run_id, codec, persisted=persisted),
-        "step_index": _encode_domain(value.step_index, codec, persisted=persisted),
-        "timestamp": _encode_domain(value.timestamp, codec, persisted=persisted),
-        "state": _encode_domain(value.state, codec, persisted=persisted),
-        "projection_digest": _encode_domain(
-            value.projection_digest,
-            codec,
-            persisted=persisted,
-        ),
-        "has_context_projection": _encode_domain(
-            value.has_context_projection,
-            codec,
-            persisted=persisted,
-        ),
-    }
-    if not persisted or value.pending_request_index is not None:
-        fields["pending_request_index"] = _encode_domain(
-            value.pending_request_index,
-            codec,
-            persisted=persisted,
-        )
-    return fields
 
 
 def _encode_v1_task_node(
@@ -601,19 +436,22 @@ def _decode_v1_task_node(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskNode:
-    _require_contract_fields(
-        raw_fields,
-        frozenset(
-            {
-                "node_id",
-                "dependencies",
-                "input",
-                "budget_cost",
-                "expander",
-            }
-        ),
-        persisted=persisted,
+    required = frozenset(
+        {"node_id", "dependencies", "input", "budget_cost", "expander"}
     )
+    optional = frozenset(
+        {
+            "input_refs",
+            "timeout_seconds",
+            "max_attempts",
+            "retry_delay_seconds",
+            "output_contract",
+            "effect",
+        }
+    )
+    keys = set(raw_fields)
+    if not required.issubset(keys) or (not persisted and not keys <= required | optional):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_refs = raw_fields.get("input_refs", [])
     if not isinstance(raw_refs, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1006,89 +844,6 @@ def _decode_v1_object_ref(
 
 
 
-def _decode_v1_evaluation_record(
-    raw_fields: Mapping[str, object],
-    codec: "_VersionCodec",
-    persisted: bool,
-) -> EvaluationRecord:
-    current_fields = frozenset(
-        {
-            "evaluation_id",
-            "execution_id",
-            "dataset_digest",
-            "status",
-            "revision",
-            "created_at",
-            "updated_at",
-        }
-    )
-    legacy_only = {
-        "dataset_revision": int,
-        "evaluator_id": str,
-        "evaluator_revision": int,
-        "artifact_digest": str | None,
-        "metrics": Mapping[str, float | int],
-    }
-    if "dataset_digest" in raw_fields:
-        required = current_fields
-        dataset_field = "dataset_digest"
-    else:
-        if not persisted:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        required = current_fields.difference({"dataset_digest"}) | {
-            "dataset_id",
-            "binding_digest",
-            *legacy_only,
-        }
-        dataset_field = "dataset_id"
-    _require_contract_fields(raw_fields, required, persisted=persisted)
-
-    def decode(field_name: str, target: object) -> object:
-        return _decode_domain(
-            raw_fields[field_name],
-            target,
-            codec,
-            persisted=persisted,
-        )
-
-    if "binding_digest" in raw_fields:
-        decode("binding_digest", str)
-
-    if dataset_field == "dataset_id":
-        if "tenant_id" in raw_fields:
-            decode("tenant_id", str)
-        if (
-            decode("dataset_revision", int) != 1
-            or decode("evaluator_id", str) != "default"
-            or decode("evaluator_revision", int) != 1
-            or decode("artifact_digest", str | None) is not None
-            or decode("metrics", Mapping[str, float | int]) != {}
-        ):
-            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-
-    try:
-        return EvaluationRecord(
-            evaluation_id=cast(str, decode("evaluation_id", str)),
-            execution_id=cast(str, decode("execution_id", str)),
-            dataset_digest=cast(str, decode(dataset_field, str)),
-            status=cast(
-                EvaluationStatus,
-                decode("status", EvaluationStatus),
-            ),
-            revision=cast(int, decode("revision", int)),
-            created_at=cast(
-                datetime,
-                decode("created_at", datetime),
-            ),
-            updated_at=cast(
-                datetime,
-                decode("updated_at", datetime),
-            ),
-        )
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
 def _encode_v1_stored_user_input(
     value: object,
     codec: "_VersionCodec",
@@ -1149,7 +904,6 @@ def _decode_v1_stored_user_input(
 _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
     {
         "object_ref": _encode_v1_object_ref,
-        "stored_step_snapshot": _encode_v1_stored_step_snapshot,
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         "task_node": _encode_v1_task_node,
@@ -1159,7 +913,6 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
 )
 _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
     {
-        "evaluation_record": _decode_v1_evaluation_record,
         "object_ref": _decode_v1_object_ref,
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
@@ -1191,7 +944,6 @@ _V1_CODEC = _VersionCodec(
     enum_types=_V1_ENUM_TYPES,
     enum_values=_V1_ENUM_VALUES,
     dataclass_fields=_V1_GENERIC_DATACLASS_FIELDS,
-    dataclass_defaults=_V1_GENERIC_DATACLASS_DEFAULTS,
     dataclass_encoders=_V1_DATACLASS_ENCODERS,
     dataclass_decoders=_V1_DATACLASS_DECODERS,
     external_schema_types=_V1_EXTERNAL_SCHEMA_TYPES,
@@ -1315,11 +1067,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             "data",
         }
     )
-    keys = frozenset(value)
-    if keys == current_keys | {"partition"}:
-        _digest_wire(_string(value, "partition"))
-    elif keys != current_keys:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _require_exact_keys(value, current_keys)
     lease = value["lease"]
     if not isinstance(lease, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1862,7 +1610,7 @@ def _iter_agent_binding_object_refs(
         required = {"key", "digest", "size"}
         if not isinstance(raw, Mapping) or not required.issubset(raw):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        store_id = raw.get("store_id", _RUNTIME_OBJECT_STORE_ID)
+        store_id = raw.get("store_id", "runtime")
         key = raw["key"]
         digest = raw["digest"]
         size = raw["size"]
@@ -2317,12 +2065,8 @@ def _decode_dataclass(
     if frozen_names is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     frozen_name_set = frozenset(frozen_names)
-    defaults = codec.dataclass_defaults.get(wire_id, {})
-    if not set(defaults).issubset(frozen_name_set):
-        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if persisted:
-        required_names = frozen_name_set.difference(defaults)
-        if not required_names.issubset(raw_fields):
+        if not frozen_name_set.issubset(raw_fields):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     elif set(raw_fields) != frozen_name_set:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2338,7 +2082,7 @@ def _decode_dataclass(
         if field is None:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         if field_name not in raw_fields:
-            decoded = _copy_frozen_default(defaults[field_name])
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
             try:
                 decoded = _decode_domain(
@@ -2367,14 +2111,6 @@ def _decode_dataclass(
         if actual != expected:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return result
-
-
-def _copy_frozen_default(value: object) -> object:
-    if isinstance(value, Mapping):
-        return dict(value)
-    if isinstance(value, tuple):
-        return tuple(value)
-    return value
 
 
 def _decode_any(
@@ -2656,14 +2392,12 @@ def _validate_v1_codec_definition() -> None:
     custom_encoders = {
         "object_ref",
         "stored_user_input",
-        "stored_step_snapshot",
         "task_graph_view",
         "task_node",
         "task_node_view",
         "task_result",
     }
     custom_decoders = {
-        "evaluation_record",
         "object_ref",
         "stored_user_input",
         "task_graph_view",
