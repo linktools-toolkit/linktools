@@ -3,6 +3,7 @@
 """Session terminal handoff across tool-using turns."""
 
 import asyncio
+import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
@@ -497,7 +498,7 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     )
     runtime = await manager.__aenter__()
     execution_id = ""
-    second_state: RuntimeState | None = None
+    crash_database = tmp_path / "session-tool-crash-snapshot.db"
     try:
         await runtime.agent("default").create_session("session")
         execution = await runtime.agent("default").session("session").start(
@@ -525,12 +526,19 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
         assert before is not None
         assert before.status is ExecutionStatus.STARTED
 
-        # A real process exit does not run Runtime.close(), because graceful close
-        # intentionally cancels a still-started execution. Reopen the durable state
-        # while the crashed worker is already gone, then close the first Runtime only
-        # after recovery has reached a terminal state.
-        await asyncio.sleep(0)
-        second_state = RuntimeState.sqlite(database)
+        def snapshot_database() -> None:
+            with sqlite3.connect(database) as source:
+                with sqlite3.connect(crash_database) as target:
+                    source.backup(target)
+
+        await asyncio.to_thread(snapshot_database)
+    finally:
+        await manager.__aexit__(None, None, None)
+        if first_state.ready:
+            await first_state.close()
+
+    second_state = RuntimeState.sqlite(crash_database)
+    try:
         async with Runtime.open(
             "session-tool-crash",
             models=_ToolModels(),  # type: ignore[arg-type]
@@ -555,11 +563,8 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
                 "assistant",
             ]
     finally:
-        if second_state is not None and second_state.ready:
+        if second_state.ready:
             await second_state.close()
-        await manager.__aexit__(None, None, None)
-        if first_state.ready:
-            await first_state.close()
 
 
 @pytest.mark.asyncio
