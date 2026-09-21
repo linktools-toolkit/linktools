@@ -697,11 +697,14 @@ class DefaultEventService:
                                 yield event
                             return
                         if self._live.is_completed(execution_id):
-                            await self._raise_unconfirmed_completion(
+                            await live.close()
+                            async for event in self._stream_durable(
                                 execution_id,
                                 tenant_id=principal.tenant_id,
                                 after_sequence=cursor,
-                            )
+                            ):
+                                yield event
+                            return
                         try:
                             await asyncio.wait_for(
                                 self._live.wait_for_activity(execution_id),
@@ -771,16 +774,17 @@ class DefaultEventService:
             if cursor >= execution.event_sequence:
                 return
             if ephemeral_semantic_count:
-                await self._raise_unconfirmed_completion(
+                await self._validate_unconfirmed_completion(
                     execution_id,
                     tenant_id=principal.tenant_id,
                     after_sequence=cursor,
                     minimum_events=ephemeral_semantic_count,
                 )
+                return
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def _raise_unconfirmed_completion(
+    async def _validate_unconfirmed_completion(
         self,
         execution_id: str,
         *,
@@ -812,13 +816,7 @@ class DefaultEventService:
             or last_event.event_type != f"EXECUTION_{execution.status.value}"
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raise AIError(
-            ErrorCode.STORAGE_INTEGRITY_ERROR,
-            safe_details={
-                "phase": "execution_event_durability_race",
-                "execution_id": execution_id,
-            },
-        )
+        return
 
 
     async def _stream_durable(

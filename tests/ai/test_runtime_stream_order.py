@@ -152,239 +152,233 @@ def _service(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("after_sequence", [0, 1])
-@pytest.mark.parametrize("durable", [True, False])
-async def test_unconfirmed_completion_requires_valid_durable_tail(
-    after_sequence: int,
-    durable: bool,
-) -> None:
+async def test_unconfirmed_terminal_event_converges_to_durable_tail() -> None:
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
     broker.publish_event(
-        "execution", ExecutionEventType.EXECUTION_SUCCEEDED, {},
+        "execution",
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        {},
         durable_sequence=None,
     )
     broker.complete("execution")
-    event = ExecutionEvent("execution", 1, "EXECUTION_SUCCEEDED", {})
     service = _service(
         _execution(status=ExecutionStatus.SUCCEEDED, event_sequence=1),
-        _EventReader({0: (event,)} if durable else {}),
+        _EventReader(
+            {0: (ExecutionEvent("execution", 1, "EXECUTION_SUCCEEDED", {}),)}
+        ),
         broker,
     )
-    with pytest.raises(AIError) as raised:
-        async for _ in service.stream(
-            "execution", principal=Principal("owner", "tenant"),
-            after_sequence=after_sequence,
-        ):
-            pass
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert (
-        raised.value.safe_details.get("phase") == "execution_event_durability_race"
-    ) is durable
+
+    streamed = [
+        event
+        async for event in service.stream(
+            "execution",
+            principal=Principal("owner", "tenant"),
+        )
+    ]
+
+    assert len(streamed) == 1
+    assert streamed[0].durable_sequence is None
+    assert streamed[0].event_type == ExecutionEventType.EXECUTION_SUCCEEDED
 
 
 @pytest.mark.asyncio
-async def test_unconfirmed_completion_rejects_lost_semantic_events() -> None:
+async def test_unconfirmed_completion_rejects_missing_durable_tail() -> None:
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
-    for event_type in ("TOOL_CALL_STARTED", "EXECUTION_SUCCEEDED"):
-        broker.publish_event("execution", event_type, {}, durable_sequence=None)
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        {},
+        durable_sequence=None,
+    )
     broker.complete("execution")
     service = _service(
         _execution(status=ExecutionStatus.SUCCEEDED, event_sequence=1),
-        _EventReader({0: (ExecutionEvent("execution", 1, "EXECUTION_SUCCEEDED", {}),)}),
+        _EventReader({}),
         broker,
     )
+
     with pytest.raises(AIError) as raised:
-        async for _ in service.stream("execution", principal=Principal("owner", "tenant")):
+        async for _ in service.stream(
+            "execution",
+            principal=Principal("owner", "tenant"),
+        ):
             pass
+
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-    assert "phase" not in raised.value.safe_details
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "mode", [
-        "terminal", "nonterminal", "missing_events", "missing_graph_event",
-        "callback", "cancel_recovery", "simultaneous", "waiter_during_recovery",
-    ]
-)
-async def test_graph_observer_completion_before_live_cursor_confirmation(mode: str) -> None:
+async def test_graph_wait_terminal_result_waits_for_observer_completion() -> None:
     principal = Principal("owner", "tenant")
     broker = LiveExecutionEventBroker()
     broker.prepare_local_producer("execution")
     broker.register_local_producer("execution", 0)
     executions = _ExecutionReader(_execution(event_sequence=1))
-    events = _EventReader({0: (ExecutionEvent("execution", 1, "EXECUTION_STARTED", {}),)})
-    service = DefaultEventService(
-        executions, events, _AllowAll(),
-        lambda execution_id, tenant_id: None, broker,
+    events = _EventReader(
+        {0: (ExecutionEvent("execution", 1, "EXECUTION_STARTED", {}),)}
     )
-    observed_live = asyncio.Event()
-    waiter_started = asyncio.Event()
-    waiter_cancelled = asyncio.Event()
+    execution_service = DefaultEventService(
+        executions,
+        events,
+        _AllowAll(),
+        lambda execution_id, tenant_id: None,
+        broker,
+    )
     waiter_release = asyncio.Event()
-    recovering = asyncio.Event()
-    recovery_release = asyncio.Event()
-    graph_closed = asyncio.Event()
-    execution_closed = asyncio.Event()
-    committed = False
+    graph_terminal_release = asyncio.Event()
+    observed_live = asyncio.Event()
+    observed_terminal = asyncio.Event()
     now = datetime.now(timezone.utc)
-    terminal_event = TaskEvent(
-        1, "graph", 2, TaskEventType.GRAPH_CHANGED, now, TaskStatus.SUCCEEDED,
+    terminal_graph_event = TaskEvent(
+        1,
+        "graph",
+        2,
+        TaskEventType.GRAPH_CHANGED,
+        now,
+        TaskStatus.SUCCEEDED,
         previous_status=TaskStatus.RUNNING,
     )
 
     class GraphService:
         async def snapshot(
-            self, graph_id: str, *, principal: Principal,
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
         ) -> TaskGraphSnapshot:
-            status = TaskStatus.SUCCEEDED if committed else TaskStatus.RUNNING
+            del principal
             state = TaskNodeView(
-                graph_id, "node", (), status, None, 1, None,
-                "a" * 64 if committed else None, None, None, "execution",
+                graph_id,
+                "node",
+                (),
+                TaskStatus.WAITING,
+                None,
+                1,
+                None,
+                None,
+                None,
+                None,
+                "execution",
             )
             return TaskGraphSnapshot(
-                graph_id, status, (TaskNode("node"),), (state,), 2 if committed else 1,
+                graph_id,
+                TaskStatus.RUNNING,
+                (TaskNode("node"),),
+                (state,),
+                1,
             )
 
         async def wait(
-            self, graph_id: str, *, principal: Principal,
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
             timeout_seconds: float | None = None,
         ) -> TaskGraphResult:
-            waiter_started.set()
-            try:
-                await waiter_release.wait()
-                return TaskGraphResult(graph_id, TaskStatus.SUCCEEDED)
-            finally:
-                waiter_cancelled.set()
+            del principal, timeout_seconds
+            await waiter_release.wait()
+            return TaskGraphResult(graph_id, TaskStatus.SUCCEEDED)
 
         async def stream_events(
-            self, graph_id: str, *, principal: Principal, after_sequence: int = 0,
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
         ) -> AsyncIterator[TaskEvent]:
-            try:
-                yield TaskEvent(
-                    1, graph_id, 1, TaskEventType.NODE_CHANGED, now, TaskStatus.WAITING,
-                    previous_status=TaskStatus.RUNNING, node_id="node", fence=1,
-                    execution_id="execution",
-                )
-                await asyncio.Event().wait()
-            finally:
-                graph_closed.set()
-
-        async def list_events(
-            self, graph_id: str, *, principal: Principal,
-            after_sequence: int = 0, limit: int = 100,
-        ) -> Page[TaskEvent]:
-            recovering.set()
-            if mode == "cancel_recovery":
-                await asyncio.Event().wait()
-            if mode == "waiter_during_recovery":
-                waiter_release.set()
-                await recovery_release.wait()
-            return Page(() if mode == "missing_graph_event" else (terminal_event,))
+            del principal, after_sequence
+            yield TaskEvent(
+                1,
+                graph_id,
+                1,
+                TaskEventType.NODE_CHANGED,
+                now,
+                TaskStatus.WAITING,
+                previous_status=TaskStatus.RUNNING,
+                node_id="node",
+                fence=1,
+                execution_id="execution",
+            )
+            await graph_terminal_release.wait()
+            yield terminal_graph_event
 
     async def watch_tree(
-        execution_id: str, *, principal: Principal,
+        execution_id: str,
+        *,
+        principal: Principal,
         after_sequences: Mapping[str, int] | None = None,
         include_content: bool = False,
     ) -> AsyncIterator[ExecutionTreeEvent]:
-        try:
-            async for event in service.stream(execution_id, principal=principal):
-                yield ExecutionTreeEvent(
-                    execution_id, "agent", ExecutionLineageKind.RUN, None,
-                    execution_id, None, 0, event,
-                )
-        finally:
-            execution_closed.set()
+        del after_sequences, include_content
+        async for event in execution_service.stream(execution_id, principal=principal):
+            yield ExecutionTreeEvent(
+                execution_id,
+                "agent",
+                ExecutionLineageKind.RUN,
+                None,
+                execution_id,
+                None,
+                0,
+                event,
+            )
 
     run = TaskGraphRun(
         SimpleNamespace(namespace="watch-test", graph=GraphService()),
-        "graph", principal, watch_tree,
+        "graph",
+        principal,
+        watch_tree,
     )
     observed: list[TaskGraphRunEvent] = []
-    callback_error = AIError(
-        ErrorCode.STORAGE_INTEGRITY_ERROR,
-        safe_details={"phase": "execution_event_durability_race"},
-    )
 
     async def observer(event: TaskGraphRunEvent) -> None:
-        nonlocal committed
         observed.append(event)
-        if mode == "simultaneous" and event.event == terminal_event:
-            waiter_release.set()
         if (
             isinstance(event.event, ExecutionTreeEvent)
             and event.event.event.durable_sequence is None
         ):
             observed_live.set()
-            if mode == "callback":
-                committed = True
-                raise callback_error
+        if event.event == terminal_graph_event:
+            observed_terminal.set()
 
-    broker.publish_event("execution", "EXECUTION_STARTED", {}, durable_sequence=1)
     broker.publish_event(
-        "execution", ExecutionEventType.EXECUTION_SUCCEEDED, {},
+        "execution",
+        "EXECUTION_STARTED",
+        {},
+        durable_sequence=1,
+    )
+    broker.publish_event(
+        "execution",
+        ExecutionEventType.EXECUTION_SUCCEEDED,
+        {},
         durable_sequence=None,
     )
     waiting = asyncio.create_task(run.wait(observer=observer))
-    try:
-        await asyncio.wait_for(waiter_started.wait(), 1)
-        await asyncio.wait_for(observed_live.wait(), 1)
-        committed = mode != "nonterminal"
-        executions.execution = _execution(
-            status=ExecutionStatus.SUCCEEDED, event_sequence=2,
-        )
-        if mode != "missing_events":
-            events.pages[1] = (
-                ExecutionEvent("execution", 2, "EXECUTION_SUCCEEDED", {}),
-            )
-        broker.complete("execution")
-        if mode == "waiter_during_recovery":
-            await asyncio.wait_for(waiter_cancelled.wait(), 1)
-            await asyncio.sleep(0)
-            recovery_release.set()
-        if mode in {"terminal", "simultaneous", "waiter_during_recovery"}:
-            result = await asyncio.wait_for(waiting, 1)
-            snapshot = await run.snapshot()
-            assert result.status is snapshot.status is TaskStatus.SUCCEEDED
-            assert (
-                result.node_results[0].result_digest
-                == snapshot.node_states[0].result_digest
-            )
-            assert result.node_results[0].execution_id == "execution"
-            assert observed[-1].event == terminal_event
-            assert observed[-1].cursor is not None
-            graph_sequence, positions = decode_graph_watch_cursor(
-                "watch-test", "tenant", "graph", observed[-1].cursor,
-                include_content=False,
-            )
-            _, previous_positions = decode_graph_watch_cursor(
-                "watch-test", "tenant", "graph", observed[-2].cursor,
-                include_content=False,
-            )
-            assert graph_sequence == snapshot.event_sequence
-            assert positions == previous_positions
-            assert positions == {"node": {"execution": 1}}
-        elif mode == "cancel_recovery":
-            await asyncio.wait_for(recovering.wait(), 1)
-            waiting.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await waiting
-        else:
-            with pytest.raises(AIError) as raised:
-                await asyncio.wait_for(waiting, 1)
-            assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-            if mode == "callback":
-                assert raised.value is callback_error
-        assert waiter_cancelled.is_set()
-        assert graph_closed.is_set()
-        assert execution_closed.is_set()
-    finally:
-        waiting.cancel()
-        await asyncio.gather(waiting, return_exceptions=True)
+    await asyncio.wait_for(observed_live.wait(), 1)
+
+    executions.execution = _execution(
+        status=ExecutionStatus.SUCCEEDED,
+        event_sequence=2,
+    )
+    events.pages[1] = (
+        ExecutionEvent("execution", 2, "EXECUTION_SUCCEEDED", {}),
+    )
+    waiter_release.set()
+    await asyncio.sleep(0)
+    assert not waiting.done()
+
+    broker.complete("execution")
+    graph_terminal_release.set()
+    result = await asyncio.wait_for(waiting, 1)
+
+    assert result.status is TaskStatus.SUCCEEDED
+    assert observed_terminal.is_set()
+    assert observed[-1].event == terminal_graph_event
+    assert observed[-1].cursor is not None
 
 
 @pytest.mark.asyncio
