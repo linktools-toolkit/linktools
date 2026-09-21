@@ -4,10 +4,10 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import fields, is_dataclass
+from dataclasses import is_dataclass
 from typing import cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 from ..core import JsonValue, canonical_json_bytes
@@ -46,12 +46,15 @@ def stable_json_snapshot(value: object) -> JsonValue:
             value.model_dump(mode="python", by_alias=True)
         )
     if is_dataclass(value) and not isinstance(value, type):
-        return stable_json_snapshot(
-            {
-                field.name: getattr(value, field.name)
-                for field in fields(value)
-            }
-        )
+        try:
+            snapshot = TypeAdapter(type(value)).dump_python(
+                value,
+                mode="python",
+                by_alias=True,
+            )
+        except PydanticSerializationError as error:
+            raise TypeError("value is not JSON portable") from error
+        return stable_json_snapshot(snapshot)
     try:
         snapshot = to_jsonable_python(
             value,
