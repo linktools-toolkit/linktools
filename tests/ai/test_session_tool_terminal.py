@@ -19,7 +19,6 @@ from linktools.ai.core import ExecutionEventType, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state._runtime_commands import RuntimeStateCommands
@@ -464,28 +463,29 @@ async def test_session_tool_turn_recovers_after_process_exit_without_replaying_e
     database = tmp_path / "session-tool-crash.db"
     calls: list[str] = []
     application = _application(calls, effect="non_replay_safe")
-    original_commit_success = LocalExecutionBackend._commit_success
+    original_complete = RuntimeToolOperationBridge.complete
     crashed = False
 
-    async def crash_before_terminal(
-        self: LocalExecutionBackend,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
+    async def complete_then_exit(
+        self: RuntimeToolOperationBridge,
+        decision: object,
+        result: object,
+    ) -> bool:
         nonlocal crashed
+        cancelled = await original_complete(
+            self,
+            decision,  # type: ignore[arg-type]
+            result,
+        )
         if not crashed:
             crashed = True
             raise _SimulatedProcessExit("simulated process exit")
-        return await original_commit_success(
-            self,
-            *args,  # type: ignore[arg-type]
-            **kwargs,  # type: ignore[arg-type]
-        )
+        return cancelled
 
     monkeypatch.setattr(
-        LocalExecutionBackend,
-        "_commit_success",
-        crash_before_terminal,
+        RuntimeToolOperationBridge,
+        "complete",
+        complete_then_exit,
     )
 
     first_state = RuntimeState.sqlite(database)
