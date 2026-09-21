@@ -76,6 +76,33 @@ def _backend(execution: ExecutionRecord) -> LocalExecutionBackend:
     return backend
 
 
+def test_local_binding_lookup_uses_semantic_digest() -> None:
+    durable = _binding()
+    equivalent = replace(
+        durable,
+        agent_spec=replace(
+            durable.agent_spec,
+            description="non-semantic display label",
+        ),
+    )
+    assert durable != equivalent
+    assert durable.binding_digest == equivalent.binding_digest
+
+    execution = _execution(correlation={})
+    backend = _backend(execution)
+    backend._catalog = SimpleNamespace(
+        binding=lambda digest: SimpleNamespace(
+            snapshot=equivalent,
+            digest=digest,
+        )
+    )
+
+    binding = backend._execution_binding(execution)
+
+    assert binding.digest == execution.binding_digest
+    assert binding.snapshot == equivalent
+
+
 @pytest.mark.asyncio
 async def test_local_start_accepts_matching_durable_correlation() -> None:
     execution = _execution(correlation={"trace_id": "durable", "attempt": 1})
