@@ -1527,20 +1527,6 @@ class DefaultExecutionService:
             if not _terminal_idempotency_matches(existing, execution):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(execution.execution_id)
-        if existing.status in {
-            IdempotencyStatus.FAILED,
-            IdempotencyStatus.CANCELLED,
-        }:
-            if execution.started_at is None:
-                fallback = (
-                    ErrorCode.EXECUTION_START_PERSISTENCE_FAILED
-                    if existing.status is IdempotencyStatus.FAILED
-                    else ErrorCode.EXECUTION_CANCELLED
-                )
-                raise _stable_idempotency_error(existing.error_code, fallback)
-            if not _terminal_idempotency_matches(existing, execution):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ExecutionHandle(execution.execution_id)
         if (
             existing.status is IdempotencyStatus.STARTED
             and execution.status is ExecutionStatus.WAITING_DEFERRED
@@ -1876,7 +1862,10 @@ class DefaultExecutionService:
                 )
                 if terminal is not None:
                     self._validate_replayed_execution(terminal, binding, request)
-                    if terminal.started_at is not None:
+                    if (
+                        scope == "session.resume"
+                        and terminal.started_at is not None
+                    ):
                         if not _terminal_idempotency_matches(existing, terminal):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                         await self._acquire_start_dependency_hold(
