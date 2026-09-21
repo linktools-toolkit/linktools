@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
@@ -29,6 +30,7 @@ from linktools.ai.runtime.state._steps import RuntimeStepStore
 from linktools.ai.storage import PayloadPolicy
 
 from pydantic_ai.messages import (
+    ModelMessage,
     ModelRequest,
     ModelResponse,
     TextPart,
@@ -434,6 +436,167 @@ async def test_completed_tool_operation_is_reused_after_reopen(
         await second.close()
         if second_engine is not None:
             await second_engine.dispose()
+
+
+
+class _SimulatedProcessExit(BaseException):
+    pass
+
+
+class _CrashRecoveryController:
+    def __init__(self) -> None:
+        self.crash = True
+        self.replay_tool = False
+        self.crashed = False
+
+    def model(
+        self,
+        messages: list[ModelMessage],
+        _info: AgentInfo,
+    ) -> ModelResponse:
+        has_tool_result = any(
+            isinstance(message, ModelRequest)
+            and any(isinstance(part, ToolReturnPart) for part in message.parts)
+            for message in messages
+        )
+        if not has_tool_result:
+            return ModelResponse(
+                parts=[ToolCallPart("lookup", {}, tool_call_id="call-1")]
+            )
+        if self.crash:
+            self.crash = False
+            self.replay_tool = True
+            self.crashed = True
+            raise _SimulatedProcessExit("simulated process exit")
+        if self.replay_tool:
+            self.replay_tool = False
+            return ModelResponse(
+                parts=[ToolCallPart("lookup", {}, tool_call_id="call-1")]
+            )
+        return ModelResponse(parts=[TextPart("done")])
+
+
+class _CrashRecoveryModelBinding:
+    route_id = "default"
+    provider = "test"
+    model_identity = "test:session-tool-crash"
+    vision = False
+    fingerprint = "b" * 64
+    semantic_payload: dict[str, JsonValue] = {
+        "provider": "test",
+        "model": "session-tool-crash",
+    }
+
+    def __init__(self, controller: _CrashRecoveryController) -> None:
+        self._controller = controller
+
+    def materialize(self) -> FunctionModel:
+        return FunctionModel(self._controller.model)
+
+
+class _CrashRecoveryModels:
+    def __init__(self, controller: _CrashRecoveryController) -> None:
+        self._controller = controller
+
+    def snapshot(self) -> "_CrashRecoveryModels":
+        return self
+
+    def resolve(self, route_id: str) -> _CrashRecoveryModelBinding:
+        if route_id != "default":
+            raise AssertionError(route_id)
+        return _CrashRecoveryModelBinding(self._controller)
+
+    def restore(
+        self,
+        payload: Mapping[str, JsonValue],
+        *,
+        route_id: str | None = None,
+    ) -> _CrashRecoveryModelBinding:
+        if (
+            route_id not in {None, "default"}
+            or dict(payload) != _CrashRecoveryModelBinding.semantic_payload
+        ):
+            raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
+        return _CrashRecoveryModelBinding(self._controller)
+
+
+@pytest.mark.asyncio
+async def test_session_tool_turn_recovers_after_process_exit_without_replaying_effect(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "session-tool-crash.db"
+    calls: list[str] = []
+    application = _application(calls)
+    controller = _CrashRecoveryController()
+    models = _CrashRecoveryModels(controller)
+
+    first_state = RuntimeState.sqlite(database)
+    manager = Runtime.open(
+        "session-tool-crash",
+        models=models,  # type: ignore[arg-type]
+        state=first_state,
+        capabilities=(application,),
+    )
+    runtime = await manager.__aenter__()
+    execution_id = ""
+    try:
+        await runtime.agent("default").create_session("session")
+        execution = await runtime.agent("default").session("session").start(
+            "inspect",
+            idempotency_key="turn-1",
+        )
+        execution_id = execution.execution_id
+        for _ in range(200):
+            if controller.crashed:
+                break
+            await asyncio.sleep(0.01)
+        assert controller.crashed
+        assert calls == ["lookup"]
+
+        operations = await first_state.recovery.tools.list_by_execution(
+            execution_id,
+            tenant_id=runtime.tenant_id,
+        )
+        assert len(operations) == 1
+        assert operations[0].status.value == "COMPLETED"
+        before = await first_state.execution.executions.get(
+            execution_id,
+            tenant_id=runtime.tenant_id,
+        )
+        assert before is not None
+        assert before.status is ExecutionStatus.STARTED
+    finally:
+        with pytest.raises(AIError):
+            await manager.__aexit__(None, None, None)
+        await first_state.close()
+
+    second_state = RuntimeState.sqlite(database)
+    try:
+        async with Runtime.open(
+            "session-tool-crash",
+            models=models,  # type: ignore[arg-type]
+            state=second_state,
+            capabilities=(application,),
+        ) as recovered:
+            session = recovered.agent("default").session("session")
+            same = await session.start(
+                "inspect",
+                idempotency_key="turn-1",
+            )
+            result = await same.wait(timeout_seconds=10)
+
+            assert same.execution_id == execution_id
+            assert result.status is ExecutionStatus.SUCCEEDED
+            assert calls == ["lookup"]
+            history = await session.history()
+            assert _relevant_kinds(history.items) == [
+                "user",
+                "tool_call",
+                "tool_result",
+                "assistant",
+            ]
+    finally:
+        await second_state.close()
 
 
 @pytest.mark.asyncio
