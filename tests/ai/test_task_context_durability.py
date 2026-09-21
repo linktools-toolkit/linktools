@@ -35,10 +35,7 @@ class _CaptureLauncher:
 
     async def start(self, launch: TaskGraphLaunch) -> TaskGraphHandle:
         self.started = launch
-        return TaskGraphHandle(
-            launch.graph_id,
-            f"capture:{launch.principal.tenant_id}:{launch.graph_id}",
-        )
+        return TaskGraphHandle(launch.graph_id)
 
     async def cancel(self, launch: TaskGraphLaunch) -> TaskGraphView:
         self.cancelled = launch
