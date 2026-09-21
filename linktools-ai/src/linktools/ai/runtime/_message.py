@@ -36,7 +36,7 @@ from pydantic_ai.messages import (
 
 from ..core import JsonValue, canonical_json_bytes
 from ..errors import AIError, ErrorCode
-from ._input import _decode_user_content_item, _encode_user_content_item
+from ._user_content_codec import decode_user_content_item, encode_user_content_item
 from ._json_snapshot import stable_json_snapshot
 from ._tool_return_codec import decode_tool_return_content, encode_tool_return_content
 
@@ -312,7 +312,7 @@ def _encode_request_part(part: object) -> dict[str, JsonValue]:
         else:
             content = {
                 "type": "items",
-                "items": [_encode_user_content_item(item) for item in part.content],
+                "items": [encode_user_content_item(item) for item in part.content],
             }
         return {
             "part_kind": "user-prompt",
@@ -364,7 +364,7 @@ def _decode_request_part(value: object) -> object:
             items = raw_content["items"]
             if not isinstance(items, list):
                 raise ValueError("user prompt items are invalid")
-            content = [_decode_user_content_item(item) for item in items]
+            content = [decode_user_content_item(item) for item in items]
         else:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         return UserPromptPart(
@@ -443,7 +443,7 @@ def _encode_response_part(part: object) -> dict[str, JsonValue]:
     if isinstance(part, FilePart):
         return {
             "part_kind": "file",
-            "content": _encode_user_content_item(part.content),
+            "content": encode_user_content_item(part.content),
             "id": part.id,
             "provider_name": part.provider_name,
             "provider_details": _encode_optional_mapping(part.provider_details),
@@ -511,7 +511,7 @@ def _decode_response_part(value: object) -> object:
             part,
             {"part_kind", "content", "id", "provider_name", "provider_details"},
         )
-        content = _decode_user_content_item(part["content"])
+        content = decode_user_content_item(part["content"])
         if not isinstance(content, BinaryContent):
             raise ValueError("file part content is invalid")
         return FilePart(
@@ -658,7 +658,7 @@ def _encode_speech_part(part: SpeechPart) -> dict[str, JsonValue]:
         "audio": (
             None
             if part.audio is None
-            else _encode_user_content_item(part.audio)
+            else encode_user_content_item(part.audio)
         ),
         "interrupted_at_ms": part.interrupted_at_ms,
         "id": part.id,
@@ -687,7 +687,7 @@ def _decode_speech_part(part: Mapping[str, object]) -> SpeechPart:
     audio = part["audio"]
     decoded_audio = None
     if audio is not None:
-        decoded_audio = _decode_user_content_item(audio)
+        decoded_audio = decode_user_content_item(audio)
         if not isinstance(decoded_audio, BinaryContent):
             raise ValueError("speech audio is invalid")
     interrupted = part["interrupted_at_ms"]
