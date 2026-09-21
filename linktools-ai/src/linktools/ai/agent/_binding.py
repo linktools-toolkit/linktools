@@ -103,7 +103,7 @@ class SemanticPin:
 
 @dataclass(frozen=True, slots=True)
 class AgentBindingSnapshot:
-    """Persist the semantic inputs required to restore one Agent binding."""
+    """Persist identity inputs and locators required to restore one Agent binding."""
 
     agent_spec: AgentSpec
     base_model: Mapping[str, JsonValue]
