@@ -33,10 +33,8 @@ def test_tool_contribution_rejects_incomplete_runtime_semantics(
 
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
-def test_tool_fingerprint_ignores_unrelated_upstream_metadata() -> None:
-    from pydantic_ai import Tool
 
-    from linktools.ai.capability import CapabilityContribution, tool_semantic_metadata
+def test_tool_fingerprint_ignores_unrelated_upstream_metadata() -> None:
 
     def sample(value: str) -> str:
         return value
@@ -56,9 +54,6 @@ def test_tool_fingerprint_ignores_unrelated_upstream_metadata() -> None:
 
 
 def test_tool_fingerprint_changes_with_linktools_execution_semantics() -> None:
-    from pydantic_ai import Tool
-
-    from linktools.ai.capability import CapabilityContribution, tool_semantic_metadata
 
     def sample(value: str) -> str:
         return value
@@ -102,10 +97,6 @@ def test_tool_fingerprint_tracks_nondefault_execution_configuration(
     option: str,
     value: object,
 ) -> None:
-    from pydantic_ai import Tool
-
-    from linktools.ai.capability import CapabilityContribution, tool_semantic_metadata
-
     def sample(value: str) -> str:
         return value
 
@@ -129,10 +120,6 @@ def test_tool_fingerprint_tracks_nondefault_execution_configuration(
 
 
 def test_tool_timeout_identity_normalizes_integer_and_float_values() -> None:
-    from pydantic_ai import Tool
-
-    from linktools.ai.capability import CapabilityContribution, tool_semantic_metadata
-
     def sample(value: str) -> str:
         return value
 

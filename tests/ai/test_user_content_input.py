@@ -14,6 +14,7 @@ from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._input import (
     ExecutionInputMaterializer,
     decode_user_content_payload,
+    task_prompt_draft,
 )
 from linktools.ai.runtime._input_contract import validate_user_content
 from linktools.ai.workspace import SandboxResource, SandboxSession
@@ -195,6 +196,21 @@ async def test_external_url_attachment_does_not_claim_size_or_digest() -> None:
         assert "https://example.com/evidence.png" not in str(attachment)
     finally:
         await materializer.close()
+
+
+def test_url_allow_local_force_download_round_trips() -> None:
+    content = ImageUrl(
+        url="https://example.com/evidence.png",
+        media_type="image/png",
+        force_download="allow-local",
+    )
+
+    payload = task_prompt_draft((content,))
+    restored = decode_user_content_payload(payload["value"])
+
+    assert len(restored) == 1
+    assert isinstance(restored[0], ImageUrl)
+    assert restored[0].force_download == "allow-local"
 
 
 def test_url_vendor_metadata_must_be_json() -> None:

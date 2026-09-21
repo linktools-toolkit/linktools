@@ -621,7 +621,7 @@ def _decode_user_content_item(value: object) -> UserContent:
             not isinstance(url, str)
             or media_type is not None
             and not isinstance(media_type, str)
-            or not isinstance(force_download, bool)
+            or force_download not in {False, True, "allow-local"}
             or "identifier" not in value
             or "vendor_metadata" not in value
         ):
