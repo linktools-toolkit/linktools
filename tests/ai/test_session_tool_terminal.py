@@ -256,7 +256,7 @@ async def test_durable_terminal_survives_local_seal_finalization_failure(
 
             assert result.status is ExecutionStatus.SUCCEEDED
             assert calls == ["lookup"]
-            assert watched[-1].event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED
+            assert watched[-1].event.event_type == ExecutionEventType.EXECUTION_SUCCEEDED
     finally:
         await state.close()
 
@@ -314,7 +314,7 @@ async def test_terminal_commit_error_converges_to_failed_terminal(
         assert result.status is ExecutionStatus.FAILED
         assert result.error_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
         assert calls == ["lookup"]
-        assert watched[-1].event.event_type is ExecutionEventType.EXECUTION_FAILED
+        assert watched[-1].event.event_type == ExecutionEventType.EXECUTION_FAILED
         assert watched[-1].event.payload["error_code"] == result.error_code
 
         same = await session.start(
