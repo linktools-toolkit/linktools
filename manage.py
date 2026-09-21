@@ -193,6 +193,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     subparsers.required = True
 
+    modules_parser = subparsers.add_parser("modules", help="List project modules as JSON")
+    modules_parser.set_defaults(func=handle_modules)
+
     init_parser = subparsers.add_parser("init", help="Initialize new project metadata")
     _add_project_argument(init_parser, modules)
     init_parser.set_defaults(func=handle_init)
@@ -527,6 +530,11 @@ def _install_requirements(
             requirement = "%s[%s]" % (requirement, ",".join(extras))
         result.append((name, requirement))
     return result
+
+
+def handle_modules(args: argparse.Namespace) -> None:
+    del args
+    print(json.dumps(list(get_modules())))
 
 
 def handle_init(args: argparse.Namespace) -> None:
