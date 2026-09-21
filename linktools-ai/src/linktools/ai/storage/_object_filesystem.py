@@ -309,7 +309,7 @@ def _stat_filesystem_object(
     destination: Path,
     key: str,
 ) -> ObjectStat | None:
-    if not destination.exists():
+    if not _path_present(destination):
         return None
     return _read_filesystem_metadata(destination, key)
 
@@ -321,7 +321,7 @@ def _publish_filesystem_object(
     size: int,
     digest: str,
 ) -> bool:
-    if destination.exists():
+    if _path_present(destination):
         current = _read_filesystem_metadata(destination, key)
         if current.digest != digest or current.size != size:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -363,7 +363,7 @@ def _list_filesystem_objects(root: Path, store_id: str) -> tuple[ObjectStat, ...
 
 
 def _delete_filesystem_object(root: Path, destination: Path) -> bool:
-    if not destination.exists():
+    if not _path_present(destination):
         return False
     trash_root = root / ".trash"
     trash_root.mkdir(parents=True, exist_ok=True)
@@ -459,6 +459,14 @@ def _filesystem_object_paths(root: Path) -> tuple[Path, ...]:
             _require_directory(object_path)
             values.append(object_path)
     return tuple(values)
+
+
+def _path_present(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _require_regular_file(path: Path) -> None:
