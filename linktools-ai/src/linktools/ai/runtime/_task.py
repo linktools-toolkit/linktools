@@ -93,12 +93,7 @@ class TaskGraphRun(Generic[AppT]):
                 observer_task.result()
                 return _public_task_result(await wait_task)
             result = _public_task_result(await wait_task)
-            if result.status in {
-                TaskStatus.SUCCEEDED,
-                TaskStatus.FAILED,
-                TaskStatus.BLOCKED,
-                TaskStatus.CANCELLED,
-            }:
+            if _must_drain_observer(result.status):
                 await observer_task
             return result
         finally:
@@ -675,6 +670,22 @@ def _is_task_execution_id(value: str) -> bool:
 
 
 __all__ = ["TaskGraphRun"]
+
+
+_OBSERVER_DRAIN_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+        TaskStatus.RECOVERY_REQUIRED,
+    }
+)
+
+
+def _must_drain_observer(status: TaskStatus) -> bool:
+    """Return whether wait() must observe the durable graph boundary before returning."""
+    return status in _OBSERVER_DRAIN_STATUSES
 
 
 def _public_task_status(

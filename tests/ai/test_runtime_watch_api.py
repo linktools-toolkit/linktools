@@ -491,6 +491,17 @@ class _WaitGraphService:
                     datetime.now(timezone.utc),
                     TaskStatus.PENDING,
                 )
+            if self.mode == "recovery":
+                yield TaskEvent(
+                    1,
+                    graph_id,
+                    1,
+                    TaskEventType.GRAPH_CHANGED,
+                    datetime.now(timezone.utc),
+                    TaskStatus.RECOVERY_REQUIRED,
+                    TaskStatus.RUNNING,
+                )
+                return
             await self.stream_release.wait()
             if False:
                 yield None
@@ -509,6 +520,8 @@ class _WaitGraphService:
         self.wait_started.set()
         if self.mode == "waiting":
             return TaskGraphResult(graph_id, TaskStatus.WAITING, ())
+        if self.mode == "recovery":
+            return TaskGraphResult(graph_id, TaskStatus.RECOVERY_REQUIRED, ())
         if self.mode == "timeout":
             raise AIError(
                 ErrorCode.TASK_WAIT_TIMEOUT,
@@ -562,6 +575,30 @@ async def test_task_graph_wait_cleans_observer_on_stable_waiting() -> None:
     result = await run.wait(observer=observer)
 
     assert result.status is TaskStatus.WAITING
+    await _assert_no_graph_observer_tasks()
+
+
+@pytest.mark.asyncio
+async def test_task_graph_wait_delivers_recovery_required_boundary() -> None:
+    service = _WaitGraphService("recovery")
+    run = TaskGraphRun(
+        _wait_runtime(service),
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+    observed: list[TaskGraphRunEvent] = []
+
+    async def observer(event: TaskGraphRunEvent) -> None:
+        observed.append(event)
+
+    result = await run.wait(observer=observer)
+
+    assert result.status is TaskStatus.RECOVERY_REQUIRED
+    assert len(observed) == 1
+    assert isinstance(observed[0].event, TaskEvent)
+    assert observed[0].event.status is TaskStatus.RECOVERY_REQUIRED
+    assert observed[0].cursor is not None
     await _assert_no_graph_observer_tasks()
 
 
