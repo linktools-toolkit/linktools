@@ -23,6 +23,7 @@ jobs:
       - name: Export isolated verification inputs
         run: |
           mkdir -p "$RUNNER_TEMP/ai-recovery-inputs"
+          cp "$(command -v ruff)" "$RUNNER_TEMP/ai-recovery-inputs/ruff"
           tar --exclude='./.git' --exclude='__pycache__' -czf "$RUNNER_TEMP/ai-recovery-inputs/source.tar.gz" .
           python -m pip list --format=json > "$RUNNER_TEMP/ai-recovery-inputs/packages.json"
           python -c 'import sys; print(sys.version)' > "$RUNNER_TEMP/ai-recovery-inputs/python-version.txt"
