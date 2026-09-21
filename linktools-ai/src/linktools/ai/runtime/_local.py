@@ -4670,19 +4670,6 @@ class LocalExecutionBackend:
                     else session.continuation.history_id
                 )
             next_cursor = ConversationCursor(run_id, history_id=history_id)
-        conversation_snapshots: tuple[ContinuableSnapshot, ...] = ()
-        if conversation_run is not None and conversation_snapshot is not None:
-            recovery_archive = self._step_reads[RuntimeDomain.RECOVERY]
-            conversation_snapshots = tuple(
-                await recovery_archive.list_snapshots(
-                    run_id=conversation_run.run_id,
-                )
-            )
-            if (
-                not conversation_snapshots
-                or conversation_snapshots[-1] != conversation_snapshot
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         committed = await self._runtime_commands.commit_terminal_checkpoint(
             commit,
             session_id=current.session_id,
@@ -4690,7 +4677,6 @@ class LocalExecutionBackend:
             next_cursor=next_cursor,
             conversation_run=conversation_run,
             conversation_snapshot=conversation_snapshot,
-            conversation_snapshots=conversation_snapshots,
             recovery_checkpoint=recovery_checkpoint,
             recovery_run=recovery_run,
             recovery_snapshot=recovery_snapshot,
