@@ -288,6 +288,37 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     assert first_snapshot.resolve("default") is first
 
 
+def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -> None:
+    registry = ModelRegistry()
+    registry.register_openai(
+        "first",
+        model="gpt-test",
+        base_url="https://first.example/v1",
+    )
+    registry.register_openai(
+        "second",
+        model="gpt-test",
+        base_url="https://second.example/v1",
+    )
+    compiler = AgentCompiler(
+        model_resolver=registry.snapshot(),
+        candidates=(),
+        agents={"agent": AgentSpec("agent", model="first")},
+    )
+    first = compiler.bind(compiler.compile(AgentSpec("agent", model="first")))
+    second = compiler.bind(compiler.compile(AgentSpec("agent", model="second")))
+
+    assert first.definition.digest == second.definition.digest
+    assert first.digest == second.digest
+    assert first.snapshot != second.snapshot
+    assert first.definition.model is not second.definition.model
+
+    catalog = AgentCatalog({"agent": first.definition})
+    assert catalog.register_binding(first) is first
+    assert catalog.register_binding(second) is second
+    assert catalog.binding(first.digest) is second
+
+
 def test_current_binding_snapshot_persists_only_semantic_inputs() -> None:
     snapshot = _snapshot()
 
@@ -376,7 +407,7 @@ def test_restore_accepts_nonsemantic_tool_contract_drift() -> None:
     assert restored.definition.selected_tools == (second_candidate,)
 
 
-def test_catalog_reuses_binding_for_nonsemantic_snapshot_differences() -> None:
+def test_catalog_reuses_binding_for_nonsemantic_definition_differences() -> None:
     compiler = _compiler()
     first = compiler.bind(
         compiler.compile(AgentSpec("agent", description="first label"))
@@ -385,7 +416,7 @@ def test_catalog_reuses_binding_for_nonsemantic_snapshot_differences() -> None:
         compiler.compile(AgentSpec("agent", description="second label"))
     )
 
-    assert first.snapshot != second.snapshot
+    assert first.snapshot == second.snapshot
     assert first.digest == second.digest
 
     catalog = AgentCatalog({"agent": first.definition})
