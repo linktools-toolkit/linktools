@@ -2510,6 +2510,7 @@ def _validate_v1_codec_definition() -> None:
         "stored_user_input",
         "task_graph_view",
         "task_node",
+        _TASK_NODE_TERMINAL_WIRE_ID,
         "task_node_view",
         "task_result",
     }
