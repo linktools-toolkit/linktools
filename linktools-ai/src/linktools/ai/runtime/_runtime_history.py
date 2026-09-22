@@ -47,6 +47,10 @@ from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._runtime_identity import token_seed
+from ._session_timeline import (
+    SessionTimelineTranscriptStore,
+    project_session_timeline,
+)
 from .service_api import (
     AttachmentFact,
     ArtifactService,
@@ -67,6 +71,7 @@ from .service_api import (
 )
 from .state import RuntimeDomain, RuntimeState
 from .state._contracts import (
+    ConversationState,
     EventRepository,
     ExecutionRecord,
     ExecutionRepository,
@@ -238,6 +243,8 @@ class RuntimeHistory:
         execution_objects: "ObjectStore | None" = None,
         task_objects: "ObjectStore | None" = None,
         artifacts: "ArtifactService | None" = None,
+        conversation: "ConversationState | None" = None,
+        session_transcript_store: "SessionTimelineTranscriptStore | None" = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
@@ -253,6 +260,8 @@ class RuntimeHistory:
         self._execution_objects = execution_objects
         self._task_objects = task_objects
         self._artifacts = artifacts
+        self._conversation = conversation
+        self._session_transcript_store = session_transcript_store
 
     @property
     def tenant_id(self) -> str:
@@ -784,6 +793,32 @@ class RuntimeHistory:
         recent.sort(key=lambda value: (value[0], value[1]), reverse=True)
         return tuple(value[2] for value in recent)
 
+    async def session_timeline(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> Page[SessionTurn]:
+        if self._conversation is None or self._session_transcript_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        signer = self._cursor_signer
+        if signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        executions, authorization = self._require_direct_reader()
+        return await project_session_timeline(
+            self._conversation,
+            executions,
+            authorization,
+            signer,
+            self._session_transcript_store,
+            session_id,
+            principal=principal,
+            cursor=cursor,
+            limit=limit,
+        )
+
     async def inspect_session(
         self,
         session_id: str,
@@ -1093,6 +1128,8 @@ async def _open_runtime_history(
                 "runtime-history",
                 token_seed(resolved_namespace),
             ),
+            conversation=selected_state.conversation,
+            session_transcript_store=selected_state.steps,
         )
     except BaseException as error:
         body_error = error
