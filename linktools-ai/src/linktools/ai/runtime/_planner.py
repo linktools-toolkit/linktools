@@ -46,6 +46,7 @@ from ..storage import ObjectRef, ObjectStore
 from ..task import (
     TaskBindingSnapshot,
     TaskDependency,
+    TaskDependencyState,
     TaskEffectResolution,
     TaskDependencyResult,
     TaskGraph,
@@ -59,7 +60,7 @@ from ..task import (
     TaskNodeRunError,
     TaskNodeRunControl,
     TaskNodeRunResult,
-    TaskNodeView,
+    TaskDependencyState,
     TaskResultRecord,
     TaskResultRef,
 )
@@ -1037,7 +1038,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         handler: TaskNodeHandler[AppT],
         body: Mapping[str, JsonValue],
         dependencies: Mapping[str, TaskDependency],
-        dependency_states: Mapping[str, TaskNodeView],
+        dependency_states: Mapping[str, TaskDependencyState],
         *,
         principal: Principal,
         correlation: Mapping[str, str | int],
@@ -1299,7 +1300,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         handler: TaskNodeHandler[AppT],
         body: Mapping[str, JsonValue],
         dependencies: Mapping[str, TaskDependency],
-        dependency_states: Mapping[str, TaskNodeView],
+        dependency_states: Mapping[str, TaskDependencyState],
         *,
         principal: Principal,
         correlation: Mapping[str, str | int],
@@ -2017,7 +2018,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         node: TaskNode,
         *,
         dependency_results: Mapping[str, TaskDependencyResult],
-        dependency_states: Mapping[str, TaskNodeView],
+        dependency_states: Mapping[str, TaskDependencyState],
         principal: Principal,
         graph_id: str,
     ) -> dict[str, TaskDependency]:
@@ -2260,7 +2261,7 @@ def _custom_idempotency_key(
     node: TaskNode,
     principal: Principal,
     dependencies: Mapping[str, TaskDependency],
-    dependency_states: Mapping[str, TaskNodeView],
+    dependency_states: Mapping[str, TaskDependencyState],
 ) -> str:
     return canonical_sha256(
         {
