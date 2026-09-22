@@ -1302,7 +1302,6 @@ class StepExecutionHistoryReader:
                 execution_id=execution_id,
                 segment_sequence=segment_sequence,
             )
-            high_water = await self._transcript_high_water(run_id)
             message_index = 0
             item_offset = 0
         else:
@@ -1324,8 +1323,6 @@ class StepExecutionHistoryReader:
                 )
             ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
-            if await self._transcript_high_water(run_id) < high_water:
-                raise AIError(ErrorCode.CURSOR_INVALID)
 
         run = await self._store.get_run(run_id=run_id)
         if run is None:
@@ -1334,6 +1331,10 @@ class StepExecutionHistoryReader:
             if record.status is ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
+        if cursor_state is None:
+            high_water = await self._transcript_high_water(run_id)
+        elif await self._transcript_high_water(run_id) < high_water:
+            raise AIError(ErrorCode.CURSOR_INVALID)
         _validate_run(
             run,
             run_id,
@@ -1404,25 +1405,20 @@ class StepExecutionHistoryReader:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        result: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
+        result = [(selected, 0)]
         visited = {selected.execution_id}
-        pending: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
-        while pending:
-            parent, depth = pending.pop(0)
-            for child in await self._executions.list_children(
-                parent.execution_id,
-                tenant_id=tenant_id,
+        for child in await self._executions.list_children(
+            selected.execution_id, tenant_id=tenant_id
+        ):
+            if (
+                child.execution_id in visited
+                or child.lineage_kind.value != "SUBAGENT"
+                or child.parent_execution_id != selected.execution_id
+                or child.root_execution_id != selected.root_execution_id
             ):
-                if (
-                    child.execution_id in visited
-                    or child.lineage_kind.value != "SUBAGENT"
-                    or child.parent_execution_id != parent.execution_id
-                    or child.root_execution_id != selected.root_execution_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                visited.add(child.execution_id)
-                result.append((child, depth + 1))
-                pending.append((child, depth + 1))
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            visited.add(child.execution_id)
+            result.append((child, 1))
         return result
 
 
