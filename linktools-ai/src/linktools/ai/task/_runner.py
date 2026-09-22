@@ -10,8 +10,8 @@ from typing import Protocol, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
-from ._graph import TaskDependencyResult, TaskNode, TaskNodeView
-from ._handler import TaskEffectResolution
+from ._graph import TaskDependencyResult, TaskNode
+from ._handler import TaskDependencyState, TaskEffectResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +78,7 @@ class TaskNodeInvocation:
     correlation: CorrelationData
     dependency_results: "Mapping[str, TaskDependencyResult]"
     execution_id: "str | None" = None
-    dependency_states: "Mapping[str, TaskNodeView]" = field(default_factory=dict)
+    dependency_states: "Mapping[str, TaskDependencyState]" = field(default_factory=dict)
 
 
 class TaskNodeRunner(Protocol):
