@@ -8,19 +8,20 @@ import pytest
 
 from linktools.ai.asset import (
     AssetKey,
+    AssetStore,
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import CapabilityGroup, LocalSkillResourceSource
+from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.capability._group import _workspace_declaration_store
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
     MCPServerSpec,
     MCPServerSpecCodec,
 )
-from linktools.ai.workspace import Workspace
+from linktools.ai.storage import StorageOverlay
 
 
 def _symlink(target: Path, link: Path, *, directory: bool = False) -> None:
@@ -152,11 +153,10 @@ async def test_directory_asset_backend_does_not_follow_symlinks_by_default(
 
 
 @pytest.mark.asyncio
-async def test_workspace_declaration_symlinks_freeze_valid_external_declarations(
+async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path / "workspace")
-    storage_root = workspace.storage_root
+    storage_root = tmp_path / "workspace" / ".linktools"
     external = tmp_path / "shared-declarations"
     external_skill = external / "skills" / "review"
     external_skill.mkdir(parents=True)
@@ -177,12 +177,24 @@ async def test_workspace_declaration_symlinks_freeze_valid_external_declarations
     _symlink(external_skill, storage_root / "skills" / "review", directory=True)
     _symlink(storage_root / "skills", storage_root / "skills" / "loop", directory=True)
 
-    store = _workspace_declaration_store(workspace)
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(storage_root),
+                path_adapter=PrefixAssetPathAdapter(
+                    {"agent": "agents", "skill": "skills", "mcp": "mcp"}
+                ),
+                kinds=("agent", "skill", "mcp"),
+                follow_external_symlinks=True,
+                ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
+            )
+        )
+    )
     await store.initialize()
     try:
-        group: CapabilityGroup[object] = CapabilityGroup("workspace", assets=store, skill_source=LocalSkillResourceSource(
-                "workspace",
-                storage_root / "skills"),
+        group: CapabilityGroup[object] = CapabilityGroup(
+            "workspace",
+            assets=store,
         )
         frozen = await group.freeze()
         assert {(item.kind, item.id) for item in frozen} == {
