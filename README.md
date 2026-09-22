@@ -36,7 +36,7 @@ python3 -m pip install --ignore-installed \
   "linktools-common@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-common" \
   "linktools-mobile@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-mobile" \
   "linktools-cntr@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-cntr" \
-  "linktools-ai@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-ai"
+  "linktools-ai[sqlite] @ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-ai"
 ```
 
 ### 配置 alias（推荐）
@@ -66,7 +66,7 @@ alias jadx="ct-tools --set version=1.5.0 jadx-gui"
 $ python3 -m linktools
     ___       __   __              __
    / (_)___  / /__/ /_____  ____  / /____
-  / / / __ \/ //_/ __/ __ \/ __ \/ / ___/  linktools toolkit (v0.9.0)
+  / / / __ \/ //_/ __/ __ \/ __ \/ / ___/  linktools toolkit (v0.10.0)
  / / / / / / ,< / /_/ /_/ / /_/ / (__  )   by: Hu Ji <669898595@qq.com>
 /_/_/_/ /_/_/|_|\__/\____/\____/_/____/
 📎 All commands
