@@ -147,10 +147,13 @@ class _RuntimeBindingFreezer:
             if pin.kind != "mcp":
                 selected.append(pin)
                 continue
-            server = MCPServerSpecCodec().from_payload(
+            codec = MCPServerSpecCodec()
+            server, resource_snapshot = codec.from_frozen_payload(
                 cast("Mapping[str, object]", pin.contract)
             )
-            if server.resource_root is None or server.resource_snapshot is not None:
+            if resource_snapshot is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if server.resource_root is None:
                 selected.append(pin)
                 continue
             asset = self._mcp_assets.get(server.id)
@@ -167,15 +170,12 @@ class _RuntimeBindingFreezer:
                 object_store=self._objects,
                 expected_revision=expected_revision,
             )
-            frozen = MCPServerSpec(
-                server.id,
-                server.command,
-                server.args,
-                server.resource_root,
-                reference,
-            )
             selected.append(
-                SemanticPin("mcp", pin.id, MCPServerSpecCodec().to_payload(frozen))
+                SemanticPin(
+                    "mcp",
+                    pin.id,
+                    codec.to_frozen_payload(server, reference),
+                )
             )
         return replace(snapshot, selected=tuple(selected))
 
@@ -238,8 +238,12 @@ def _has_mcp_resources(snapshot: AgentBindingSnapshot) -> bool:
     for pin in snapshot.selected:
         if pin.kind != "mcp":
             continue
-        server = codec.from_payload(cast("Mapping[str, object]", pin.contract))
-        if server.resource_root is not None and server.resource_snapshot is None:
+        server, resource_snapshot = codec.from_frozen_payload(
+            cast("Mapping[str, object]", pin.contract)
+        )
+        if resource_snapshot is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if server.resource_root is not None:
             return True
     return any(_has_mcp_resources(child) for child in snapshot.subagent_bindings)
 
