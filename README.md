@@ -52,7 +52,7 @@ eval "$(ct-env --silent java 17.0.11 --shell bash)"
 
 # 常用 alias
 alias adb="at-adb"
-alias sib="it-sib"
+alias sib="it-ios"
 alias pidcat="at-pidcat"
 
 alias apktool="ct-tools apktool"
