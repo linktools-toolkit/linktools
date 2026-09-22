@@ -162,9 +162,12 @@ A store-backed group captures the declaration metadata visible when freeze start
 
 For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it for its input Asset kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or `mcp` replaces only that built-in parser slot. The loader receives one `CapabilityLoadContext`, can inspect the captured metadata and read captured keys with `read()` / `read_many()`, and returns normal `CapabilityContribution` values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP declarations. No additional Registry/Provider abstraction is required.
 
-An `MCPServerSpec` may declare `resource_root=AssetKey("mcp", "server/assets")`.
-Arguments whose complete value starts with `resource:` then name files below
-that root. Runtime freezes and verifies the selected AssetStore tree, rejects
+For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
+`resource_root=AssetKey("mcp", "server/assets")`. Workspace-only automatic
+declaration discovery does not retain an AssetStore for later execution
+freezing; pass `assets=` when MCP resource trees must be frozen. Arguments
+whose complete value starts with `resource:` then name files below that root.
+Runtime freezes and verifies the selected AssetStore tree, rejects
 absolute paths, traversal, and missing files, and materializes the frozen files
 for the MCP process. Without `resource_root`, existing argument strings keep
 their original meaning.
