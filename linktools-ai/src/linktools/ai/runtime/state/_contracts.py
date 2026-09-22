@@ -92,6 +92,7 @@ def _normalize_model_attachment_fact(
         "size",
         "digest",
         "content_key",
+        "input_identifier",
         "position",
         "call_id",
     }
@@ -104,6 +105,7 @@ def _normalize_model_attachment_fact(
     size = value.get("size")
     digest = value.get("digest")
     content_key = value.get("content_key")
+    input_identifier = value.get("input_identifier")
     position = value.get("position")
     call_id = value.get("call_id")
     if (
@@ -118,6 +120,8 @@ def _normalize_model_attachment_fact(
         or digest is not None
         and not _is_sha256(digest)
         or not _is_sha256(content_key)
+        or input_identifier is not None
+        and not isinstance(input_identifier, str)
         or isinstance(position, bool)
         or not isinstance(position, int)
         or position < 0

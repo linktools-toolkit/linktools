@@ -281,13 +281,25 @@ async def test_model_request_records_attach_files_call_identity() -> None:
         interaction.attachments[1]["attachment_id"]
     )
     assert all(value["call_id"] == "call-1" for value in interaction.attachments)
+    assert all(
+        value["input_identifier"] is None for value in interaction.attachments
+    )
     assert interaction.attachments[1]["digest"] == digest
 
 
 @pytest.mark.asyncio
 async def test_model_request_preserves_duplicate_initial_attachment_identity() -> None:
-    body = BinaryContent(b"same", media_type="image/png")
-    accepted = input_attachment_views((body, body))
+    first = BinaryContent(
+        b"same",
+        media_type="image/png",
+        identifier="input-a",
+    )
+    second = BinaryContent(
+        b"same",
+        media_type="image/png",
+        identifier="input-b",
+    )
+    accepted = input_attachment_views((first, second))
     store = ModelInteractionStagingStepStore()
     await store.initialize()
     await store.register_run(RunRecord("run"))
@@ -297,7 +309,7 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
         step_run_id="run",
         initial_attachments=accepted,
     )
-    message = ModelRequest(parts=[UserPromptPart([body, body])])
+    message = ModelRequest(parts=[UserPromptPart([first, second])])
     journal = _journal()
     fact = journal.begin(1)
     capture.begin_model_interaction(
@@ -328,6 +340,14 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
         accepted[1]["attachment_id"],
     ]
     assert included[0]["attachment_id"] != included[1]["attachment_id"]
+    assert [value["input_identifier"] for value in accepted] == [
+        "input-a",
+        "input-b",
+    ]
+    assert [value["input_identifier"] for value in included] == [
+        "input-a",
+        "input-b",
+    ]
 
 
 @pytest.mark.asyncio

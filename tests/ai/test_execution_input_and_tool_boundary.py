@@ -195,6 +195,7 @@ async def test_execution_freezes_materialized_input_once() -> None:
         )
         assert attachments[0]["position"] == 0
         assert attachments[0]["call_id"] is None
+        assert attachments[0]["input_identifier"] is None
         view_text = str(prepared.stored_user_input.view)
         assert "Workspace file path" not in view_text
         assert "ZXZpZGVuY2U=" not in view_text

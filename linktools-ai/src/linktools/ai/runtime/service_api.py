@@ -391,6 +391,7 @@ class AttachmentFact:
     request_sequence: int | None = None
     step_index: int | None = None
     call_id: str | None = None
+    input_identifier: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -433,6 +434,11 @@ class AttachmentFact:
             not isinstance(self.call_id, str) or not self.call_id
         ):
             raise ValueError("attachment call association is invalid")
+        if self.input_identifier is not None and not isinstance(
+            self.input_identifier,
+            str,
+        ):
+            raise ValueError("attachment input identifier is invalid")
 
 
 @dataclass(frozen=True, slots=True)

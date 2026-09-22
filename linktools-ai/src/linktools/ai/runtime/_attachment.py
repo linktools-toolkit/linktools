@@ -69,6 +69,7 @@ def input_attachment_views(
             "size": size,
             "digest": cast(str, digest),
             "content_key": cast(str, digest),
+            "input_identifier": None,
         }
         result.append(
             _accepted_occurrence(
@@ -261,6 +262,7 @@ def _attach_file_occurrences(
                 "size": size,
                 "digest": content_key,
                 "content_key": content_key,
+                "input_identifier": None,
                 "call_id": call_id,
                 "call_position": position,
             }
@@ -283,6 +285,7 @@ def _accepted_occurrence(
         "size": descriptor.get("size"),
         "digest": descriptor.get("digest"),
         "content_key": content_key,
+        "input_identifier": descriptor.get("input_identifier"),
         "position": position,
         "call_id": None,
     }
@@ -303,6 +306,7 @@ def _request_fact(
         "size": occurrence.get("size"),
         "digest": occurrence.get("digest"),
         "content_key": occurrence.get("content_key"),
+        "input_identifier": occurrence.get("input_identifier"),
         "position": request_position,
         "call_id": call_id,
     }
@@ -369,6 +373,7 @@ def _content_descriptor(item: object) -> dict[str, JsonValue] | None:
             "size": len(item.data),
             "digest": digest,
             "content_key": digest,
+            "input_identifier": item.identifier,
         }
     if isinstance(item, _URL_TYPES):
         return {
@@ -383,6 +388,7 @@ def _content_descriptor(item: object) -> dict[str, JsonValue] | None:
                     "identifier": item.identifier,
                 }
             ),
+            "input_identifier": item.identifier,
         }
     if isinstance(item, UploadedFile):
         return {
@@ -397,6 +403,7 @@ def _content_descriptor(item: object) -> dict[str, JsonValue] | None:
                     "identifier": item.identifier,
                 }
             ),
+            "input_identifier": item.identifier,
         }
     return None
 

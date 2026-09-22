@@ -94,6 +94,19 @@ def test_binary_input_intent_contains_metadata_without_body() -> None:
     assert intent.prompt[0]["identifier"] == "a.txt"
 
 
+def test_binary_input_identifier_changes_input_intent_identity() -> None:
+    first = input_intent(
+        (BinaryContent(b"body", media_type="text/plain", identifier="input-a"),),
+        (),
+    )
+    second = input_intent(
+        (BinaryContent(b"body", media_type="text/plain", identifier="input-b"),),
+        (),
+    )
+
+    assert first.digest != second.digest
+
+
 def test_stored_user_input_does_not_accept_unknown_codec() -> None:
     with pytest.raises(ValueError):
         StoredUserInput("legacy", StoredPayload.inline_text("prompt"))
