@@ -102,14 +102,8 @@ class LocalSandbox:
         *,
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
-        read_policy: ReadOnlySandboxPolicy | None = None,
     ) -> SandboxSession:
-        if read_policy is not None and not isinstance(
-            read_policy,
-            ReadOnlySandboxPolicy,
-        ):
-            raise TypeError("read_policy must be ReadOnlySandboxPolicy")
-        policy = self._read_policy if read_policy is None else read_policy
+        policy = self._read_policy
         normalized_root = _normalize_root(root)
         normalized_resources = _validate_resources(normalized_root, resources)
         _logger.debug(
