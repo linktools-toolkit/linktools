@@ -145,6 +145,7 @@ from ._store import (
 )
 
 CURRENT_DATA_VERSION = 1
+_TASK_NODE_TERMINAL_WIRE_ID = "task_node_terminal"
 DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
@@ -229,7 +230,10 @@ _V1_WIRE_IDS = MappingProxyType(
     {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
 )
 _V1_DOMAIN_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
+    {
+        **{wire_id: target for wire_id, target in _V1_WIRE_TYPES},
+        _TASK_NODE_TERMINAL_WIRE_ID: TaskNode,
+    }
 )
 
 _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
@@ -500,7 +504,7 @@ def _decode_v1_task_node(
     if not isinstance(effect, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     dependency_policy = raw_fields.get("dependency_policy", "all_succeeded")
-    if dependency_policy not in {"all_succeeded", "all_terminal"}:
+    if dependency_policy != "all_succeeded":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -542,6 +546,33 @@ def _decode_v1_task_node(
         ),
         effect=effect,
         dependency_policy=dependency_policy,
+    )
+
+
+def _decode_v1_terminal_task_node(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> TaskNode:
+    if raw_fields.get("dependency_policy") != "all_terminal":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    normalized = dict(raw_fields)
+    normalized.pop("dependency_policy", None)
+    node = _decode_v1_task_node(normalized, codec, persisted)
+    return TaskNode(
+        node.node_id,
+        node.dependencies,
+        input=node.input,
+        budget_cost=node.budget_cost,
+        expander=node.expander,
+        input_refs=node.input_refs,
+        timeout_seconds=node.timeout_seconds,
+        max_attempts=node.max_attempts,
+        retry_delay_seconds=node.retry_delay_seconds,
+        output_schema=node.output_schema,
+        output_contract=node.output_contract,
+        effect=node.effect,
+        dependency_policy="all_terminal",
     )
 
 
@@ -915,6 +946,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         "task_node": _encode_v1_task_node,
+        _TASK_NODE_TERMINAL_WIRE_ID: _encode_v1_task_node,
         "task_node_view": _encode_v1_task_node_view,
         "task_result": _encode_v1_task_result,
     }
@@ -925,6 +957,7 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
         "task_node": _decode_v1_task_node,
+        _TASK_NODE_TERMINAL_WIRE_ID: _decode_v1_terminal_task_node,
         "task_node_view": _decode_v1_task_node_view,
         "task_result": _decode_v1_task_result,
     }
@@ -1437,7 +1470,12 @@ def _encode_domain(
     if isinstance(value, StoredPayload):
         value.to_json()
     if is_dataclass(value):
-        wire_id = codec.wire_ids.get(type(value))
+        wire_id = (
+            _TASK_NODE_TERMINAL_WIRE_ID
+            if isinstance(value, TaskNode)
+            and value.dependency_policy == "all_terminal"
+            else codec.wire_ids.get(type(value))
+        )
         if wire_id is None:
             raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
         encoder = codec.dataclass_encoders.get(wire_id)
@@ -1770,7 +1808,10 @@ def _iter_runtime_object_refs(
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
-        if dataclass_name == codec.wire_ids.get(TaskNode):
+        if dataclass_name in {
+            codec.wire_ids.get(TaskNode),
+            _TASK_NODE_TERMINAL_WIRE_ID,
+        }:
             node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
             prompt = node.input.get("user_prompt")
             if (
@@ -2444,7 +2485,8 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 wire ids are not unique")
     if len(enum_wire_ids) != len(set(enum_wire_ids)):
         raise RuntimeError("Runtime v1 enum wire ids are not unique")
-    if set(_CURRENT_CODEC.domain_types) != set(wire_ids):
+    domain_wire_ids = set(wire_ids) | {_TASK_NODE_TERMINAL_WIRE_ID}
+    if set(_CURRENT_CODEC.domain_types) != domain_wire_ids:
         raise RuntimeError("Runtime v1 domain type registry is incomplete")
     if set(_CURRENT_CODEC.wire_ids.values()) != set(wire_ids):
         raise RuntimeError("Runtime v1 domain wire-id registry is incomplete")
@@ -2457,6 +2499,7 @@ def _validate_v1_codec_definition() -> None:
         "stored_user_input",
         "task_graph_view",
         "task_node",
+        _TASK_NODE_TERMINAL_WIRE_ID,
         "task_node_view",
         "task_result",
     }
@@ -2472,11 +2515,11 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 dataclass encoder mapping is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_decoders:
         raise RuntimeError("Runtime v1 dataclass decoder mapping is invalid")
-    if not set(_V1_DATACLASS_ENCODERS).issubset(set(wire_ids)):
+    if not set(_V1_DATACLASS_ENCODERS).issubset(domain_wire_ids):
         raise RuntimeError(
             "Runtime v1 dataclass encoder mapping contains an unknown type"
         )
-    if not set(_V1_DATACLASS_DECODERS).issubset(set(wire_ids)):
+    if not set(_V1_DATACLASS_DECODERS).issubset(domain_wire_ids):
         raise RuntimeError(
             "Runtime v1 dataclass decoder mapping contains an unknown type"
         )
