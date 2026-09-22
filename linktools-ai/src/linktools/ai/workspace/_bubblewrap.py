@@ -100,7 +100,6 @@ class BubblewrapSandbox:
         *,
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
-        read_policy: ReadOnlySandboxPolicy | None = None,
     ) -> SandboxSession:
         if sys.platform != "linux" or os.geteuid() == 0:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
@@ -109,9 +108,7 @@ class BubblewrapSandbox:
         normalized_root = _resolve_directory(root)
         runtime_root = _resolve_directory(self._runtime_root)
         bwrap = _resolve_executable(self._bwrap_executable)
-        policy = self._read_policy if read_policy is None else read_policy
-        if policy is not None and not isinstance(policy, ReadOnlySandboxPolicy):
-            raise TypeError("read_policy must be ReadOnlySandboxPolicy")
+        policy = self._read_policy
         hidden_paths = _prepare_hidden_paths(
             normalized_root, self._hidden_paths, create_missing=policy is None,
         )
