@@ -805,35 +805,23 @@ def _dependency_identity_payload(
     if set(dependency_states) != set(node.dependencies):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result: list[dict[str, JsonValue]] = []
-    terminal = {
-        TaskStatus.SUCCEEDED,
-        TaskStatus.FAILED,
-        TaskStatus.BLOCKED,
-        TaskStatus.CANCELLED,
-    }
     for dependency_id in sorted(node.dependencies):
         state = dependency_states[dependency_id]
-        if state.status not in terminal:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value: dict[str, JsonValue] = {
-            "node_id": dependency_id,
-            "status": state.status.value,
-        }
         if state.status is TaskStatus.SUCCEEDED:
             dependency = dependencies.get(dependency_id)
             if (
                 dependency is None
-                or state.result_digest is None
                 or dependency.result_digest != state.result_digest
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value["result_digest"] = dependency.result_digest
-        else:
-            if dependency_id in dependencies:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value["error_code"] = state.error_code
-            value["error_digest"] = state.error_digest
-        result.append(value)
+        elif dependency_id in dependencies:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result.append(
+            {
+                "node_id": dependency_id,
+                **state.semantic_payload,
+            }
+        )
     return result
 
 
