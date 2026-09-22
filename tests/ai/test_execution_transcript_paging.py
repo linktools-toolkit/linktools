@@ -141,6 +141,47 @@ class _RangedStore:
 
 
 @pytest.mark.asyncio
+async def test_execution_transcript_cursor_keeps_first_page_high_water() -> None:
+    record = _execution()
+    run_id = step_run_id(
+        namespace="history",
+        tenant_id="tenant",
+        execution_id=record.execution_id,
+        segment_sequence=1,
+    )
+    store = _RangedStore(run_id)
+    reader = StepExecutionHistoryReader(
+        namespace="history",
+        executions=_Executions(record),  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+        cursor_signer=HmacCursorSigner("history", b"history-key"),
+    )
+
+    first = await reader.transcript(
+        record.execution_id,
+        tenant_id="tenant",
+        cursor=None,
+        limit=2,
+    )
+    assert first.next_cursor is not None
+
+    store._messages = (
+        *store._messages,
+        ModelRequest(parts=[UserPromptPart(content="late-user")]),
+        ModelResponse(parts=[TextPart(content="late-assistant")]),
+    )
+    second = await reader.transcript(
+        record.execution_id,
+        tenant_id="tenant",
+        cursor=first.next_cursor,
+        limit=10,
+    )
+
+    assert tuple(item.text for item in second.items) == ("user-2", "assistant-2")
+    assert second.next_cursor is None
+
+
+@pytest.mark.asyncio
 async def test_execution_transcript_cursor_resumes_from_message_range() -> None:
     record = _execution()
     run_id = step_run_id(
