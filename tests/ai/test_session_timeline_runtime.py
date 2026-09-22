@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 """End-to-end Session timeline coverage through the public Runtime API."""
 
-from pathlib import Path
-
 import pytest
 
 from linktools.ai.capability import CapabilityGroup
@@ -11,18 +9,19 @@ from linktools.ai.core import ExecutionStatus
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime.state import RuntimeState
 
-from ._runtime_test_helpers import RuntimeUsageModels, runtime_usage_workspace
+from ._runtime_test_helpers import RuntimeUsageModels
 
 
 @pytest.mark.asyncio
-async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
-    workspace = runtime_usage_workspace(tmp_path / "workspace")
+async def test_in_memory_session_run_restores_timeline() -> None:
+    application = CapabilityGroup("application")
+    application.agent("default", model="default", allow_tools=())
 
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(application,),
     ) as runtime:
         session = await runtime.agent("default").create_session("session")
         first = await session.run("hello", timeout_seconds=10)
@@ -51,8 +50,9 @@ async def test_in_memory_session_run_restores_timeline(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_in_memory_fork_survives_parent_close(tmp_path: Path) -> None:
-    workspace = runtime_usage_workspace(tmp_path / "workspace-fork")
+async def test_in_memory_fork_survives_parent_close() -> None:
+    application = CapabilityGroup("application")
+    application.agent("default", model="default", allow_tools=())
 
     async with Runtime.open(
         "default",
