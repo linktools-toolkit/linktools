@@ -32,7 +32,6 @@ from ..task import (
     TaskNode,
     TaskNodeRunControl,
     TaskNodeRunError,
-    TaskDependencyState,
 )
 from ._input import (
     ExecutionInputMaterializer,
