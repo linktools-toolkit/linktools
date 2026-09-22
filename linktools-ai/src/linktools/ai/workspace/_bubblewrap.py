@@ -148,6 +148,8 @@ class BubblewrapSandbox:
                 {
                     resource.key: f"/skills/{resource.key}"
                     for resource in normalized_resources
+                    if policy is None
+                    or policy.may_descend(".", resource_key=resource.key)
                 },
                 lock_root=lock_root if cleanup_lock_root else None,
             )
