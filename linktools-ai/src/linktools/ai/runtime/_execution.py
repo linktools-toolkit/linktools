@@ -90,6 +90,7 @@ from .service_api import (
     ModelInteractionItem,
     RetryExecutionRequest,
     TranscriptItem,
+    UsageReadCutoff,
 )
 from .service_api import (
     project_execution_view as _project_execution_view,
@@ -3444,6 +3445,7 @@ class DefaultExecutionService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
         if self._history_service is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -3453,6 +3455,7 @@ class DefaultExecutionService:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            cutoffs=cutoffs,
         )
 
     async def _load_authorized(
