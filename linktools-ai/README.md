@@ -58,7 +58,7 @@ ai-run "review this change" --project /workspace/project --model gpt-4o-mini
 python3 -m linktools ai run "review this change" --project /workspace/project --model gpt-4o-mini
 ```
 
-Local CLI entry points include `ai-run`, `ai-status`, `ai-session`, `ai-history`, `ai-metrics`, `ai-trace`, and `ai-acp`.
+Local CLI entry points include `ai-run`, `ai-status`, `ai-session`, `ai-history`, `ai-metrics`, and `ai-trace`. `ai-acp` is also available when the separate `agent-client-protocol` dependency is installed.
 
 Useful options:
 
