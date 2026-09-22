@@ -521,7 +521,7 @@ class TaskGraphRun(Generic[AppT]):
             pending.append((state.node_id, root.execution_id, 0))
 
         while pending:
-            node_id, parent_id, parent_depth = pending.pop()
+            node_id, parent_id, _parent_depth = pending.pop()
             parent = captured.get(parent_id)
             if parent is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
