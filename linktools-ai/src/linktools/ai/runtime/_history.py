@@ -392,20 +392,6 @@ class StepExecutionHistoryReader:
             for source in current_sources
             if (source.record.execution_id, source.segment_sequence) in cutoff_by_identity
         )
-        for source in sources:
-            identity = (source.record.execution_id, source.segment_sequence)
-            run_id = step_run_id(
-                namespace=self._namespace,
-                tenant_id=tenant_id,
-                execution_id=source.record.execution_id,
-                segment_sequence=source.segment_sequence,
-            )
-            message_high_water, event_high_water = cutoff_by_identity[identity]
-            if (
-                await self._transcript_high_water(run_id) < message_high_water
-                or len(await self._store.list_events(run_id=run_id)) < event_high_water
-            ):
-                raise AIError(ErrorCode.CURSOR_INVALID)
         page = await self._history_page(
             sources,
             cursor_coordinate=cursor_coordinate,
@@ -514,17 +500,6 @@ class StepExecutionHistoryReader:
             for source in current_sources
             if (source.record.execution_id, source.segment_sequence) in cutoff_by_identity
         )
-        for source in sources:
-            identity = (source.record.execution_id, source.segment_sequence)
-            run_id = step_run_id(
-                namespace=self._namespace,
-                tenant_id=tenant_id,
-                execution_id=source.record.execution_id,
-                segment_sequence=source.segment_sequence,
-            )
-            if await self._store.model_interaction_count(run_id=run_id) < cutoff_by_identity[identity]:
-                raise AIError(ErrorCode.CURSOR_INVALID)
-
         cursor_source = None
         if cursor_coordinate is not None:
             cursor_source = source_by_identity.get(cursor_coordinate[:2])
