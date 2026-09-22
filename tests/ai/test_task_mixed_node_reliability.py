@@ -19,6 +19,7 @@ from linktools.ai.core import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
+from linktools.ai.runtime._agent_task import _dependency_identity_payload
 from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
 from linktools.ai.runtime.state._codec import (
     _encode_persisted_domain,
@@ -29,6 +30,7 @@ from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload, read_object
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
+    TaskDependency,
     TaskDependencyState,
     TaskFunction,
     TaskGraph,
@@ -44,6 +46,7 @@ from linktools.ai.task import (
     TaskExpanderRef,
     TaskNodeRunControl,
     TaskNodeRunResult,
+    TaskResultRef,
 )
 from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
@@ -257,6 +260,52 @@ async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
         "upstream": await context.read_dependency(name),
         "execution_id": dependency.execution_id,
     }
+
+
+def test_all_terminal_identity_includes_input_refs_without_execution_identity() -> None:
+    digest = "b" * 64
+    node = TaskNode(
+        "consumer",
+        dependencies=("failed",),
+        input_refs={
+            "evidence": TaskResultRef(
+                "namespace",
+                "tenant",
+                "source-graph",
+                "source-node",
+                digest,
+            )
+        },
+        dependency_policy="all_terminal",
+    )
+    states = {
+        "failed": TaskDependencyState(
+            TaskStatus.FAILED,
+            error_code=ErrorCode.REQUEST_FIELD_INVALID.value,
+            error_digest="a" * 64,
+        )
+    }
+    first = _dependency_identity_payload(
+        node,
+        {"evidence": TaskDependency("source-node", digest, "execution-1")},
+        states,
+    )
+    second = _dependency_identity_payload(
+        node,
+        {"evidence": TaskDependency("source-node", digest, "execution-2")},
+        states,
+    )
+
+    assert first == second
+    assert first == [
+        {"node_id": "evidence", "result_digest": digest},
+        {
+            "node_id": "failed",
+            "status": TaskStatus.FAILED.value,
+            "error_code": ErrorCode.REQUEST_FIELD_INVALID.value,
+            "error_digest": "a" * 64,
+        },
+    ]
 
 
 def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
