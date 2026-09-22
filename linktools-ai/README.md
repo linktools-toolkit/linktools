@@ -74,8 +74,10 @@ async with Runtime.open(
 `Runtime.open()` is the public composition root. The Runtime is frozen for the lifetime of the context; registrations are completed before it opens.
 
 Connection settings can be resolved lazily for a route. The resolver runs only
-when that route is materialized, and an alias keeps the concrete binding that
-was registered as its target:
+when that route is materialized, and each materialization resolves independently;
+there is no process-global first-use client cache or initialization lock. Concurrent
+first use may therefore create independent provider instances. An alias keeps the
+concrete binding that was registered as its target:
 
 ```python
 models.register_openai(
