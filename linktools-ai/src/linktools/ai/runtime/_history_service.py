@@ -241,13 +241,20 @@ class DefaultExecutionHistoryService:
             if include_content
             else tuple(
                 ExecutionHistoryItem(
-                    item.execution_id,
-                    item.sequence,
-                    item.item_kind,
-                    None,
-                    item.tool_name,
-                    item.tool_call_id,
-                    False,
+                    execution_id=item.execution_id,
+                    sequence=item.sequence,
+                    item_kind=item.item_kind,
+                    content=None,
+                    tool_name=item.tool_name,
+                    tool_call_id=item.tool_call_id,
+                    content_included=False,
+                    segment_sequence=item.segment_sequence,
+                    request_sequence=item.request_sequence,
+                    tool_operation_id=item.tool_operation_id,
+                    started_at=item.started_at,
+                    finished_at=item.finished_at,
+                    duration_ns=item.duration_ns,
+                    status=item.status,
                 )
                 for item in page.items
             )
