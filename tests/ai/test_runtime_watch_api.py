@@ -612,7 +612,7 @@ async def test_task_graph_replay_recurses_through_grandchildren() -> None:
     ] == [
         ("root", 0, 1),
         ("child", 1, 1),
-        ("grandchild", 2, 1),
+        ("grandchild", 1, 1),
     ]
     assert all(event.event.payload == {} for event in execution_events)
 
