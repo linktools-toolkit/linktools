@@ -133,13 +133,13 @@ jobs:
       run: python manage.py clean
     - name: Build package
       env:
-        RELEASE: "true"
-        VERSION: ${{ needs.validate.outputs.resume != 'true' && inputs.version || '' }}
+        RESUME: ${{ needs.validate.outputs.resume }}
+        VERSION: ${{ inputs.version }}
       run: |
-        if [[ -n "$VERSION" ]]; then
-          VERSION="$VERSION" RELEASE="$RELEASE" python manage.py build
+        if [[ "$RESUME" == "true" ]]; then
+          RELEASE=true python manage.py build
         else
-          RELEASE="$RELEASE" python manage.py build
+          VERSION="$VERSION" RELEASE=true python manage.py build
         fi
     - name: Verify package
       run: VERSION=${{ inputs.version }} RELEASE=true python manage.py verify
@@ -192,7 +192,82 @@ jobs:
           exit 1
         fi
 
-    # retries consume the same tag; PyPI may already contain files from an interrupted prior run
+    # retries consume the same tag; any existing PyPI files must match the candidate exactly
+    - name: Verify resumable PyPI state
+      if: ${{ needs.validate.outputs.resume == 'true' && !env.ACT }}
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        PYPI_VERSION="${VERSION#v}"
+        for PROJECT in linktools linktools-ai linktools-cntr linktools-common linktools-mobile; do
+          RESPONSE="$(mktemp)"
+          STATUS="$(curl --silent --show-error --location \
+            --output "$RESPONSE" --write-out '%{http_code}' \
+            "https://pypi.org/pypi/$PROJECT/$PYPI_VERSION/json")"
+          if [[ "$STATUS" == "404" ]]; then
+            rm -f "$RESPONSE"
+            continue
+          fi
+          if [[ "$STATUS" != "200" ]]; then
+            echo "::error::PyPI metadata request failed for $PROJECT $PYPI_VERSION: HTTP $STATUS"
+            rm -f "$RESPONSE"
+            exit 1
+          fi
+
+          while IFS=      if: ${{ !env.ACT }}
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        user: __token__
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        packages_dir: dist/
+        skip-existing: ${{ needs.validate.outputs.resume }}
+
+    # create as a draft, upload all assets, then publish; an interrupted draft is resumable
+    - name: Publish GitHub release
+      if: ${{ !env.ACT }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        if IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+          if [[ "$IS_DRAFT" != "true" ]]; then
+            echo "GitHub release $VERSION is already published"
+            exit 0
+          fi
+        else
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release create "$VERSION" --draft --generate-notes --prerelease --latest=false
+          else
+            gh release create "$VERSION" --draft --generate-notes
+          fi
+        fi
+
+        gh release upload "$VERSION" dist/* --clobber
+
+        if [[ "$PRERELEASE" == "true" ]]; then
+          gh release edit "$VERSION" --draft=false --prerelease --latest=false
+        else
+          gh release edit "$VERSION" --draft=false --prerelease=false
+        fi
+\t' read -r FILENAME EXPECTED_SHA256; do
+            [[ -n "$FILENAME" ]] || continue
+            LOCAL_PATH="dist/$FILENAME"
+            if [[ ! -f "$LOCAL_PATH" ]]; then
+              echo "::error::PyPI contains unexpected artifact $PROJECT/$PYPI_VERSION/$FILENAME"
+              rm -f "$RESPONSE"
+              exit 1
+            fi
+            ACTUAL_SHA256="$(sha256sum "$LOCAL_PATH" | cut -d' ' -f1)"
+            if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+              echo "::error::PyPI artifact differs from fixed candidate: $FILENAME"
+              rm -f "$RESPONSE"
+              exit 1
+            fi
+          done < <(jq -r '.urls[] | [.filename, .digests.sha256] | @tsv' "$RESPONSE")
+          rm -f "$RESPONSE"
+        done
+
     - name: Publish package
       if: ${{ !env.ACT }}
       uses: pypa/gh-action-pypi-publish@release/v1
