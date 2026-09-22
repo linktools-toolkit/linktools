@@ -391,15 +391,11 @@ class _VersionCodec:
     external_schema_types: Mapping[type[object], JsonValue]
 
 
-def _encode_v1_task_node(
-    value: object,
+def _encode_v1_task_node_fields(
+    value: TaskNode,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
-    if not isinstance(value, TaskNode):
-        raise TypeError("V1 task_node encoder received the wrong type")
-    if value.dependency_policy != "all_succeeded":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     fields: dict[str, JsonValue] = {
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
         "dependencies": _encode_domain(
@@ -436,6 +432,18 @@ def _encode_v1_task_node(
     if value.effect != "none":
         fields["effect"] = value.effect
     return fields
+
+
+def _encode_v1_task_node(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskNode):
+        raise TypeError("V1 task_node encoder received the wrong type")
+    if value.dependency_policy != "all_succeeded":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _encode_v1_task_node_fields(value, codec, persisted)
 
 
 def _decode_v1_task_node(
@@ -554,22 +562,7 @@ def _encode_v1_terminal_task_node(
         raise TypeError("V1 task_node_terminal encoder received the wrong type")
     if value.dependency_policy != "all_terminal":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    normalized = TaskNode(
-        value.node_id,
-        value.dependencies,
-        input=value.input,
-        budget_cost=value.budget_cost,
-        expander=value.expander,
-        input_refs=value.input_refs,
-        timeout_seconds=value.timeout_seconds,
-        max_attempts=value.max_attempts,
-        retry_delay_seconds=value.retry_delay_seconds,
-        output_schema=value.output_schema,
-        output_contract=value.output_contract,
-        effect=value.effect,
-        dependency_policy="all_succeeded",
-    )
-    return _encode_v1_task_node(normalized, codec, persisted)
+    return _encode_v1_task_node_fields(value, codec, persisted)
 
 
 def _decode_v1_terminal_task_node(
