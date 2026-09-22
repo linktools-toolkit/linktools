@@ -295,6 +295,149 @@ async def test_task_graph_run_watch_merges_task_and_execution_events() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_graph_watch_rejects_unbound_cursor_before_starting_stream() -> None:
+    class GraphService:
+        def __init__(self) -> None:
+            self.stream_calls = 0
+
+        async def snapshot(self, graph_id: str, *, principal: Principal):
+            del principal
+            assert graph_id == "graph"
+            state = type(
+                "State",
+                (),
+                {"node_id": "node", "execution_id": None},
+            )()
+            return type("Snapshot", (), {"node_states": (state,)})()
+
+        def stream_events(
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            del graph_id, principal, after_sequence
+            self.stream_calls += 1
+
+            async def values():
+                await asyncio.Event().wait()
+                if False:
+                    yield None
+
+            return values()
+
+    service = GraphService()
+    runtime = type(
+        "Runtime",
+        (),
+        {"namespace": "watch-test", "graph": service},
+    )()
+    run = TaskGraphRun(
+        runtime,
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+    stream = run.watch(
+        after_execution_sequences={"node": {"execution": 1}},
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            await anext(stream)
+        assert raised.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        assert service.stream_calls == 0
+    finally:
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_task_graph_replay_delivers_pages_without_buffering_all_events() -> None:
+    observed_first = asyncio.Event()
+    now = datetime.now(timezone.utc)
+
+    class GraphService:
+        async def snapshot(self, graph_id: str, *, principal: Principal):
+            del principal
+            assert graph_id == "graph"
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "graph_id": graph_id,
+                    "status": TaskStatus.RUNNING,
+                    "event_sequence": 2,
+                    "node_states": (),
+                },
+            )()
+
+        async def list_events(
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+            limit: int = 100,
+        ):
+            del principal, limit
+            assert graph_id == "graph"
+            if after_sequence == 0:
+                return Page(
+                    (
+                        TaskEvent(
+                            1,
+                            graph_id,
+                            1,
+                            TaskEventType.GRAPH_ADMITTED,
+                            now,
+                            TaskStatus.PENDING,
+                        ),
+                    )
+                )
+            await observed_first.wait()
+            return Page(
+                (
+                    TaskEvent(
+                        1,
+                        graph_id,
+                        2,
+                        TaskEventType.GRAPH_CHANGED,
+                        now,
+                        TaskStatus.RUNNING,
+                        TaskStatus.PENDING,
+                    ),
+                )
+            )
+
+    runtime = type(
+        "Runtime",
+        (),
+        {
+            "namespace": "watch-test",
+            "graph": GraphService(),
+            "execution": object(),
+            "event": object(),
+        },
+    )()
+    run = TaskGraphRun(
+        runtime,
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+    observed: list[int] = []
+
+    async def observer(event: TaskGraphRunEvent) -> None:
+        assert isinstance(event.event, TaskEvent)
+        observed.append(event.event.sequence)
+        if event.event.sequence == 1:
+            observed_first.set()
+
+    await asyncio.wait_for(run.replay(observer), timeout=1)
+    assert observed == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
     now = datetime.now(timezone.utc)
 
