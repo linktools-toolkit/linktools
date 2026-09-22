@@ -159,6 +159,11 @@ class _LocalSandboxSession:
         source = self._resources.get(key)
         if source is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if (
+            self._read_policy is not None
+            and not self._read_policy.may_descend(".", resource_key=key)
+        ):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return str(source)
 
     def managed_process_ids(self) -> frozenset[int]:
