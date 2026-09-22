@@ -80,6 +80,18 @@ def _python_command(code: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
+async def test_read_only_policy_rejects_command_status(tmp_path: Path) -> None:
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("**",))
+    ).open(root=tmp_path)
+    try:
+        with pytest.raises(SandboxOperationRejected) as raised:
+            await session.check_command("command")
+        assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await session.close()
+
+
 async def test_local_sandbox_bounds_command_output(tmp_path: Path) -> None:
     session = await LocalSandbox().open(root=tmp_path)
     command = _python_command("print('x' * 60000)")
