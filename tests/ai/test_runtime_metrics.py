@@ -18,7 +18,6 @@ from linktools.ai.observe._memory import InMemoryMetricStore
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime import _metrics as runtime_metrics
 from linktools.ai.runtime._metric_capability import RuntimeModelObservationCapability
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
     TaskEvent,
@@ -34,7 +33,6 @@ from linktools.ai.task import (
     TaskNodeView,
 )
 from linktools.ai.task._metrics import _TaskMetricProjector
-from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
 from pydantic_ai import RunContext
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -169,12 +167,10 @@ class _CommitUnknownOnceMetricStore(_FailingMetricStore):
         return None
 
 
-def _write_default_agent(root: Path) -> None:
-    path = root / ".linktools" / "agents" / "default"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(
-        AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
-    )
+def _agent_group() -> CapabilityGroup[object]:
+    group = CapabilityGroup[object]("application")
+    group.agent("default", model="default", allow_tools=())
+    return group
 
 
 def _observation(observation_id: str) -> Observation:
@@ -195,18 +191,16 @@ def _observation(observation_id: str) -> Observation:
 
 @pytest.mark.asyncio
 async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path) -> None:
-    _write_default_agent(tmp_path)
     store = InMemoryMetricStore()
     metrics = Metrics.from_store(store, namespace="runtime-metrics")
     start = datetime.now(timezone.utc) - timedelta(seconds=1)
     secret = "TOP_SECRET_PROMPT_VALUE"
 
-    workspace = Workspace.load(tmp_path)
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run(secret, timeout_seconds=10)
@@ -248,15 +242,13 @@ async def test_runtime_projects_model_agent_and_execution_metrics(tmp_path: Path
 async def test_runtime_metrics_backend_failure_does_not_change_execution_result(
     tmp_path: Path,
 ) -> None:
-    _write_default_agent(tmp_path)
     metrics = Metrics.from_store(_FailingMetricStore(), namespace="runtime-fail-open")  # type: ignore[arg-type]
 
-    workspace = Workspace.load(tmp_path)
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(_agent_group(),),
         metrics=metrics,
     ) as runtime:
         result = await runtime.agent("default").run("hello", timeout_seconds=10)
