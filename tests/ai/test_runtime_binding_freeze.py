@@ -340,9 +340,14 @@ async def test_non_durable_snapshot_freezes_existing_child_mcp_resources(
             mcp_assets={"server": (store, None)},
         )
         frozen = await freezer.freeze_snapshot(snapshot)
-        server = codec.from_payload(frozen.subagent_bindings[0].selected[0].contract)
-        assert server.resource_snapshot is not None
-        assert await freezer.freeze_snapshot(frozen) == frozen
+        server, resource_snapshot = codec.from_frozen_payload(
+            frozen.subagent_bindings[0].selected[0].contract
+        )
+        assert server.resource_root == root
+        assert resource_snapshot is not None
+        with pytest.raises(AIError) as raised:
+            await freezer.freeze_snapshot(frozen)
+        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await store.close()
 
