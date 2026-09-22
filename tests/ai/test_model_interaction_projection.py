@@ -289,6 +289,52 @@ async def test_model_request_records_attach_files_call_identity() -> None:
 
 @pytest.mark.asyncio
 async def test_model_request_preserves_duplicate_initial_attachment_identity() -> None:
+    body = BinaryContent(b"same", media_type="image/png")
+    accepted = input_attachment_views((body, body))
+    store = ModelInteractionStagingStepStore()
+    await store.initialize()
+    await store.register_run(RunRecord("run"))
+    capture = RuntimeCaptureStore(
+        store,
+        execution_id="execution",
+        step_run_id="run",
+        initial_attachments=accepted,
+    )
+    message = ModelRequest(parts=[UserPromptPart([body, body])])
+    journal = _journal()
+    fact = journal.begin(1)
+    capture.begin_model_interaction(
+        fact,
+        TestModel(),
+        (message,),
+        None,
+        ModelRequestParameters(),
+        False,
+    )
+    finished = journal.finish(fact.request_sequence, status="SUCCEEDED")
+    capture.finish_model_interaction(
+        finished,
+        model=TestModel(),
+        response=ModelResponse(parts=[TextPart("done")]),
+        status="SUCCEEDED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+    )
+
+    interaction = (await store.list_model_interactions(run_id="run"))[0]
+    included = interaction.attachments
+    assert len(included) == 2
+    assert all(value["fact"] == "included_in_request" for value in included)
+    assert [value["attachment_id"] for value in included] == [
+        accepted[0]["attachment_id"],
+        accepted[1]["attachment_id"],
+    ]
+    assert included[0]["attachment_id"] != included[1]["attachment_id"]
+
+
+@pytest.mark.asyncio
+async def test_model_request_preserves_input_attachment_identifiers() -> None:
     first = BinaryContent(
         b"same",
         media_type="image/png",
@@ -333,13 +379,6 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
 
     interaction = (await store.list_model_interactions(run_id="run"))[0]
     included = interaction.attachments
-    assert len(included) == 2
-    assert all(value["fact"] == "included_in_request" for value in included)
-    assert [value["attachment_id"] for value in included] == [
-        accepted[0]["attachment_id"],
-        accepted[1]["attachment_id"],
-    ]
-    assert included[0]["attachment_id"] != included[1]["attachment_id"]
     assert [value["input_identifier"] for value in accepted] == [
         "input-a",
         "input-b",
