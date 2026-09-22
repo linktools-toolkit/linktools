@@ -30,6 +30,25 @@ The main ownership rules are:
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
 - `Session` is bound to `AgentSpec.id`; retry/recovery remain pinned to the exact historical execution binding.
 
+## Installation
+
+Python 3.10 or newer is required.
+
+```bash
+# Runtime library
+python3 -m pip install -U linktools-ai
+
+# Recommended for the local CLI and durable SQLite Runtime state
+python3 -m pip install -U "linktools-ai[sqlite]"
+
+# Latest development version
+python3 -m pip install --ignore-installed \
+  "linktools@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools" \
+  "linktools-ai[sqlite] @ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-ai"
+```
+
+Optional extras are deliberately scoped: `sqlite` adds the built-in SQLite dependencies, `sqlalchemy` adds the generic SQLAlchemy runtime dependency, and `evaluation` adds evaluation support.
+
 ## 1. Run a workspace
 
 ### Command line
@@ -39,6 +58,8 @@ ai-run "review this change" --project /workspace/project --model gpt-4o-mini
 python3 -m linktools ai run "review this change" --project /workspace/project --model gpt-4o-mini
 ```
 
+Local CLI entry points include `ai-run`, `ai-status`, `ai-session`, `ai-history`, `ai-metrics`, `ai-trace`, and `ai-acp`.
+
 Useful options:
 
 - `--base-url`, `--api-key`, and `--model` also read `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
@@ -46,7 +67,7 @@ Useful options:
 - `--thinking` requests model thinking when supported.
 - `--json` emits one terminal JSON result.
 
-The local CLI stores Runtime state under `<workspace>/.linktools/runtime` through `RuntimeState.from_root()`; storage is not selected with a CLI flag.
+The local CLI stores Runtime state under `<workspace>/.linktools/runtime` through `RuntimeState.from_root()`; storage is not selected with a CLI flag. Install `linktools-ai[sqlite]` when using this durable local Runtime state.
 
 ### Python
 
