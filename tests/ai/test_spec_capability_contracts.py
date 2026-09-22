@@ -154,31 +154,6 @@ def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
     assert AgentSpecCodec().decode(json.dumps(agent_payload).encode()) == AgentSpec(
         "agent"
     )
-
-
-def test_mcp_resource_snapshot_is_serialized_but_locator_is_not_semantic() -> None:
-    first = MCPServerSpec(
-        "mcp",
-        "server",
-        ("resource:script.py",),
-        AssetKey("mcp", "server"),
-        ObjectRef("runtime", "v1/asset-snapshot/one", "a" * 64, 1),
-    )
-    second = MCPServerSpec(
-        "mcp",
-        "server",
-        first.args,
-        first.resource_root,
-        ObjectRef("other", "v1/asset-snapshot/two", "a" * 64, 1),
-    )
-
-    restored = MCPServerSpecCodec().decode(MCPServerSpecCodec().encode(first))
-    assert restored == first
-    assert capability_identity_payload(
-        "mcp", first.id, MCPServerSpecCodec().to_payload(first)
-    ) == capability_identity_payload(
-        "mcp", second.id, MCPServerSpecCodec().to_payload(second)
-    )
     skill_payload = {
         "version": 1,
         "id": "skill",
@@ -197,6 +172,34 @@ def test_mcp_resource_snapshot_is_serialized_but_locator_is_not_semantic() -> No
     assert MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode()) == MCPServerSpec(
         "mcp", "echo"
     )
+
+
+def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() -> None:
+    codec = MCPServerSpecCodec()
+    server = MCPServerSpec(
+        "mcp",
+        "server",
+        ("resource:script.py",),
+        AssetKey("mcp", "server"),
+    )
+    declaration = codec.to_payload(server)
+    assert declaration["version"] == 2
+    assert codec.from_payload(declaration) == server
+
+    first = codec.to_frozen_payload(
+        server,
+        ObjectRef("runtime", "v1/asset-snapshot/one", "a" * 64, 1),
+    )
+    second = codec.to_frozen_payload(
+        server,
+        ObjectRef("other", "v1/asset-snapshot/two", "a" * 64, 1),
+    )
+    assert capability_identity_payload("mcp", server.id, first) == (
+        capability_identity_payload("mcp", server.id, second)
+    )
+    with pytest.raises(AIError) as raised:
+        codec.from_payload(first)
+    assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
 @pytest.mark.asyncio
@@ -227,7 +230,8 @@ async def test_mcp_resource_snapshot_rejects_unmaterializable_tree(
                 await _snapshot_mcp_resources(store, root, (), object_store=objects)
             else:
                 await _materialize_server_args(
-                    MCPServerSpec("server", "python", (), root, reference),
+                    MCPServerSpec("server", "python", (), root),
+                    resource_snapshot=reference,
                     resource_objects=objects,
                 )
         assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -262,10 +266,10 @@ async def test_mcp_resource_snapshot_materializes_deleted_source_bytes() -> None
             "python",
             ("resource:script.py",),
             root,
-            reference,
         )
         arguments, directory = await _materialize_server_args(
             server,
+            resource_snapshot=reference,
             resource_objects=objects,
         )
 
