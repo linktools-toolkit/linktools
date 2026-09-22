@@ -134,17 +134,29 @@ async def compose_runtime_components(
         for group in groups:
             values = await group.freeze()
             frozen.extend(values)
+            resource_mcp = tuple(
+                candidate
+                for candidate in values
+                if (
+                    candidate.kind == "mcp"
+                    and isinstance(candidate.value, MCPServerSpec)
+                    and candidate.value.resource_root is not None
+                )
+            )
+            if resource_mcp and group.asset_store is None:
+                raise AIError(
+                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                    safe_details={
+                        "kind": "mcp_resource_store",
+                        "group_id": group.id,
+                    },
+                )
             if group.asset_store is not None:
-                for candidate in values:
-                    if (
-                        candidate.kind == "mcp"
-                        and isinstance(candidate.value, MCPServerSpec)
-                        and candidate.value.resource_root is not None
-                    ):
-                        mcp_assets[candidate.id] = (
-                            group.asset_store,
-                            group.asset_revision,
-                        )
+                for candidate in resource_mcp:
+                    mcp_assets[candidate.id] = (
+                        group.asset_store,
+                        group.asset_revision,
+                    )
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
