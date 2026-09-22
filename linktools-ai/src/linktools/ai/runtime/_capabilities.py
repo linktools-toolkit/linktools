@@ -38,6 +38,7 @@ from ._harness_memory import (
 )
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
+from ._journal import REQUEST_SEQUENCE_METADATA_KEY
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
@@ -226,6 +227,14 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         )
         raise error
 
+    def _tool_request_metadata(self, step_index: int) -> dict[str, str]:
+        sequence = self.capture.request_sequence_for_step(step_index)
+        return (
+            {}
+            if sequence is None
+            else {REQUEST_SEQUENCE_METADATA_KEY: str(sequence)}
+        )
+
     async def before_tool_execute(
         self,
         ctx: PydanticRunContext[None],
@@ -239,6 +248,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
+            metadata=self._tool_request_metadata(ctx.run_step),
         )
         return args
 
