@@ -710,7 +710,7 @@ async def _assert_public_interaction(runtime: Runtime[object]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execution_model_interactions_are_durable_and_public(tmp_path: Path) -> None:
+async def test_execution_model_interactions_are_durable_and_public() -> None:
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
@@ -722,11 +722,7 @@ async def test_execution_model_interactions_are_durable_and_public(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_execution_model_interactions_support_volatile_memory_state(
-    tmp_path: Path,
-) -> None:
-    _write_default_agent(tmp_path)
-    workspace = Workspace.load(tmp_path)
+async def test_execution_model_interactions_support_volatile_memory_state() -> None:
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
