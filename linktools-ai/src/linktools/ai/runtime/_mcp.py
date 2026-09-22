@@ -25,7 +25,7 @@ from ..asset import AssetStore
 from ..core import Principal, ResourceRef
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, parse_mcp_tool_selector
-from ..storage import ObjectStore
+from ..storage import ObjectRef, ObjectStore
 from ._tool import ToolOperationBridge
 from ._mcp_resources import validate_resource_path, validate_resource_tree
 from ._tool_boundary import (
@@ -104,6 +104,7 @@ async def materialize_mcp_capabilities(
     tool_metrics: "_ToolMetricContext | None",
     background_tasks: set[asyncio.Task[object]],
     resource_objects: ObjectStore | None = None,
+    resource_snapshots: Mapping[str, ObjectRef] | None = None,
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize only compiler-selected stdio MCP servers."""
     from fastmcp import Client
@@ -132,6 +133,7 @@ async def materialize_mcp_capabilities(
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             server_args, resource_directory = await _materialize_server_args(
                 server,
+                resource_snapshot=(resource_snapshots or {}).get(server.id),
                 resource_objects=resource_objects,
             )
             client = Client(
@@ -189,19 +191,22 @@ async def materialize_mcp_capabilities(
 async def _materialize_server_args(
     server: MCPServerSpec,
     *,
+    resource_snapshot: ObjectRef | None = None,
     resource_objects: ObjectStore | None,
 ) -> tuple[list[str], "tempfile.TemporaryDirectory[str] | None"]:
     if server.resource_root is None:
+        if resource_snapshot is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return list(server.args), None
-    if server.resource_snapshot is None or resource_objects is None:
+    if resource_snapshot is None or resource_objects is None:
         raise AIError(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,
             safe_details={"kind": "mcp_resource", "server_id": server.id},
         )
-    if server.resource_snapshot.store_id != resource_objects.store_id:
+    if resource_snapshot.store_id != resource_objects.store_id:
         raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     snapshot = AssetStore.from_snapshot(
-        server.resource_snapshot,
+        resource_snapshot,
         object_store=resource_objects,
     )
     await snapshot.initialize()
