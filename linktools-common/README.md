@@ -4,6 +4,10 @@ Linktools 通用工具包，提供环境管理、文件搜索及远程工具下�
 
 ## 开始使用
 
+### 依赖项
+
+Python & pip（3.6 及以上）：<https://www.python.org/downloads/>
+
 ### 安装
 
 ```bash
