@@ -22,18 +22,17 @@ from linktools.ai.capability import (
     SkillSourceRef,
     SkillSourceRegistry,
 )
-from linktools.ai.capability._group import _workspace_declaration_store
+from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.spec import SkillSpec
 from linktools.ai.storage import StorageOverlay
-from linktools.ai.workspace import LocalRuleCatalog, Workspace, WorkspacePolicy
+from linktools.ai.workspace import LocalRuleCatalog, WorkspacePolicy
 
 
 @pytest.mark.asyncio
-async def test_workspace_declaration_discovery_ignores_noise_without_restricting_ids(
+async def test_directory_declaration_assets_ignore_noise_without_restricting_ids(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path)
-    root = workspace.storage_root
+    root = tmp_path / ".linktools"
     (root / "agents" / "__pycache__").mkdir(parents=True)
     (root / "agents" / "nested").mkdir()
     (root / "mcp" / ".cache").mkdir(parents=True)
@@ -50,7 +49,19 @@ async def test_workspace_declaration_discovery_ignores_noise_without_restricting
     (root / "skills" / "review" / "SKILL.md").write_text("skill", encoding="utf-8")
     (root / "skills" / "Thumbs.DB").write_bytes(b"noise")
 
-    store = _workspace_declaration_store(workspace)
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter(
+                    {"agent": "agents", "skill": "skills", "mcp": "mcp"}
+                ),
+                kinds=("agent", "skill", "mcp"),
+                follow_external_symlinks=True,
+                ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
+            )
+        )
+    )
     await store.initialize()
     try:
         page = await store.list_info(limit=200)
