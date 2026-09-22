@@ -10,6 +10,7 @@ from ..core import ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
 from .service_api import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView
 
+_DISCOVERY_BACKOFF_INITIAL = 1.0
 _DISCOVERY_BACKOFF_MAX = 30.0
 
 
@@ -210,7 +211,7 @@ class ExecutionTreeStreamer:
                 subscription.wait(),
                 name=f"execution-tree-children-{execution_id}",
             )
-            discovery_backoff = 1.0
+            discovery_backoff = _DISCOVERY_BACKOFF_INITIAL
             discovery_wait = asyncio.create_task(
                 asyncio.sleep(discovery_backoff),
                 name=f"execution-tree-discovery-{execution_id}",
@@ -243,7 +244,7 @@ class ExecutionTreeStreamer:
                     if discovery_wait in done:
                         added = await discover_persisted_children()
                         discovery_backoff = (
-                            1.0
+                            _DISCOVERY_BACKOFF_INITIAL
                             if added
                             else min(
                                 _DISCOVERY_BACKOFF_MAX,
