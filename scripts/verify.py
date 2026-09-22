@@ -45,6 +45,28 @@ _CLI_EXTRAS = {
     "linktools-ai": "sqlite",
 }
 _REQUIREMENT_NAME = re.compile(r"^\\s*([A-Za-z0-9_.-]+)")
+_AI_SQLITE_SMOKE = """
+import asyncio
+import pathlib
+import sys
+
+from linktools.ai.runtime import RuntimeState
+
+async def main():
+    path = pathlib.Path(sys.argv[1])
+    state = RuntimeState.sqlite(path)
+    await state.initialize(namespace="verify", tenant_id="verify")
+    await state.close()
+    reopened = RuntimeState.sqlite(path)
+    await reopened.initialize(
+        namespace="verify",
+        tenant_id="verify",
+        read_only=True,
+    )
+    await reopened.close()
+
+asyncio.run(main())
+"""
 
 
 class _Artifact:
@@ -449,6 +471,8 @@ def _venv_command(environment, name):
 
 
 def _validate_candidate_installs(pairs, known_projects):
+    if set(pairs) != set(known_projects):
+        return
     wheels = {project: pair[0] for project, pair in pairs.items()}
     with tempfile.TemporaryDirectory(prefix="linktools-candidate-install-") as temporary:
         root = Path(temporary)
@@ -461,10 +485,17 @@ def _validate_candidate_installs(pairs, known_projects):
             order = _candidate_install_order(project, wheels, known_projects)
             requirements = []
             for name in order:
-                requirement = str(wheels[name].path)
                 if name == project and project in _CLI_EXTRAS:
-                    requirement += "[%s]" % _CLI_EXTRAS[project]
-                requirements.append(requirement)
+                    requirements.append(
+                        "%s[%s] @ %s"
+                        % (
+                            wheels[name].name,
+                            _CLI_EXTRAS[project],
+                            wheels[name].path.as_uri(),
+                        )
+                    )
+                else:
+                    requirements.append(str(wheels[name].path))
             subprocess.check_call(
                 [str(python), "-m", "pip", "install"] + requirements,
                 cwd=str(root),
@@ -499,19 +530,7 @@ def _validate_candidate_installs(pairs, known_projects):
                         str(python),
                         "-I",
                         "-c",
-                        (
-                            "import asyncio,pathlib,sys;"
-                            "from linktools.ai.runtime import RuntimeState;"
-                            "p=pathlib.Path(sys.argv[1]);"
-                            "async def f():\n"
-                            " s=RuntimeState.sqlite(p);"
-                            " await s.initialize(namespace='verify',tenant_id='verify');"
-                            " await s.close();"
-                            " r=RuntimeState.sqlite(p);"
-                            " await r.initialize(namespace='verify',tenant_id='verify',read_only=True);"
-                            " await r.close()\n"
-                            "asyncio.run(f())"
-                        ),
+                        _AI_SQLITE_SMOKE,
                         str(root / "runtime.db"),
                     ],
                     cwd=str(root),
