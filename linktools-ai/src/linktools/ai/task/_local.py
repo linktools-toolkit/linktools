@@ -668,27 +668,20 @@ class LocalTaskGraphLauncher:
         cancellation_error: BaseException | None = None
         if invoke_cancel and state.execution_id is not None:
             try:
+                dependency_results, dependency_states = await self._dependency_context(
+                    snapshot.graph_id,
+                    node,
+                    tenant_id=run.request.principal.tenant_id,
+                )
                 await self._runner.cancel(
                     TaskNodeInvocation(
                         node,
                         snapshot.graph_id,
                         run.request.principal,
                         run.request.correlation,
-                        (
-                            await self._dependency_context(
-                                snapshot.graph_id,
-                                node,
-                                tenant_id=run.request.principal.tenant_id,
-                            )
-                        )[0],
+                        dependency_results,
                         state.execution_id,
-                        dependency_states=(
-                            await self._dependency_states(
-                                snapshot.graph_id,
-                                node,
-                                tenant_id=run.request.principal.tenant_id,
-                            )
-                        ),
+                        dependency_states=dependency_states,
                     )
                 )
             except asyncio.CancelledError:
@@ -1622,8 +1615,11 @@ class LocalTaskGraphLauncher:
                 )
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result_digest = semantic.result_digest
+            if result_digest is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             results[dependency_id] = TaskDependencyResult(
-                cast(str, semantic.result_digest),
+                result_digest,
                 state.execution_id,
             )
         if (
