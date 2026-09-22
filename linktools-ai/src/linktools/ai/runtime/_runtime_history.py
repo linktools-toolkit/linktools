@@ -1094,6 +1094,7 @@ async def _open_runtime_history(
                 "execution-history",
                 token_seed(resolved_namespace),
             ),
+            tool_operations=selected_state.recovery.tools,
         )
         effective_authorization = (
             TenantAuthorizationPolicy(effective_tenant_id)
