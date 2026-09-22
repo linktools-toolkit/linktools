@@ -267,6 +267,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
+            metadata=self._tool_request_metadata(ctx.run_step),
         )
         return result
 
@@ -286,6 +287,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
             error=repr(error),
+            metadata=self._tool_request_metadata(ctx.run_step),
         )
         raise error
 
