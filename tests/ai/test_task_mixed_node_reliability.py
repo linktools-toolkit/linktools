@@ -268,7 +268,7 @@ def test_all_terminal_uses_a_distinct_persisted_task_node_wire() -> None:
     assert default_wire["$dataclass"] == "task_node"
     assert "dependency_policy" not in default_wire["fields"]
     assert terminal_wire["$dataclass"] == "task_node_terminal"
-    assert terminal_wire["fields"]["dependency_policy"] == "all_terminal"
+    assert "dependency_policy" not in terminal_wire["fields"]
 
 
 @pytest.mark.asyncio
