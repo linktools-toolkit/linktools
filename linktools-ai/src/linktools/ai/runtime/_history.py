@@ -67,7 +67,7 @@ _logger = environ.get_logger("ai.runtime.history")
 _EXECUTION_HISTORY_PROJECTION_VERSION = 1
 _EXECUTION_TRACE_PROJECTION_VERSION = 1
 _EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1
-_MODEL_INTERACTION_PROJECTION_VERSION = 1
+_MODEL_INTERACTION_PROJECTION_VERSION = 2
 _ATTACHMENT_FACT_PROJECTION_VERSION = 1
 
 
@@ -320,16 +320,18 @@ class StepExecutionHistoryReader:
         tenant_id: str,
         cursor: "str | None",
         limit: int,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
+        include_content: bool = True,
     ) -> Page[ModelInteractionItem]:
         limit = validate_page_limit(limit)
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._history_tree(record, tenant_id)
-        sources: list[_HistorySource] = []
+        current_sources: list[_HistorySource] = []
         for item, depth in entries:
             for segment_sequence in await self._segment_sequences(item, tenant_id):
-                sources.append(
+                current_sources.append(
                     _HistorySource(
                         item,
                         depth,
@@ -342,21 +344,78 @@ class StepExecutionHistoryReader:
                         ),
                     )
                 )
-        sources.sort(key=lambda source: source.merge_prefix)
-        cursor_coordinate = _decode_model_interaction_cursor(
+        current_sources.sort(key=lambda source: source.merge_prefix)
+        source_by_identity = {
+            (source.record.execution_id, source.segment_sequence): source
+            for source in current_sources
+        }
+
+        cursor_state = _decode_model_interaction_cursor(
             cursor,
             tenant_id=tenant_id,
             execution_id=execution_id,
             signer=self._cursor_signer,
         )
-        source_by_identity = {
-            (source.record.execution_id, source.segment_sequence): source
-            for source in sources
+        explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
+        if cursor_state is not None:
+            cursor_coordinate, cursor_cutoffs = cursor_state
+            if explicit_cutoffs is not None and explicit_cutoffs != cursor_cutoffs:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            fixed_cutoffs = cursor_cutoffs
+        else:
+            cursor_coordinate = None
+            if explicit_cutoffs is None:
+                captured: list[UsageReadCutoff] = []
+                for source in current_sources:
+                    run_id = step_run_id(
+                        namespace=self._namespace,
+                        tenant_id=tenant_id,
+                        execution_id=source.record.execution_id,
+                        segment_sequence=source.segment_sequence,
+                    )
+                    captured.append(
+                        UsageReadCutoff(
+                            source.record.execution_id,
+                            source.segment_sequence,
+                            await self._store.model_interaction_count(run_id=run_id),
+                        )
+                    )
+                fixed_cutoffs = tuple(captured)
+            else:
+                fixed_cutoffs = explicit_cutoffs
+
+        cutoff_by_identity = {
+            (value.execution_id, value.segment_sequence): value.request_sequence
+            for value in fixed_cutoffs
         }
+        if len(cutoff_by_identity) != len(fixed_cutoffs):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        if any(identity not in source_by_identity for identity in cutoff_by_identity):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        sources = tuple(
+            source
+            for source in current_sources
+            if (source.record.execution_id, source.segment_sequence) in cutoff_by_identity
+        )
+        for source in sources:
+            identity = (source.record.execution_id, source.segment_sequence)
+            run_id = step_run_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=source.record.execution_id,
+                segment_sequence=source.segment_sequence,
+            )
+            if await self._store.model_interaction_count(run_id=run_id) < cutoff_by_identity[identity]:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+
         cursor_source = None
         if cursor_coordinate is not None:
             cursor_source = source_by_identity.get(cursor_coordinate[:2])
-            if cursor_source is None:
+            if (
+                cursor_source is None
+                or cursor_coordinate[:2] not in cutoff_by_identity
+                or cursor_coordinate[2] > cutoff_by_identity[cursor_coordinate[:2]]
+            ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
         cursor_prefix = None if cursor_source is None else cursor_source.merge_prefix
 
@@ -364,27 +423,41 @@ class StepExecutionHistoryReader:
         for source in sources:
             if cursor_prefix is not None and source.merge_prefix < cursor_prefix:
                 continue
-            remaining = limit + 1 - len(page)
-            if remaining <= 0:
-                break
+            identity = (source.record.execution_id, source.segment_sequence)
+            high_water = cutoff_by_identity[identity]
             after_request_sequence = (
                 cursor_coordinate[2]
                 if cursor_coordinate is not None and source is cursor_source
-                else None
+                else 0
             )
+            available = high_water - after_request_sequence
+            if available <= 0:
+                continue
+            remaining = limit + 1 - len(page)
+            if remaining <= 0:
+                break
             run_id = step_run_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=source.record.execution_id,
                 segment_sequence=source.segment_sequence,
             )
+            fetch_limit = min(remaining, available)
             interactions = await self._store.list_model_interactions(
                 run_id=run_id,
                 after_request_sequence=after_request_sequence,
-                limit=remaining,
+                limit=fetch_limit,
             )
+            if len(interactions) != fetch_limit:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            expected_sequence = after_request_sequence
             for interaction in interactions:
-                if not isinstance(interaction, ModelInteractionRecord):
+                expected_sequence += 1
+                if (
+                    not isinstance(interaction, ModelInteractionRecord)
+                    or interaction.run_id != run_id
+                    or interaction.request_sequence != expected_sequence
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 page.append(
                     _InteractionOccurrence(
@@ -395,20 +468,30 @@ class StepExecutionHistoryReader:
                         interaction,
                     )
                 )
+
         selected_occurrences = page[:limit]
-        resolved_items: dict[tuple[str, int], ModelInteractionItem] = {}
+        selected_items: dict[tuple[str, int], ModelInteractionItem] = {}
         for occurrence_group in _interaction_occurrence_groups(selected_occurrences):
-            resolved = await self._store.resolve_model_interactions(
-                tuple(value.interaction for value in occurrence_group)
-            )
-            if len(resolved) != len(occurrence_group):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            times = await self._model_request_times(occurrence_group[0].interaction.run_id)
+            resolved_values: tuple[object, ...]
+            if include_content:
+                resolved_values = await self._store.resolve_model_interactions(
+                    tuple(value.interaction for value in occurrence_group)
+                )
+                if len(resolved_values) != len(occurrence_group):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            else:
+                resolved_values = (None,) * len(occurrence_group)
             for occurrence, resolved_context in zip(
                 occurrence_group,
-                resolved,
+                resolved_values,
                 strict=True,
             ):
-                resolved_items[
+                started_at, finished_at = times.get(
+                    occurrence.interaction.request_sequence,
+                    (None, None),
+                )
+                selected_items[
                     (occurrence.interaction.run_id, occurrence.interaction.request_sequence)
                 ] = self._project_model_interaction(
                     occurrence.interaction,
@@ -416,9 +499,12 @@ class StepExecutionHistoryReader:
                     occurrence.segment_sequence,
                     occurrence.depth,
                     resolved_context,
+                    include_content=include_content,
+                    started_at=started_at,
+                    finished_at=finished_at,
                 )
         selected = tuple(
-            resolved_items[
+            selected_items[
                 (value.interaction.run_id, value.interaction.request_sequence)
             ]
             for value in selected_occurrences
@@ -429,6 +515,7 @@ class StepExecutionHistoryReader:
                 tenant_id,
                 execution_id,
                 selected_occurrences[-1],
+                fixed_cutoffs,
                 self._cursor_signer,
             )
         _logger.debug(
@@ -437,6 +524,7 @@ class StepExecutionHistoryReader:
             len(selected),
         )
         return Page(selected, next_cursor)
+
 
     async def attachment_facts(
         self,
@@ -571,6 +659,7 @@ class StepExecutionHistoryReader:
         execution_id: str,
         *,
         tenant_id: str,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
         record = await self._executions.get(
             execution_id,
@@ -580,6 +669,32 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if record.binding_kind == "task":
             return UsageSummary()
+
+        current_sequences = await self._segment_sequences(record, tenant_id)
+        explicit_cutoffs = _normalize_usage_cutoffs(cutoffs)
+        if explicit_cutoffs is None:
+            fixed_cutoffs: list[UsageReadCutoff] = []
+            for segment_sequence in current_sequences:
+                run_id = step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=record.execution_id,
+                    segment_sequence=segment_sequence,
+                )
+                fixed_cutoffs.append(
+                    UsageReadCutoff(
+                        record.execution_id,
+                        segment_sequence,
+                        await self._store.model_interaction_count(run_id=run_id),
+                    )
+                )
+        else:
+            if any(value.execution_id != record.execution_id for value in explicit_cutoffs):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            fixed_cutoffs = list(explicit_cutoffs)
+        current_set = set(current_sequences)
+        if any(value.segment_sequence not in current_set for value in fixed_cutoffs):
+            raise AIError(ErrorCode.CURSOR_INVALID)
 
         logical_requests = 0
         succeeded_requests = 0
@@ -592,37 +707,27 @@ class StepExecutionHistoryReader:
         cache_write_tokens = 0
         model_duration_ns = 0
         unknown_usage_requests = 0
-        cutoffs: list[UsageReadCutoff] = []
+        unknown_duration_requests = 0
 
-        for segment_sequence in await self._segment_sequences(
-            record,
-            tenant_id,
-        ):
+        for cutoff in fixed_cutoffs:
             run_id = step_run_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=record.execution_id,
-                segment_sequence=segment_sequence,
+                segment_sequence=cutoff.segment_sequence,
             )
-            high_water = await self._store.model_interaction_count(
-                run_id=run_id,
-            )
-            cutoffs.append(
-                UsageReadCutoff(
-                    record.execution_id,
-                    segment_sequence,
-                    high_water,
-                )
-            )
+            current_high_water = await self._store.model_interaction_count(run_id=run_id)
+            if cutoff.request_sequence > current_high_water:
+                raise AIError(ErrorCode.CURSOR_INVALID)
             after_sequence = 0
-            while after_sequence < high_water:
-                limit = min(500, high_water - after_sequence)
+            while after_sequence < cutoff.request_sequence:
+                batch_limit = min(500, cutoff.request_sequence - after_sequence)
                 values = await self._store.list_model_interactions(
                     run_id=run_id,
                     after_request_sequence=after_sequence,
-                    limit=limit,
+                    limit=batch_limit,
                 )
-                if len(values) != limit:
+                if len(values) != batch_limit:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 for raw in values:
                     if not isinstance(raw, ModelInteractionRecord):
@@ -631,13 +736,15 @@ class StepExecutionHistoryReader:
                     if (
                         raw.run_id != run_id
                         or raw.request_sequence != expected
-                        or raw.status
-                        not in {"SUCCEEDED", "FAILED", "CANCELLED"}
+                        or raw.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
                     ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     after_sequence = raw.request_sequence
                     logical_requests += 1
-                    model_duration_ns += raw.duration_ns
+                    if raw.duration_ns is None:
+                        unknown_duration_requests += 1
+                    else:
+                        model_duration_ns += raw.duration_ns
                     if raw.status == "SUCCEEDED":
                         succeeded_requests += 1
                     elif raw.status == "FAILED":
@@ -646,14 +753,14 @@ class StepExecutionHistoryReader:
                         cancelled_requests += 1
                     if raw.output_retry_index is not None:
                         output_correction_retries += 1
-                    usage = raw.usage
-                    if usage is None:
+                    request_usage = raw.usage
+                    if request_usage is None:
                         unknown_usage_requests += 1
                     else:
-                        input_tokens += usage.input_tokens
-                        output_tokens += usage.output_tokens
-                        cache_read_tokens += usage.cache_read_tokens
-                        cache_write_tokens += usage.cache_write_tokens
+                        input_tokens += request_usage.input_tokens
+                        output_tokens += request_usage.output_tokens
+                        cache_read_tokens += request_usage.cache_read_tokens
+                        cache_write_tokens += request_usage.cache_write_tokens
 
         return UsageSummary(
             logical_requests=logical_requests,
@@ -667,9 +774,11 @@ class StepExecutionHistoryReader:
             cache_write_tokens=cache_write_tokens,
             model_duration_ns=model_duration_ns,
             unknown_usage_requests=unknown_usage_requests,
+            unknown_duration_requests=unknown_duration_requests,
             transport_retries=None,
-            cutoffs=tuple(cutoffs),
+            cutoffs=tuple(fixed_cutoffs),
         )
+
 
     def _project_model_interaction(
         self,
@@ -677,52 +786,92 @@ class StepExecutionHistoryReader:
         execution_id: str,
         segment_sequence: int,
         depth: int,
-        resolved: object,
+        resolved: object | None,
+        *,
+        include_content: bool,
+        started_at: datetime | None,
+        finished_at: datetime | None,
     ) -> ModelInteractionItem:
-        if not isinstance(resolved, tuple) or len(resolved) != 3:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        request_messages, response_messages, envelope_raw = resolved
-        if not isinstance(request_messages, tuple) or not isinstance(
-            envelope_raw, bytes
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            envelope = json.loads(envelope_raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if not isinstance(envelope, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        request: dict[str, JsonValue] = {
-            "messages": project_public_messages(request_messages),
-            **dict(envelope),
-        }
-        instructions = [
-            message.instructions
-            for message in request_messages
-            if isinstance(message, ModelRequest) and message.instructions is not None
-        ]
-        if instructions:
-            request["instructions"] = instructions
+        request: dict[str, JsonValue] = {}
         response: JsonValue | None = None
-        if response_messages is not None:
-            projected = project_public_messages(response_messages)
-            response = projected[0] if len(projected) == 1 else projected
+        if include_content:
+            if not isinstance(resolved, tuple) or len(resolved) != 3:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            request_messages, response_messages, envelope_raw = resolved
+            if not isinstance(request_messages, tuple) or not isinstance(
+                envelope_raw, bytes
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                envelope = json.loads(envelope_raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if not isinstance(envelope, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            request = {
+                "messages": project_public_messages(request_messages),
+                **dict(envelope),
+            }
+            instructions = [
+                message.instructions
+                for message in request_messages
+                if isinstance(message, ModelRequest)
+                and message.instructions is not None
+            ]
+            if instructions:
+                request["instructions"] = instructions
+            if response_messages is not None:
+                projected = project_public_messages(response_messages)
+                response = projected[0] if len(projected) == 1 else projected
         return ModelInteractionItem(
-            execution_id,
-            segment_sequence,
-            depth,
-            interaction.request_sequence,
-            interaction.purpose,
-            interaction.step_index,
-            interaction.output_retry_index,
-            interaction.model,
-            request,
-            response,
-            interaction.status,
-            interaction.error_code,
-            interaction.duration_ns,
-            interaction.usage,
+            execution_id=execution_id,
+            segment_sequence=segment_sequence,
+            depth=depth,
+            request_sequence=interaction.request_sequence,
+            purpose=interaction.purpose,
+            step_index=interaction.step_index,
+            output_retry_index=interaction.output_retry_index,
+            model=interaction.model,
+            request=request,
+            response=response,
+            status=interaction.status,
+            error_code=interaction.error_code,
+            duration_ns=interaction.duration_ns,
+            usage=interaction.usage,
+            content_included=include_content,
+            started_at=started_at,
+            finished_at=finished_at,
         )
+
+    async def _model_request_times(
+        self,
+        run_id: str,
+    ) -> dict[int, tuple[datetime | None, datetime | None]]:
+        values: dict[int, list[datetime | None]] = {}
+        for event in await self._store.list_events(run_id=run_id):
+            if event.kind not in {
+                "model_request_started",
+                "model_request_completed",
+                "model_request_failed",
+            }:
+                continue
+            raw_sequence = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
+            if raw_sequence is None:
+                continue
+            if not raw_sequence.isdigit() or int(raw_sequence) < 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            sequence = int(raw_sequence)
+            pair = values.setdefault(sequence, [None, None])
+            index = 0 if event.kind == "model_request_started" else 1
+            timestamp = _event_timestamp(event)
+            if pair[index] is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            pair[index] = timestamp
+        return {
+            sequence: (pair[0], pair[1])
+            for sequence, pair in values.items()
+        }
+
 
     async def _history_page(
         self,
@@ -985,21 +1134,27 @@ class StepExecutionHistoryReader:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        result = [(selected, 0)]
+        result: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
         visited = {selected.execution_id}
-        for child in await self._executions.list_children(
-            selected.execution_id, tenant_id=tenant_id
-        ):
-            if (
-                child.execution_id in visited
-                or child.lineage_kind.value != "SUBAGENT"
-                or child.parent_execution_id != selected.execution_id
-                or child.root_execution_id != selected.root_execution_id
+        pending: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
+        while pending:
+            parent, depth = pending.pop(0)
+            for child in await self._executions.list_children(
+                parent.execution_id,
+                tenant_id=tenant_id,
             ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            visited.add(child.execution_id)
-            result.append((child, 1))
+                if (
+                    child.execution_id in visited
+                    or child.lineage_kind.value != "SUBAGENT"
+                    or child.parent_execution_id != parent.execution_id
+                    or child.root_execution_id != selected.root_execution_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                visited.add(child.execution_id)
+                result.append((child, depth + 1))
+                pending.append((child, depth + 1))
         return result
+
 
     async def _segment_events(
         self, record: ExecutionRecord, tenant_id: str
