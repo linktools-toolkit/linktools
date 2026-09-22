@@ -94,7 +94,7 @@ jobs:
         ref: ${{ needs.validate.outputs.release_ref }}
         fetch-depth: 0
 
-    # build frida.min.js for a new release commit
+    # build generated source only while preparing a new release commit
     - name: Set up Node
       if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       uses: actions/setup-node@v7
@@ -104,7 +104,6 @@ jobs:
       if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       run: cd linktools-mobile/agents/frida && npm install && npm run build
 
-    # build android-tools.apk for a new release commit
     - name: Set up JDK 17
       if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       uses: actions/setup-java@v6
@@ -118,7 +117,6 @@ jobs:
       if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       run: cd linktools-mobile/agents/android && ./gradlew --no-daemon :tools:buildTools
 
-    # build and verify the exact candidate package set
     - name: Set up Python
       uses: actions/setup-python@v7
       with:
@@ -131,7 +129,40 @@ jobs:
       run: python manage.py install --editable --quiet
     - name: Clean package
       run: python manage.py clean
+
+    # a completed draft archive is the exact recovery source for interrupted uploads
+    - name: Restore archived release artifacts
+      id: restore
+      if: ${{ needs.validate.outputs.resume == 'true' && !env.ACT }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        echo "restored=false" >> "$GITHUB_OUTPUT"
+        echo "published=false" >> "$GITHUB_OUTPUT"
+        rm -f release-sha256sums.txt
+
+        if ! IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+          exit 0
+        fi
+        if [[ "$IS_DRAFT" != "true" ]]; then
+          echo "published=true" >> "$GITHUB_OUTPUT"
+        fi
+
+        if ! gh release download "$VERSION"           --pattern 'release-sha256sums.txt'           --output release-sha256sums.txt >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        mkdir -p dist
+        gh release download "$VERSION"           --pattern '*.whl'           --pattern '*.tar.gz'           --dir dist
+        (
+          cd dist
+          sha256sum --check ../release-sha256sums.txt
+        )
+        echo "restored=true" >> "$GITHUB_OUTPUT"
+
     - name: Build package
+      if: ${{ needs.validate.outputs.resume != 'true' || steps.restore.outputs.restored != 'true' }}
       env:
         RESUME: ${{ needs.validate.outputs.resume }}
         VERSION: ${{ inputs.version }}
@@ -141,6 +172,7 @@ jobs:
         else
           VERSION="$VERSION" RELEASE=true python manage.py build
         fi
+
     - name: Verify package
       run: VERSION=${{ inputs.version }} RELEASE=true python manage.py verify
 
@@ -192,7 +224,35 @@ jobs:
           exit 1
         fi
 
-    # retries consume the same tag; any existing PyPI files must match the candidate exactly
+    # archive the verified bytes before PyPI so retries never depend on reproducible builds
+    - name: Archive release artifacts
+      if: ${{ steps.restore.outputs.restored != 'true' && !env.ACT }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        if IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+          if [[ "$IS_DRAFT" != "true" ]]; then
+            echo "::error::Published release $VERSION has no complete recovery archive"
+            exit 1
+          fi
+        else
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release create "$VERSION" --draft --generate-notes --prerelease --latest=false
+          else
+            gh release create "$VERSION" --draft --generate-notes
+          fi
+        fi
+
+        (
+          cd dist
+          sha256sum * | sort > ../release-sha256sums.txt
+        )
+        gh release upload "$VERSION" dist/* --clobber
+        gh release upload "$VERSION" release-sha256sums.txt --clobber
+
+    # any PyPI files from an interrupted upload must be byte-identical to the archived candidate
     - name: Verify resumable PyPI state
       if: ${{ needs.validate.outputs.resume == 'true' && !env.ACT }}
       env:
@@ -225,7 +285,7 @@ jobs:
             fi
             ACTUAL_SHA256="$(sha256sum "$LOCAL_PATH" | cut -d' ' -f1)"
             if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
-              echo "::error::PyPI artifact differs from fixed candidate: $FILENAME"
+              echo "::error::PyPI artifact differs from archived candidate: $FILENAME"
               rm -f "$RESPONSE"
               exit 1
             fi
@@ -242,7 +302,6 @@ jobs:
         packages_dir: dist/
         skip-existing: ${{ needs.validate.outputs.resume }}
 
-    # create as a draft, upload all assets, then publish; an interrupted draft is resumable
     - name: Publish GitHub release
       if: ${{ !env.ACT }}
       env:
@@ -250,20 +309,11 @@ jobs:
         PRERELEASE: ${{ needs.validate.outputs.prerelease }}
         VERSION: ${{ inputs.version }}
       run: |
-        if IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
-          if [[ "$IS_DRAFT" != "true" ]]; then
-            echo "GitHub release $VERSION is already published"
-            exit 0
-          fi
-        else
-          if [[ "$PRERELEASE" == "true" ]]; then
-            gh release create "$VERSION" --draft --generate-notes --prerelease --latest=false
-          else
-            gh release create "$VERSION" --draft --generate-notes
-          fi
+        IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft')"
+        if [[ "$IS_DRAFT" != "true" ]]; then
+          echo "GitHub release $VERSION is already published"
+          exit 0
         fi
-
-        gh release upload "$VERSION" dist/* --clobber
 
         if [[ "$PRERELEASE" == "true" ]]; then
           gh release edit "$VERSION" --draft=false --prerelease --latest=false
