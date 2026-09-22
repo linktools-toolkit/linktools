@@ -16,16 +16,10 @@ from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import (
-    AssetKey,
-    AssetPathAdapter,
-    AssetStore,
-    DirectoryAssetBackend,
-    PrefixAssetPathAdapter,
-)
-from ..core import DEFAULT_DISCOVERY_POLICY, ImmutableJsonMapping, JsonValue, canonical_sha256
+from ..asset import AssetKey, AssetStore
+from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..storage import StorageOverlay, StorageRevision
+from ..storage import StorageRevision
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -47,7 +41,6 @@ from ._context import AgentContext
 from ._skill import SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
-    LocalSkillResourceSource,
     SkillResourceSource,
     SkillSourceRef,
 )
@@ -408,7 +401,6 @@ class CapabilityGroup(Generic[AppT]):
         assets: "AssetStore | None" = None,
         workspace: "Workspace | None" = None,
         skill_source: "SkillResourceSource | None" = None,
-        discover_workspace_assets: bool = True,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
@@ -421,14 +413,11 @@ class CapabilityGroup(Generic[AppT]):
             SkillResourceSource,
         ):
             raise TypeError("skill_source must implement SkillResourceSource")
-        if not isinstance(discover_workspace_assets, bool):
-            raise TypeError("discover_workspace_assets must be bool")
         if skill_source is not None and skill_source.id != group_id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         self._id = group_id
         self._store = assets
         self._asset_revision: StorageRevision | None = None
-        self._owned_store_factory: "Callable[[], AssetStore] | None" = None
         self._workspace = workspace
         self._skill_source = skill_source
         self._loaders: list[tuple[str, CapabilityLoader[AppT]]] = []
@@ -442,22 +431,6 @@ class CapabilityGroup(Generic[AppT]):
             self._skill_source = skill_source or AssetSkillResourceSource(
                 group_id,
                 assets,
-            )
-            for kind in ("agent", "skill", "mcp"):
-                self._loaders.append(
-                    (
-                        kind,
-                        cast(
-                            "CapabilityLoader[AppT]",
-                            _BuiltinDeclarationLoader(kind),
-                        ),
-                    )
-                )
-        elif workspace is not None and discover_workspace_assets:
-            self._owned_store_factory = lambda: _workspace_declaration_store(workspace)
-            self._skill_source = skill_source or LocalSkillResourceSource(
-                group_id,
-                workspace.storage_root / "skills",
             )
             for kind in ("agent", "skill", "mcp"):
                 self._loaders.append(
@@ -680,56 +653,33 @@ class CapabilityGroup(Generic[AppT]):
         contributions = list(tuple(self._contributions))
         loaders = tuple(loader for _kind, loader in self._loaders)
         store = self._store
-        owned_store = (
-            None if self._owned_store_factory is None else self._owned_store_factory()
-        )
-        primary_error: BaseException | None = None
-        try:
-            if owned_store is not None:
-                await owned_store.initialize()
-                store = owned_store
-            if store is not None:
-                if not store.ready:
-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                captured_revision = await store.current_revision()
-                metadata = await store.metadata_snapshot()
-                entries = tuple(
-                    CapabilityLoadEntry(
-                        info.key,
-                        info.etag,
-                        info.size,
-                        info.metadata,
-                    )
-                    for info in metadata
-                )
-                context = CapabilityLoadContext(self._id, store, entries)
-                for loader in loaders:
-                    loaded = await loader.load(context)
-                    if any(
-                        not isinstance(item, CapabilityContribution)
-                        for item in loaded
-                    ):
-                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                    contributions.extend(loaded)
-                await context.verify()
-                self._asset_revision = captured_revision
-            elif loaders:
+        if store is not None:
+            if not store.ready:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        except BaseException as error:
-            primary_error = error
-            raise
-        finally:
-            if owned_store is not None:
-                try:
-                    await owned_store.close()
-                except BaseException as error:
-                    if primary_error is None:
-                        raise
-                    _logger.error(
-                        "owned capability store cleanup failed: group=%s exception_type=%s",
-                        self._id,
-                        type(error).__name__,
-                    )
+            captured_revision = await store.current_revision()
+            metadata = await store.metadata_snapshot()
+            entries = tuple(
+                CapabilityLoadEntry(
+                    info.key,
+                    info.etag,
+                    info.size,
+                    info.metadata,
+                )
+                for info in metadata
+            )
+            context = CapabilityLoadContext(self._id, store, entries)
+            for loader in loaders:
+                loaded = await loader.load(context)
+                if any(
+                    not isinstance(item, CapabilityContribution)
+                    for item in loaded
+                ):
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                contributions.extend(loaded)
+            await context.verify()
+            self._asset_revision = captured_revision
+        elif loaders:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         frozen = tuple(_freeze_contribution(item) for item in contributions)
         _validate_unique(frozen)
         generic = [item for item in frozen if item.kind == "capability"]
@@ -738,42 +688,6 @@ class CapabilityGroup(Generic[AppT]):
             key=lambda item: (item.kind, item.id, item.fingerprint),
         )
         return tuple((*declarations, *generic))
-
-
-class _WorkspaceDeclarationPathAdapter:
-    def __init__(self) -> None:
-        self._delegate = PrefixAssetPathAdapter(
-            {"agent": "agents", "skill": "skills", "mcp": "mcp"}
-        )
-
-    def validate(self, kinds: Sequence[str]) -> None:
-        self._delegate.validate(kinds)
-
-    def root_path(self, kind: str) -> str:
-        return self._delegate.root_path(kind)
-
-    def to_path(self, key: AssetKey) -> str:
-        return self._delegate.to_path(key)
-
-    def from_path(self, path: str) -> "AssetKey | None":
-        key = self._delegate.from_path(path)
-        if key is None or key.kind != "skill":
-            return key
-        if "/" not in key.id or key.id.endswith("/SKILL.md"):
-            return key
-        return None
-
-
-def _workspace_declaration_store(workspace: Workspace) -> AssetStore:
-    adapter: AssetPathAdapter = _WorkspaceDeclarationPathAdapter()
-    source = DirectoryAssetBackend(
-        str(workspace.storage_root),
-        path_adapter=adapter,
-        kinds=("agent", "skill", "mcp"),
-        follow_external_symlinks=True,
-        ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
-    )
-    return AssetStore(StorageOverlay(source))
 
 
 class _BuiltinDeclarationLoader:
