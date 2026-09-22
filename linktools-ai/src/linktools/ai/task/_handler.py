@@ -22,7 +22,6 @@ from ..errors import AIError, ErrorCode
 from ._graph import (
     TaskExpanderRef,
     TaskNode,
-    TaskNodeView,
     TaskResultRef,
     normalize_retry_delay_seconds,
     normalize_timeout_seconds,
@@ -119,6 +118,48 @@ class TaskDependency:
             raise ValueError("task dependency execution id is required")
 
 
+@dataclass(frozen=True, slots=True)
+class TaskDependencyState:
+    """Stable terminal semantics exposed for one Task dependency."""
+
+    status: TaskStatus
+    result_digest: "str | None" = None
+    error_code: "str | None" = None
+    error_digest: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }:
+            raise ValueError("task dependency state must be terminal")
+        if self.status is TaskStatus.SUCCEEDED:
+            if (
+                self.result_digest is None
+                or _RESULT_DIGEST.fullmatch(self.result_digest) is None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("successful task dependency state is invalid")
+            return
+        if self.result_digest is not None:
+            raise ValueError("failed task dependency state cannot carry a result")
+        if self.error_digest is not None and _RESULT_DIGEST.fullmatch(self.error_digest) is None:
+            raise ValueError("task dependency error digest is invalid")
+
+    @property
+    def semantic_payload(self) -> "dict[str, JsonValue]":
+        value: dict[str, JsonValue] = {"status": self.status.value}
+        if self.status is TaskStatus.SUCCEEDED:
+            value["result_digest"] = self.result_digest
+        else:
+            value["error_code"] = self.error_code
+            value["error_digest"] = self.error_digest
+        return value
+
+
 class TaskArtifactPublisher(Protocol):
     async def publish(
         self,
@@ -162,7 +203,7 @@ class TaskNodeContext(Generic[AppT]):
     )
     correlation: CorrelationData = field(default_factory=dict)
     artifacts: "TaskArtifactPublisher | None" = None
-    dependency_states: "Mapping[str, TaskNodeView]" = field(default_factory=dict)
+    dependency_states: "Mapping[str, TaskDependencyState]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -192,7 +233,7 @@ class TaskNodeContext(Generic[AppT]):
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
         dependency_states = dict(self.dependency_states)
         if any(
-            not isinstance(key, str) or not isinstance(value, TaskNodeView)
+            not isinstance(key, str) or not isinstance(value, TaskDependencyState)
             for key, value in dependency_states.items()
         ):
             raise ValueError("task dependency states are invalid")
@@ -318,6 +359,7 @@ class TaskFunction(Generic[AppT]):
 __all__ = [
     "TaskBindingSnapshot",
     "TaskDependency",
+    "TaskDependencyState",
     "TaskArtifactPublisher",
     "TaskEffectResolution",
     "TaskFunction",
