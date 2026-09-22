@@ -199,7 +199,8 @@ jobs:
         VERSION: ${{ inputs.version }}
       run: |
         PYPI_VERSION="${VERSION#v}"
-        for PROJECT in linktools linktools-ai linktools-cntr linktools-common linktools-mobile; do
+        mapfile -t PROJECTS < <(python manage.py modules | jq -r '.[]')
+        for PROJECT in "${PROJECTS[@]}"; do
           RESPONSE="$(mktemp)"
           STATUS="$(curl --silent --show-error --location \
             --output "$RESPONSE" --write-out '%{http_code}' \
