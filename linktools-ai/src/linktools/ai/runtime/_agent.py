@@ -7,11 +7,9 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Awaitable, Callable, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
-from pydantic_ai.messages import UserContent
-
 from ..core import JsonValue, Page, Principal, ThinkingValue
 from ..errors import AIError, ErrorCode
-from ._input import validate_user_input
+from ._input_contract import UserPromptInput, validate_user_input
 from ._watch_cursor import (
     decode_execution_watch_cursor,
     encode_execution_watch_cursor,
@@ -37,6 +35,7 @@ from .service_api import (
     SessionView,
     StartEvaluationRequest,
     TranscriptItem,
+    UsageReadCutoff,
 )
 
 if TYPE_CHECKING:
@@ -184,7 +183,7 @@ class Execution(Generic[AppT]):
 
     async def retry(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         idempotency_key: "str | None" = None,
@@ -201,7 +200,7 @@ class Execution(Generic[AppT]):
 
     async def fork(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         idempotency_key: "str | None" = None,
@@ -285,6 +284,7 @@ class Execution(Generic[AppT]):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
         return await self._runtime.execution.model_interactions(
             self.execution_id,
@@ -292,6 +292,7 @@ class Execution(Generic[AppT]):
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            cutoffs=cutoffs,
         )
 
 
@@ -306,7 +307,7 @@ class Session(Generic[AppT]):
 
     async def start(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
@@ -335,7 +336,7 @@ class Session(Generic[AppT]):
 
     async def run(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
@@ -362,7 +363,7 @@ class Session(Generic[AppT]):
 
     async def plan(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
@@ -482,7 +483,7 @@ class Agent(Generic[AppT]):
 
     async def start(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
@@ -512,7 +513,7 @@ class Agent(Generic[AppT]):
 
     async def run(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
@@ -541,7 +542,7 @@ class Agent(Generic[AppT]):
 
     async def plan(
         self,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         files: Sequence[str] = (),
         output: "type[BaseModel] | None" = None,
@@ -638,7 +639,7 @@ class Agent(Generic[AppT]):
     def task(
         self,
         node_id: str,
-        user_prompt: "str | Sequence[UserContent]",
+        user_prompt: "UserPromptInput",
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
@@ -653,6 +654,7 @@ class Agent(Generic[AppT]):
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
+        dependency_policy: str = "all_succeeded",
     ) -> "TaskNode":
         return self._runtime._task_for_agent(
             self._agent_digest,
@@ -671,6 +673,7 @@ class Agent(Generic[AppT]):
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
+            dependency_policy=dependency_policy,
             definition=self._definition,
         )
 

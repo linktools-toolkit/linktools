@@ -24,7 +24,6 @@ from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime._planner import RuntimeTaskNodeRunner
 from linktools.ai.runtime.state._task_repository import TaskRepositoryImpl
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
 from linktools.ai.task import (
     CancelGraphRequest,
@@ -45,7 +44,6 @@ from linktools.ai.task import (
     TaskNodeRunResult,
     TaskTerminalRecord,
 )
-from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -86,13 +84,10 @@ class _TaskTestModels:
         return _TaskTestModelBinding()
 
 
-def _workspace(root: Path) -> Workspace:
-    agent_path = root / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
-    )
-    return Workspace.load(root)
+def _agent_group() -> CapabilityGroup[object]:
+    group = CapabilityGroup[object]("application")
+    group.agent("default", model="default", allow_tools=())
+    return group
 
 
 async def _provision_sqlite(path: Path) -> None:
@@ -140,13 +135,11 @@ async def test_sqlite_public_runtime_task_graph_repeated_concurrency_is_stable(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    workspace = _workspace(tmp_path / "workspace")
-
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(_agent_group(),),
     ) as runtime:
         agent = runtime.agent("default")
         for index in range(20):
@@ -226,13 +219,11 @@ async def test_sqlite_public_runtime_task_failure_blocks_dependency(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    workspace = _workspace(tmp_path / "workspace")
-
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(_agent_group(),),
     ) as runtime:
         agent = runtime.agent("default")
         graph = TaskGraph(
@@ -291,13 +282,11 @@ async def test_sqlite_public_runtime_task_wait_timeout_and_cancel(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
-    workspace = _workspace(tmp_path / "workspace")
-
     async with Runtime.open(
         "default",
         models=_TaskTestModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(_agent_group(),),
     ) as runtime:
         agent = runtime.agent("default")
         graph = TaskGraph("timeout", (agent.task("blocked", "blocked"),))

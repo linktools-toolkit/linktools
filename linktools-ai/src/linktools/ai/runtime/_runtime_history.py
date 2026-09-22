@@ -47,6 +47,10 @@ from ._cursor import encode_cursor as encode_runtime_cursor
 from ._history import StepExecutionHistoryReader
 from ._history_service import DefaultExecutionHistoryService
 from ._runtime_identity import token_seed
+from ._session_timeline import (
+    SessionTimelineTranscriptStore,
+    project_session_timeline,
+)
 from .service_api import (
     AttachmentFact,
     ArtifactService,
@@ -59,12 +63,15 @@ from .service_api import (
     ExecutionView,
     ListExecutionRequest,
     ModelInteractionItem,
+    SessionTurn,
     SessionView,
     TranscriptItem,
+    UsageReadCutoff,
     UsageSummary,
 )
 from .state import RuntimeDomain, RuntimeState
 from .state._contracts import (
+    ConversationState,
     EventRepository,
     ExecutionRecord,
     ExecutionRepository,
@@ -126,6 +133,7 @@ def _merge_usage_summaries(
         "cache_write_tokens": 0,
         "model_duration_ns": 0,
         "unknown_usage_requests": 0,
+        "unknown_duration_requests": 0,
     }
     for value in values:
         totals["logical_requests"] += value.logical_requests
@@ -139,6 +147,7 @@ def _merge_usage_summaries(
         totals["cache_write_tokens"] += value.cache_write_tokens
         totals["model_duration_ns"] += value.model_duration_ns
         totals["unknown_usage_requests"] += value.unknown_usage_requests
+        totals["unknown_duration_requests"] += value.unknown_duration_requests
         cutoffs.extend(value.cutoffs)
         if transport_retries is not None:
             if value.transport_retries is None:
@@ -151,6 +160,19 @@ def _merge_usage_summaries(
         transport_retries=transport_retries,
         unrecorded_executions=unrecorded_executions,
         cutoffs=tuple(cutoffs),
+    )
+
+
+def _execution_cutoffs(
+    cutoffs: "tuple[UsageReadCutoff, ...] | None",
+    execution_id: str,
+) -> "tuple[UsageReadCutoff, ...] | None":
+    if cutoffs is None:
+        return None
+    if any(not isinstance(value, UsageReadCutoff) for value in cutoffs):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return tuple(
+        value for value in cutoffs if value.execution_id == execution_id
     )
 
 
@@ -221,6 +243,8 @@ class RuntimeHistory:
         execution_objects: "ObjectStore | None" = None,
         task_objects: "ObjectStore | None" = None,
         artifacts: "ArtifactService | None" = None,
+        conversation: "ConversationState | None" = None,
+        session_transcript_store: "SessionTimelineTranscriptStore | None" = None,
     ) -> None:
         self._service = service
         self._tenant_id = tenant_id
@@ -236,6 +260,8 @@ class RuntimeHistory:
         self._execution_objects = execution_objects
         self._task_objects = task_objects
         self._artifacts = artifacts
+        self._conversation = conversation
+        self._session_transcript_store = session_transcript_store
 
     @property
     def tenant_id(self) -> str:
@@ -603,17 +629,63 @@ class RuntimeHistory:
         execution_id: str,
         *,
         principal: Principal,
+        include_children: bool = False,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
-        return await self._service.usage(
-            execution_id,
-            principal=principal,
+        if not include_children:
+            selected = _execution_cutoffs(cutoffs, execution_id)
+            return await self._service.usage(
+                execution_id,
+                principal=principal,
+                cutoffs=selected,
+            )
+
+        executions, _authorization = self._require_direct_reader()
+        await self._authorized_record(execution_id, principal)
+        explicit_ids = (
+            None if cutoffs is None else {value.execution_id for value in cutoffs}
         )
+        pending = [execution_id]
+        seen: set[str] = set()
+        values: list[UsageSummary] = []
+        while pending:
+            current_id = pending.pop(0)
+            if current_id in seen:
+                continue
+            record = await executions.get(
+                current_id,
+                tenant_id=principal.tenant_id,
+            )
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            seen.add(current_id)
+            if explicit_ids is None or current_id in explicit_ids:
+                values.append(
+                    await self._service.usage(
+                        current_id,
+                        principal=principal,
+                        cutoffs=_execution_cutoffs(cutoffs, current_id),
+                    )
+                )
+            children = await executions.list_children(
+                current_id,
+                tenant_id=principal.tenant_id,
+            )
+            for child in children:
+                if child.parent_execution_id != current_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if child.execution_id not in seen:
+                    pending.append(child.execution_id)
+        if explicit_ids is not None and not explicit_ids.issubset(seen):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        return _merge_usage_summaries(values)
 
     async def graph_usage(
         self,
         graph_id: str,
         *,
         principal: Principal,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
         graph = await self.task_graph(
             graph_id,
@@ -631,39 +703,42 @@ class RuntimeHistory:
             if state.execution_id is None
             and state.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED}
         )
-
+        explicit_ids = (
+            None if cutoffs is None else {value.execution_id for value in cutoffs}
+        )
         pending = list(roots)
         seen: set[str] = set()
         values: list[UsageSummary] = []
         while pending:
-            execution_id = pending.pop(0)
-            if execution_id in seen:
+            current_id = pending.pop(0)
+            if current_id in seen:
                 continue
             record = await executions.get(
-                execution_id,
+                current_id,
                 tenant_id=principal.tenant_id,
             )
             if record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            seen.add(execution_id)
-            values.append(
-                await self._service.usage(
-                    execution_id,
-                    principal=principal,
+            seen.add(current_id)
+            if explicit_ids is None or current_id in explicit_ids:
+                values.append(
+                    await self._service.usage(
+                        current_id,
+                        principal=principal,
+                        cutoffs=_execution_cutoffs(cutoffs, current_id),
+                    )
                 )
-            )
             children = await executions.list_children(
-                execution_id,
+                current_id,
                 tenant_id=principal.tenant_id,
             )
             for child in children:
-                if (
-                    child.parent_execution_id != execution_id
-                ):
+                if child.parent_execution_id != current_id:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if child.execution_id not in seen:
                     pending.append(child.execution_id)
-
+        if explicit_ids is not None and not explicit_ids.issubset(seen):
+            raise AIError(ErrorCode.CURSOR_INVALID)
         return _merge_usage_summaries(
             values,
             unrecorded_executions=unrecorded,
@@ -717,6 +792,32 @@ class RuntimeHistory:
             cursor = page.next_cursor
         recent.sort(key=lambda value: (value[0], value[1]), reverse=True)
         return tuple(value[2] for value in recent)
+
+    async def session_timeline(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> Page[SessionTurn]:
+        if self._conversation is None or self._session_transcript_store is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        signer = self._cursor_signer
+        if signer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        executions, authorization = self._require_direct_reader()
+        return await project_session_timeline(
+            self._conversation,
+            executions,
+            authorization,
+            signer,
+            self._session_transcript_store,
+            session_id,
+            principal=principal,
+            cursor=cursor,
+            limit=limit,
+        )
 
     async def inspect_session(
         self,
@@ -819,6 +920,7 @@ class RuntimeHistory:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> Page[ModelInteractionItem]:
         return await self._service.model_interactions(
             execution_id,
@@ -826,6 +928,7 @@ class RuntimeHistory:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            cutoffs=cutoffs,
         )
 
     def _require_session_reader(
@@ -991,6 +1094,7 @@ async def _open_runtime_history(
                 "execution-history",
                 token_seed(resolved_namespace),
             ),
+            tool_operations=selected_state.recovery.tools,
         )
         effective_authorization = (
             TenantAuthorizationPolicy(effective_tenant_id)
@@ -1025,6 +1129,8 @@ async def _open_runtime_history(
                 "runtime-history",
                 token_seed(resolved_namespace),
             ),
+            conversation=selected_state.conversation,
+            session_transcript_store=selected_state.steps,
         )
     except BaseException as error:
         body_error = error

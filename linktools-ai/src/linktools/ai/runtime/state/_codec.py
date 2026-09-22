@@ -55,6 +55,7 @@ from ...core import (
     canonical_json_bytes,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
+from ...spec import MCPServerSpecCodec
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskBindingSnapshot,
@@ -144,6 +145,7 @@ from ._store import (
 )
 
 CURRENT_DATA_VERSION = 1
+_TASK_NODE_TERMINAL_WIRE_ID = "task_node_terminal"
 DomainT = TypeVar("DomainT")
 _logger = environ.get_logger("ai.runtime.state.codec")
 
@@ -228,7 +230,10 @@ _V1_WIRE_IDS = MappingProxyType(
     {target: wire_id for wire_id, target in _V1_WIRE_TYPES}
 )
 _V1_DOMAIN_TYPES = MappingProxyType(
-    {wire_id: target for wire_id, target in _V1_WIRE_TYPES}
+    {
+        **{wire_id: target for wire_id, target in _V1_WIRE_TYPES},
+        _TASK_NODE_TERMINAL_WIRE_ID: TaskNode,
+    }
 )
 
 _V1_ENUM_WIRE_TYPES: tuple[tuple[str, type[Enum]], ...] = (
@@ -386,13 +391,11 @@ class _VersionCodec:
     external_schema_types: Mapping[type[object], JsonValue]
 
 
-def _encode_v1_task_node(
-    value: object,
+def _encode_v1_task_node_fields(
+    value: TaskNode,
     codec: "_VersionCodec",
     persisted: bool,
 ) -> Mapping[str, JsonValue]:
-    if not isinstance(value, TaskNode):
-        raise TypeError("V1 task_node encoder received the wrong type")
     fields: dict[str, JsonValue] = {
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
         "dependencies": _encode_domain(
@@ -429,6 +432,18 @@ def _encode_v1_task_node(
     if value.effect != "none":
         fields["effect"] = value.effect
     return fields
+
+
+def _encode_v1_task_node(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskNode):
+        raise TypeError("V1 task_node encoder received the wrong type")
+    if value.dependency_policy != "all_succeeded":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _encode_v1_task_node_fields(value, codec, persisted)
 
 
 def _decode_v1_task_node(
@@ -534,6 +549,42 @@ def _decode_v1_task_node(
             output_contract,
         ),
         effect=effect,
+        dependency_policy="all_succeeded",
+    )
+
+
+def _encode_v1_terminal_task_node(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskNode):
+        raise TypeError("V1 task_node_terminal encoder received the wrong type")
+    if value.dependency_policy != "all_terminal":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return _encode_v1_task_node_fields(value, codec, persisted)
+
+
+def _decode_v1_terminal_task_node(
+    raw_fields: Mapping[str, object],
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> TaskNode:
+    node = _decode_v1_task_node(raw_fields, codec, persisted)
+    return TaskNode(
+        node.node_id,
+        node.dependencies,
+        input=node.input,
+        budget_cost=node.budget_cost,
+        expander=node.expander,
+        input_refs=node.input_refs,
+        timeout_seconds=node.timeout_seconds,
+        max_attempts=node.max_attempts,
+        retry_delay_seconds=node.retry_delay_seconds,
+        output_schema=node.output_schema,
+        output_contract=node.output_contract,
+        effect=node.effect,
+        dependency_policy="all_terminal",
     )
 
 
@@ -907,6 +958,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         "task_node": _encode_v1_task_node,
+        _TASK_NODE_TERMINAL_WIRE_ID: _encode_v1_terminal_task_node,
         "task_node_view": _encode_v1_task_node_view,
         "task_result": _encode_v1_task_result,
     }
@@ -917,6 +969,7 @@ _V1_DATACLASS_DECODERS: Mapping[str, DataclassDecoder] = MappingProxyType(
         "stored_user_input": _decode_v1_stored_user_input,
         "task_graph_view": _decode_v1_task_graph_view,
         "task_node": _decode_v1_task_node,
+        _TASK_NODE_TERMINAL_WIRE_ID: _decode_v1_terminal_task_node,
         "task_node_view": _decode_v1_task_node_view,
         "task_result": _decode_v1_task_result,
     }
@@ -1429,7 +1482,12 @@ def _encode_domain(
     if isinstance(value, StoredPayload):
         value.to_json()
     if is_dataclass(value):
-        wire_id = codec.wire_ids.get(type(value))
+        wire_id = (
+            _TASK_NODE_TERMINAL_WIRE_ID
+            if isinstance(value, TaskNode)
+            and value.dependency_policy == "all_terminal"
+            else codec.wire_ids.get(type(value))
+        )
         if wire_id is None:
             raise TypeError(f"unsupported dataclass type: {type(value).__name__}")
         encoder = codec.dataclass_encoders.get(wire_id)
@@ -1597,6 +1655,16 @@ def _iter_agent_binding_object_refs(
     domain: RuntimeDomain,
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     for pin in snapshot.selected:
+        if pin.kind == "mcp":
+            try:
+                _server, resource_snapshot = MCPServerSpecCodec().from_frozen_payload(
+                    pin.contract
+                )
+            except AIError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if resource_snapshot is not None:
+                yield domain, resource_snapshot
+            continue
         if pin.kind != "skill":
             continue
         source = pin.contract.get("source")
@@ -1681,6 +1749,38 @@ def iter_runtime_object_dependencies(
             yield default_domain, nested
         return
 
+    if reference.key.startswith("v1/asset-snapshot/"):
+        if (
+            manifest.get("kind") != "asset-snapshot"
+            or manifest.get("format_version") != 1
+            or not isinstance(manifest.get("entries"), list)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for item in cast(list[object], manifest["entries"]):
+            if not isinstance(item, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            content = item.get("content")
+            if not isinstance(content, Mapping) or not {
+                "key",
+                "digest",
+                "size",
+            }.issubset(content):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            size = content["size"]
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                nested = ObjectRef(
+                    reference.store_id,
+                    cast(str, content["key"]),
+                    cast(str, content["digest"]),
+                    size,
+                )
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            yield default_domain, nested
+        return
+
     if reference.key.startswith("v1/task-capability-snapshot/"):
         if (
             manifest.get("kind") != "task-capability-snapshot"
@@ -1722,6 +1822,24 @@ def _iter_runtime_object_refs(
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
+        if dataclass_name in {
+            codec.wire_ids.get(TaskNode),
+            _TASK_NODE_TERMINAL_WIRE_ID,
+        }:
+            node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
+            prompt = node.input.get("user_prompt")
+            if (
+                node.input.get("type") == "linktools.ai.agent"
+                and isinstance(prompt, Mapping)
+                and prompt.get("kind") == "stored-user-content-v1"
+            ):
+                stored = cast(
+                    StoredUserInput,
+                    _decode_domain(prompt.get("value"), StoredUserInput, codec),
+                )
+                yield from _iter_runtime_object_refs(
+                    stored.payload, RuntimeDomain.TASK, codec,
+                )
         if dataclass_name == codec.wire_ids.get(ExecutionRecord):
             fields_value = value.get("fields")
             if not isinstance(fields_value, Mapping):
@@ -2381,7 +2499,8 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 wire ids are not unique")
     if len(enum_wire_ids) != len(set(enum_wire_ids)):
         raise RuntimeError("Runtime v1 enum wire ids are not unique")
-    if set(_CURRENT_CODEC.domain_types) != set(wire_ids):
+    domain_wire_ids = set(wire_ids) | {_TASK_NODE_TERMINAL_WIRE_ID}
+    if set(_CURRENT_CODEC.domain_types) != domain_wire_ids:
         raise RuntimeError("Runtime v1 domain type registry is incomplete")
     if set(_CURRENT_CODEC.wire_ids.values()) != set(wire_ids):
         raise RuntimeError("Runtime v1 domain wire-id registry is incomplete")
@@ -2394,6 +2513,7 @@ def _validate_v1_codec_definition() -> None:
         "stored_user_input",
         "task_graph_view",
         "task_node",
+        _TASK_NODE_TERMINAL_WIRE_ID,
         "task_node_view",
         "task_result",
     }
@@ -2402,6 +2522,7 @@ def _validate_v1_codec_definition() -> None:
         "stored_user_input",
         "task_graph_view",
         "task_node",
+        _TASK_NODE_TERMINAL_WIRE_ID,
         "task_node_view",
         "task_result",
     }
@@ -2409,11 +2530,11 @@ def _validate_v1_codec_definition() -> None:
         raise RuntimeError("Runtime v1 dataclass encoder mapping is invalid")
     if set(_V1_DATACLASS_DECODERS) != custom_decoders:
         raise RuntimeError("Runtime v1 dataclass decoder mapping is invalid")
-    if not set(_V1_DATACLASS_ENCODERS).issubset(set(wire_ids)):
+    if not set(_V1_DATACLASS_ENCODERS).issubset(domain_wire_ids):
         raise RuntimeError(
             "Runtime v1 dataclass encoder mapping contains an unknown type"
         )
-    if not set(_V1_DATACLASS_DECODERS).issubset(set(wire_ids)):
+    if not set(_V1_DATACLASS_DECODERS).issubset(domain_wire_ids):
         raise RuntimeError(
             "Runtime v1 dataclass decoder mapping contains an unknown type"
         )
@@ -2430,6 +2551,7 @@ def _validate_v1_codec_definition() -> None:
         "output_schema",
         "output_contract",
         "effect",
+        "dependency_policy",
         "_input",
     ):
         raise RuntimeError("Runtime v1 task_node source contract changed")

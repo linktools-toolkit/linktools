@@ -206,8 +206,10 @@ class _UsageService:
         execution_id: str,
         *,
         principal: Principal,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
         del principal
+        assert cutoffs is None
         self.calls.append(execution_id)
         if execution_id == "root":
             return UsageSummary(

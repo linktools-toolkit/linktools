@@ -5,13 +5,13 @@
 import re
 from datetime import datetime
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from ..core import CorrelationData, JsonValue, Principal
 from ..errors import AIError, ErrorCode
 from ._graph import TaskDependencyResult, TaskNode
-from ._handler import TaskEffectResolution
+from ._handler import TaskDependencyState, TaskEffectResolution
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +78,7 @@ class TaskNodeInvocation:
     correlation: CorrelationData
     dependency_results: "Mapping[str, TaskDependencyResult]"
     execution_id: "str | None" = None
+    dependency_states: "Mapping[str, TaskDependencyState]" = field(default_factory=dict)
 
 
 class TaskNodeRunner(Protocol):

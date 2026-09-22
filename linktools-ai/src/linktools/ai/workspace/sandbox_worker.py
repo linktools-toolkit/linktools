@@ -18,7 +18,11 @@ from typing import Any
 
 from ..errors import AIError, ErrorCode
 from ._local_sandbox import _LocalSandboxSession
-from ._sandbox import SandboxOperationRejected, SandboxResource
+from ._sandbox import (
+    ReadOnlySandboxPolicy,
+    SandboxOperationRejected,
+    SandboxResource,
+)
 from ._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_UNKNOWN,
@@ -42,10 +46,12 @@ _PR_SET_NO_NEW_PRIVS = 38
 async def main_async(arguments: argparse.Namespace) -> int:
     _validate_worker()
     resources = _resources(arguments.resources_json)
+    read_policy = _read_policy(arguments.read_policy_json)
     session = _LocalSandboxSession(
         Path("/workspace"),
         resources,
         lock_root=Path(arguments.lock_root),
+        read_policy=read_policy,
     )
     reader, writer = await _stdio_streams()
     write_lock = asyncio.Lock()
@@ -483,6 +489,30 @@ def _resources(value: str) -> tuple[SandboxResource, ...]:
     return tuple(resources)
 
 
+def _read_policy(value: str | None) -> ReadOnlySandboxPolicy | None:
+    if value is None:
+        return None
+    try:
+        payload = json.loads(value)
+        if not isinstance(payload, Mapping):
+            raise ValueError
+        readable = payload["readable_paths"]
+        resources = payload["resource_paths"]
+        if not isinstance(readable, list) or not isinstance(resources, Mapping):
+            raise ValueError
+        if any(
+            not isinstance(key, str) or not isinstance(values, list)
+            for key, values in resources.items()
+        ):
+            raise ValueError
+        return ReadOnlySandboxPolicy(
+            tuple(readable),
+            {key: tuple(values) for key, values in resources.items()},
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("worker read policy is invalid") from error
+
+
 def _validate_worker() -> None:
     if os.getpid() != 1:
         raise RuntimeError("worker must be the namespace init process")
@@ -564,6 +594,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--resources-json", required=True)
     parser.add_argument("--lock-root", required=True)
+    parser.add_argument("--read-policy-json")
     arguments = parser.parse_args(argv)
     try:
         return asyncio.run(main_async(arguments))

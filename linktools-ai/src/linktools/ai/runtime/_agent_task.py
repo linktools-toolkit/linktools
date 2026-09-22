@@ -16,6 +16,7 @@ from ..core import (
     ExecutionStatus,
     JsonValue,
     Principal,
+    TaskStatus,
     ThinkingValue,
     canonical_sha256,
     normalize_execution_mode,
@@ -25,8 +26,21 @@ from ..core import (
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
-from ..task import TaskDependency, TaskNode, TaskNodeRunControl, TaskNodeRunError
-from ._input import decode_user_content_payload
+from ..task import (
+    TaskDependency,
+    TaskDependencyState,
+    TaskNode,
+    TaskNodeRunControl,
+    TaskNodeRunError,
+)
+from ._input import (
+    ExecutionInputMaterializer,
+    decode_task_prompt_draft,
+    decode_user_content_payload,
+)
+from .state._codec import decode_domain
+from ._input_contract import append_user_input_text
+from .state._contracts import StoredUserInput
 from .service_api import (
     CancelExecutionRequest,
     ExecutionHandle,
@@ -66,8 +80,10 @@ class _AgentTaskNodeHandler:
         *,
         session: SessionService | None = None,
         release_dependency_hold: Callable[..., Awaitable[None]] | None = None,
+        input_materializer: ExecutionInputMaterializer | None = None,
     ) -> None:
         self._execution = execution
+        self._input_materializer = input_materializer
         self._session = session
         del catalog
         self._compiler = compiler
@@ -145,6 +161,13 @@ class _AgentTaskNodeHandler:
                 if not isinstance(value, Mapping):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
                 base_user_prompt = decode_user_content_payload(value)
+            elif kind == "task-user-content-v1":
+                base_user_prompt = decode_task_prompt_draft(raw_user_prompt)
+            elif kind == "stored-user-content-v1":
+                if set(raw_user_prompt) != {"kind", "intent", "value"}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                decode_domain(raw_user_prompt["value"], StoredUserInput)
+                base_user_prompt = ()
             else:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             resolved_mode = normalize_execution_mode(mode)
@@ -207,18 +230,20 @@ class _AgentTaskNodeHandler:
         dependencies: Mapping[str, TaskDependency],
         dependency_reader: Callable[[TaskDependency], Awaitable[JsonValue]],
         control: TaskNodeRunControl,
+        dependency_states: Mapping[str, TaskDependencyState] | None = None,
     ) -> tuple[JsonValue, str]:
         dependency_values = await self._read_dependencies(
             dependencies,
             dependency_reader,
         )
-        prepared = self._prepare_request(
+        prepared = await self._prepare_request(
             node,
             graph_id=graph_id,
             principal=principal,
             correlation=correlation,
             dependencies=dependencies,
             dependency_values=dependency_values,
+            dependency_states={} if dependency_states is None else dependency_states,
         )
         binding_digest, request = prepared[:2]
         agent_id = prepared[2] if len(prepared) > 2 else ""
@@ -334,6 +359,7 @@ class _AgentTaskNodeHandler:
         dependencies: Mapping[str, TaskDependency],
         dependency_reader: Callable[[TaskDependency], Awaitable[JsonValue]],
         durable_execution_id: str | None,
+        dependency_states: Mapping[str, TaskDependencyState] | None = None,
     ) -> None:
         key = (principal.tenant_id, graph_id, node.node_id)
         execution_id = durable_execution_id
@@ -365,13 +391,14 @@ class _AgentTaskNodeHandler:
                 _,
                 _,
                 binding_snapshot,
-            ) = self._prepare_request(
+            ) = await self._prepare_request(
                 node,
                 graph_id=graph_id,
                 principal=principal,
                 correlation=correlation,
                 dependencies=dependencies,
                 dependency_values=dependency_values,
+                dependency_states={} if dependency_states is None else dependency_states,
             )
             try:
                 handle = await self._execution.resolve_existing(
@@ -419,7 +446,7 @@ class _AgentTaskNodeHandler:
             values[name] = value
         return values
 
-    def _prepare_request(
+    async def _prepare_request(
         self,
         node: TaskNode,
         *,
@@ -428,6 +455,7 @@ class _AgentTaskNodeHandler:
         correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
         dependency_values: Mapping[str, JsonValue],
+        dependency_states: Mapping[str, TaskDependencyState],
     ) -> tuple[
         str,
         ExecutionRequest,
@@ -457,11 +485,18 @@ class _AgentTaskNodeHandler:
             base_user_prompt: str | tuple[object, ...] = cast(
                 str, raw_user_prompt["text"]
             )
-        else:
+        elif raw_user_prompt.get("kind") == "pydantic-user-content-v1":
             value = raw_user_prompt.get("value")
             if not isinstance(value, Mapping):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             base_user_prompt = decode_user_content_payload(value)
+        elif raw_user_prompt.get("kind") == "stored-user-content-v1":
+            if self._input_materializer is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            stored = decode_domain(raw_user_prompt["value"], StoredUserInput)
+            base_user_prompt = await self._input_materializer.restore(stored)
+        else:
+            base_user_prompt = decode_task_prompt_draft(raw_user_prompt)
         if set(dependency_values) != set(dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         dependency_payload = {
@@ -473,13 +508,25 @@ class _AgentTaskNodeHandler:
                 "\n\nUpstream task results (JSON, keyed by task id):\n"
                 + _canonical_json(dependency_payload)
             )
-            effective_user_prompt = (
-                base_user_prompt + dependency_text
-                if isinstance(base_user_prompt, str)
-                else (*base_user_prompt, dependency_text)
+            effective_user_prompt = append_user_input_text(
+                base_user_prompt, dependency_text,
             )
         else:
             effective_user_prompt = base_user_prompt
+        if node.dependency_policy == "all_terminal" and dependency_states:
+            state_payload = {
+                dependency_id: _dependency_state_payload(
+                    dependency_states[dependency_id]
+                )
+                for dependency_id in sorted(dependency_states)
+            }
+            state_text = (
+                "\n\nUpstream task states (JSON, keyed by task id):\n"
+                + _canonical_json(state_payload)
+            )
+            effective_user_prompt = append_user_input_text(
+                effective_user_prompt, state_text,
+            )
         if isinstance(effective_user_prompt, str):
             validate_user_prompt(effective_user_prompt)
         idempotency_key = canonical_sha256(
@@ -489,13 +536,11 @@ class _AgentTaskNodeHandler:
                 "node_id": node.node_id,
                 "binding_digest": binding.digest,
                 "input": node.input,
-                "dependencies": [
-                    {
-                        "node_id": dependency_id,
-                        "result_digest": dependencies[dependency_id].result_digest,
-                    }
-                    for dependency_id in sorted(dependencies)
-                ],
+                "dependencies": _dependency_identity_payload(
+                    node,
+                    dependencies,
+                    dependency_states,
+                ),
                 "principal": principal_identity_payload(principal),
             }
         )
@@ -739,6 +784,58 @@ def _validate_dependency_result(result: ExecutionResult, expected_digest: str) -
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if canonical_sha256(result.output) != expected_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _dependency_identity_payload(
+    node: TaskNode,
+    dependencies: Mapping[str, TaskDependency],
+    dependency_states: Mapping[str, TaskDependencyState],
+) -> list[dict[str, JsonValue]]:
+    if node.dependency_policy == "all_succeeded":
+        return [
+            {
+                "node_id": dependency_id,
+                "result_digest": dependencies[dependency_id].result_digest,
+            }
+            for dependency_id in sorted(dependencies)
+        ]
+    if node.dependency_policy != "all_terminal":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if set(dependency_states) != set(node.dependencies):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    node_dependencies = set(node.dependencies)
+    result: list[dict[str, JsonValue]] = []
+    for dependency_id in sorted(node_dependencies | set(dependencies)):
+        if dependency_id not in node_dependencies:
+            result.append(
+                {
+                    "node_id": dependency_id,
+                    "result_digest": dependencies[dependency_id].result_digest,
+                }
+            )
+            continue
+        state = dependency_states[dependency_id]
+        if state.status is TaskStatus.SUCCEEDED:
+            dependency = dependencies.get(dependency_id)
+            if (
+                dependency is None
+                or dependency.result_digest != state.result_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif dependency_id in dependencies:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result.append(
+            {
+                "node_id": dependency_id,
+                **state.semantic_payload,
+            }
+        )
+    return result
+
+
+def _dependency_state_payload(state: TaskDependencyState) -> dict[str, JsonValue]:
+    return state.semantic_payload
 
 
 def _canonical_json(value: object) -> str:

@@ -5,6 +5,7 @@
 import asyncio
 from types import SimpleNamespace
 from typing import get_args, get_origin, get_type_hints
+from unittest.mock import AsyncMock
 
 import pytest
 from linktools.ai.asset._sql import SqlAssetBackend
@@ -215,7 +216,7 @@ async def test_task_runner_cancellation_does_not_business_cancel_running_executi
 
     execution = Execution()
     handler = _AgentTaskNodeHandler(execution, object(), object())
-    handler._prepare_request = lambda *args, **kwargs: ("binding", object())
+    handler._prepare_request = AsyncMock(return_value=("binding", object()))
     control = Control()
     task = asyncio.create_task(
         handler.run_node(
@@ -277,7 +278,7 @@ async def test_task_runner_binds_execution_that_finishes_launch_after_caller_can
 
     execution = Execution()
     handler = _AgentTaskNodeHandler(execution, object(), object())
-    handler._prepare_request = lambda *args, **kwargs: ("binding", object())
+    handler._prepare_request = AsyncMock(return_value=("binding", object()))
     control = Control()
     task = asyncio.create_task(
         handler.run_node(
@@ -333,7 +334,7 @@ async def test_task_runner_start_unknown_after_caller_cancel_blocks_shutdown() -
 
     execution = Execution()
     handler = _AgentTaskNodeHandler(execution, object(), object())
-    handler._prepare_request = lambda *args, **kwargs: ("binding", object())
+    handler._prepare_request = AsyncMock(return_value=("binding", object()))
     task = asyncio.create_task(
         handler.run_node(
             SimpleNamespace(node_id="node"),

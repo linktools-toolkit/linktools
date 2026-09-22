@@ -23,6 +23,29 @@ ThinkingValue: TypeAlias = bool | ThinkingEffort
 _THINKING_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh"})
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceFileInput:
+    """Describe one workspace file to be frozen by the Runtime."""
+
+    path: str
+    media_type: str | None = None
+    identifier: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError("workspace file path is required")
+        if "\x00" in self.path:
+            raise ValueError("workspace file path is invalid")
+        if self.media_type is not None and (
+            not isinstance(self.media_type, str) or not self.media_type
+        ):
+            raise ValueError("workspace file media type is invalid")
+        if self.identifier is not None and (
+            not isinstance(self.identifier, str) or not self.identifier
+        ):
+            raise ValueError("workspace file identifier is invalid")
+
+
 def normalize_execution_mode(value: JsonValue) -> ExecutionMode:
     if value in {"run", "plan"}:
         return value  # type: ignore[return-value]

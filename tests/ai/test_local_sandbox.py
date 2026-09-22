@@ -13,15 +13,83 @@ import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace._local_sandbox import _LocalSandboxSession
-from linktools.ai.workspace import LocalSandbox, SandboxResource
+from linktools.ai.workspace import (
+    LocalSandbox,
+    ReadOnlySandboxPolicy,
+    SandboxOperationRejected,
+    SandboxResource,
+)
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_file_info_does_not_authorize_a_file_as_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "secret").write_text("private contents", encoding="utf-8")
+    policy = ReadOnlySandboxPolicy(("secret/allowed.txt",))
+    session = await LocalSandbox(read_policy=policy).open(root=tmp_path)
+    try:
+        with pytest.raises(AIError) as error:
+            await session.file_info("secret")
+        assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await session.close()
+
+
+async def test_read_only_policy_hides_unauthorized_resource_root(
+    tmp_path: Path,
+) -> None:
+    resource = tmp_path / "resource"
+    resource.mkdir()
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("allowed.txt",))
+    ).open(
+        root=tmp_path,
+        resources=(SandboxResource("resource", resource),),
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            session.resource_path("resource")
+        assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await session.close()
+
+
+async def test_read_only_policy_exposes_authorized_resource_root(
+    tmp_path: Path,
+) -> None:
+    resource = tmp_path / "resource"
+    resource.mkdir()
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(
+            ("allowed.txt",),
+            {"resource": ("resource.txt",)},
+        )
+    ).open(
+        root=tmp_path,
+        resources=(SandboxResource("resource", resource),),
+    )
+    try:
+        assert session.resource_path("resource") == str(resource.resolve())
+    finally:
+        await session.close()
 
 
 def _python_command(code: str) -> str:
     if os.name == "nt":
         return f'"{sys.executable}" -c "{code}"'
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+
+async def test_read_only_policy_rejects_command_status(tmp_path: Path) -> None:
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("**",))
+    ).open(root=tmp_path)
+    try:
+        with pytest.raises(SandboxOperationRejected) as raised:
+            await session.check_command("command")
+        assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await session.close()
 
 
 async def test_local_sandbox_bounds_command_output(tmp_path: Path) -> None:
@@ -244,6 +312,52 @@ async def test_local_sandbox_listing_includes_regular_file_size(tmp_path: Path) 
         await session.close()
 
     assert "sample.txt  (3 bytes)" in result
+
+
+async def test_local_sandbox_read_policy_filters_descendants_and_writes(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "visible.py").write_text("print('ok')\n", encoding="utf-8")
+    (allowed / "hidden.txt").write_text("secret\n", encoding="utf-8")
+    policy = ReadOnlySandboxPolicy(("allowed/*.py",))
+    session = await LocalSandbox(read_policy=policy).open(root=tmp_path)
+    try:
+        assert "visible.py" in await session.list_directory("allowed")
+        assert "hidden.txt" not in await session.list_directory("allowed")
+        assert "type: directory" in await session.file_info("allowed")
+        assert "print('ok')" in await session.read_file("allowed/visible.py")
+        with pytest.raises(AIError) as denied:
+            await session.read_file("allowed/hidden.txt")
+        assert denied.value.code is ErrorCode.AUTHORIZATION_DENIED
+        with pytest.raises(SandboxOperationRejected) as rejected:
+            await session.write_file("allowed/new.py", "blocked")
+        assert rejected.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await session.close()
+
+
+async def test_local_sandbox_read_policy_filters_before_listing_limit(
+    tmp_path: Path,
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "visible.py").write_text("ok\n", encoding="utf-8")
+    for index in range(1_001):
+        (allowed / f"hidden-{index:04d}.txt").write_text(
+            "secret\n",
+            encoding="utf-8",
+        )
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("allowed/*.py",)),
+    ).open(root=tmp_path)
+    try:
+        result = await session.list_directory("allowed")
+    finally:
+        await session.close()
+
+    assert result == "visible.py  (3 bytes)"
 
 
 async def test_local_sandbox_file_info_includes_text_metadata(tmp_path: Path) -> None:

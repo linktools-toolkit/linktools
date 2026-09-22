@@ -73,6 +73,21 @@ async with Runtime.open(
 
 `Runtime.open()` is the public composition root. The Runtime is frozen for the lifetime of the context; registrations are completed before it opens.
 
+Connection settings can be resolved lazily for a route. The resolver runs only
+when that route is materialized, and each materialization resolves independently;
+there is no process-global first-use client cache or initialization lock. Concurrent
+first use may therefore create independent provider instances. An alias keeps the
+concrete binding that was registered as its target:
+
+```python
+models.register_openai(
+    "production",
+    model="gpt-4o-mini",
+    connection_resolver=lambda: {"api_key": get_api_key()},
+)
+models.register_alias("default", "production")
+```
+
 ## 2. Define application capabilities and Agents
 
 Use `CapabilityGroup` for direct application registrations:
@@ -117,37 +132,35 @@ these declarations instead of inferring behavior from Tool names.
 
 `CapabilityGroup.agent()` creates an `AgentSpec`; declarations themselves use the single v1 wire contract and do not expose a per-declaration revision field.
 
-## 3. Workspace declarations
+## 3. Workspace and declaration assets
 
-Workspace behavior is opt-in. Install it with `CapabilityGroup("workspace", workspace=workspace)`; construction is side-effect free, and declaration discovery happens when the Runtime freezes the group. The default Workspace source loads these declaration kinds:
+`CapabilityGroup("workspace", workspace=workspace)` contributes the stable
+Workspace tools and sandbox boundary only. It does not discover Agent, Skill, or
+MCP declarations from Workspace paths.
 
-```text
-.linktools/
-  agents/<id>
-  skills/<id>
-  skills/<id>/SKILL.md
-  mcp/<id>
-```
+Agent, Skill, and MCP declarations use one explicit source: pass a ready
+`AssetStore` with `CapabilityGroup(..., assets=store)`. A store-backed group
+captures the declaration metadata visible when freeze starts. Assets added
+afterward are ignored for that freeze; assets actually read by a loader must
+still match their captured metadata through verification. Conflicting
+identities or layouts fail closed.
 
-For a filesystem Workspace, use the dedicated constructor:
+For downstream declaration formats or custom kinds such as `worker` or
+`audit`, implement `CapabilityLoader` and register it for its input Asset
+kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or
+`mcp` replaces only that built-in parser slot. The loader receives one
+`CapabilityLoadContext`, can inspect captured metadata and read captured keys
+with `read()` / `read_many()`, and returns normal `CapabilityContribution`
+values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill,
+and MCP declarations. No additional Registry/Provider abstraction is required.
 
-```python
-workspace_group = CapabilityGroup("workspace", workspace=workspace)
-
-async with Runtime.open(
-    "default",
-    models=models,
-    state=state,
-    capabilities=(workspace_group,),
-) as runtime:
-    ...
-```
-
-For caller-owned declaration storage independent of a Workspace, `CapabilityGroup(..., assets=...)` performs discovery from the borrowed `AssetStore` using metadata captured when freeze starts.
-
-A store-backed group captures the declaration metadata visible when freeze starts. Assets added afterward are ignored for that freeze; assets actually read by a loader must still match their captured metadata through verification. Conflicting identities or layouts fail closed.
-
-For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it for its input Asset kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or `mcp` replaces only that built-in parser slot. The loader receives one `CapabilityLoadContext`, can inspect the captured metadata and read captured keys with `read()` / `read_many()`, and returns normal `CapabilityContribution` values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP declarations. No additional Registry/Provider abstraction is required.
+For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
+`resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
+value starts with `resource:` then name files below that root. Runtime freezes
+and verifies the selected AssetStore tree, rejects absolute paths, traversal,
+and missing files, and materializes the frozen files for the MCP process.
+Without `resource_root`, existing argument strings keep their original
+meaning.
 
 ### Workspace sandbox
 
@@ -177,6 +190,25 @@ Selected local Skills are exposed as read-only `SandboxResource` directories at
 sessions. The mapping is derived for the current run and is not persisted into
 Skill declarations. Background command state is ephemeral and is cleaned up
 with the Session; it is not a cross-run service.
+
+For a read-only Runtime session, configure the supported backend with one
+immutable policy. Rules are root-relative POSIX patterns; an empty rule set
+denies reads, and resource rules are keyed by `SandboxResource.key`:
+
+```python
+from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy
+
+readonly = ReadOnlySandboxPolicy(
+    readable_paths=("src/**", "README.md"),
+    resource_paths={"review": ("**",)},
+)
+workspace = Workspace.load(
+    "/workspace/project",
+    sandbox=LocalSandbox(read_policy=readonly),
+)
+```
+
+With a read-only policy, Bubblewrap mounts the Workspace read-only and never creates hidden-path mount points there. Provision its hidden directories (including `.linktools`) before opening the sandbox; a missing or unsafe mount point causes startup to fail with `SANDBOX_UNAVAILABLE`.
 
 ## 4. Agent selection and capability policy
 
@@ -276,11 +308,29 @@ result = await agent.run(
 )
 ```
 
+When a file must be frozen as part of the accepted prompt, use the pure
+`WorkspaceFileInput` value. Runtime reads it through the configured Sandbox and
+preserves its order and optional opaque identifier:
+
+```python
+from linktools.ai.core import WorkspaceFileInput
+
+result = await agent.run(
+    ("Review this evidence:", WorkspaceFileInput(
+        "evidence/report.txt",
+        media_type="text/plain",
+        identifier="report-1",
+    )),
+)
+```
+
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task()` remains a generic TaskGraph API and does not accept `files`; delegated subagents use the same explicit `files=` execution input.
+If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task(files=...)` keeps the existing node-execution materialization semantics. Use `BinaryContent` or `WorkspaceFileInput` in the task prompt when bytes must be frozen at graph admission; delegated subagents use the same explicit execution-input rules.
 
 Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
+
+`Agent.task()` prompts support both `BinaryContent` and `WorkspaceFileInput`. Runtime freezes their bytes when accepting the graph, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph snapshots retain the frozen input objects.
 
 ### Runtime context and execution queries
 
@@ -334,7 +384,11 @@ positions of the relevant execution streams. A cursor produced with
 `include_content=False` cannot be reused with `include_content=True`.
 TaskGraph replay captures a fixed durable prefix and emits the same event model
 with resumable cursors; it does not invoke models, task handlers, or external
-systems.
+systems. A node may opt into `dependency_policy="all_terminal"`; its handler
+receives `dependency_states` for failed, blocked, cancelled, and successful
+dependencies, while `dependencies` continues to contain only successful
+result references. Observer callback failures are reported as
+`TASK_OBSERVER_FAILED` and do not fail the graph or retry nodes.
 
 Downstream code must not scan `ExecutionRecord`, codec data, `StateStore`, or
 private repositories directly. The current pre-release wire contract is the
@@ -363,7 +417,7 @@ async with Runtime.open(
     ...
 ```
 
-Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments.
+Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only State handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only State, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Asset-backed MCP resource snapshots and frozen Workspace inputs remain reachable through the same RuntimeState object-reference traversal and restore closure.
 
 SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local path-backed SQLite state initializes its own Runtime and `ai_objects` schema; an existing SQLite database is only validated and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
 

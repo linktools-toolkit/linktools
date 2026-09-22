@@ -31,6 +31,7 @@ from linktools.core import environ
 from ..errors import AIError, ErrorCode
 from ._sandbox import (
     SandboxOperationRejected,
+    ReadOnlySandboxPolicy,
     SandboxResource,
     SandboxSession,
     normalize_workspace_path,
@@ -88,8 +89,13 @@ _DANGEROUS_COMMANDS = frozenset(
 class LocalSandbox:
     """Open local sessions rooted at the caller-provided workspace."""
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, *, read_policy: ReadOnlySandboxPolicy | None = None) -> None:
+        if read_policy is not None and not isinstance(
+            read_policy,
+            ReadOnlySandboxPolicy,
+        ):
+            raise TypeError("read_policy must be ReadOnlySandboxPolicy")
+        self._read_policy = read_policy
 
     async def open(
         self,
@@ -97,6 +103,7 @@ class LocalSandbox:
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
     ) -> SandboxSession:
+        policy = self._read_policy
         normalized_root = _normalize_root(root)
         normalized_resources = _validate_resources(normalized_root, resources)
         _logger.debug(
@@ -105,11 +112,13 @@ class LocalSandbox:
             tuple(resource.key for resource in normalized_resources),
         )
         lock_root = normalized_root / ".linktools" / "locks"
-        _prepare_lock_root(lock_root)
+        if policy is None:
+            _prepare_lock_root(lock_root)
         return _LocalSandboxSession(
             normalized_root,
             normalized_resources,
             lock_root=lock_root,
+            read_policy=policy,
         )
 
 
@@ -122,10 +131,14 @@ class _LocalSandboxSession:
         resources: tuple[SandboxResource, ...],
         *,
         lock_root: Path | None = None,
+        read_policy: ReadOnlySandboxPolicy | None = None,
     ) -> None:
         self._root = root
-        self._resources = {resource.key: resource.source.resolve() for resource in resources}
+        self._resources = {
+            resource.key: resource.source.resolve() for resource in resources
+        }
         self._lock_root = lock_root or root / ".linktools" / "locks"
+        self._read_policy = read_policy
         self._environment = _command_environment()
         self._state = "OPEN"
         self._state_lock = asyncio.Lock()
@@ -146,6 +159,11 @@ class _LocalSandboxSession:
         source = self._resources.get(key)
         if source is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if (
+            self._read_policy is not None
+            and not self._read_policy.may_descend(".", resource_key=key)
+        ):
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return str(source)
 
     def managed_process_ids(self) -> frozenset[int]:
@@ -166,11 +184,12 @@ class _LocalSandboxSession:
         return frozenset(values)
 
     async def canonicalize_path(self, path: str) -> str:
-        normalized = _normalize_path(path)
-
         def operation() -> str:
-            target = self._resolve_path(normalized, allow_missing=True)
-            return _relative(self._root, target)
+            _target, display, _resource_key = self._read_target(
+                path,
+                allow_missing=True,
+            )
+            return display
 
         return await self._run_sync(operation)
 
@@ -180,23 +199,25 @@ class _LocalSandboxSession:
         *,
         max_bytes: int | None = None,
     ) -> bytes:
-        normalized = _normalize_path(path)
         if max_bytes is not None and (
             not isinstance(max_bytes, int)
             or isinstance(max_bytes, bool)
             or max_bytes < 0
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
         def operation() -> bytes:
-            target = self._file_path(normalized, write=False)
+            target, _display, _resource_key = self._read_target(path)
             try:
                 info = target.stat()
                 if not stat.S_ISREG(info.st_mode):
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                if max_bytes is not None and info.st_size > max_bytes:
+                if max_bytes is None:
+                    return target.read_bytes()
+                with target.open("rb") as stream:
+                    value = stream.read(max_bytes + 1)
+                if len(value) > max_bytes:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                return target.read_bytes()
+                return value
             except AIError:
                 raise
             except FileNotFoundError as error:
@@ -213,7 +234,6 @@ class _LocalSandboxSession:
         offset: int = 0,
         limit: int | None = None,
     ) -> str:
-        normalized = _normalize_path(path)
         if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         selected_limit = _MAX_READ_LINES if limit is None else limit
@@ -228,9 +248,16 @@ class _LocalSandboxSession:
             "read_file",
             {"path": path, "offset": offset, "limit": limit},
         )
-
         def operation() -> str:
-            target = self._file_path(normalized, write=False)
+            target, display, _resource_key = self._read_target(path)
+            try:
+                info = target.stat()
+            except FileNotFoundError as error:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+            except OSError as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+            if not stat.S_ISREG(info.st_mode):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             binary_size = _binary_file_size(target)
             if binary_size is not None:
                 return _bound_output(
@@ -239,14 +266,14 @@ class _LocalSandboxSession:
                 )
             digest, line_count, visible, selected_truncated = _read_selected_lines(
                 target,
-                normalized,
+                display,
                 offset,
                 selected_limit,
             )
             if offset >= line_count and line_count:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             rendered = _render_read(
-                normalized,
+                display,
                 digest,
                 line_count,
                 offset,
@@ -264,6 +291,7 @@ class _LocalSandboxSession:
         *,
         expected_hash: str | None = None,
     ) -> str:
+        self._reject_read_only()
         try:
             normalized = _normalize_path(path)
             expected = _validate_expected_hash(expected_hash)
@@ -301,6 +329,7 @@ class _LocalSandboxSession:
         *,
         expected_hash: str | None = None,
     ) -> str:
+        self._reject_read_only()
         try:
             normalized = _normalize_path(path)
             if not isinstance(old_text, str) or not old_text:
@@ -344,15 +373,29 @@ class _LocalSandboxSession:
         return await self._run_sync(operation)
 
     async def list_directory(self, path: str = ".") -> str:
-        normalized = _normalize_path(path)
         validate_request_size("list_directory", {"path": path})
 
         def operation() -> str:
-            target = self._directory_path(normalized)
+            target, display, resource_key = self._read_target(
+                path,
+                directory=True,
+            )
             try:
+                candidates: Iterable[Path] = target.iterdir()
+                if self._read_policy is not None:
+                    candidates = (
+                        entry
+                        for entry in candidates
+                        if self._policy_lists_entry(
+                            entry,
+                            display=display,
+                            parent=target,
+                            resource_key=resource_key,
+                        )
+                    )
                 entries = heapq.nsmallest(
                     _MAX_ITEMS + 1,
-                    target.iterdir(),
+                    candidates,
                     key=lambda item: item.name,
                 )
             except FileNotFoundError as error:
@@ -369,10 +412,30 @@ class _LocalSandboxSession:
                     incomplete = True
                     continue
                 if stat.S_ISLNK(info.st_mode):
+                    if self._read_policy is not None:
+                        continue
+                    if not self._visible_read_path(
+                        _child_display(display, entry, target),
+                        resource_key=resource_key,
+                        directory=False,
+                    ):
+                        continue
                     rows.append(entry.name + "@")
                 elif stat.S_ISDIR(info.st_mode):
+                    if not self._visible_read_path(
+                        _child_display(display, entry, target),
+                        resource_key=resource_key,
+                        directory=True,
+                    ):
+                        continue
                     rows.append(entry.name + "/")
                 elif stat.S_ISREG(info.st_mode):
+                    if not self._visible_read_path(
+                        _child_display(display, entry, target),
+                        resource_key=resource_key,
+                        directory=False,
+                    ):
+                        continue
                     rows.append(f"{entry.name}  ({info.st_size} bytes)")
             result = "\n".join(rows) if rows else "(empty directory)"
             if incomplete:
@@ -381,6 +444,29 @@ class _LocalSandboxSession:
 
         return await self._run_sync(operation)
 
+    def _policy_lists_entry(
+        self,
+        entry: Path,
+        *,
+        display: str,
+        parent: Path,
+        resource_key: str | None,
+    ) -> bool:
+        try:
+            info = entry.lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(info.st_mode):
+            return False
+        is_directory = stat.S_ISDIR(info.st_mode)
+        if not is_directory and not stat.S_ISREG(info.st_mode):
+            return False
+        return self._visible_read_path(
+            _child_display(display, entry, parent),
+            resource_key=resource_key,
+            directory=is_directory,
+        )
+
     async def search_files(
         self,
         pattern: str,
@@ -388,7 +474,6 @@ class _LocalSandboxSession:
         path: str = ".",
         include_glob: str | None = None,
     ) -> str:
-        normalized = _normalize_path(path)
         expression = _compile_pattern(pattern)
         if include_glob is not None and not isinstance(include_glob, str):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -404,7 +489,10 @@ class _LocalSandboxSession:
         )
 
         def operation() -> str:
-            target = self._resolve_path(normalized, allow_missing=False)
+            target, display, resource_key = self._read_target(
+                path,
+                directory=True,
+            )
             walk_state = _WalkState()
             if target.is_file():
                 candidates: Iterable[Path] = (target,)
@@ -417,7 +505,13 @@ class _LocalSandboxSession:
             row_chars = 0
             incomplete = False
             for candidate in candidates:
-                relative = _relative(self._root, candidate)
+                relative = _child_display(display, candidate, target)
+                if not self._visible_read_path(
+                    relative,
+                    resource_key=resource_key,
+                    directory=False,
+                ):
+                    continue
                 if include_glob is not None and not fnmatch.fnmatchcase(
                     relative, include_glob
                 ):
@@ -471,17 +565,27 @@ class _LocalSandboxSession:
         return await self._run_sync(operation)
 
     async def find_files(self, pattern: str, *, path: str = ".") -> str:
-        normalized = _normalize_path(path)
         _validate_glob(pattern)
         validate_request_size("find_files", {"pattern": pattern, "path": path})
 
         def operation() -> str:
-            directory = self._directory_path(normalized)
+            directory, display, resource_key = self._read_target(
+                path,
+                directory=True,
+            )
+            if not directory.is_dir():
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             matches: list[str] = []
             too_many = False
             walk_state = _WalkState()
             for target in _walk_files_and_directories(directory, walk_state):
-                relative = _relative(self._root, target)
+                relative = _child_display(display, target, directory)
+                if not self._visible_read_path(
+                    relative,
+                    resource_key=resource_key,
+                    directory=target.is_dir(),
+                ):
+                    continue
                 if target.is_symlink():
                     continue
                 if fnmatch.fnmatchcase(relative, pattern) or fnmatch.fnmatchcase(
@@ -503,6 +607,7 @@ class _LocalSandboxSession:
         return await self._run_sync(operation)
 
     async def create_directory(self, path: str) -> str:
+        self._reject_read_only()
         try:
             normalized = _normalize_path(path)
             validate_request_size("create_directory", {"path": path})
@@ -534,24 +639,35 @@ class _LocalSandboxSession:
         return await self._run_sync(operation)
 
     async def file_info(self, path: str) -> str:
-        normalized = _normalize_path(path)
         validate_request_size("file_info", {"path": path})
 
         def operation() -> str:
-            original = self._root / normalized
+            target, display, _resource_key = self._read_target(
+                path,
+                directory=None,
+            )
+            self._authorize_read(
+                display,
+                resource_key=_resource_key,
+                directory=target.is_dir(),
+            )
+            original = (
+                self._root / _normalize_path(path)
+                if self._read_policy is None
+                else target
+            )
             is_link = original.is_symlink()
-            target = self._resolve_path(normalized, allow_missing=False)
             try:
                 info = target.stat()
             except FileNotFoundError as error:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
             except OSError as error:
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            if not stat.S_ISREG(info.st_mode) and not stat.S_ISDIR(info.st_mode):
+            if not stat.S_ISDIR(info.st_mode) and not stat.S_ISREG(info.st_mode):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             kind = "directory" if stat.S_ISDIR(info.st_mode) else "file"
             parts = [
-                f"path: {normalized}",
+                f"path: {display}",
                 f"type: {kind}",
                 f"size: {info.st_size} bytes",
                 f"mode: {stat.S_IMODE(info.st_mode):04o}",
@@ -562,7 +678,7 @@ class _LocalSandboxSession:
                 if not binary:
                     digest, line_count, _visible, _truncated = _read_selected_lines(
                         target,
-                        normalized,
+                        display,
                         0,
                         1,
                     )
@@ -580,6 +696,7 @@ class _LocalSandboxSession:
         *,
         timeout_seconds: float | None = None,
     ) -> str:
+        self._reject_read_only()
         try:
             validate_request_size(
                 "run_command",
@@ -626,6 +743,7 @@ class _LocalSandboxSession:
         return _command_result(process)
 
     async def start_command(self, command: str) -> str:
+        self._reject_read_only()
         try:
             validate_request_size("start_command", {"command": command})
             _validate_command_input(command)
@@ -645,6 +763,7 @@ class _LocalSandboxSession:
         return _bound_output(f"command_id: {process.command_id}\nstatus: running")
 
     async def check_command(self, command_id: str) -> str:
+        self._reject_read_only()
         validate_request_size("check_command", {"command_id": command_id})
         process = await self._get_process(command_id)
         if process is None:
@@ -657,6 +776,7 @@ class _LocalSandboxSession:
         return _command_result(process, status=status)
 
     async def stop_command(self, command_id: str) -> str:
+        self._reject_read_only()
         try:
             validate_request_size("stop_command", {"command_id": command_id})
             if not command_id:
@@ -782,6 +902,111 @@ class _LocalSandboxSession:
                 )
                 raise AIError(code)
 
+    def _reject_read_only(self) -> None:
+        if self._read_policy is not None:
+            raise SandboxOperationRejected(ErrorCode.AUTHORIZATION_DENIED)
+
+    def _authorize_read(
+        self,
+        path: str,
+        *,
+        resource_key: str | None = None,
+        directory: bool | None = False,
+    ) -> None:
+        if self._read_policy is None:
+            return
+        if directory is None:
+            allowed = self._visible_read_path(
+                path,
+                resource_key=resource_key,
+                directory=False,
+            ) or self._visible_read_path(
+                path,
+                resource_key=resource_key,
+                directory=True,
+            )
+        else:
+            allowed = self._visible_read_path(
+                path,
+                resource_key=resource_key,
+                directory=directory,
+            )
+        if not allowed:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+
+    def _visible_read_path(
+        self,
+        path: str,
+        *,
+        resource_key: str | None = None,
+        directory: bool,
+    ) -> bool:
+        if self._read_policy is None:
+            return True
+        try:
+            return (
+                self._read_policy.may_descend(path, resource_key=resource_key)
+                if directory
+                else self._read_policy.allows(path, resource_key=resource_key)
+            )
+        except ValueError as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+
+    def _read_target(
+        self,
+        path: str,
+        *,
+        allow_missing: bool = False,
+        directory: bool | None = False,
+    ) -> tuple[Path, str, str | None]:
+        resource_key: str | None = None
+        base = self._root
+        if (
+            self._read_policy is not None
+            and isinstance(path, str)
+            and Path(path).is_absolute()
+        ):
+            candidate = Path(path)
+            resource_matches = tuple(
+                (key, source)
+                for key, source in self._resources.items()
+                if _inside_or_equal(source, candidate)
+            )
+            if resource_matches:
+                resource_key, base = max(
+                    resource_matches,
+                    key=lambda item: len(item[1].parts),
+                )
+            elif _inside_or_equal(self._root, candidate):
+                base = self._root
+            else:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            try:
+                relative = candidate.relative_to(base).as_posix()
+            except ValueError as error:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
+            normalized = _normalize_path(relative)
+        else:
+            normalized = _normalize_path(path)
+        self._authorize_read(
+            normalized,
+            resource_key=resource_key,
+            directory=directory,
+        )
+        target = self._resolve_path(
+            normalized,
+            allow_missing=allow_missing,
+            base=base,
+        )
+        if (
+            self._read_policy is None
+            and directory
+            and base == self._root
+            and (base / normalized).is_symlink()
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return target, normalized, resource_key
+
     def _ensure_open_sync(self) -> None:
         if self._state != "OPEN":
             code = (
@@ -819,11 +1044,20 @@ class _LocalSandboxSession:
             if current is not None:
                 self._operations.discard(current)
 
-    def _resolve_path(self, path: str, *, allow_missing: bool) -> Path:
+    def _resolve_path(
+        self,
+        path: str,
+        *,
+        allow_missing: bool,
+        base: Path | None = None,
+    ) -> Path:
         self._ensure_open_sync()
-        candidate = self._root / path
-        if candidate != self._root:
-            _check_parent_chain(self._root, candidate.parent)
+        trusted_root = self._root if base is None else base
+        candidate = trusted_root / path
+        if candidate != trusted_root:
+            _check_parent_chain(trusted_root, candidate.parent)
+        if self._read_policy is not None and candidate.is_symlink():
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         try:
             if candidate.is_symlink():
                 link = os.readlink(candidate)
@@ -836,7 +1070,7 @@ class _LocalSandboxSession:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
-        if not _inside(self._root, resolved):
+        if not _inside(trusted_root, resolved):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if not allow_missing and not resolved.exists():
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -1092,6 +1326,17 @@ def _inside(root: Path, target: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _inside_or_equal(root: Path, target: Path) -> bool:
+    return _inside(root, target)
+
+
+def _child_display(display: str, child: Path, parent: Path) -> str:
+    if child == parent:
+        return display
+    relative = child.relative_to(parent).as_posix()
+    return relative if display == "." else f"{display}/{relative}"
 
 
 def _relative(root: Path, target: Path) -> str:

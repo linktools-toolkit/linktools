@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, cast
 
-from pydantic_ai.messages import UserContent
-
 from ..agent import AgentBindingSnapshot
 from ..core import (
     ApprovalDecision,
@@ -34,7 +32,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingSnapshot, TaskEffectResolution, TaskEvent
-from ._input_contract import validate_user_input
+from ._input_contract import UserPromptInput, validate_user_input
 from ._snapshot_contract import RunSnapshot
 from .recovery import (
     ExecutionRecoveryEffect,
@@ -64,7 +62,7 @@ def _request_files(value: Sequence[str]) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     principal: Principal
     idempotency_key: str
     memory_scope: "str | None"
@@ -92,7 +90,7 @@ class ExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
@@ -108,7 +106,7 @@ class RetryExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
@@ -329,6 +327,13 @@ class ExecutionHistoryItem:
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
     content_included: bool = True
+    segment_sequence: "int | None" = None
+    request_sequence: "int | None" = None
+    tool_operation_id: "str | None" = None
+    started_at: "datetime | None" = None
+    finished_at: "datetime | None" = None
+    duration_ns: "int | None" = None
+    status: "str | None" = None
 
     def __post_init__(self) -> None:
         if self.sequence < 0 or not isinstance(self.item_kind, str) or not self.item_kind:
@@ -337,6 +342,12 @@ class ExecutionHistoryItem:
             raise TypeError("history content flag must be bool")
         if not self.content_included and self.content is not None:
             raise ValueError("omitted history content must be None")
+        if self.segment_sequence is not None and self.segment_sequence < 1:
+            raise ValueError("history segment sequence is invalid")
+        if self.request_sequence is not None and self.request_sequence < 1:
+            raise ValueError("history request sequence is invalid")
+        if self.duration_ns is not None and self.duration_ns < 0:
+            raise ValueError("history duration is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,9 +364,11 @@ class ModelInteractionItem:
     response: JsonValue | None
     status: str
     error_code: str | None
-    duration_ns: int
+    duration_ns: "int | None"
     usage: UsageMetrics | None
     content_included: bool = True
+    started_at: "datetime | None" = None
+    finished_at: "datetime | None" = None
 
     def __post_init__(self) -> None:
         if (
@@ -365,7 +378,7 @@ class ModelInteractionItem:
             or self.request_sequence < 1
             or self.step_index < 0
             or self.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
-            or self.duration_ns < 0
+            or self.duration_ns is not None and self.duration_ns < 0
         ):
             raise ValueError("model interaction item is invalid")
         if not isinstance(self.content_included, bool):
@@ -477,6 +490,7 @@ class UsageSummary:
     transport_retries: "int | None" = None
     unrecorded_executions: int = 0
     cutoffs: "tuple[UsageReadCutoff, ...]" = ()
+    unknown_duration_requests: int = 0
 
     def __post_init__(self) -> None:
         counts = (
@@ -491,6 +505,7 @@ class UsageSummary:
             self.cache_write_tokens,
             self.model_duration_ns,
             self.unknown_usage_requests,
+            self.unknown_duration_requests,
             self.unrecorded_executions,
         )
         if any(
@@ -507,6 +522,7 @@ class UsageSummary:
             != self.logical_requests
             or self.output_correction_retries > self.logical_requests
             or self.unknown_usage_requests > self.logical_requests
+            or self.unknown_duration_requests > self.logical_requests
         ):
             raise ValueError("usage summary request counts are inconsistent")
         if self.transport_retries is not None and (
@@ -610,6 +626,8 @@ class ExecutionHistoryReader(Protocol):
         tenant_id: str,
         cursor: "str | None",
         limit: int,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
+        include_content: bool = True,
     ) -> Page[ModelInteractionItem]: ...
 
     async def attachment_facts(
@@ -626,6 +644,7 @@ class ExecutionHistoryReader(Protocol):
         execution_id: str,
         *,
         tenant_id: str,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary: ...
 
 
@@ -677,7 +696,7 @@ class ListExecutionRequest:
 @dataclass(frozen=True, slots=True)
 class ResumeSessionRequest:
     principal: Principal
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     idempotency_key: str
     memory_scope: "str | None"
     mode: ExecutionMode
@@ -1086,6 +1105,7 @@ class ExecutionHistoryService(Protocol):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]": ...
 
     async def attachment_facts(
@@ -1102,6 +1122,7 @@ class ExecutionHistoryService(Protocol):
         execution_id: str,
         *,
         principal: Principal,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary: ...
 
 

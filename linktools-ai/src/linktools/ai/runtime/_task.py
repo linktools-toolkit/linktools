@@ -216,7 +216,7 @@ class TaskGraphRun(Generic[AppT]):
         if observer is not None:
             events = await self._capture_replay_events(snapshot)
             for event in events:
-                await observer(event)
+                await _call_observer(observer, event)
         return result
 
     async def inspect(self) -> TaskGraphView:
@@ -266,7 +266,7 @@ class TaskGraphRun(Generic[AppT]):
         events = self.watch()
         try:
             async for event in events:
-                await observer(event)
+                await _call_observer(observer, event)
         finally:
             await events.aclose()
 
@@ -491,7 +491,7 @@ class TaskGraphRun(Generic[AppT]):
         if graph_cutoff < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        captured: dict[str, tuple[str, ExecutionView, int]] = {}
+        captured: dict[str, tuple[str, ExecutionView, int, int]] = {}
         for state in snapshot.node_states:
             execution_id = state.execution_id
             if execution_id is None:
@@ -515,6 +515,7 @@ class TaskGraphRun(Generic[AppT]):
                 state.node_id,
                 root,
                 root.event_sequence,
+                0,
             )
             for child in await self._runtime.execution.list_children(
                 root.execution_id,
@@ -525,10 +526,13 @@ class TaskGraphRun(Generic[AppT]):
                     or child.root_execution_id != root.root_execution_id
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if child.execution_id in captured:
+                    continue
                 captured[child.execution_id] = (
                     state.node_id,
                     child,
                     child.event_sequence,
+                    1,
                 )
 
         events: list[TaskGraphRunEvent] = []
@@ -570,12 +574,12 @@ class TaskGraphRun(Generic[AppT]):
                 0
                 if captured[value][1].parent_execution_id is None
                 else 1,
+                captured[value][3],
                 value,
             ),
         ):
-            node_id, view, cutoff = captured[execution_id]
+            node_id, view, cutoff, depth = captured[execution_id]
             sequence = 0
-            depth = 0 if view.parent_execution_id is None else 1
             while sequence < cutoff:
                 page = await self._runtime.event.list(
                     execution_id,
@@ -667,6 +671,18 @@ def _normalize_execution_sequences(
 
 def _is_task_execution_id(value: str) -> bool:
     return value.startswith("task-execution-") or value.startswith("wait:")
+
+
+async def _call_observer(
+    observer: "Callable[[TaskGraphRunEvent], Awaitable[None]]",
+    event: TaskGraphRunEvent,
+) -> None:
+    try:
+        await observer(event)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        raise AIError(ErrorCode.TASK_OBSERVER_FAILED) from error
 
 
 __all__ = ["TaskGraphRun"]

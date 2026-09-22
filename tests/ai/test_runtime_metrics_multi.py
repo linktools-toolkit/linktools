@@ -13,9 +13,7 @@ from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.observe import MetricQuery, MetricWindow, Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import FilesystemObjectStore
-from linktools.ai.workspace import Workspace
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -55,16 +53,10 @@ class _Models:
         return _ModelBinding()
 
 
-def _workspace(path: Path) -> Workspace:
-    path.mkdir(parents=True)
-    agent_path = path / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
-    )
-    return Workspace.load(path)
+def _agent_group() -> CapabilityGroup[object]:
+    group = CapabilityGroup[object]("application")
+    group.agent("default", model="default", allow_tools=())
+    return group
 
 
 @pytest.mark.asyncio
@@ -93,18 +85,18 @@ async def test_runtime_states_share_metrics_without_lifecycle_coupling(
     sql_state = RuntimeState.sql(sql_engine)
 
     cases = (
-        (_workspace(tmp_path / "workspace-fs"), filesystem_state, "filesystem"),
-        (_workspace(tmp_path / "workspace-sqlite"), sqlite_state, "sqlite"),
-        (_workspace(tmp_path / "workspace-sql"), sql_state, "sql"),
+        (filesystem_state, "filesystem"),
+        (sqlite_state, "sqlite"),
+        (sql_state, "sql"),
     )
 
     try:
-        for workspace, state, label in cases:
+        for state, label in cases:
             async with Runtime.open(
                 "default",
                 models=_Models(),  # type: ignore[arg-type]
                 state=state,
-                capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+                capabilities=(_agent_group(),),
                 metrics=metrics,
             ) as runtime:
                 result = await runtime.agent("default").run(

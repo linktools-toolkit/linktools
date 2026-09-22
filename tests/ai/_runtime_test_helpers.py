@@ -4,7 +4,6 @@
 
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from pydantic_ai import Tool
@@ -23,9 +22,7 @@ from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._tool_boundary import ManagedToolDescriptor
 from linktools.ai.runtime.state._contracts import StoredUserInput
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import StoredPayload
-from linktools.ai.workspace import Workspace
 
 
 def execution_owner_fields(prompt: str = "prompt") -> dict[str, object]:
@@ -128,15 +125,3 @@ class RuntimeUsageModels:
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _RuntimeUsageModelBinding()
-
-
-def runtime_usage_workspace(path: Path) -> Workspace:
-    path.mkdir(parents=True)
-    agent_path = path / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
-    )
-    return Workspace.load(path)

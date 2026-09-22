@@ -3,6 +3,7 @@
 """Sandbox lifecycle boundary regressions."""
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,6 +16,8 @@ from linktools.ai.runtime._compaction import (
     RuntimeCompactionPolicy,
 )
 from linktools.ai.workspace import SandboxOperationRejected, SandboxResource, Workspace
+from linktools.ai.workspace import BubblewrapSandbox, ReadOnlySandboxPolicy
+from linktools.ai.workspace import _bubblewrap
 from linktools.ai.workspace._bubblewrap import (
     _BubblewrapSandboxSession,
     _build_bwrap_args,
@@ -39,6 +42,54 @@ def _context() -> RunContext[None]:
         usage=RunUsage(),
         run_id="run",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Bubblewrap requires Linux")
+@pytest.mark.parametrize("hidden_paths", ((), ("private/nested",)))
+async def test_read_only_sandbox_cleans_locks_after_validation_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hidden_paths: tuple[str, ...],
+) -> None:
+    root = tmp_path / "workspace"
+    runtime_root = tmp_path / "rootfs"
+    root.mkdir()
+    (root / ".linktools").mkdir()
+    runtime_root.mkdir()
+    lock_root = tmp_path / "locks"
+
+    def create_locks(*, prefix: str) -> str:
+        lock_root.mkdir()
+        return str(lock_root)
+
+    def reject_rootfs(*args: object) -> None:
+        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+
+    monkeypatch.setattr(_bubblewrap.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(_bubblewrap.os, "pidfd_open", lambda pid: -1, raising=False)
+    monkeypatch.setattr(_bubblewrap.tempfile, "mkdtemp", create_locks)
+    monkeypatch.setattr(_bubblewrap, "_validate_rootfs", reject_rootfs)
+    sandbox = BubblewrapSandbox(
+        runtime_root=runtime_root,
+        bwrap_executable=Path(sys.executable).resolve(),
+        hidden_paths=hidden_paths,
+        read_policy=ReadOnlySandboxPolicy(("**",)),
+    )
+    with pytest.raises(AIError) as raised:
+        await sandbox.open(root=root)
+    assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+    assert not lock_root.exists()
+    assert tuple(root.iterdir()) == (root / ".linktools",)
+
+
+def test_read_only_bubblewrap_mounts_workspace_read_only(tmp_path: Path) -> None:
+    arguments = _build_bwrap_args(
+        root=tmp_path, runtime_root=tmp_path / "runtime",
+        bwrap=Path("/usr/bin/bwrap"), lock_root=tmp_path / "locks",
+        resources=(), hidden_paths=(), worker_resources=[],
+        read_policy=ReadOnlySandboxPolicy(("**",)),
+    )
+    workspace_mount = arguments.index("/workspace")
+    assert arguments[workspace_mount - 2] == "--ro-bind"
 
 
 class _FakeSession:

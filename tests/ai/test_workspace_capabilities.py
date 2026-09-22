@@ -39,7 +39,7 @@ from pydantic_ai.usage import RunUsage
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup("workspace", workspace=workspace, discover_workspace_assets=False)._contributions
+        CapabilityGroup("workspace", workspace=workspace)._contributions
     )
 
 
@@ -486,7 +486,7 @@ async def test_disabled_sandbox_fails_before_workspace_tool_execution(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_workspace_group_can_disable_default_asset_discovery(
+async def test_workspace_group_does_not_discover_declarations(
     tmp_path: Path,
 ) -> None:
     storage = tmp_path / ".linktools"
@@ -500,7 +500,7 @@ async def test_workspace_group_can_disable_default_asset_discovery(
         sandbox=sandbox,
     )
 
-    group = CapabilityGroup("workspace", workspace=workspace, discover_workspace_assets=False)
+    group = CapabilityGroup("workspace", workspace=workspace)
     frozen = await group.freeze()
 
     assert group.workspace is workspace

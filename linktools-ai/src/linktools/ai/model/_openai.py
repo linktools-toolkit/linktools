@@ -4,7 +4,7 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
@@ -42,6 +42,11 @@ class _OpenAIModelBinding:
     max_retries: int = 2
     retry_delay: "int | float" = 1.0
     max_tokens: "int | None" = None
+    connection_resolver: "Callable[[], Mapping[str, object]] | None" = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         model = self.model.strip().removeprefix("openai:")
@@ -49,6 +54,10 @@ class _OpenAIModelBinding:
             raise ValueError("OpenAI model binding is incomplete")
         if type(self.vision) is not bool:
             raise ValueError("OpenAI model vision must be bool")
+        if self.connection_resolver is not None and not callable(
+            self.connection_resolver
+        ):
+            raise ValueError("OpenAI connection resolver must be callable")
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "base_url", _normalize_base_url(self.base_url))
         if self.api_key is not None and not self.api_key.strip():
@@ -83,13 +92,17 @@ class _OpenAIModelBinding:
         return canonical_sha256({"contract": "model-v1", **self.semantic_payload})
 
     def materialize(self) -> Model:
+        connection = _resolved_connection(self)
         try:
-            provider = OpenAIProvider(base_url=self.base_url, api_key=self.api_key)
+            provider = OpenAIProvider(
+                base_url=connection["base_url"],
+                api_key=connection["api_key"],
+            )
             provider.client.max_retries = 0
 
             settings: ModelSettings = {}
-            if self.timeout is not None:
-                settings["timeout"] = self.timeout
+            if connection["timeout"] is not None:
+                settings["timeout"] = connection["timeout"]
             if self.max_tokens is not None:
                 settings["max_tokens"] = self.max_tokens
 
@@ -111,14 +124,70 @@ class _OpenAIModelBinding:
             "OpenAI model materialized: route=%s model=%s credential=%s",
             self.route_id,
             self.model,
-            self.api_key is not None,
+            connection["api_key"] is not None,
         )
         return _RetryingModel(
             model,
-            self.max_retries,
-            self.retry_delay,
+            int(connection["max_retries"]),
+            connection["retry_delay"],
             vision=self.vision,
         )
+
+
+def _resolved_connection(binding: _OpenAIModelBinding) -> dict[str, object]:
+    values: dict[str, object] = {
+        "base_url": binding.base_url,
+        "api_key": binding.api_key,
+        "timeout": binding.timeout,
+        "max_retries": binding.max_retries,
+        "retry_delay": binding.retry_delay,
+    }
+    resolver = binding.connection_resolver
+    if resolver is None:
+        return values
+    try:
+        overrides = resolver()
+    except AIError:
+        raise
+    except Exception as error:
+        raise AIError(
+            ErrorCode.MODEL_CONFIG_INVALID,
+            safe_details={"reason": "connection_resolver_failed"},
+        ) from error
+    if not isinstance(overrides, Mapping):
+        error = TypeError("connection resolver must return a mapping")
+        raise AIError(
+            ErrorCode.MODEL_CONFIG_INVALID,
+            safe_details={"reason": "connection_resolver_invalid"},
+        ) from error
+    allowed = frozenset(values)
+    if any(key not in allowed for key in overrides):
+        error = ValueError("connection resolver returned an unsupported field")
+        raise AIError(
+            ErrorCode.MODEL_CONFIG_INVALID,
+            safe_details={"reason": "connection_resolver_field_invalid"},
+        ) from error
+    values.update(overrides)
+    try:
+        if values["base_url"] is not None and not isinstance(
+            values["base_url"], str
+        ):
+            raise ValueError("base_url must be a string")
+        values["base_url"] = _normalize_base_url(values["base_url"])
+        _validate_optional_string("api_key", values["api_key"])
+        if isinstance(values["api_key"], str) and not values["api_key"].strip():
+            values["api_key"] = None
+        _validate_positive_number("timeout", values["timeout"])
+        if values["max_retries"] is None:
+            raise ValueError("max_retries must be a non-negative integer")
+        _validate_non_negative_integer("max_retries", values["max_retries"])
+        _validate_non_negative_number("retry_delay", values["retry_delay"])
+    except (TypeError, ValueError) as error:
+        raise AIError(
+            ErrorCode.MODEL_CONFIG_INVALID,
+            safe_details={"reason": "connection_resolver_value_invalid"},
+        ) from error
+    return values
 
 
 def _validate_positive_number(name: str, value: "int | float | None") -> None:
@@ -131,6 +200,11 @@ def _validate_positive_number(name: str, value: "int | float | None") -> None:
         or value <= 0
     ):
         raise ValueError(f"{name} must be a finite positive number")
+
+
+def _validate_optional_string(name: str, value: object) -> None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{name} must be a string")
 
 
 def _validate_positive_integer(name: str, value: "int | None") -> None:

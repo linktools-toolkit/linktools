@@ -33,9 +33,8 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionTerminalCommit,
     ResultRecord,
 )
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, InMemoryObjectStore, PayloadPolicy
-from linktools.ai.workspace import Workspace
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
@@ -77,17 +76,6 @@ class _DiagnosticModels:
         if dict(payload) != _DiagnosticModelBinding.semantic_payload:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _DiagnosticModelBinding()
-
-
-def _workspace(root: Path) -> Workspace:
-    agent_path = root / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
-    )
-    return Workspace.load(root)
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -195,7 +183,6 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
     tmp_path: Path,
     backend: str,
 ) -> None:
-    workspace = _workspace(tmp_path / "workspace")
     diagnostics = ErrorDiagnostics.from_exception(
         RuntimeError("provider disconnected")
     )
@@ -222,7 +209,6 @@ async def test_failed_diagnostics_survive_restart_through_public_result_and_even
             "default",
             models=_DiagnosticModels(),  # type: ignore[arg-type]
             state=reopened,
-            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
         ) as runtime:
             result = await runtime.execution.result(
                 started.execution_id,

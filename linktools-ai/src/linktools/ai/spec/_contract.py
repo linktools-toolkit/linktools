@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import ClassVar, Literal
 
+from ..asset import AssetKey
 from ..core import (
     ThinkingEffort,
     ThinkingValue,
@@ -257,6 +258,7 @@ class MCPServerSpec:
     id: str
     command: str
     args: "tuple[str, ...]" = ()
+    resource_root: "AssetKey | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -269,6 +271,8 @@ class MCPServerSpec:
         if any(not isinstance(item, str) for item in args):
             raise TypeError("MCP server args must be strings")
         object.__setattr__(self, "args", args)
+        if self.resource_root is not None and not isinstance(self.resource_root, AssetKey):
+            raise TypeError("MCP resource root must be an AssetKey")
 
 
 __all__ = [

@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 
@@ -460,6 +458,161 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
 
 
 
+@pytest.mark.asyncio
+async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
+    now = datetime.now(timezone.utc)
+
+    class GraphService:
+        async def snapshot(self, graph_id: str, *, principal: Principal):
+            del principal
+            assert graph_id == "graph"
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "graph_id": graph_id,
+                    "status": TaskStatus.RUNNING,
+                    "event_sequence": 1,
+                    "node_states": (
+                        type(
+                            "State",
+                            (),
+                            {
+                                "node_id": "node",
+                                "status": TaskStatus.RUNNING,
+                                "result_digest": None,
+                                "execution_id": "root",
+                                "error_code": None,
+                                "error_digest": None,
+                            },
+                        )(),
+                    ),
+                },
+            )()
+
+        async def list_events(
+            self,
+            graph_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+            limit: int = 100,
+        ):
+            del principal, limit
+            values = (
+                TaskEvent(
+                    1,
+                    graph_id,
+                    1,
+                    TaskEventType.GRAPH_ADMITTED,
+                    now,
+                    TaskStatus.PENDING,
+                ),
+            )
+            return Page(tuple(value for value in values if value.sequence > after_sequence))
+
+    views = {
+        "root": ExecutionView(
+            "root",
+            "agent",
+            ExecutionStatus.STARTED,
+            ExecutionLineageKind.RUN,
+            None,
+            "root",
+            None,
+            event_sequence=1,
+        ),
+        "child": ExecutionView(
+            "child",
+            "child-agent",
+            ExecutionStatus.STARTED,
+            ExecutionLineageKind.SUBAGENT,
+            "root",
+            "root",
+            "call-child",
+            event_sequence=1,
+        ),
+        "grandchild": ExecutionView(
+            "grandchild",
+            "grandchild-agent",
+            ExecutionStatus.STARTED,
+            ExecutionLineageKind.SUBAGENT,
+            "child",
+            "root",
+            "call-grandchild",
+            event_sequence=1,
+        ),
+    }
+
+    class ExecutionService:
+        async def inspect(self, execution_id: str, *, principal: Principal):
+            del principal
+            return views[execution_id]
+
+        async def list_children(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+        ):
+            del principal
+            assert execution_id == "root"
+            return (views["child"],)
+
+    class EventService:
+        async def list(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+            limit: int = 100,
+        ):
+            del principal, limit
+            values = (
+                ExecutionEvent(execution_id, 1, "EXECUTION_STARTED", {"raw": "one"}),
+                ExecutionEvent(execution_id, 2, "LATE_EVENT", {"raw": "late"}),
+            )
+            return Page(tuple(value for value in values if value.sequence > after_sequence))
+
+    runtime = type(
+        "ReplayRuntime",
+        (),
+        {
+            "namespace": "watch-test",
+            "graph": GraphService(),
+            "execution": ExecutionService(),
+            "event": EventService(),
+        },
+    )()
+    run = TaskGraphRun(
+        runtime,
+        "graph",
+        Principal("owner", "tenant"),
+        _watch_tree,
+    )
+    observed: list[TaskGraphRunEvent] = []
+
+    async def observer(event: TaskGraphRunEvent) -> None:
+        observed.append(event)
+
+    await run.replay(observer)
+
+    execution_events = [
+        event.event
+        for event in observed
+        if isinstance(event.event, ExecutionTreeEvent)
+    ]
+    assert [
+        (event.execution_id, event.depth, event.event.durable_sequence)
+        for event in execution_events
+    ] == [
+        ("root", 0, 1),
+        ("child", 1, 1),
+    ]
+    assert all(event.event.payload == {} for event in execution_events)
+
+
 class _WaitGraphService:
     def __init__(self, mode: str) -> None:
         self.mode = mode
@@ -635,8 +788,9 @@ async def test_task_graph_observer_error_cleans_waiter_without_cancelling_graph(
     async def observer(_event: TaskGraphRunEvent) -> None:
         raise RuntimeError("observer failed")
 
-    with pytest.raises(RuntimeError, match="observer failed"):
+    with pytest.raises(AIError) as raised:
         await run.wait(observer=observer)
+    assert raised.value.code is ErrorCode.TASK_OBSERVER_FAILED
 
     await asyncio.wait_for(service.wait_cancelled.wait(), 1)
     await _assert_no_graph_observer_tasks()

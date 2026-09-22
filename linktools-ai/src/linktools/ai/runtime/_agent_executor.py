@@ -115,6 +115,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ..spec import MCPServerSpecCodec
 from ..storage import ObjectRef, ObjectStore
 from ..workspace import LocalSandbox, SandboxResource, SandboxSession, Workspace
 
@@ -126,7 +127,7 @@ from ._capture import RuntimeCaptureStore
 from ._compaction import RuntimeCompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
-from ._mcp import materialize_mcp_capabilities
+from ._mcp import close_mcp_resources, materialize_mcp_capabilities
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
@@ -247,12 +248,14 @@ class AgentExecutor:
         skill_sources: SkillSourceRegistry,
         *,
         skill_snapshot_store: ObjectStore | None = None,
+        mcp_resource_store: ObjectStore | None = None,
         metrics: MetricRecorder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
         self._skill_snapshot_store = skill_snapshot_store
+        self._mcp_resource_store = mcp_resource_store
         self._metrics = metrics
 
     async def execute(self, scope: _RunScope) -> AgentExecutionOutcome:
@@ -548,6 +551,7 @@ class AgentExecutor:
             deferred_pause_sink=capture_deferred_step,
             metrics=self._metrics,
             model_journal=model_journal,
+            mcp_resource_store=self._mcp_resource_store,
         )
         capabilities = cast(
             "tuple[AbstractCapability[AgentContext[object]], ...]",
@@ -581,61 +585,79 @@ class AgentExecutor:
             deferred_kwargs["deferred_tool_results"] = rehydrate_deferred_tool_results(
                 scope.deferred_tool_results
             )
-        final_result = await agent.run(
-            user_prompt,
-            deps=scope.context,
-            message_history=scope.history or None,
-            conversation_id=scope.conversation_id,
-            usage_limits=usage_limits,
-            usage=run_usage,
-            capabilities=capabilities,
-            **deferred_kwargs,
-        )
-        output = final_result.output
-        if isinstance(output, DeferredToolRequests):
-            if deferred_step_index is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _validate_deferred_requests(output)
-            return output
-        run = await scope.step_store.get_run(run_id=scope.step_run_id)
-        snapshot = await scope.step_store.latest_snapshot(run_id=scope.step_run_id)
-        operations = (
-            ()
-            if scope.tool_operations is None
-            else await scope.tool_operations.list_operations()
-        )
-        unresolved = tuple(
-            operation
-            for operation in operations
-            if operation.status
-            not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
-        )
-        if (
-            run is None
-            or snapshot is None
-            or unresolved
-            or run.conversation_id != scope.conversation_id
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if binding.output_binding.mode == "text":
-            if not isinstance(output, AssistantTextOutput):
-                raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
-            output_payload: object = output.model_dump(mode="json")
-        elif isinstance(output, Mapping):
-            output_payload = dict(output)
-        else:
-            raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
         try:
-            payload = normalize_json_value(output_payload)
-        except (TypeError, ValueError) as error:
-            raise AIError(
-                ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
-            ) from error
-        binding.output_binding.validate_payload(payload)
-        usage = _usage_metrics(run_usage)
-        return AgentExecutionResult(
-            scope.step_run_id, payload, final_result.all_messages(), usage
-        )
+            final_result = await agent.run(
+                user_prompt,
+                deps=scope.context,
+                message_history=scope.history or None,
+                conversation_id=scope.conversation_id,
+                usage_limits=usage_limits,
+                usage=run_usage,
+                capabilities=capabilities,
+                **deferred_kwargs,
+            )
+            output = final_result.output
+            if isinstance(output, DeferredToolRequests):
+                if deferred_step_index is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                _validate_deferred_requests(output)
+                return output
+            run = await scope.step_store.get_run(run_id=scope.step_run_id)
+            snapshot = await scope.step_store.latest_snapshot(run_id=scope.step_run_id)
+            operations = (
+                ()
+                if scope.tool_operations is None
+                else await scope.tool_operations.list_operations()
+            )
+            unresolved = tuple(
+                operation
+                for operation in operations
+                if operation.status
+                not in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED}
+            )
+            if (
+                run is None
+                or snapshot is None
+                or unresolved
+                or run.conversation_id != scope.conversation_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if binding.output_binding.mode == "text":
+                if not isinstance(output, AssistantTextOutput):
+                    raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
+                output_payload: object = output.model_dump(mode="json")
+            elif isinstance(output, Mapping):
+                output_payload = dict(output)
+            else:
+                raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
+            try:
+                payload = normalize_json_value(output_payload)
+            except (TypeError, ValueError) as error:
+                raise AIError(
+                    ErrorCode.OUTPUT_VALIDATION_FAILED, retryable=False
+                ) from error
+            binding.output_binding.validate_payload(payload)
+            usage = _usage_metrics(run_usage)
+            return AgentExecutionResult(
+                scope.step_run_id, payload, final_result.all_messages(), usage
+            )
+        finally:
+            await close_mcp_resources(capabilities)
+
+
+def _mcp_resource_snapshots(binding: AgentBinding) -> dict[str, ObjectRef]:
+    codec = MCPServerSpecCodec()
+    result: dict[str, ObjectRef] = {}
+    for pin in binding.snapshot.selected:
+        if pin.kind != "mcp":
+            continue
+        server, reference = codec.from_frozen_payload(pin.contract)
+        if reference is None:
+            continue
+        if server.id in result:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result[server.id] = reference
+    return result
 
 
 async def _close_sandbox_session(session: SandboxSession) -> None:
@@ -760,6 +782,7 @@ async def _materialize_agent(
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
     model_journal: ModelRequestJournal,
+    mcp_resource_store: ObjectStore | None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -920,6 +943,8 @@ async def _materialize_agent(
                     scope.context.principal.tenant_id,
                 ),
                 execution_root=scope.mcp_cwd,
+                resource_objects=mcp_resource_store,
+                resource_snapshots=_mcp_resource_snapshots(scope.binding),
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
                 background_tasks=scope.background_tasks,

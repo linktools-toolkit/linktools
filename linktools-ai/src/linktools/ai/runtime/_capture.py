@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol, cast
 
-from pydantic_ai.messages import ModelMessage, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.settings import ModelSettings
 
@@ -69,6 +69,7 @@ class RuntimeCaptureStore:
         self._step_run_id = step_run_id
         self._run: RunRecord | None = None
         self._event_sequence = 0
+        self._request_sequence_by_tool_call: dict[str, int] = {}
         self._initial_attachments = tuple(dict(value) for value in initial_attachments)
         self._accepted_attachment_ids = {
             attachment_id
@@ -361,6 +362,9 @@ class RuntimeCaptureStore:
             )
         )
 
+    def request_sequence_for_tool_call(self, tool_call_id: str) -> int | None:
+        return self._request_sequence_by_tool_call.get(tool_call_id)
+
     async def record_model_event(
         self,
         fact: ModelRequestFact,
@@ -382,6 +386,22 @@ class RuntimeCaptureStore:
         kind = kinds.get(phase)
         if kind is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            fact.purpose == "agent"
+            and phase == "completed"
+            and response is not None
+        ):
+            for part in response.parts:
+                if not isinstance(part, ToolCallPart):
+                    continue
+                call_id = part.tool_call_id
+                if (
+                    not isinstance(call_id, str)
+                    or not call_id
+                    or call_id in self._request_sequence_by_tool_call
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._request_sequence_by_tool_call[call_id] = fact.request_sequence
         metadata = fact.metadata(
             include_observation=include_observation and fact.duration_ns is not None
         )

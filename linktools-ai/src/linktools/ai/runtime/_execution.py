@@ -43,6 +43,7 @@ from ..core import (
     ResourceRef,
     StopReason,
     UsageMetrics,
+    WorkspaceFileInput,
     canonical_json_bytes,
     canonical_sha256,
     normalize_json_value,
@@ -89,6 +90,7 @@ from .service_api import (
     ModelInteractionItem,
     RetryExecutionRequest,
     TranscriptItem,
+    UsageReadCutoff,
 )
 from .service_api import (
     project_execution_view as _project_execution_view,
@@ -465,22 +467,31 @@ class DefaultExecutionService:
         if self._input_materializer is None:
             if request.files:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            canonical_prompt = validate_user_input(request.user_prompt)
+            if not isinstance(canonical_prompt, str) and any(
+                isinstance(item, WorkspaceFileInput)
+                for item in canonical_prompt
+            ):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             canonical_files = ()
         else:
+            canonical_prompt = await self._input_materializer.canonicalize_input(
+                request.user_prompt
+            )
             canonical_files = await self._input_materializer.canonicalize_files(
                 request.files
             )
         if self._input_materializer is None:
-            intent = input_intent(request.user_prompt, canonical_files)
+            intent = input_intent(canonical_prompt, canonical_files)
         else:
             intent = self._input_materializer.intent(
-                request.user_prompt,
+                canonical_prompt,
                 canonical_files,
             )
         return _ExecutionStartContext(
             request=replace(
                 request,
-                user_prompt=validate_user_input(request.user_prompt),
+                user_prompt=canonical_prompt,
                 files=canonical_files,
             ),
             canonical_files=canonical_files,
@@ -3434,6 +3445,7 @@ class DefaultExecutionService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
         if self._history_service is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -3443,6 +3455,7 @@ class DefaultExecutionService:
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            cutoffs=cutoffs,
         )
 
     async def _load_authorized(

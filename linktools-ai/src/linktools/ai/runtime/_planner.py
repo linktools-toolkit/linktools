@@ -32,8 +32,8 @@ from ..core import (
     ResourceKind,
     ResourceRef,
     TaskStatus,
+    WorkspaceFileInput,
     ThinkingValue,
-    canonical_json_bytes,
     canonical_sha256,
     deterministic_id,
     normalize_json_value,
@@ -46,6 +46,7 @@ from ..storage import ObjectRef, ObjectStore
 from ..task import (
     TaskBindingSnapshot,
     TaskDependency,
+    TaskDependencyState,
     TaskEffectResolution,
     TaskDependencyResult,
     TaskGraph,
@@ -62,8 +63,19 @@ from ..task import (
     TaskResultRecord,
     TaskResultRef,
 )
-from ._agent_task import _AgentTaskNodeHandler, _execution_failure
-from ._input import CanonicalUserInput, task_prompt_draft, validate_user_input
+from ._agent_task import (
+    _AgentTaskNodeHandler,
+    _dependency_identity_payload,
+    _execution_failure,
+)
+from ._input import (
+    CanonicalUserInput,
+    ExecutionInputMaterializer,
+    decode_task_prompt_draft,
+    task_prompt_draft,
+    validate_user_input,
+)
+from .state._codec import encode_domain
 from ._object import RuntimeObjectKeyFactory
 from ._task_capability_snapshot import (
     FrozenTaskCapabilities,
@@ -231,7 +243,7 @@ class _TaskExpansionContext:
         self,
         agent_id: str,
         node_id: str,
-        user_prompt: str | Sequence[UserContent],
+        user_prompt: str | Sequence[UserContent | WorkspaceFileInput],
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
@@ -246,6 +258,7 @@ class _TaskExpansionContext:
         files: Sequence[str] = (),
         session_id: str | None = None,
         memory_scope: str | None = None,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         node = self._build_agent_task(
             agent_id,
@@ -264,6 +277,7 @@ class _TaskExpansionContext:
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
+            dependency_policy=dependency_policy,
         )
         self._generated_agent_tasks[node.node_id] = node
         return node
@@ -313,6 +327,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         task_durable: bool = False,
         execution_durable: bool = True,
         recovery_durable: bool = True,
+        input_materializer: ExecutionInputMaterializer | None = None,
     ) -> None:
         self._app = app
         self._namespace = namespace
@@ -322,6 +337,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._execution = execution
         self._task_state = task_state
         self._task_objects = task_objects
+        self._input_materializer = input_materializer
         self._artifact_state = artifact_state
         self._artifact_objects = artifact_objects
         self._object_key_factory = object_key_factory
@@ -335,6 +351,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             compiler,
             session=session,
             release_dependency_hold=release_dependency_hold,
+            input_materializer=input_materializer,
         )
         self._deferred_input = _DeferredInputHandler()
         values: dict[tuple[str, int], TaskNodeHandler[AppT]] = {}
@@ -378,12 +395,57 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self,
         admission: TaskGraphAdmission,
         graph: TaskGraph,
-    ) -> None:
+    ) -> TaskGraph:
         frozen = await self._capability_snapshots.capture(
             admission,
             graph,
         )
         self._frozen_capabilities[admission.graph_id] = frozen
+        return TaskGraph(
+            graph.graph_id,
+            tuple(
+                [
+                    await self._freeze_node_input(node, admission.principal.tenant_id)
+                    for node in graph.nodes
+                ]
+            ),
+        )
+
+    async def _freeze_node_input(self, node: TaskNode, tenant_id: str) -> TaskNode:
+        body = node.input
+        prompt = body.get("user_prompt")
+        if body.get("type") != self._agent.type or not isinstance(prompt, Mapping):
+            return node
+        if prompt.get("kind") != "task-user-content-v1":
+            return node
+        materializer = self._input_materializer
+        if materializer is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        draft = decode_task_prompt_draft(prompt)
+        canonical = await materializer.canonicalize_input(draft)
+        content = await materializer.materialize(canonical, ())
+        stored = await materializer.store(content, tenant_id=tenant_id)
+        body["user_prompt"] = {
+            "kind": "stored-user-content-v1",
+            "intent": prompt["intent"],
+            "value": encode_domain(stored),
+        }
+        _logger.info("task input frozen: node=%s", node.node_id)
+        return TaskNode(
+            node.node_id,
+            node.dependencies,
+            input=body,
+            budget_cost=node.budget_cost,
+            expander=node.expander,
+            input_refs=node.input_refs,
+            timeout_seconds=node.timeout_seconds,
+            max_attempts=node.max_attempts,
+            retry_delay_seconds=node.retry_delay_seconds,
+            output_schema=node.output_schema,
+            output_contract=node.output_contract,
+            effect=node.effect,
+            dependency_policy=node.dependency_policy,
+        )
 
     async def load_admission(
         self,
@@ -465,6 +527,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             output_schema=node.output_schema,
             output_contract=node.output_contract,
             effect=node.effect,
+            dependency_policy=node.dependency_policy,
         )
 
     async def prepare_node(
@@ -693,6 +756,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     def admit_node(self, node: TaskNode) -> TaskNode:
         task_type, task_version, body = _parse_node(node, request=True)
+        prompt = body.get("user_prompt")
+        if task_type == self._agent.type and isinstance(prompt, Mapping):
+            if prompt.get("kind") == "stored-user-content-v1":
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         handler = self._handler(task_type, task_version, request=True)
         if node.expander is not None:
             self._resolve_expander(node.expander, request=True)
@@ -718,6 +785,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             output_schema=node.output_schema,
             output_contract=_output_contract(handler, node.output_schema),
             effect=_handler_effect(handler),
+            dependency_policy=node.dependency_policy,
         )
 
     def validate_request(self, graph: TaskGraph) -> None:
@@ -839,6 +907,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 output_schema=node.output_schema,
                 output_contract=node.output_contract,
                 effect=node.effect,
+                dependency_policy=node.dependency_policy,
             )
             if canonical.input != node.input:
                 raise AIError(
@@ -865,11 +934,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         principal = invocation.principal
         correlation = invocation.correlation
         dependency_results = invocation.dependency_results
+        dependency_states = invocation.dependency_states
         task_type, task_version, body = _parse_node(node, request=False)
         handler = self._handler(task_type, task_version, request=False)
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
+            dependency_states=dependency_states,
             principal=principal,
             graph_id=graph_id,
         )
@@ -880,6 +951,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 principal=principal,
                 correlation=correlation,
                 dependencies=dependencies,
+                dependency_states=dependency_states,
                 dependency_reader=lambda dependency: self._read_dependency(
                     dependency,
                     principal=principal,
@@ -900,6 +972,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             node,
             principal,
             dependencies,
+            dependency_states,
         )
         handle = await self._execution.start_task(
             binding,
@@ -951,6 +1024,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             handler,
             body,
             dependencies,
+            dependency_states,
             principal=principal,
             correlation=correlation,
             graph_id=graph_id,
@@ -963,6 +1037,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         handler: TaskNodeHandler[AppT],
         body: Mapping[str, JsonValue],
         dependencies: Mapping[str, TaskDependency],
+        dependency_states: Mapping[str, TaskDependencyState],
         *,
         principal: Principal,
         correlation: Mapping[str, str | int],
@@ -992,6 +1067,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 handler,
                 body,
                 dependencies,
+                dependency_states,
                 principal=principal,
                 correlation=correlation,
                 graph_id=graph_id,
@@ -1048,7 +1124,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution_id,
             body,
             dependencies,
-            _custom_idempotency_key(graph_id, node, principal, dependencies),
+            _custom_idempotency_key(
+                graph_id,
+                node,
+                principal,
+                dependencies,
+                dependency_states,
+            ),
             lambda dependency: self._read_dependency(
                 dependency,
                 principal=principal,
@@ -1060,6 +1142,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node.node_id,
                 execution_id,
             ),
+            dependency_states=dependency_states,
         )
         try:
             timeout = None
@@ -1216,6 +1299,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         handler: TaskNodeHandler[AppT],
         body: Mapping[str, JsonValue],
         dependencies: Mapping[str, TaskDependency],
+        dependency_states: Mapping[str, TaskDependencyState],
         *,
         principal: Principal,
         correlation: Mapping[str, str | int],
@@ -1233,13 +1317,20 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution_id,
             body,
             dependencies,
-            _custom_idempotency_key(graph_id, node, principal, dependencies),
+            _custom_idempotency_key(
+                graph_id,
+                node,
+                principal,
+                dependencies,
+                dependency_states,
+            ),
             lambda dependency: self._read_dependency(
                 dependency,
                 principal=principal,
             ),
             correlation,
             artifacts=None,
+            dependency_states=dependency_states,
         )
         resolution = await reconcile(context)
         if not isinstance(resolution, TaskEffectResolution):
@@ -1435,6 +1526,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         session_id: str | None = None,
         memory_scope: str | None = None,
         definition: AgentDefinition | None = None,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         if definition is None:
             definition = self._root_definition(agent_digest)
@@ -1473,6 +1565,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
             output_schema=output,
+            dependency_policy=dependency_policy,
         )
 
     def _build_frozen_agent_task_by_id(
@@ -1495,6 +1588,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         files: Sequence[str] = (),
         session_id: str | None = None,
         memory_scope: str | None = None,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         validate_agent_id(agent_id)
         frozen = self._require_frozen_capabilities(graph_id)
@@ -1544,6 +1638,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
             output_schema=output,
+            dependency_policy=dependency_policy,
         )
 
     def _build_agent_task_by_id(
@@ -1565,6 +1660,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         files: Sequence[str] = (),
         session_id: str | None = None,
         memory_scope: str | None = None,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         validate_agent_id(agent_id)
         try:
@@ -1594,6 +1690,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             session_id=session_id,
             memory_scope=memory_scope,
             definition=definition,
+            dependency_policy=dependency_policy,
         )
 
     async def cancel(self, invocation: TaskNodeInvocation) -> None:
@@ -1605,6 +1702,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         principal = invocation.principal
         correlation = invocation.correlation
         dependency_results = invocation.dependency_results
+        dependency_states = invocation.dependency_states
         execution_id = invocation.execution_id
         if execution_id is None:
             snapshot = await self._task_state.snapshot_graph(
@@ -1632,6 +1730,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         dependencies = await self._dependencies(
             node,
             dependency_results=dependency_results,
+            dependency_states=dependency_states,
             principal=principal,
             graph_id=graph_id,
         )
@@ -1642,6 +1741,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 principal=principal,
                 correlation=correlation,
                 dependencies=dependencies,
+                dependency_states=dependency_states,
                 dependency_reader=lambda dependency: self._read_dependency(
                     dependency,
                     principal=principal,
@@ -1663,6 +1763,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node,
                 principal,
                 dependencies,
+                dependency_states,
             ),
             lambda dependency: self._read_dependency(
                 dependency,
@@ -1675,6 +1776,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node.node_id,
                 execution_id,
             ),
+            dependency_states=dependency_states,
         )
         await handler.cancel(context)
         await self._execution.cancel_task(
@@ -1736,6 +1838,10 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             principal=principal,
             graph_id=graph_id,
         )
+        expanded_nodes = tuple([
+            await self._freeze_node_input(expanded, principal.tenant_id)
+            for expanded in expanded_nodes
+        ])
         return TaskNodeRunResult(
             digest,
             execution_id,
@@ -1911,14 +2017,26 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         node: TaskNode,
         *,
         dependency_results: Mapping[str, TaskDependencyResult],
+        dependency_states: Mapping[str, TaskDependencyState],
         principal: Principal,
         graph_id: str,
     ) -> dict[str, TaskDependency]:
         del graph_id
-        if set(dependency_results) != set(node.dependencies):
+        if set(dependency_states) != set(node.dependencies):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        required = (
+            set(node.dependencies)
+            if node.dependency_policy == "all_succeeded"
+            else {
+                dependency_id
+                for dependency_id, state in dependency_states.items()
+                if state.status is TaskStatus.SUCCEEDED
+            }
+        )
+        if set(dependency_results) != required:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values: dict[str, TaskDependency] = {}
-        for dependency_id in sorted(node.dependencies):
+        for dependency_id in sorted(required):
             dependency = dependency_results[dependency_id]
             values[dependency_id] = TaskDependency(
                 dependency_id,
@@ -2142,6 +2260,7 @@ def _custom_idempotency_key(
     node: TaskNode,
     principal: Principal,
     dependencies: Mapping[str, TaskDependency],
+    dependency_states: Mapping[str, TaskDependencyState],
 ) -> str:
     return canonical_sha256(
         {
@@ -2149,13 +2268,11 @@ def _custom_idempotency_key(
             "graph_id": graph_id,
             "node_id": node.node_id,
             "input": node.input,
-            "dependencies": [
-                {
-                    "node_id": dependency_id,
-                    "result_digest": dependencies[dependency_id].result_digest,
-                }
-                for dependency_id in sorted(dependencies)
-            ],
+            "dependencies": _dependency_identity_payload(
+                node,
+                dependencies,
+                dependency_states,
+            ),
             "principal": principal_identity_payload(principal),
         }
     )

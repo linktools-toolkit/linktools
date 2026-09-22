@@ -14,13 +14,24 @@ from linktools.ai.core import (
     Principal,
     PrincipalKind,
     TaskStatus,
+    WorkspaceFileInput,
     canonical_sha256,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.storage import StoredPayload
+from linktools.ai.runtime._agent_task import _dependency_identity_payload
+from linktools.ai.runtime.state import RuntimeDomain, SnapshotLimits
+from linktools.ai.runtime.state._codec import (
+    _encode_persisted_domain,
+    decode_domain,
+    iter_runtime_object_refs,
+)
+from linktools.ai.runtime.state._contracts import StoredUserInput
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload, read_object
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
+    TaskDependency,
+    TaskDependencyState,
     TaskFunction,
     TaskGraph,
     TaskGraphAdmission,
@@ -35,10 +46,162 @@ from linktools.ai.task import (
     TaskExpanderRef,
     TaskNodeRunControl,
     TaskNodeRunResult,
+    TaskResultRef,
 )
 from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.messages import BinaryContent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_input", (False, True))
+@pytest.mark.parametrize("dynamic", (False, True))
+async def test_graph_freezes_attachments_before_dependencies_finish(
+    tmp_path: Path,
+    workspace_input: bool,
+    dynamic: bool,
+) -> None:
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def hold(context: TaskNodeContext[None]) -> JsonValue:
+        if context.node_id == "plan":
+            return "ready"
+        started.set()
+        await gate.wait()
+        return "ready"
+
+    source = tmp_path / "input.txt"
+    source.write_text("accepted content", encoding="utf-8")
+    application = CapabilityGroup[None]("application")
+    handler = TaskFunction[None]("example.hold", 1, hold)
+    application.task(handler, effect="none")
+    attachment = (
+        WorkspaceFileInput("input.txt", identifier="source")
+        if workspace_input
+        else BinaryContent(
+            data=b"accepted content",
+            media_type="text/plain",
+            identifier="source",
+        )
+    )
+
+    class Expand:
+        id = "example.attachments"
+        version = 1
+
+        def expand(self, context: TaskExpansionContext) -> tuple[TaskNode, ...]:
+            return (
+                handler.node("hold"),
+                context.agent_task(
+                    "default",
+                    "consumer",
+                    ("inspect", attachment),
+                    dependencies=("hold",),
+                ),
+            )
+
+    application.task_expander(Expand())
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=(),
+        allow_skills=(),
+        allow_subagents=(),
+    )
+    workspace = Workspace.load(tmp_path)
+    state_root = tmp_path / "state"
+    state = RuntimeState.filesystem(state_root)
+    async with Runtime.open(
+        "attachment-test",
+        models=_TaskTestModels(),
+        state=state,
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
+    ) as runtime:
+        node = runtime.agent("default").task(
+            "consumer",
+            ("inspect", attachment),
+            dependencies=("hold",),
+        )
+        nodes = (
+            (handler.node("plan", expander=TaskExpanderRef("example.attachments", 1)),)
+            if dynamic
+            else (handler.node("hold"), node)
+        )
+        graph = TaskGraph("attachment-graph", nodes)
+        run = await runtime.start_graph(graph, idempotency_key="attachment-1")
+        await asyncio.wait_for(started.wait(), 10)
+        source.unlink()
+        repeated = await runtime.start_graph(graph, idempotency_key="attachment-1")
+        assert repeated.graph_id == run.graph_id
+        snapshot = await state.task.tasks.scheduler_snapshot(
+            run.graph_id,
+            tenant_id=runtime.tenant_id,
+        )
+        frozen_node = next(n for n in snapshot.nodes if n.node_id == "consumer")
+        stored = decode_domain(
+            frozen_node.input["user_prompt"]["value"], StoredUserInput
+        )
+        assert stored.payload.ref is not None
+        frozen_bytes = await read_object(
+            state.object_store(RuntimeDomain.TASK),
+            stored.payload.ref.key,
+            expected_digest=stored.payload.ref.digest,
+            expected_size=stored.payload.ref.size,
+        )
+        refs = tuple(
+            iter_runtime_object_refs(
+                _encode_persisted_domain(frozen_node),
+                default_domain=RuntimeDomain.TASK,
+            )
+        )
+        assert (RuntimeDomain.TASK, stored.payload.ref) in refs
+        with pytest.raises(AIError) as rejected:
+            await runtime.start_graph(
+                TaskGraph("forged-input", (handler.node("hold"), frozen_node)),
+                idempotency_key="forged-input-1",
+            )
+        assert rejected.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        gate.set()
+        completed = await run.wait(timeout_seconds=10)
+        assert completed.status is TaskStatus.SUCCEEDED
+        consumer = next(n for n in completed.node_results if n.node_id == "consumer")
+        record = await state.execution.executions.get(
+            consumer.execution_id, tenant_id=runtime.tenant_id,
+        )
+        assert record.stored_user_input.view["attachments"] == stored.view["attachments"]
+        assert record.stored_user_input.view["files"] == stored.view["files"]
+
+    archive = InMemoryObjectStore("archive")
+    read_state = RuntimeState.filesystem(state_root)
+    await read_state.initialize(
+        namespace="attachment-test", tenant_id="default", read_only=True
+    )
+    limits = SnapshotLimits(max_entries=4096, max_bytes=16 * 1024 * 1024)
+    try:
+        reference = await read_state.export_snapshot(
+            object_store=archive, limits=limits
+        )
+    finally:
+        await read_state.close()
+    restored_root = tmp_path / "restored"
+    await RuntimeState.restore_snapshot(
+        reference, object_store=archive, root=restored_root, limits=limits
+    )
+    restored = RuntimeState.from_root(restored_root)
+    await restored.initialize(
+        namespace="attachment-test", tenant_id="default", read_only=True
+    )
+    try:
+        assert frozen_bytes == await read_object(
+            restored.object_store(RuntimeDomain.TASK),
+            stored.payload.ref.key,
+            expected_digest=stored.payload.ref.digest,
+            expected_size=stored.payload.ref.size,
+        )
+    finally:
+        await restored.close()
 
 
 class _TaskTestModelBinding:
@@ -96,6 +259,140 @@ async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
     return {
         "upstream": await context.read_dependency(name),
         "execution_id": dependency.execution_id,
+    }
+
+
+def test_all_terminal_identity_includes_input_refs_without_execution_identity() -> None:
+    digest = "b" * 64
+    node = TaskNode(
+        "consumer",
+        dependencies=("failed",),
+        input_refs={
+            "evidence": TaskResultRef(
+                "namespace",
+                "tenant",
+                "source-graph",
+                "source-node",
+                digest,
+            )
+        },
+        dependency_policy="all_terminal",
+    )
+    states = {
+        "failed": TaskDependencyState(
+            TaskStatus.FAILED,
+            error_code=ErrorCode.REQUEST_FIELD_INVALID.value,
+            error_digest="a" * 64,
+        )
+    }
+    first = _dependency_identity_payload(
+        node,
+        {"evidence": TaskDependency("source-node", digest, "execution-1")},
+        states,
+    )
+    second = _dependency_identity_payload(
+        node,
+        {"evidence": TaskDependency("source-node", digest, "execution-2")},
+        states,
+    )
+
+    assert first == second
+    assert first == [
+        {"node_id": "evidence", "result_digest": digest},
+        {
+            "node_id": "failed",
+            "status": TaskStatus.FAILED.value,
+            "error_code": ErrorCode.REQUEST_FIELD_INVALID.value,
+            "error_digest": "a" * 64,
+        },
+    ]
+
+
+def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
+    failed = TaskDependencyState(
+        TaskStatus.FAILED,
+        error_code=ErrorCode.REQUEST_FIELD_INVALID.value,
+        error_digest="a" * 64,
+    )
+    assert failed.semantic_payload == {
+        "status": TaskStatus.FAILED.value,
+        "error_code": ErrorCode.REQUEST_FIELD_INVALID.value,
+        "error_digest": "a" * 64,
+    }
+    assert "execution_id" not in failed.semantic_payload
+
+
+
+def test_all_terminal_uses_a_distinct_persisted_task_node_wire() -> None:
+    default_node = TaskNode("default")
+    terminal_node = TaskNode("terminal", dependency_policy="all_terminal")
+
+    default_wire = _encode_persisted_domain(default_node)
+    terminal_wire = _encode_persisted_domain(terminal_node)
+
+    assert default_wire["$dataclass"] == "task_node"
+    assert "dependency_policy" not in default_wire["fields"]
+    assert terminal_wire["$dataclass"] == "task_node_terminal"
+    assert "dependency_policy" not in terminal_wire["fields"]
+
+
+@pytest.mark.asyncio
+async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() -> None:
+    observed: dict[str, TaskStatus] = {}
+
+    async def fail(context: TaskNodeContext[None]) -> JsonValue:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+    async def collect(context: TaskNodeContext[None]) -> JsonValue:
+        observed.update(
+            {key: value.status for key, value in context.dependency_states.items()}
+        )
+        for name in context.dependency_states:
+            with pytest.raises(AIError) as raised:
+                await context.read_dependency(name)
+            assert raised.value.code is ErrorCode.TASK_DEPENDENCY_FAILED
+        return "collected"
+
+    group = CapabilityGroup[None]("application")
+    failure = group.task(TaskFunction("example.fail", 1, fail), effect="none")
+    collector = group.task(TaskFunction("example.collect", 1, collect), effect="none")
+    group.agent(
+        "default", model="default", allow_tools=(), allow_skills=(), allow_subagents=()
+    )
+    async with Runtime.open(
+        "terminal-dependencies",
+        models=_TaskTestModels(),
+        capabilities=(group,),
+        state=RuntimeState.in_memory(),
+    ) as runtime:
+        run = await runtime.start_graph(
+            TaskGraph(
+                "graph",
+                (
+                    failure.node("failed"),
+                    failure.node("blocked", dependencies=("failed",)),
+                    collector.node(
+                        "collect",
+                        dependencies=("failed", "blocked"),
+                        dependency_policy="all_terminal",
+                    ),
+                    runtime.agent("default").task(
+                        "summary",
+                        "Summarize upstream states",
+                        dependencies=("failed", "blocked", "collect"),
+                        dependency_policy="all_terminal",
+                    ),
+                ),
+            ),
+            idempotency_key="terminal-dependencies",
+        )
+        result = await run.wait(timeout_seconds=10)
+    assert observed == {"failed": TaskStatus.FAILED, "blocked": TaskStatus.BLOCKED}
+    assert {node.node_id: node.status for node in result.node_results} == {
+        "failed": TaskStatus.FAILED,
+        "blocked": TaskStatus.BLOCKED,
+        "collect": TaskStatus.SUCCEEDED,
+        "summary": TaskStatus.SUCCEEDED,
     }
 
 

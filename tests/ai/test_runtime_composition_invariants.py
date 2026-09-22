@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output, restore_output
-from linktools.ai.asset import AssetStore, DirectoryAssetBackend, InMemoryAssetBackend
+from linktools.ai.asset import AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -30,10 +30,9 @@ from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay, StoredPayload
-from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 
-from ._runtime_test_helpers import RuntimeUsageModels, runtime_usage_workspace
+from ._runtime_test_helpers import RuntimeUsageModels
 
 
 class _DenyAuthorization:
@@ -127,77 +126,7 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
 
 
 @pytest.mark.asyncio
-async def test_runtime_closes_owned_workspace_assets_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed: list[tuple[str, object]] = []
-    original_store_close = AssetStore.close
-    original_backend_close = DirectoryAssetBackend.close
-
-    async def close_store(store: AssetStore) -> None:
-        closed.append(("store", store))
-        await original_store_close(store)
-
-    async def close_backend(backend: DirectoryAssetBackend) -> None:
-        closed.append(("backend", backend))
-        await original_backend_close(backend)
-
-    monkeypatch.setattr(AssetStore, "close", close_store)
-    monkeypatch.setattr(DirectoryAssetBackend, "close", close_backend)
-    workspace = Workspace.load(tmp_path)
-    components = await compose_runtime_components(
-        "default",
-        models=ModelRegistry.openai(model="gpt-test"),
-        state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
-    )
-
-    await components.close_callback()
-    await components.close_callback()
-
-    assert [kind for kind, _value in closed] == ["store", "backend"]
-    assert closed[0][1].ready is False
-
-
-@pytest.mark.asyncio
-async def test_runtime_open_failure_closes_owned_workspace_assets(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed: list[str] = []
-    original_store_close = AssetStore.close
-    original_backend_close = DirectoryAssetBackend.close
-
-    async def close_store(store: AssetStore) -> None:
-        closed.append("store")
-        await original_store_close(store)
-
-    async def close_backend(backend: DirectoryAssetBackend) -> None:
-        closed.append("backend")
-        await original_backend_close(backend)
-
-    monkeypatch.setattr(AssetStore, "close", close_store)
-    monkeypatch.setattr(DirectoryAssetBackend, "close", close_backend)
-    workspace = Workspace.load(tmp_path)
-
-    def fail_snapshot(_models: ModelRegistry) -> object:
-        raise RuntimeError("model snapshot failed")
-
-    monkeypatch.setattr(ModelRegistry, "snapshot", fail_snapshot)
-    with pytest.raises(RuntimeError, match="model snapshot failed"):
-        await compose_runtime_components(
-            "default",
-            models=ModelRegistry.openai(model="gpt-test"),
-            state=RuntimeState.in_memory(),
-            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
-        )
-
-    assert closed == ["store", "backend"]
-
-
-@pytest.mark.asyncio
-async def test_runtime_does_not_close_borrowed_workspace_store(tmp_path: Path) -> None:
+async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
@@ -320,16 +249,15 @@ async def test_subagent_unknown_cancel_requires_recovery() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_persists_model_usage_through_history_views(
-    tmp_path: Path,
-) -> None:
-    workspace = runtime_usage_workspace(tmp_path / "workspace")
+async def test_runtime_persists_model_usage_through_history_views() -> None:
+    application = CapabilityGroup("application")
+    application.agent("default", model="default", allow_tools=())
 
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(application,),
     ) as runtime:
         result = await runtime.agent("default").run(
             "hello",

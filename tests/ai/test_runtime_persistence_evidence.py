@@ -32,14 +32,19 @@ from linktools.ai.runtime.state._contracts import (
     ExecutionTerminalCommit,
     ResultRecord,
 )
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import FilesystemObjectStore, ObjectRef, StoredPayload
-from linktools.ai.workspace import Workspace
 from linktools.commands.ai.run import _emit_result
 from pydantic import BaseModel
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from ._runtime_test_helpers import execution_owner_fields
+
+
+def _agent_group() -> CapabilityGroup[object]:
+    group = CapabilityGroup[object]("application")
+    group.agent("default", model="default", allow_tools=())
+    return group
 
 
 def _binding_snapshot() -> AgentBindingSnapshot:
@@ -188,14 +193,6 @@ async def test_terminal_stream_allows_immediate_runtime_close(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    workspace_root = tmp_path / "workspace"
-    agent_path = workspace_root / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
-    )
     if backend == "filesystem":
         state = RuntimeState.filesystem(tmp_path / "runtime")
     else:
@@ -208,13 +205,12 @@ async def test_terminal_stream_allows_immediate_runtime_close(
             object_store=FilesystemObjectStore(tmp_path / "objects"),
         )
 
-    workspace = Workspace.load(workspace_root)
     try:
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
-            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+            capabilities=(_agent_group(),),
         ) as runtime:
             execution = await runtime.agent("default").start("hello")
             terminal_events = []
@@ -238,14 +234,6 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace_root = tmp_path / "workspace"
-    agent_path = workspace_root / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
-    )
     database = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
@@ -260,7 +248,6 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
         raise AssertionError("blocked execution unexpectedly completed")
 
     monkeypatch.setattr(AgentExecutor, "execute", blocking_execute)
-    workspace = Workspace.load(workspace_root)
     state = RuntimeState.sqlite(
         database,
         object_store=FilesystemObjectStore(tmp_path / "objects"),
@@ -270,7 +257,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
-            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+            capabilities=(_agent_group(),),
         ) as runtime:
             task = asyncio.create_task(
                 _emit_result(
@@ -299,7 +286,7 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=reopened,
-            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+            capabilities=(_agent_group(),),
         ):
             pass
     finally:
@@ -310,14 +297,6 @@ async def test_ai_run_interrupt_closes_and_reopens_sqlite_runtime(
 async def test_session_runtime_persists_and_reads_terminal_result(
     tmp_path: Path,
 ) -> None:
-    workspace_root = tmp_path / "workspace"
-    agent_path = workspace_root / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=())
-        )
-    )
     database = tmp_path / "runtime.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{database}")
     await provision_runtime_database(engine)
@@ -327,13 +306,12 @@ async def test_session_runtime_persists_and_reads_terminal_result(
         object_store=FilesystemObjectStore(tmp_path / "objects"),
     )
 
-    workspace = Workspace.load(workspace_root)
     try:
         async with Runtime.open(
             "default",
             models=_PersistenceTestModels(),  # type: ignore[arg-type]
             state=state,
-            capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+            capabilities=(_agent_group(),),
         ) as runtime:
             created = await runtime.agent("default").create_session("session")
             loaded = await runtime.session.get(

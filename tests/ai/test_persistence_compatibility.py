@@ -35,7 +35,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 def _workspace_tool_contributions(workspace: Workspace):
     return tuple(
-        CapabilityGroup("workspace", workspace=workspace, discover_workspace_assets=False)._contributions
+        CapabilityGroup("workspace", workspace=workspace)._contributions
     )
 
 

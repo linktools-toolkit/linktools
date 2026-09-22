@@ -12,7 +12,6 @@ from linktools.ai.core import ApprovalStatus, ExecutionStatus, JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime.state._contracts import RecoveryCheckpointState
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import (
     Workspace,
     WorkspacePolicy,
@@ -59,13 +58,6 @@ async def test_composed_runtime_ask_enters_approval_wait(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    agent_path = tmp_path / ".linktools" / "agents" / "default"
-    agent_path.parent.mkdir(parents=True)
-    agent_path.write_bytes(
-        AgentSpecCodec().encode(
-            AgentSpec("default", model="default", allow_tools=("read_file",))
-        )
-    )
     workspace = Workspace.load(
         tmp_path,
 
@@ -78,12 +70,18 @@ async def test_composed_runtime_ask_enters_approval_wait(
         if backend == "memory"
         else RuntimeState.filesystem(tmp_path / "runtime-state")
     )
+    application = CapabilityGroup("application")
+    application.agent(
+        "default",
+        model="default",
+        allow_tools=("read_file",),
+    )
 
     async with Runtime.open(
         "default",
         models=_ToolModels(),  # type: ignore[arg-type]
         state=state,
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(CapabilityGroup("workspace", workspace=workspace), application),
     ) as runtime:
         execution = await runtime.agent("default").start("read a file")
         record = None

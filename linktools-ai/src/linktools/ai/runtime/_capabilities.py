@@ -7,6 +7,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from time import monotonic_ns
 from typing import TYPE_CHECKING, Any, cast
 
 from linktools.core import environ
@@ -38,6 +39,7 @@ from ._harness_memory import (
 )
 from ._harness_planning import build_harness_planning
 from ._memory import MemoryStore
+from ._journal import DURATION_NS_METADATA_KEY, REQUEST_SEQUENCE_METADATA_KEY
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
 from .state._step_contracts import (
@@ -107,6 +109,12 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
     _replay_request_captured: bool = field(default=False, init=False, repr=False, compare=False)
     _live_messages: Sequence[ModelMessage] | None = field(
         default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _tool_started_ns: dict[str, int] = field(
+        default_factory=dict,
         init=False,
         repr=False,
         compare=False,
@@ -226,6 +234,14 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         )
         raise error
 
+    def _tool_request_metadata(self, tool_call_id: str) -> dict[str, str]:
+        sequence = self.capture.request_sequence_for_tool_call(tool_call_id)
+        return (
+            {}
+            if sequence is None
+            else {REQUEST_SEQUENCE_METADATA_KEY: str(sequence)}
+        )
+
     async def before_tool_execute(
         self,
         ctx: PydanticRunContext[None],
@@ -234,11 +250,15 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         tool_def: ToolDefinition,
         args: dict[str, Any],
     ) -> dict[str, Any]:
+        if call.tool_call_id in self._tool_started_ns:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._tool_started_ns[call.tool_call_id] = monotonic_ns()
         await self.capture.record_event(
             "tool_call_started",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
+            metadata=self._tool_request_metadata(call.tool_call_id),
         )
         return args
 
@@ -252,11 +272,17 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         result: Any,
     ) -> Any:
         del args
+        started_ns = self._tool_started_ns.pop(call.tool_call_id, None)
+        if started_ns is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        metadata = self._tool_request_metadata(call.tool_call_id)
+        metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.capture.record_event(
             "tool_call_completed",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
+            metadata=metadata,
         )
         return result
 
@@ -270,12 +296,18 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         error: Exception,
     ) -> Any:
         del args
+        started_ns = self._tool_started_ns.pop(call.tool_call_id, None)
+        if started_ns is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        metadata = self._tool_request_metadata(call.tool_call_id)
+        metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.capture.record_event(
             "tool_call_failed",
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
             error=repr(error),
+            metadata=metadata,
         )
         raise error
 

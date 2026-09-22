@@ -8,11 +8,12 @@ import pytest
 from pydantic_ai.messages import BinaryContent, ImageUrl, UploadedFile
 
 from linktools.ai.capability import WorkspaceAccess
-from linktools.ai.core import Principal, PromptLimits
+from linktools.ai.core import Principal, PromptLimits, WorkspaceFileInput
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._input import (
     ExecutionInputMaterializer,
+    decode_task_prompt_draft,
     decode_user_content_payload,
     task_prompt_draft,
 )
@@ -105,6 +106,54 @@ async def test_binary_content_preserves_duplicate_workspace_occurrences() -> Non
         assert attachments[0]["attachment_id"] != attachments[1]["attachment_id"]
     finally:
         await materializer.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_file_input_is_materialized_in_prompt_order() -> None:
+    materializer, session = _materializer({"evidence.txt": b"error"})
+    try:
+        prompt = (
+            "before",
+            WorkspaceFileInput("evidence.txt", "text/plain", "source-1"),
+            "after",
+        )
+        canonical = await materializer.canonicalize_input(prompt)
+        stored = await materializer.store(
+            await materializer.materialize(canonical, ()),
+            tenant_id="tenant",
+        )
+
+        assert session.reads == [("evidence.txt", PromptLimits().max_binary_input_bytes)]
+        assert stored.view is not None
+        attachments = stored.view["attachments"]
+        assert isinstance(attachments, list)
+        assert attachments[0]["source"] == "workspace"
+        assert attachments[0]["input_identifier"] == "source-1"
+        assert await materializer.restore(stored) == (
+            "before",
+            'Workspace file path: "evidence.txt"',
+            BinaryContent(data=b"error", media_type="text/plain", identifier="source-1"),
+            "after",
+        )
+        session.values.clear()
+        assert await materializer.restore(stored) == (
+            "before",
+            'Workspace file path: "evidence.txt"',
+            BinaryContent(data=b"error", media_type="text/plain", identifier="source-1"),
+            "after",
+        )
+        assert session.reads == [("evidence.txt", PromptLimits().max_binary_input_bytes)]
+    finally:
+        await materializer.close()
+
+
+def test_workspace_file_task_prompt_round_trips_without_reading() -> None:
+    prompt = ("inspect", WorkspaceFileInput("evidence.txt", identifier="source-1"))
+
+    draft = task_prompt_draft(prompt)
+    restored = decode_task_prompt_draft(draft)
+
+    assert restored == prompt
 
 
 @pytest.mark.asyncio

@@ -93,6 +93,7 @@ def _normalize_json_value(value: object) -> JsonValue:
 
 _TASK_EXPANDER_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,127}$")
 _RESULT_DIGEST = re.compile(r"[0-9a-f]{64}")
+_TASK_DEPENDENCY_POLICIES = frozenset({"all_succeeded", "all_terminal"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +148,7 @@ class TaskNode:
     output_schema: object | None
     output_contract: "Mapping[str, JsonValue] | None"
     effect: str
+    dependency_policy: str
     _input: bytes = field(repr=False)
 
     def __init__(
@@ -164,6 +166,7 @@ class TaskNode:
         output_schema: object | None = None,
         output_contract: "Mapping[str, JsonValue] | None" = None,
         effect: str = "none",
+        dependency_policy: str = "all_succeeded",
     ) -> None:
         if isinstance(dependencies, (str, bytes)):
             raise TypeError("task node dependencies are invalid")
@@ -189,6 +192,7 @@ class TaskNode:
             or not isinstance(max_attempts, int)
             or max_attempts < 1
             or effect not in {"none", "replay_safe", "non_replay_safe"}
+            or dependency_policy not in _TASK_DEPENDENCY_POLICIES
         ):
             raise ValueError("task node identity is invalid")
         values: Mapping[str, JsonValue] = {} if input is None else input
@@ -226,6 +230,7 @@ class TaskNode:
         object.__setattr__(self, "output_schema", output_schema)
         object.__setattr__(self, "output_contract", contract)
         object.__setattr__(self, "effect", effect)
+        object.__setattr__(self, "dependency_policy", dependency_policy)
         object.__setattr__(self, "_input", canonical_json_bytes(normalized))
 
     @property
@@ -492,6 +497,15 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
         node_input["binding"] = canonical_sha256(
             binding_identity_payload(node_input["binding"])
         )
+        prompt = node_input.get("user_prompt")
+        if isinstance(prompt, Mapping) and prompt.get("kind") in {
+            "task-user-content-v1",
+            "stored-user-content-v1",
+        }:
+            node_input["user_prompt"] = {
+                "kind": "task-input-intent-v1",
+                "intent": prompt["intent"],
+            }
     value: dict[str, JsonValue] = {
         "node_id": node.node_id,
         "dependencies": sorted(node.dependencies),
@@ -527,6 +541,8 @@ def _task_node_digest_payload(node: TaskNode) -> dict[str, JsonValue]:
         value["output_contract"] = dict(node.output_contract)
     if node.effect != "none":
         value["effect"] = node.effect
+    if node.dependency_policy != "all_succeeded":
+        value["dependency_policy"] = node.dependency_policy
     return value
 
 
@@ -675,6 +691,7 @@ class TaskNodeInfo:
     output_schema: object | None
     output_contract: "Mapping[str, JsonValue] | None"
     effect: str
+    dependency_policy: str = "all_succeeded"
 
     @classmethod
     def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
@@ -690,6 +707,7 @@ class TaskNodeInfo:
             node.output_schema,
             node.output_contract,
             node.effect,
+            node.dependency_policy,
         )
 
 

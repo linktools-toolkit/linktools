@@ -482,7 +482,11 @@ class RuntimeState:
             )
             copied_objects.add(identity)
             if reference.key.startswith(
-                ("v1/skill-source-snapshot/", "v1/task-capability-snapshot/")
+                (
+                    "v1/asset-snapshot/",
+                    "v1/skill-source-snapshot/",
+                    "v1/task-capability-snapshot/",
+                )
             ):
                 payload = await read_object(
                     source_store,
@@ -853,7 +857,11 @@ class RuntimeState:
                 continue
             domain, source, content_ref = decoded
             if not source.key.startswith(
-                ("v1/skill-source-snapshot/", "v1/task-capability-snapshot/")
+                (
+                    "v1/asset-snapshot/",
+                    "v1/skill-source-snapshot/",
+                    "v1/task-capability-snapshot/",
+                )
             ):
                 continue
             dependency_payload = await read_object(

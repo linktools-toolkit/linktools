@@ -14,13 +14,19 @@ from linktools.cli import CommandError
 from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
 
+from linktools.ai.asset import (
+    AssetStore,
+    DirectoryAssetBackend,
+    PrefixAssetPathAdapter,
+)
 from linktools.ai.capability import CapabilityGroup
+from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.migrate import provision_metrics_sqlite, validate_metrics_sqlite
 from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import Metrics
 from linktools.ai.runtime import Runtime, RuntimeState
-from linktools.ai.storage import FilesystemMutationLock
+from linktools.ai.storage import FilesystemMutationLock, StorageOverlay
 from linktools.ai.workspace import Workspace
 
 ResultT = TypeVar("ResultT")
@@ -59,6 +65,22 @@ def _load_workspace(root: "Path | None" = None) -> Workspace:
 
 def _local_runtime_root(workspace: Workspace) -> Path:
     return workspace.storage_root / "runtime"
+
+
+def _local_runtime_assets(workspace: Workspace) -> AssetStore:
+    return AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(workspace.storage_root),
+                path_adapter=PrefixAssetPathAdapter(
+                    {"agent": "agents", "skill": "skills", "mcp": "mcp"}
+                ),
+                kinds=("agent", "skill", "mcp"),
+                follow_external_symlinks=True,
+                ignore_paths=DEFAULT_DISCOVERY_POLICY.ignores,
+            )
+        )
+    )
 
 
 def _local_runtime_state(workspace: Workspace) -> RuntimeState:
@@ -145,14 +167,25 @@ async def _open_local_runtime(
     *,
     models: "ModelRegistry | None" = None,
 ) -> AsyncIterator[Runtime]:
-    async with Runtime.open(
-        "default",
-        state=_local_runtime_state(workspace),
-        metrics=await _local_metrics(workspace),
-        models=_local_models(workspace) if models is None else models,
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
-    ) as runtime:
-        yield runtime
+    assets = _local_runtime_assets(workspace)
+    await assets.initialize()
+    try:
+        async with Runtime.open(
+            "default",
+            state=_local_runtime_state(workspace),
+            metrics=await _local_metrics(workspace),
+            models=_local_models(workspace) if models is None else models,
+            capabilities=(
+                CapabilityGroup(
+                    "workspace",
+                    workspace=workspace,
+                    assets=assets,
+                ),
+            ),
+        ) as runtime:
+            yield runtime
+    finally:
+        await assets.close()
 
 
 def _run_async(coroutine: "Coroutine[object, object, ResultT]") -> ResultT:

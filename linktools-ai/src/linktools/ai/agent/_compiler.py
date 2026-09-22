@@ -217,7 +217,9 @@ class AgentCompiler:
                 )
                 candidate = CapabilityContribution("skill", pin.id, pin.fingerprint, value)
             elif pin.kind == "mcp":
-                value = MCPServerSpecCodec().from_payload(cast("Mapping[str, object]", pin.contract))
+                value, _resource_snapshot = MCPServerSpecCodec().from_frozen_payload(
+                    cast("Mapping[str, object]", pin.contract)
+                )
                 candidate = CapabilityContribution("mcp", pin.id, pin.fingerprint, value)
             else:
                 current = self._by_identity.get((pin.kind, pin.id))

@@ -13,6 +13,7 @@ from ..core import (
     JsonValue,
     Principal,
     CorrelationData,
+    TaskStatus,
     canonical_sha256,
     normalize_json_value,
     normalize_correlation,
@@ -117,6 +118,55 @@ class TaskDependency:
             raise ValueError("task dependency execution id is required")
 
 
+@dataclass(frozen=True, slots=True)
+class TaskDependencyState:
+    """Stable terminal semantics exposed for one Task dependency."""
+
+    status: TaskStatus
+    result_digest: "str | None" = None
+    error_code: "str | None" = None
+    error_digest: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {
+            TaskStatus.SUCCEEDED,
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }:
+            raise ValueError("task dependency state must be terminal")
+        if self.status is TaskStatus.SUCCEEDED:
+            if (
+                not isinstance(self.result_digest, str)
+                or _RESULT_DIGEST.fullmatch(self.result_digest) is None
+                or self.error_code is not None
+                or self.error_digest is not None
+            ):
+                raise ValueError("successful task dependency state is invalid")
+            return
+        if self.result_digest is not None:
+            raise ValueError("failed task dependency state cannot carry a result")
+        if self.error_code is not None and (
+            not isinstance(self.error_code, str) or not self.error_code
+        ):
+            raise ValueError("task dependency error code is invalid")
+        if self.error_digest is not None and (
+            not isinstance(self.error_digest, str)
+            or _RESULT_DIGEST.fullmatch(self.error_digest) is None
+        ):
+            raise ValueError("task dependency error digest is invalid")
+
+    @property
+    def semantic_payload(self) -> "dict[str, JsonValue]":
+        value: dict[str, JsonValue] = {"status": self.status.value}
+        if self.status is TaskStatus.SUCCEEDED:
+            value["result_digest"] = self.result_digest
+        else:
+            value["error_code"] = self.error_code
+            value["error_digest"] = self.error_digest
+        return value
+
+
 class TaskArtifactPublisher(Protocol):
     async def publish(
         self,
@@ -160,6 +210,7 @@ class TaskNodeContext(Generic[AppT]):
     )
     correlation: CorrelationData = field(default_factory=dict)
     artifacts: "TaskArtifactPublisher | None" = None
+    dependency_states: "Mapping[str, TaskDependencyState]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -187,12 +238,26 @@ class TaskNodeContext(Generic[AppT]):
             raise ValueError("task dependency mapping is invalid")
         object.__setattr__(self, "input", ImmutableJsonMapping(normalized_input))
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
+        dependency_states = dict(self.dependency_states)
+        if any(
+            not isinstance(key, str) or not isinstance(value, TaskDependencyState)
+            for key, value in dependency_states.items()
+        ):
+            raise ValueError("task dependency states are invalid")
+        object.__setattr__(
+            self,
+            "dependency_states",
+            MappingProxyType(dependency_states),
+        )
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
     async def read_dependency(self, name: str) -> JsonValue:
         """Read one dependency body through its authorized Execution owner."""
         if not isinstance(name, str) or not name:
             raise KeyError(name)
+        state = self.dependency_states.get(name)
+        if state is not None and state.status is not TaskStatus.SUCCEEDED:
+            raise AIError(ErrorCode.TASK_DEPENDENCY_FAILED)
         try:
             dependency = self.dependencies[name]
         except KeyError as error:
@@ -277,6 +342,7 @@ class TaskFunction(Generic[AppT]):
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
         retry_delay_seconds: float = 0,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         normalized = self.normalize({} if input is None else input)
         return TaskNode(
@@ -293,12 +359,14 @@ class TaskFunction(Generic[AppT]):
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
+            dependency_policy=dependency_policy,
         )
 
 
 __all__ = [
     "TaskBindingSnapshot",
     "TaskDependency",
+    "TaskDependencyState",
     "TaskArtifactPublisher",
     "TaskEffectResolution",
     "TaskFunction",

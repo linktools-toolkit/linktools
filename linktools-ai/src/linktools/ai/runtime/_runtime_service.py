@@ -14,7 +14,6 @@ from pydantic import BaseModel
 
 from ..agent import (
     AgentBinding,
-    AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
     AgentDefinition,
@@ -23,14 +22,12 @@ from ..capability import CapabilityGroup
 from ..core import (
     CorrelationData,
     ExecutionMode,
-    ExecutionStatus,
     JsonValue,
     Principal,
     PrincipalKind,
     SessionStatus,
     TaskStatus,
     ThinkingValue,
-    UsageMetrics,
     PromptLimits,
     normalize_correlation,
     normalize_execution_mode,
@@ -82,7 +79,6 @@ from .service_api import (
     EventService,
     ExternalService,
     ExecutionRequest,
-    ExecutionResult,
     ExecutionService,
     ForkExecutionRequest,
     ForkSessionRequest,
@@ -125,6 +121,7 @@ class _TaskNodeRuntimePort(Protocol):
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
         definition: "AgentDefinition | None" = None,
+        dependency_policy: str = "all_succeeded",
     ) -> "TaskNode": ...
 
     async def get_result_record(
@@ -788,6 +785,7 @@ class Runtime(Generic[AppT]):
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
         definition: "AgentDefinition | None" = None,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         return self._require_task_node_runtime().build_agent_task(
             agent_digest,
@@ -807,6 +805,7 @@ class Runtime(Generic[AppT]):
             session_id=session_id,
             memory_scope=memory_scope,
             definition=definition,
+            dependency_policy=dependency_policy,
         )
 
     async def start_graph(

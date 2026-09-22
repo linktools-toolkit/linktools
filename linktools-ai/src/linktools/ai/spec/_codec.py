@@ -11,6 +11,8 @@ import yaml
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
+from ..asset import AssetKey
+from ..storage import ObjectRef
 from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, normalize_thinking
 
 SpecT = TypeVar("SpecT")
@@ -267,16 +269,80 @@ class MCPServerSpecCodec:
     def to_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
         if not isinstance(value, MCPServerSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid")
-        return {"version": _VERSION, "id": value.id, "command": value.command, "args": list(value.args)}
+        payload: dict[str, JsonValue] = {
+            "version": 1,
+            "id": value.id,
+            "command": value.command,
+            "args": list(value.args),
+        }
+        if value.resource_root is not None:
+            payload["resource_root"] = {
+                "kind": value.resource_root.kind,
+                "id": value.resource_root.id,
+            }
+        return payload
+
+    def to_frozen_payload(
+        self,
+        value: MCPServerSpec,
+        resource_snapshot: ObjectRef | None,
+    ) -> "dict[str, JsonValue]":
+        payload = self.to_payload(value)
+        if value.resource_root is None:
+            if resource_snapshot is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return payload
+        if not isinstance(resource_snapshot, ObjectRef):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["args"] = None
+        payload["frozen_args"] = list(value.args)
+        payload["resource_snapshot"] = _object_ref_payload(resource_snapshot)
+        return payload
 
     def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
         return self.to_payload(value)
 
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
+        value, resource_snapshot = self._decode_payload(raw, frozen=False)
+        if resource_snapshot is not None:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        return value
+
+    def from_frozen_payload(
+        self,
+        raw: Mapping[str, object],
+    ) -> "tuple[MCPServerSpec, ObjectRef | None]":
+        return self._decode_payload(raw, frozen=True)
+
+    def _decode_payload(
+        self,
+        raw: Mapping[str, object],
+        *,
+        frozen: bool,
+    ) -> "tuple[MCPServerSpec, ObjectRef | None]":
         _require_v1(raw)
+        if not frozen and (
+            "resource_snapshot" in raw or "frozen_args" in raw
+        ):
+            raise AIError(
+                ErrorCode.OUTPUT_CONTRACT_INVALID,
+                "MCP frozen resource fields are Runtime-owned",
+            )
         identity = raw.get("id")
         command = raw.get("command")
-        args = raw.get("args", [])
+        resource_root = _decode_asset_key(raw.get("resource_root"))
+        raw_snapshot = raw.get("resource_snapshot") if frozen else None
+        resource_snapshot = (
+            _decode_object_ref(raw_snapshot) if raw_snapshot is not None else None
+        )
+        if resource_snapshot is None:
+            if frozen and "frozen_args" in raw:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            args = raw.get("args", [])
+        else:
+            if resource_root is None or raw.get("args") is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            args = raw.get("frozen_args")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")
         if not isinstance(command, str) or not command.strip():
@@ -284,9 +350,15 @@ class MCPServerSpecCodec:
         if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server args must be a string array")
         try:
-            return MCPServerSpec(identity, command, tuple(cast("list[str]", args)))
+            value = MCPServerSpec(
+                identity,
+                command,
+                tuple(cast("list[str]", args)),
+                resource_root,
+            )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
+        return value, resource_snapshot
 
     def encode(self, value: MCPServerSpec) -> bytes:
         return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
@@ -297,6 +369,53 @@ class MCPServerSpecCodec:
 
 def _encode(value: "dict[str, object]") -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def _object_ref_payload(value: ObjectRef) -> dict[str, JsonValue]:
+    return {
+        "store_id": value.store_id,
+        "key": value.key,
+        "digest": value.digest,
+        "size": value.size,
+    }
+
+
+def _decode_asset_key(value: object) -> AssetKey | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid")
+    kind = value.get("kind")
+    identity = value.get("id")
+    if not isinstance(kind, str) or not isinstance(identity, str):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid")
+    try:
+        return AssetKey(kind, identity)
+    except ValueError as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid") from error
+
+
+def _decode_object_ref(value: object) -> ObjectRef | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid")
+    store_id = value.get("store_id")
+    key = value.get("key")
+    digest = value.get("digest")
+    size = value.get("size")
+    if (
+        not isinstance(store_id, str)
+        or not isinstance(key, str)
+        or not isinstance(digest, str)
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+    ):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid")
+    try:
+        return ObjectRef(store_id, key, digest, size)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid") from error
 
 
 def _decode(data: bytes) -> "dict[str, object]":

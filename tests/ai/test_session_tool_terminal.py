@@ -200,6 +200,21 @@ async def test_session_tool_turn_commits_terminal_and_history(
                 "tool_result",
                 "assistant",
             ]
+            tool_items = tuple(
+                item
+                for item in execution_history.items
+                if item.item_kind in {"tool_call", "tool_result"}
+            )
+            assert len(tool_items) == 2
+            assert tool_items[0].tool_call_id == tool_items[1].tool_call_id
+            assert tool_items[0].request_sequence is not None
+            assert tool_items[1].request_sequence == tool_items[0].request_sequence
+            assert tool_items[0].tool_operation_id is not None
+            assert tool_items[1].tool_operation_id == tool_items[0].tool_operation_id
+            assert tool_items[0].started_at is not None
+            assert tool_items[0].finished_at is not None
+            assert tool_items[0].duration_ns is not None
+            assert tool_items[0].status == "SUCCEEDED"
 
             retried = await session.start(
                 "inspect",
