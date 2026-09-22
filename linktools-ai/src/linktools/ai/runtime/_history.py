@@ -444,7 +444,7 @@ class StepExecutionHistoryReader:
         record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        entries = await self._history_tree(record, tenant_id)
+        entries = await self._recursive_history_tree(record, tenant_id)
         current_sources: list[_HistorySource] = []
         for item, depth in entries:
             for segment_sequence in await self._segment_sequences(item, tenant_id):
@@ -1389,6 +1389,40 @@ class StepExecutionHistoryReader:
         return Page(selected, next_cursor)
 
     async def _history_tree(
+        self, selected: ExecutionRecord, tenant_id: str
+    ) -> list[tuple[ExecutionRecord, int]]:
+        if selected.lineage_kind.value == "SUBAGENT":
+            if (
+                selected.parent_execution_id is None
+                or selected.root_execution_id == selected.execution_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return [(selected, 1)]
+        if (
+            selected.parent_execution_id is not None
+            or selected.lineage_kind.value
+            not in {"RUN", "RETRY", "FORK", "SESSION_RESUME"}
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        result = [(selected, 0)]
+        visited = {selected.execution_id}
+        for child in await self._executions.list_children(
+            selected.execution_id, tenant_id=tenant_id
+        ):
+            if (
+                child.execution_id in visited
+                or child.lineage_kind.value != "SUBAGENT"
+                or child.parent_execution_id != selected.execution_id
+                or child.root_execution_id != selected.root_execution_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            visited.add(child.execution_id)
+            result.append((child, 1))
+        return result
+
+
+    async def _recursive_history_tree(
         self, selected: ExecutionRecord, tenant_id: str
     ) -> list[tuple[ExecutionRecord, int]]:
         if selected.lineage_kind.value == "SUBAGENT":
