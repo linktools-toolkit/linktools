@@ -215,43 +215,7 @@ jobs:
             exit 1
           fi
 
-          while IFS=      if: ${{ !env.ACT }}
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        user: __token__
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages_dir: dist/
-        skip-existing: ${{ needs.validate.outputs.resume }}
-
-    # create as a draft, upload all assets, then publish; an interrupted draft is resumable
-    - name: Publish GitHub release
-      if: ${{ !env.ACT }}
-      env:
-        GH_TOKEN: ${{ github.token }}
-        PRERELEASE: ${{ needs.validate.outputs.prerelease }}
-        VERSION: ${{ inputs.version }}
-      run: |
-        if IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
-          if [[ "$IS_DRAFT" != "true" ]]; then
-            echo "GitHub release $VERSION is already published"
-            exit 0
-          fi
-        else
-          if [[ "$PRERELEASE" == "true" ]]; then
-            gh release create "$VERSION" --draft --generate-notes --prerelease --latest=false
-          else
-            gh release create "$VERSION" --draft --generate-notes
-          fi
-        fi
-
-        gh release upload "$VERSION" dist/* --clobber
-
-        if [[ "$PRERELEASE" == "true" ]]; then
-          gh release edit "$VERSION" --draft=false --prerelease --latest=false
-        else
-          gh release edit "$VERSION" --draft=false --prerelease=false
-        fi
-\t' read -r FILENAME EXPECTED_SHA256; do
+          while IFS='|' read -r FILENAME EXPECTED_SHA256; do
             [[ -n "$FILENAME" ]] || continue
             LOCAL_PATH="dist/$FILENAME"
             if [[ ! -f "$LOCAL_PATH" ]]; then
@@ -265,7 +229,7 @@ jobs:
               rm -f "$RESPONSE"
               exit 1
             fi
-          done < <(jq -r '.urls[] | [.filename, .digests.sha256] | @tsv' "$RESPONSE")
+          done < <(jq -r '.urls[] | "\(.filename)|\(.digests.sha256)"' "$RESPONSE")
           rm -f "$RESPONSE"
         done
 
