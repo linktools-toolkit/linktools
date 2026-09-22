@@ -3,52 +3,33 @@
 
 from pathlib import Path
 
-import pytest
-
 from scripts import verify as release_verify
 
 
-def _artifact(name: str, *requires_dist: str) -> release_verify._Artifact:
+def _artifact(path: Path, name: str) -> release_verify._Artifact:
     return release_verify._Artifact(
-        Path("/tmp/%s.whl" % name),
+        path,
         "wheel",
         name,
         "0.10.0",
         ">=3.6",
-        requires_dist,
     )
 
 
-def test_candidate_install_order_uses_repository_dependencies_only() -> None:
-    artifacts = {
-        "linktools": _artifact("linktools", "filelock>=3.4.0"),
+def test_candidate_constraints_pin_other_repository_wheels(tmp_path: Path) -> None:
+    wheels = {
+        "linktools": _artifact(tmp_path / "linktools.whl", "linktools"),
         "linktools-common": _artifact(
+            tmp_path / "linktools_common.whl",
             "linktools-common",
-            "linktools[cli]>=0.10.0",
-            "lief>0.10.1; extra == 'lief'",
         ),
     }
 
-    order = release_verify._candidate_install_order(
-        "linktools-common",
-        artifacts,
-        {"linktools", "linktools-common", "linktools-mobile"},
+    constraints = release_verify._candidate_constraints(
+        wheels,
+        exclude="linktools-common",
     )
 
-    assert order == ("linktools", "linktools-common")
-
-
-def test_candidate_install_order_rejects_missing_repository_dependency() -> None:
-    artifacts = {
-        "linktools-common": _artifact(
-            "linktools-common",
-            "linktools[cli]>=0.10.0",
-        ),
-    }
-
-    with pytest.raises(ValueError, match="requires repository candidate linktools"):
-        release_verify._candidate_install_order(
-            "linktools-common",
-            artifacts,
-            {"linktools", "linktools-common"},
-        )
+    assert constraints == (
+        "linktools @ %s" % (tmp_path / "linktools.whl").as_uri(),
+    )

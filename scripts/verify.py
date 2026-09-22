@@ -44,7 +44,6 @@ _CLI_EXTRAS = {
     "linktools": "cli",
     "linktools-ai": "sqlite",
 }
-_REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _AI_SQLITE_SMOKE = """
 import asyncio
 import pathlib
@@ -333,7 +332,7 @@ def _validate_sdist_rebuild(pairs, roots):
                 raise ValueError("%s rebuilt wheel Version mismatch" % project)
             if rebuilt.requires_python != wheel.requires_python:
                 raise ValueError("%s rebuilt wheel Requires-Python mismatch" % project)
-            if rebuilt.requires_dist != wheel.requires_dist:
+            if sorted(rebuilt.requires_dist) != sorted(wheel.requires_dist):
                 raise ValueError("%s rebuilt wheel Requires-Dist mismatch" % project)
 
 
@@ -436,32 +435,12 @@ def _validate_install_isolation(pairs, resources):
                 raise ValueError("%s resource changed after mobile uninstall" % project)
 
 
-def _candidate_install_order(project, wheels, known_projects):
-    visiting = set()
-    visited = set()
-    order = []
-
-    def visit(name):
-        if name in visited:
-            return
-        if name in visiting:
-            raise ValueError("candidate dependency cycle: %s" % name)
-        visiting.add(name)
-        for requirement in wheels[name].requires_dist:
-            match = _REQUIREMENT_NAME.match(requirement)
-            dependency = _normalize_name(match.group(1)) if match else None
-            if dependency in known_projects:
-                if dependency not in wheels:
-                    raise ValueError(
-                        "%s requires unselected candidate %s" % (name, dependency)
-                    )
-                visit(dependency)
-        visiting.remove(name)
-        visited.add(name)
-        order.append(name)
-
-    visit(project)
-    return tuple(order)
+def _candidate_constraints(wheels, *, exclude=None):
+    return tuple(
+        "%s @ %s" % (wheels[name].name, wheels[name].path.as_uri())
+        for name in sorted(wheels)
+        if name != exclude
+    )
 
 
 def _venv_command(environment, name):
@@ -482,22 +461,28 @@ def _validate_candidate_installs(pairs, known_projects):
             python = _venv_python(environment)
             process_environment = dict(os.environ)
             process_environment.pop("PYTHONPATH", None)
-            order = _candidate_install_order(project, wheels, known_projects)
-            requirements = []
-            for name in order:
-                if name == project and project in _CLI_EXTRAS:
-                    requirements.append(
-                        "%s[%s] @ %s"
-                        % (
-                            wheels[name].name,
-                            _CLI_EXTRAS[project],
-                            wheels[name].path.as_uri(),
-                        )
-                    )
-                else:
-                    requirements.append(str(wheels[name].path))
+            constraints = root / ("%s-constraints.txt" % project)
+            constraints.write_text(
+                "\n".join(_candidate_constraints(wheels, exclude=project)) + "\n",
+                encoding="utf-8",
+            )
+            target = "%s @ %s" % (wheels[project].name, wheels[project].path.as_uri())
+            if project in _CLI_EXTRAS:
+                target = "%s[%s] @ %s" % (
+                    wheels[project].name,
+                    _CLI_EXTRAS[project],
+                    wheels[project].path.as_uri(),
+                )
             subprocess.check_call(
-                [str(python), "-m", "pip", "install"] + requirements,
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--constraint",
+                    str(constraints),
+                    target,
+                ],
                 cwd=str(root),
                 env=process_environment,
             )
