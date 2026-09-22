@@ -1285,44 +1285,64 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
         await self._history_tree(record, tenant_id)
-        final_run_id = step_run_id(
-            namespace=self._namespace,
+        cursor_state = _decode_transcript_cursor(
+            cursor,
             tenant_id=tenant_id,
             execution_id=execution_id,
-            segment_sequence=record.agent_run_sequence,
+            signer=self._cursor_signer,
         )
-        run = await self._store.get_run(run_id=final_run_id)
+        if cursor_state is None:
+            segment_sequence = record.agent_run_sequence
+            run_id = step_run_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+                segment_sequence=segment_sequence,
+            )
+            high_water = await self._transcript_high_water(run_id)
+            message_index = 0
+            item_offset = 0
+        else:
+            (
+                run_id,
+                segment_sequence,
+                high_water,
+                message_index,
+                item_offset,
+            ) = cursor_state
+            if (
+                segment_sequence > record.agent_run_sequence
+                or run_id
+                != step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=execution_id,
+                    segment_sequence=segment_sequence,
+                )
+            ):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            if await self._transcript_high_water(run_id) < high_water:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+
+        run = await self._store.get_run(run_id=run_id)
         if run is None:
+            if cursor is not None:
+                raise AIError(ErrorCode.CURSOR_INVALID)
             if record.status is ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
         _validate_run(
             run,
-            final_run_id,
+            run_id,
             step_conversation_id(
                 namespace=self._namespace,
                 tenant_id=tenant_id,
                 execution_id=execution_id,
             ),
-            record.agent_run_sequence,
+            segment_sequence,
         )
-        cursor_state = _decode_transcript_cursor(
-            cursor,
-            tenant_id=tenant_id,
-            execution_id=execution_id,
-            run_id=final_run_id,
-            signer=self._cursor_signer,
-        )
-        if cursor_state is None:
-            high_water = await self._transcript_high_water(final_run_id)
-            message_index = 0
-            item_offset = 0
-        else:
-            high_water, message_index, item_offset = cursor_state
-            if await self._transcript_high_water(final_run_id) < high_water:
-                raise AIError(ErrorCode.CURSOR_INVALID)
         messages = self._message_range(
-            final_run_id,
+            run_id,
             start=message_index,
             end=high_water,
             from_cursor=cursor is not None,
@@ -1355,7 +1375,8 @@ class StepExecutionHistoryReader:
             next_cursor = _transcript_cursor(
                 tenant_id,
                 execution_id,
-                final_run_id,
+                run_id,
+                segment_sequence,
                 high_water,
                 next_coordinate[0],
                 next_coordinate[1],
@@ -2293,9 +2314,8 @@ def _decode_transcript_cursor(
     *,
     tenant_id: str,
     execution_id: str,
-    run_id: str,
     signer: CursorSigner,
-) -> "tuple[int, int, int] | None":
+) -> "tuple[str, int, int, int, int] | None":
     if cursor is None:
         return None
     payload = decode_runtime_cursor(
@@ -2307,36 +2327,49 @@ def _decode_transcript_cursor(
             execution_id, _EXECUTION_TRANSCRIPT_PROJECTION_VERSION
         ),
     )
-    coordinate = _decode_position(payload.position, 4)
+    coordinate = _decode_position(payload.position, 5)
     if (
         payload.revision != 0
-        or coordinate[0] != run_id
+        or not isinstance(coordinate[0], str)
+        or not coordinate[0]
         or isinstance(coordinate[1], bool)
         or not isinstance(coordinate[1], int)
-        or coordinate[1] < 0
+        or coordinate[1] < 1
         or isinstance(coordinate[2], bool)
         or not isinstance(coordinate[2], int)
         or coordinate[2] < 0
-        or coordinate[2] > coordinate[1]
         or isinstance(coordinate[3], bool)
         or not isinstance(coordinate[3], int)
         or coordinate[3] < 0
+        or coordinate[3] > coordinate[2]
+        or isinstance(coordinate[4], bool)
+        or not isinstance(coordinate[4], int)
+        or coordinate[4] < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return coordinate[1], coordinate[2], coordinate[3]
+    return (
+        coordinate[0],
+        coordinate[1],
+        coordinate[2],
+        coordinate[3],
+        coordinate[4],
+    )
 
 
 def _transcript_cursor(
     tenant_id: str,
     execution_id: str,
     run_id: str,
+    segment_sequence: int,
     high_water: int,
     message_index: int,
     item_offset: int,
     signer: CursorSigner,
 ) -> str:
     if (
-        high_water < 0
+        not run_id
+        or segment_sequence < 1
+        or high_water < 0
         or message_index < 0
         or message_index > high_water
         or item_offset < 0
@@ -2350,7 +2383,13 @@ def _transcript_cursor(
             execution_id, _EXECUTION_TRANSCRIPT_PROJECTION_VERSION
         ),
         position=json.dumps(
-            [run_id, high_water, message_index, item_offset],
+            [
+                run_id,
+                segment_sequence,
+                high_water,
+                message_index,
+                item_offset,
+            ],
             ensure_ascii=False,
             separators=(",", ":"),
         ),
