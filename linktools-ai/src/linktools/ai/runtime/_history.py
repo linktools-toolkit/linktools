@@ -2026,7 +2026,7 @@ def _decode_history_cursor(
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
-) -> tuple[str, int, int, int] | None:
+) -> "tuple[tuple[str, int, int, int], tuple[tuple[str, int, int], ...]] | None":
     if cursor is None:
         return None
     payload = decode_runtime_cursor(
@@ -2038,9 +2038,21 @@ def _decode_history_cursor(
             execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION
         ),
     )
-    coordinate = _decode_position(payload.position, 4)
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
     if (
         payload.revision != 0
+        or not isinstance(value, Mapping)
+        or set(value) != {"position", "cutoffs"}
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    coordinate = value["position"]
+    raw_cutoffs = value["cutoffs"]
+    if (
+        not isinstance(coordinate, list)
+        or len(coordinate) != 4
         or not isinstance(coordinate[0], str)
         or not coordinate[0]
         or isinstance(coordinate[1], bool)
@@ -2052,17 +2064,44 @@ def _decode_history_cursor(
         or isinstance(coordinate[3], bool)
         or not isinstance(coordinate[3], int)
         or coordinate[3] < 0
+        or not isinstance(raw_cutoffs, list)
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return coordinate[0], coordinate[1], coordinate[2], coordinate[3]
+    cutoffs: list[tuple[str, int, int]] = []
+    for raw in raw_cutoffs:
+        if (
+            not isinstance(raw, list)
+            or len(raw) != 3
+            or not isinstance(raw[0], str)
+            or not raw[0]
+            or isinstance(raw[1], bool)
+            or not isinstance(raw[1], int)
+            or raw[1] < 1
+            or isinstance(raw[2], bool)
+            or not isinstance(raw[2], int)
+            or raw[2] < 0
+        ):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        cutoffs.append((raw[0], raw[1], raw[2]))
+    normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
+    if len({(item[0], item[1]) for item in normalized}) != len(normalized):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return (
+        (coordinate[0], coordinate[1], coordinate[2], coordinate[3]),
+        normalized,
+    )
 
 
 def _history_cursor(
     tenant_id: str,
     execution_id: str,
     occurrence: _HistoryOccurrence,
+    cutoffs: tuple[tuple[str, int, int], ...],
     signer: CursorSigner,
 ) -> str:
+    normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
+    if len({(item[0], item[1]) for item in normalized}) != len(normalized):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return encode_runtime_cursor(
         signer,
         tenant_id=tenant_id,
@@ -2071,14 +2110,18 @@ def _history_cursor(
             execution_id, _EXECUTION_HISTORY_PROJECTION_VERSION
         ),
         position=json.dumps(
-            [
-                occurrence.source_execution_id,
-                occurrence.segment_sequence,
-                occurrence.message_index,
-                occurrence.item_offset,
-            ],
+            {
+                "position": [
+                    occurrence.source_execution_id,
+                    occurrence.segment_sequence,
+                    occurrence.message_index,
+                    occurrence.item_offset,
+                ],
+                "cutoffs": [list(item) for item in normalized],
+            },
             ensure_ascii=False,
             separators=(",", ":"),
+            sort_keys=True,
         ),
     )
 
