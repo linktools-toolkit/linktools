@@ -763,6 +763,7 @@ class _LocalSandboxSession:
         return _bound_output(f"command_id: {process.command_id}\nstatus: running")
 
     async def check_command(self, command_id: str) -> str:
+        self._reject_read_only()
         validate_request_size("check_command", {"command_id": command_id})
         process = await self._get_process(command_id)
         if process is None:
