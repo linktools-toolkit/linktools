@@ -234,8 +234,8 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         )
         raise error
 
-    def _tool_request_metadata(self, step_index: int) -> dict[str, str]:
-        sequence = self.capture.request_sequence_for_step(step_index)
+    def _tool_request_metadata(self, tool_call_id: str) -> dict[str, str]:
+        sequence = self.capture.request_sequence_for_tool_call(tool_call_id)
         return (
             {}
             if sequence is None
@@ -258,7 +258,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
             ctx.run_step,
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
-            metadata=self._tool_request_metadata(ctx.run_step),
+            metadata=self._tool_request_metadata(call.tool_call_id),
         )
         return args
 
@@ -275,7 +275,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         started_ns = self._tool_started_ns.pop(call.tool_call_id, None)
         if started_ns is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        metadata = self._tool_request_metadata(ctx.run_step)
+        metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.capture.record_event(
             "tool_call_completed",
@@ -299,7 +299,7 @@ class _RuntimeStepPersistence(AbstractCapability[None]):
         started_ns = self._tool_started_ns.pop(call.tool_call_id, None)
         if started_ns is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        metadata = self._tool_request_metadata(ctx.run_step)
+        metadata = self._tool_request_metadata(call.tool_call_id)
         metadata[DURATION_NS_METADATA_KEY] = str(max(0, monotonic_ns() - started_ns))
         await self.capture.record_event(
             "tool_call_failed",
