@@ -356,6 +356,11 @@ def _same_attachment(
             return False
     elif source != candidate_source:
         return False
+    if (
+        source not in {"workspace", "attach_files"}
+        and expected.get("input_identifier") != candidate.get("input_identifier")
+    ):
+        return False
     return (
         expected.get("content_key") == candidate.get("content_key")
         and expected.get("media_type") == candidate.get("media_type")

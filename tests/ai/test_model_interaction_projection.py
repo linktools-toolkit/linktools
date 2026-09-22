@@ -30,6 +30,7 @@ from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime._attachment import (
     bind_tool_return_attachments,
     input_attachment_views,
+    request_attachment_facts,
 )
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._journal import ModelRequestJournal
@@ -348,6 +349,41 @@ async def test_model_request_preserves_duplicate_initial_attachment_identity() -
         "input-a",
         "input-b",
     ]
+
+
+def test_initial_attachment_matching_uses_input_identifier() -> None:
+    accepted = input_attachment_views(
+        (
+            BinaryContent(
+                b"same",
+                media_type="image/png",
+                identifier="input-a",
+            ),
+        )
+    )
+    message = ModelRequest(
+        parts=[
+            UserPromptPart(
+                [
+                    BinaryContent(
+                        b"same",
+                        media_type="image/png",
+                        identifier="input-b",
+                    )
+                ]
+            )
+        ]
+    )
+
+    facts = request_attachment_facts(
+        (message,),
+        accepted,
+        accepted_attachment_ids={
+            str(accepted[0]["attachment_id"]),
+        },
+    )
+
+    assert facts == ()
 
 
 @pytest.mark.asyncio
