@@ -270,7 +270,7 @@ class MCPServerSpecCodec:
         if not isinstance(value, MCPServerSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid")
         payload: dict[str, JsonValue] = {
-            "version": 2 if value.resource_root is not None else 1,
+            "version": 1,
             "id": value.id,
             "command": value.command,
             "args": list(value.args),
@@ -294,6 +294,8 @@ class MCPServerSpecCodec:
             return payload
         if not isinstance(resource_snapshot, ObjectRef):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["args"] = None
+        payload["frozen_args"] = list(value.args)
         payload["resource_snapshot"] = _object_ref_payload(resource_snapshot)
         return payload
 
@@ -318,31 +320,29 @@ class MCPServerSpecCodec:
         *,
         frozen: bool,
     ) -> "tuple[MCPServerSpec, ObjectRef | None]":
-        version = _require_version(raw, {1, 2})
-        if not frozen and "resource_snapshot" in raw:
+        _require_v1(raw)
+        if not frozen and (
+            "resource_snapshot" in raw or "frozen_args" in raw
+        ):
             raise AIError(
                 ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "MCP resource snapshot is Runtime-owned",
+                "MCP frozen resource fields are Runtime-owned",
             )
         identity = raw.get("id")
         command = raw.get("command")
-        args = raw.get("args", [])
         resource_root = _decode_asset_key(raw.get("resource_root"))
+        raw_snapshot = raw.get("resource_snapshot") if frozen else None
         resource_snapshot = (
-            _decode_object_ref(raw.get("resource_snapshot")) if frozen else None
+            _decode_object_ref(raw_snapshot) if raw_snapshot is not None else None
         )
-        if version == 1 and resource_root is not None:
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "MCP resource root requires version 2",
-            )
-        if version == 2 and resource_root is None:
-            raise AIError(
-                ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "MCP version 2 requires a resource root",
-            )
-        if resource_snapshot is not None and resource_root is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if resource_snapshot is None:
+            if frozen and "frozen_args" in raw:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            args = raw.get("args", [])
+        else:
+            if resource_root is None or raw.get("args") is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            args = raw.get("frozen_args")
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")
         if not isinstance(command, str) or not command.strip():
