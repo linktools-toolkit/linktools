@@ -540,9 +540,9 @@ class TaskGraphRun(Generic[AppT]):
                     node_id,
                     child,
                     child.event_sequence,
-                    parent_depth + 1,
+                    1,
                 )
-                pending.append((node_id, child.execution_id, parent_depth + 1))
+                pending.append((node_id, child.execution_id, 1))
 
         events: list[TaskGraphRunEvent] = []
         replay_execution_sequences: dict[str, dict[str, int]] = {}
