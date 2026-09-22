@@ -20,7 +20,6 @@ from ._journal import (
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
     MODEL_USAGE_OUTPUT_METADATA_KEY,
-    REQUEST_SEQUENCE_METADATA_KEY,
     ModelRequestFact,
 )
 from ._message import encode_model_messages, freeze_model_messages, project_transient_binary_content
