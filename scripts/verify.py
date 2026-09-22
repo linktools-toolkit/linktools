@@ -26,7 +26,6 @@ _CAPABILITY_RESOURCES = {
     "linktools-common": "linktools/assets/tools/linktools-common.json",
     "linktools-mobile": "linktools/assets/tools/linktools-mobile.json",
 }
-
 _IMPORT_MODULES = {
     "linktools": "linktools",
     "linktools-common": "linktools.commands.common",
@@ -45,7 +44,7 @@ _CLI_EXTRAS = {
     "linktools": "cli",
     "linktools-ai": "sqlite",
 }
-_REQUIREMENT_NAME_PATTERN = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
+_REQUIREMENT_NAME = re.compile(r"^\\s*([A-Za-z0-9_.-]+)")
 
 
 class _Artifact:
@@ -118,8 +117,6 @@ def _read_artifact(path):
     requires_dist = getattr(metadata, "requires_dist", None) or ()
     if isinstance(requires_dist, str):
         requires_dist = (requires_dist,)
-    else:
-        requires_dist = tuple(str(value) for value in requires_dist)
     return _Artifact(path, kind, name, version, requires_python, requires_dist)
 
 
@@ -276,45 +273,46 @@ def _validate_sdist_inputs(pairs):
     return roots
 
 
-def _validate_sdist_rebuild(pairs, roots, output_root):
-    rebuilt_artifacts = {}
-    for project, pair in pairs.items():
-        wheel, sdist = pair
-        project_root = output_root / project
-        project_root.mkdir()
-        with tarfile.open(str(sdist.path), "r:gz") as archive:
-            _safe_sdist_members(archive)
-            archive.extractall(str(project_root))
-        source = project_root / roots[project]
-        output = project_root / "wheel"
-        output.mkdir()
-        environment = dict(os.environ)
-        environment["RELEASE"] = "true"
-        subprocess.check_call(
-            [
-                sys.executable,
-                "-m",
-                "build",
-                "--wheel",
-                "--outdir",
-                str(output),
-                str(source),
-            ],
-            cwd=str(_REPO_ROOT),
-            env=environment,
-        )
-        rebuilt_paths = list(output.glob("*.whl"))
-        if len(rebuilt_paths) != 1:
-            raise ValueError("%s sdist rebuild produced %d wheel(s)" % (project, len(rebuilt_paths)))
-        rebuilt = _read_artifact(rebuilt_paths[0])
-        if rebuilt.name != wheel.name:
-            raise ValueError("%s rebuilt wheel Name mismatch" % project)
-        if rebuilt.version != wheel.version:
-            raise ValueError("%s rebuilt wheel Version mismatch" % project)
-        if rebuilt.requires_python != wheel.requires_python:
-            raise ValueError("%s rebuilt wheel Requires-Python mismatch" % project)
-        rebuilt_artifacts[project] = rebuilt
-    return rebuilt_artifacts
+def _validate_sdist_rebuild(pairs, roots):
+    with tempfile.TemporaryDirectory(prefix="linktools-sdist-rebuild-") as temporary:
+        temporary_root = Path(temporary)
+        for project, pair in pairs.items():
+            wheel, sdist = pair
+            project_root = temporary_root / project
+            project_root.mkdir()
+            with tarfile.open(str(sdist.path), "r:gz") as archive:
+                _safe_sdist_members(archive)
+                archive.extractall(str(project_root))
+            source = project_root / roots[project]
+            output = project_root / "wheel"
+            output.mkdir()
+            environment = dict(os.environ)
+            environment["RELEASE"] = "true"
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "build",
+                    "--wheel",
+                    "--outdir",
+                    str(output),
+                    str(source),
+                ],
+                cwd=str(_REPO_ROOT),
+                env=environment,
+            )
+            rebuilt_paths = list(output.glob("*.whl"))
+            if len(rebuilt_paths) != 1:
+                raise ValueError("%s sdist rebuild produced %d wheel(s)" % (project, len(rebuilt_paths)))
+            rebuilt = _read_artifact(rebuilt_paths[0])
+            if rebuilt.name != wheel.name:
+                raise ValueError("%s rebuilt wheel Name mismatch" % project)
+            if rebuilt.version != wheel.version:
+                raise ValueError("%s rebuilt wheel Version mismatch" % project)
+            if rebuilt.requires_python != wheel.requires_python:
+                raise ValueError("%s rebuilt wheel Requires-Python mismatch" % project)
+            if rebuilt.requires_dist != wheel.requires_dist:
+                raise ValueError("%s rebuilt wheel Requires-Dist mismatch" % project)
 
 
 def _wheel_resource(wheel, resource):
@@ -416,12 +414,7 @@ def _validate_install_isolation(pairs, resources):
                 raise ValueError("%s resource changed after mobile uninstall" % project)
 
 
-def _requirement_name(requirement):
-    match = _REQUIREMENT_NAME_PATTERN.match(requirement)
-    return _normalize_name(match.group(1)) if match else None
-
-
-def _candidate_install_order(project, artifacts, known_projects):
+def _candidate_install_order(project, wheels, known_projects):
     visiting = set()
     visited = set()
     order = []
@@ -430,21 +423,17 @@ def _candidate_install_order(project, artifacts, known_projects):
         if name in visited:
             return
         if name in visiting:
-            raise ValueError("candidate dependency cycle while verifying %s: %s" % (project, name))
-        artifact = artifacts.get(name)
-        if artifact is None:
-            raise ValueError("missing candidate artifact while verifying %s: %s" % (project, name))
+            raise ValueError("candidate dependency cycle: %s" % name)
         visiting.add(name)
-        for requirement in artifact.requires_dist:
-            dependency = _requirement_name(requirement)
-            if dependency not in known_projects:
-                continue
-            if dependency not in artifacts:
-                raise ValueError(
-                    "%s requires repository candidate %s, but it is not selected for verification"
-                    % (name, dependency)
-                )
-            visit(dependency)
+        for requirement in wheels[name].requires_dist:
+            match = _REQUIREMENT_NAME.match(requirement)
+            dependency = _normalize_name(match.group(1)) if match else None
+            if dependency in known_projects:
+                if dependency not in wheels:
+                    raise ValueError(
+                        "%s requires unselected candidate %s" % (name, dependency)
+                    )
+                visit(dependency)
         visiting.remove(name)
         visited.add(name)
         order.append(name)
@@ -453,171 +442,81 @@ def _candidate_install_order(project, artifacts, known_projects):
     return tuple(order)
 
 
-def _isolated_environment():
-    environment = dict(os.environ)
-    environment.pop("PYTHONHOME", None)
-    environment.pop("PYTHONPATH", None)
-    environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-    return environment
-
-
 def _venv_command(environment, name):
-    if os.name == "nt":
-        return environment / "Scripts" / ("%s.exe" % name)
-    return environment / "bin" / name
+    directory = "Scripts" if os.name == "nt" else "bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    return environment / directory / (name + suffix)
 
 
-_IMPORT_CHECK_SCRIPT = """
-import importlib
-import importlib.metadata as metadata
-import pathlib
-import site
-import sys
-
-distribution_name, module_name, expected_version = sys.argv[1:4]
-distribution = metadata.distribution(distribution_name)
-if distribution.version != expected_version:
-    raise SystemExit(
-        "distribution version mismatch: %s != %s"
-        % (distribution.version, expected_version)
-    )
-module = importlib.import_module(module_name)
-origin = getattr(module, "__file__", None)
-if not origin:
-    raise SystemExit("import has no file origin: %s" % module_name)
-module_path = pathlib.Path(origin).resolve()
-site_roots = tuple(pathlib.Path(value).resolve() for value in site.getsitepackages())
-if not any(root == module_path or root in module_path.parents for root in site_roots):
-    raise SystemExit("import escaped isolated site-packages: %s" % module_path)
-"""
-
-
-_SQLITE_CHECK_SCRIPT = """
-import asyncio
-import pathlib
-import sys
-
-from linktools.ai.runtime import RuntimeState
-
-async def main():
-    database = pathlib.Path(sys.argv[1]) / "runtime.db"
-    state = RuntimeState.sqlite(database)
-    await state.initialize(namespace="release-verify", tenant_id="release-verify")
-    await state.close()
-    reopened = RuntimeState.sqlite(database)
-    await reopened.initialize(
-        namespace="release-verify",
-        tenant_id="release-verify",
-        read_only=True,
-    )
-    await reopened.close()
-
-asyncio.run(main())
-"""
-
-
-def _pip_check(python, *, cwd, environment):
-    subprocess.check_call(
-        [str(python), "-m", "pip", "check"],
-        cwd=str(cwd),
-        env=environment,
-    )
-
-
-def _validate_candidate_imports(python, order, artifacts, *, cwd, environment):
-    for project in order:
-        artifact = artifacts[project]
-        subprocess.check_call(
-            [
-                str(python),
-                "-c",
-                _IMPORT_CHECK_SCRIPT,
-                artifact.name,
-                _IMPORT_MODULES[project],
-                artifact.version,
-            ],
-            cwd=str(cwd),
-            env=environment,
-        )
-
-
-def _validate_candidate_cli(project, environment, *, cwd, subprocess_environment):
-    command = _venv_command(environment, _CLI_COMMANDS[project])
-    if not command.is_file():
-        raise ValueError("%s CLI entry point is missing: %s" % (project, command))
-    subprocess.check_call(
-        [str(command), "--help"],
-        cwd=str(cwd),
-        env=subprocess_environment,
-    )
-
-
-def _validate_ai_sqlite(python, *, cwd, environment):
-    database_root = cwd / "sqlite-smoke"
-    database_root.mkdir()
-    subprocess.check_call(
-        [str(python), "-c", _SQLITE_CHECK_SCRIPT, str(database_root)],
-        cwd=str(cwd),
-        env=environment,
-    )
-
-
-def _validate_candidate_install(project, artifacts, known_projects, root):
-    order = _candidate_install_order(project, artifacts, known_projects)
-    target = artifacts[project]
-    environment = root / project
-    venv.create(str(environment), with_pip=True, system_site_packages=False)
-    python = _venv_python(environment)
-    subprocess_environment = _isolated_environment()
-    install_requirements = [str(artifacts[name].path) for name in order]
-    subprocess.check_call(
-        [str(python), "-m", "pip", "install"] + install_requirements,
-        cwd=str(root),
-        env=subprocess_environment,
-    )
-    _pip_check(python, cwd=root, environment=subprocess_environment)
-    _validate_candidate_imports(
-        python,
-        order,
-        artifacts,
-        cwd=root,
-        environment=subprocess_environment,
-    )
-
-    extra = _CLI_EXTRAS.get(project)
-    if extra is not None:
-        subprocess.check_call(
-            [str(python), "-m", "pip", "install", "%s[%s]" % (target.path, extra)],
-            cwd=str(root),
-            env=subprocess_environment,
-        )
-        _pip_check(python, cwd=root, environment=subprocess_environment)
-
-    _validate_candidate_cli(
-        project,
-        environment,
-        cwd=root,
-        subprocess_environment=subprocess_environment,
-    )
-    if project == "linktools-ai":
-        _validate_ai_sqlite(
-            python,
-            cwd=root,
-            environment=subprocess_environment,
-        )
-
-
-def _validate_candidate_installs(label, artifacts, known_projects):
-    revision = os.environ.get("GITHUB_SHA", "local")
-    with tempfile.TemporaryDirectory(prefix="linktools-%s-install-" % label) as temporary:
+def _validate_candidate_installs(pairs, known_projects):
+    wheels = {project: pair[0] for project, pair in pairs.items()}
+    with tempfile.TemporaryDirectory(prefix="linktools-candidate-install-") as temporary:
         root = Path(temporary)
-        for project in sorted(artifacts):
-            artifact = artifacts[project]
-            print(
-                "[+] %s candidate install: %s %s source=%s revision=%s"
-                % (label, artifact.name, artifact.version, artifact.path.name, revision)
+        for project in sorted(wheels):
+            environment = root / project
+            venv.create(str(environment), with_pip=True, system_site_packages=False)
+            python = _venv_python(environment)
+            process_environment = dict(os.environ)
+            process_environment.pop("PYTHONPATH", None)
+            order = _candidate_install_order(project, wheels, known_projects)
+            requirements = []
+            for name in order:
+                requirement = str(wheels[name].path)
+                if name == project and project in _CLI_EXTRAS:
+                    requirement += "[%s]" % _CLI_EXTRAS[project]
+                requirements.append(requirement)
+            subprocess.check_call(
+                [str(python), "-m", "pip", "install"] + requirements,
+                cwd=str(root),
+                env=process_environment,
             )
-            _validate_candidate_install(project, artifacts, known_projects, root)
+            subprocess.check_call(
+                [str(python), "-m", "pip", "check"],
+                cwd=str(root),
+                env=process_environment,
+            )
+            subprocess.check_call(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    "import importlib; importlib.import_module(%r)" % _IMPORT_MODULES[project],
+                ],
+                cwd=str(root),
+                env=process_environment,
+            )
+            command = _venv_command(environment, _CLI_COMMANDS[project])
+            if not command.is_file():
+                raise ValueError("%s CLI entry point is missing" % project)
+            subprocess.check_call(
+                [str(command), "--help"],
+                cwd=str(root),
+                env=process_environment,
+            )
+            if project == "linktools-ai":
+                subprocess.check_call(
+                    [
+                        str(python),
+                        "-I",
+                        "-c",
+                        (
+                            "import asyncio,pathlib,sys;"
+                            "from linktools.ai.runtime import RuntimeState;"
+                            "p=pathlib.Path(sys.argv[1]);"
+                            "async def f():\n"
+                            " s=RuntimeState.sqlite(p);"
+                            " await s.initialize(namespace='verify',tenant_id='verify');"
+                            " await s.close();"
+                            " r=RuntimeState.sqlite(p);"
+                            " await r.initialize(namespace='verify',tenant_id='verify',read_only=True);"
+                            " await r.close()\n"
+                            "asyncio.run(f())"
+                        ),
+                        str(root / "runtime.db"),
+                    ],
+                    cwd=str(root),
+                    env=process_environment,
+                )
 
 
 def main() -> int:
@@ -641,21 +540,10 @@ def main() -> int:
         pairs = _selected_pairs(artifacts, selected, project_paths)
         _validate_version(pairs, project_paths)
         roots = _validate_sdist_inputs(pairs)
+        _validate_sdist_rebuild(pairs, roots)
         resources = _validate_capability_resources(pairs)
         _validate_install_isolation(pairs, resources)
-        original_wheels = {project: pair[0] for project, pair in pairs.items()}
-        with tempfile.TemporaryDirectory(prefix="linktools-sdist-rebuild-") as temporary:
-            rebuilt_wheels = _validate_sdist_rebuild(
-                pairs,
-                roots,
-                Path(temporary),
-            )
-            _validate_candidate_installs("wheel", original_wheels, project_paths)
-            _validate_candidate_installs(
-                "sdist-rebuilt-wheel",
-                rebuilt_wheels,
-                project_paths,
-            )
+        _validate_candidate_installs(pairs, project_paths)
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError, zipfile.BadZipFile) as error:
         print("[-] Artifact verification failed: %s" % error, file=sys.stderr)
         return 1
