@@ -67,7 +67,7 @@ from .state._views import (
 
 _logger = environ.get_logger("ai.runtime.history")
 _EXECUTION_HISTORY_PROJECTION_VERSION = 2
-_EXECUTION_TRACE_PROJECTION_VERSION = 1
+_EXECUTION_TRACE_PROJECTION_VERSION = 2
 _EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 2
 _MODEL_INTERACTION_PROJECTION_VERSION = 2
 _ATTACHMENT_FACT_PROJECTION_VERSION = 1
@@ -231,37 +231,72 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         limit = validate_page_limit(limit)
         entries = await self._history_tree(record, tenant_id)
-        occurrences: list[_TraceOccurrence] = []
+        current: dict[tuple[str, int], tuple[ExecutionRecord, int, list[StepEvent]]] = {}
         for item, depth in entries:
             for segment_sequence, events in await self._segment_events(item, tenant_id):
-                for ordinal, event in enumerate(events):
-                    mapped = _trace_item(item, segment_sequence, depth, ordinal, event)
-                    if mapped is not None:
-                        occurrences.append(
-                            _TraceOccurrence(
-                                mapped,
-                                item.execution_id,
-                                segment_sequence,
-                                ordinal + 1,
-                                (
-                                    _event_timestamp(event),
-                                    depth,
-                                    item.execution_id,
-                                    segment_sequence,
-                                    ordinal + 1,
-                                    mapped.payload.get("kind", ""),
-                                ),
-                            )
-                        )
-        occurrences.sort(key=lambda occurrence: occurrence.merge_key)
-        start = _trace_cursor_index(
+                identity = (item.execution_id, segment_sequence)
+                if identity in current:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                current[identity] = (item, depth, events)
+
+        cursor_state = _decode_trace_cursor(
             cursor,
             tenant_id=tenant_id,
             execution_id=execution_id,
             signer=self._cursor_signer,
+        )
+        if cursor_state is None:
+            cursor_coordinate = None
+            fixed_cutoffs = tuple(
+                sorted(
+                    (
+                        source_execution_id,
+                        segment_sequence,
+                        len(events),
+                    )
+                    for (source_execution_id, segment_sequence), (
+                        _item,
+                        _depth,
+                        events,
+                    ) in current.items()
+                )
+            )
+        else:
+            cursor_coordinate, fixed_cutoffs = cursor_state
+
+        occurrences: list[_TraceOccurrence] = []
+        for source_execution_id, segment_sequence, event_count in fixed_cutoffs:
+            value = current.get((source_execution_id, segment_sequence))
+            if value is None:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            item, depth, events = value
+            if event_count > len(events):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            for ordinal, event in enumerate(events[:event_count]):
+                mapped = _trace_item(item, segment_sequence, depth, ordinal, event)
+                if mapped is not None:
+                    occurrences.append(
+                        _TraceOccurrence(
+                            mapped,
+                            item.execution_id,
+                            segment_sequence,
+                            ordinal + 1,
+                            (
+                                _event_timestamp(event),
+                                depth,
+                                item.execution_id,
+                                segment_sequence,
+                                ordinal + 1,
+                                mapped.payload.get("kind", ""),
+                            ),
+                        )
+                    )
+        occurrences.sort(key=lambda occurrence: occurrence.merge_key)
+        start_index = _trace_cursor_index(
+            cursor_coordinate,
             occurrences=occurrences,
         )
-        page = occurrences[start : start + limit + 1]
+        page = occurrences[start_index : start_index + limit + 1]
         selected = tuple(occurrence.item for occurrence in page[:limit])
         next_cursor = None
         if len(page) > limit:
@@ -269,12 +304,13 @@ class StepExecutionHistoryReader:
                 tenant_id,
                 execution_id,
                 page[limit],
+                fixed_cutoffs,
                 self._cursor_signer,
             )
         _logger.debug(
             "execution trace projected page: execution=%s source_index=%s items=%s",
             execution_id,
-            start,
+            start_index,
             len(selected),
         )
         return Page(selected, next_cursor)
@@ -2136,16 +2172,15 @@ def _history_cursor(
     )
 
 
-def _trace_cursor_index(
+def _decode_trace_cursor(
     cursor: str | None,
     *,
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
-    occurrences: Sequence[_TraceOccurrence],
-) -> int:
+) -> "tuple[tuple[str, int, int], tuple[tuple[str, int, int], ...]] | None":
     if cursor is None:
-        return 0
+        return None
     payload = decode_runtime_cursor(
         cursor,
         signer,
@@ -2155,9 +2190,21 @@ def _trace_cursor_index(
             execution_id, _EXECUTION_TRACE_PROJECTION_VERSION
         ),
     )
-    coordinate = _decode_position(payload.position, 3)
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
     if (
         payload.revision != 0
+        or not isinstance(value, Mapping)
+        or set(value) != {"position", "cutoffs"}
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    coordinate = value["position"]
+    raw_cutoffs = value["cutoffs"]
+    if (
+        not isinstance(coordinate, list)
+        or len(coordinate) != 3
         or not isinstance(coordinate[0], str)
         or not coordinate[0]
         or isinstance(coordinate[1], bool)
@@ -2166,15 +2213,44 @@ def _trace_cursor_index(
         or isinstance(coordinate[2], bool)
         or not isinstance(coordinate[2], int)
         or coordinate[2] < 1
+        or not isinstance(raw_cutoffs, list)
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    expected = (coordinate[0], coordinate[1], coordinate[2])
+    cutoffs: list[tuple[str, int, int]] = []
+    for raw in raw_cutoffs:
+        if (
+            not isinstance(raw, list)
+            or len(raw) != 3
+            or not isinstance(raw[0], str)
+            or not raw[0]
+            or isinstance(raw[1], bool)
+            or not isinstance(raw[1], int)
+            or raw[1] < 1
+            or isinstance(raw[2], bool)
+            or not isinstance(raw[2], int)
+            or raw[2] < 0
+        ):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        cutoffs.append((raw[0], raw[1], raw[2]))
+    normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
+    if len({(item[0], item[1]) for item in normalized}) != len(normalized):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return (coordinate[0], coordinate[1], coordinate[2]), normalized
+
+
+def _trace_cursor_index(
+    coordinate: "tuple[str, int, int] | None",
+    *,
+    occurrences: Sequence[_TraceOccurrence],
+) -> int:
+    if coordinate is None:
+        return 0
     for index, occurrence in enumerate(occurrences):
         if (
             occurrence.source_execution_id,
             occurrence.segment_sequence,
             occurrence.event_sequence,
-        ) == expected:
+        ) == coordinate:
             return index
     raise AIError(ErrorCode.CURSOR_INVALID)
 
@@ -2183,8 +2259,12 @@ def _trace_cursor(
     tenant_id: str,
     execution_id: str,
     occurrence: _TraceOccurrence,
+    cutoffs: tuple[tuple[str, int, int], ...],
     signer: CursorSigner,
 ) -> str:
+    normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
+    if len({(item[0], item[1]) for item in normalized}) != len(normalized):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return encode_runtime_cursor(
         signer,
         tenant_id=tenant_id,
@@ -2193,13 +2273,17 @@ def _trace_cursor(
             execution_id, _EXECUTION_TRACE_PROJECTION_VERSION
         ),
         position=json.dumps(
-            [
-                occurrence.source_execution_id,
-                occurrence.segment_sequence,
-                occurrence.event_sequence,
-            ],
+            {
+                "position": [
+                    occurrence.source_execution_id,
+                    occurrence.segment_sequence,
+                    occurrence.event_sequence,
+                ],
+                "cutoffs": [list(item) for item in normalized],
+            },
             ensure_ascii=False,
             separators=(",", ":"),
+            sort_keys=True,
         ),
     )
 
