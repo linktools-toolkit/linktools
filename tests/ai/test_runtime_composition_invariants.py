@@ -30,7 +30,6 @@ from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay, StoredPayload
-from linktools.ai.workspace import Workspace
 from pydantic import BaseModel
 
 from ._runtime_test_helpers import RuntimeUsageModels, runtime_usage_workspace
@@ -127,7 +126,7 @@ def _execution(*, binding: AgentBindingSnapshot | None = None) -> ExecutionRecor
 
 
 @pytest.mark.asyncio
-async def test_runtime_does_not_close_borrowed_workspace_store(tmp_path: Path) -> None:
+async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
