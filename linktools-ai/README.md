@@ -132,47 +132,35 @@ these declarations instead of inferring behavior from Tool names.
 
 `CapabilityGroup.agent()` creates an `AgentSpec`; declarations themselves use the single v1 wire contract and do not expose a per-declaration revision field.
 
-## 3. Workspace declarations
+## 3. Workspace and declaration assets
 
-Workspace behavior is opt-in. Install it with `CapabilityGroup("workspace", workspace=workspace)`; construction is side-effect free, and declaration discovery happens when the Runtime freezes the group. The default Workspace source loads these declaration kinds:
+`CapabilityGroup("workspace", workspace=workspace)` contributes the stable
+Workspace tools and sandbox boundary only. It does not discover Agent, Skill, or
+MCP declarations from Workspace paths.
 
-```text
-.linktools/
-  agents/<id>
-  skills/<id>
-  skills/<id>/SKILL.md
-  mcp/<id>
-```
+Agent, Skill, and MCP declarations use one explicit source: pass a ready
+`AssetStore` with `CapabilityGroup(..., assets=store)`. A store-backed group
+captures the declaration metadata visible when freeze starts. Assets added
+afterward are ignored for that freeze; assets actually read by a loader must
+still match their captured metadata through verification. Conflicting
+identities or layouts fail closed.
 
-For a filesystem Workspace, use the dedicated constructor:
-
-```python
-workspace_group = CapabilityGroup("workspace", workspace=workspace)
-
-async with Runtime.open(
-    "default",
-    models=models,
-    state=state,
-    capabilities=(workspace_group,),
-) as runtime:
-    ...
-```
-
-For caller-owned declaration storage independent of a Workspace, `CapabilityGroup(..., assets=...)` performs discovery from the borrowed `AssetStore` using metadata captured when freeze starts.
-
-A store-backed group captures the declaration metadata visible when freeze starts. Assets added afterward are ignored for that freeze; assets actually read by a loader must still match their captured metadata through verification. Conflicting identities or layouts fail closed.
-
-For downstream declaration formats or custom kinds such as `worker` or `audit`, implement `CapabilityLoader` and register it for its input Asset kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or `mcp` replaces only that built-in parser slot. The loader receives one `CapabilityLoadContext`, can inspect the captured metadata and read captured keys with `read()` / `read_many()`, and returns normal `CapabilityContribution` values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP declarations. No additional Registry/Provider abstraction is required.
+For downstream declaration formats or custom kinds such as `worker` or
+`audit`, implement `CapabilityLoader` and register it for its input Asset
+kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or
+`mcp` replaces only that built-in parser slot. The loader receives one
+`CapabilityLoadContext`, can inspect captured metadata and read captured keys
+with `read()` / `read_many()`, and returns normal `CapabilityContribution`
+values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill,
+and MCP declarations. No additional Registry/Provider abstraction is required.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
-`resource_root=AssetKey("mcp", "server/assets")`. Workspace-only automatic
-declaration discovery does not retain an AssetStore for later execution
-freezing; pass `assets=` when MCP resource trees must be frozen. Arguments
-whose complete value starts with `resource:` then name files below that root.
-Runtime freezes and verifies the selected AssetStore tree, rejects
-absolute paths, traversal, and missing files, and materializes the frozen files
-for the MCP process. Without `resource_root`, existing argument strings keep
-their original meaning.
+`resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
+value starts with `resource:` then name files below that root. Runtime freezes
+and verifies the selected AssetStore tree, rejects absolute paths, traversal,
+and missing files, and materializes the frozen files for the MCP process.
+Without `resource_root`, existing argument strings keep their original
+meaning.
 
 ### Workspace sandbox
 
