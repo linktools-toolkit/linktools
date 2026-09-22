@@ -35,6 +35,45 @@ async def test_file_info_does_not_authorize_a_file_as_a_directory(tmp_path: Path
         await session.close()
 
 
+async def test_read_only_policy_hides_unauthorized_resource_root(
+    tmp_path: Path,
+) -> None:
+    resource = tmp_path / "resource"
+    resource.mkdir()
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("allowed.txt",))
+    ).open(
+        root=tmp_path,
+        resources=(SandboxResource("resource", resource),),
+    )
+    try:
+        with pytest.raises(AIError) as raised:
+            session.resource_path("resource")
+        assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+    finally:
+        await session.close()
+
+
+async def test_read_only_policy_exposes_authorized_resource_root(
+    tmp_path: Path,
+) -> None:
+    resource = tmp_path / "resource"
+    resource.mkdir()
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(
+            ("allowed.txt",),
+            {"resource": ("resource.txt",)},
+        )
+    ).open(
+        root=tmp_path,
+        resources=(SandboxResource("resource", resource),),
+    )
+    try:
+        assert session.resource_path("resource") == str(resource.resolve())
+    finally:
+        await session.close()
+
+
 def _python_command(code: str) -> str:
     if os.name == "nt":
         return f'"{sys.executable}" -c "{code}"'
