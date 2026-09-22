@@ -165,6 +165,20 @@ async def test_memory_store_remains_writable_across_missing_delete_receipts() ->
 
 
 @pytest.mark.asyncio
+async def test_workspace_group_does_not_discover_declarations_without_assets(tmp_path) -> None:
+    workspace = Workspace.load(tmp_path)
+    agent_path = workspace.storage_root / "agents" / "default"
+    agent_path.parent.mkdir(parents=True, exist_ok=True)
+    agent_path.write_bytes(
+        AgentSpecCodec().encode(AgentSpec("default", model="gpt-test"))
+    )
+
+    frozen = await CapabilityGroup("workspace", workspace=workspace).freeze()
+
+    assert all(item.kind not in {"agent", "skill", "mcp"} for item in frozen)
+
+
+@pytest.mark.asyncio
 async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     assets_root = tmp_path / ".linktools"
     agent_path = assets_root / "agents" / "default"
