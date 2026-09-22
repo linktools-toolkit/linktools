@@ -29,6 +29,7 @@ from linktools.ai.runtime.state._contracts import StoredUserInput
 from linktools.ai.storage import InMemoryObjectStore, StoredPayload, read_object
 from linktools.ai.task import (
     LocalTaskGraphLauncher,
+    TaskDependencyState,
     TaskFunction,
     TaskGraph,
     TaskGraphAdmission,
@@ -256,6 +257,21 @@ async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
         "upstream": await context.read_dependency(name),
         "execution_id": dependency.execution_id,
     }
+
+
+def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
+    failed = TaskDependencyState(
+        TaskStatus.FAILED,
+        error_code=ErrorCode.REQUEST_FIELD_INVALID.value,
+        error_digest="a" * 64,
+    )
+    assert failed.semantic_payload == {
+        "status": TaskStatus.FAILED.value,
+        "error_code": ErrorCode.REQUEST_FIELD_INVALID.value,
+        "error_digest": "a" * 64,
+    }
+    assert "execution_id" not in failed.semantic_payload
+
 
 
 def test_all_terminal_uses_a_distinct_persisted_task_node_wire() -> None:
