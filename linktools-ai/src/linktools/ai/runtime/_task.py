@@ -492,7 +492,6 @@ class TaskGraphRun(Generic[AppT]):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         captured: dict[str, tuple[str, ExecutionView, int, int]] = {}
-        pending: list[tuple[str, str, int]] = []
         for state in snapshot.node_states:
             execution_id = state.execution_id
             if execution_id is None:
@@ -518,31 +517,23 @@ class TaskGraphRun(Generic[AppT]):
                 root.event_sequence,
                 0,
             )
-            pending.append((state.node_id, root.execution_id, 0))
-
-        while pending:
-            node_id, parent_id, _parent_depth = pending.pop()
-            parent = captured.get(parent_id)
-            if parent is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for child in await self._runtime.execution.list_children(
-                parent_id,
+                root.execution_id,
                 principal=self._principal,
             ):
                 if (
-                    child.parent_execution_id != parent_id
-                    or child.root_execution_id != parent[1].root_execution_id
+                    child.parent_execution_id != root.execution_id
+                    or child.root_execution_id != root.root_execution_id
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if child.execution_id in captured:
                     continue
                 captured[child.execution_id] = (
-                    node_id,
+                    state.node_id,
                     child,
                     child.event_sequence,
                     1,
                 )
-                pending.append((node_id, child.execution_id, 1))
 
         events: list[TaskGraphRunEvent] = []
         replay_execution_sequences: dict[str, dict[str, int]] = {}
