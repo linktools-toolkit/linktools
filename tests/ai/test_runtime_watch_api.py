@@ -459,7 +459,7 @@ async def test_task_graph_replay_uses_captured_durable_cutoffs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_task_graph_replay_recurses_through_grandchildren() -> None:
+async def test_task_graph_replay_keeps_direct_execution_tree_boundary() -> None:
     now = datetime.now(timezone.utc)
 
     class GraphService:
@@ -556,11 +556,8 @@ async def test_task_graph_replay_recurses_through_grandchildren() -> None:
             principal: Principal,
         ):
             del principal
-            return {
-                "root": (views["child"],),
-                "child": (views["grandchild"],),
-                "grandchild": (),
-            }[execution_id]
+            assert execution_id == "root"
+            return (views["child"],)
 
     class EventService:
         async def list(
@@ -612,7 +609,6 @@ async def test_task_graph_replay_recurses_through_grandchildren() -> None:
     ] == [
         ("root", 0, 1),
         ("child", 1, 1),
-        ("grandchild", 1, 1),
     ]
     assert all(event.event.payload == {} for event in execution_events)
 
