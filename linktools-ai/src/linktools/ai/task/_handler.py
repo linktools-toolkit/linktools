@@ -137,7 +137,7 @@ class TaskDependencyState:
             raise ValueError("task dependency state must be terminal")
         if self.status is TaskStatus.SUCCEEDED:
             if (
-                self.result_digest is None
+                not isinstance(self.result_digest, str)
                 or _RESULT_DIGEST.fullmatch(self.result_digest) is None
                 or self.error_code is not None
                 or self.error_digest is not None
@@ -146,7 +146,14 @@ class TaskDependencyState:
             return
         if self.result_digest is not None:
             raise ValueError("failed task dependency state cannot carry a result")
-        if self.error_digest is not None and _RESULT_DIGEST.fullmatch(self.error_digest) is None:
+        if self.error_code is not None and (
+            not isinstance(self.error_code, str) or not self.error_code
+        ):
+            raise ValueError("task dependency error code is invalid")
+        if self.error_digest is not None and (
+            not isinstance(self.error_digest, str)
+            or _RESULT_DIGEST.fullmatch(self.error_digest) is None
+        ):
             raise ValueError("task dependency error digest is invalid")
 
     @property
