@@ -66,7 +66,7 @@ from .state._views import (
 )
 
 _logger = environ.get_logger("ai.runtime.history")
-_EXECUTION_HISTORY_PROJECTION_VERSION = 1
+_EXECUTION_HISTORY_PROJECTION_VERSION = 2
 _EXECUTION_TRACE_PROJECTION_VERSION = 1
 _EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1
 _MODEL_INTERACTION_PROJECTION_VERSION = 2
@@ -287,10 +287,10 @@ class StepExecutionHistoryReader:
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._history_tree(record, tenant_id)
-        sources: list[_HistorySource] = []
+        current_sources: list[_HistorySource] = []
         for item, depth in entries:
             for segment_sequence in await self._segment_sequences(item, tenant_id):
-                sources.append(
+                current_sources.append(
                     _HistorySource(
                         item,
                         depth,
@@ -303,11 +303,65 @@ class StepExecutionHistoryReader:
                         ),
                     )
                 )
-        page = await self._history_page(
-            sources,
-            cursor=cursor,
+        current_sources.sort(key=lambda source: source.merge_prefix)
+        source_by_identity = {
+            (source.record.execution_id, source.segment_sequence): source
+            for source in current_sources
+        }
+        cursor_state = _decode_history_cursor(
+            cursor,
             tenant_id=tenant_id,
             execution_id=execution_id,
+            signer=self._cursor_signer,
+        )
+        if cursor_state is None:
+            cursor_coordinate = None
+            captured: list[tuple[str, int, int]] = []
+            for source in current_sources:
+                run_id = step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=source.record.execution_id,
+                    segment_sequence=source.segment_sequence,
+                )
+                captured.append(
+                    (
+                        source.record.execution_id,
+                        source.segment_sequence,
+                        await self._transcript_high_water(run_id),
+                    )
+                )
+            fixed_cutoffs = tuple(captured)
+        else:
+            cursor_coordinate, fixed_cutoffs = cursor_state
+        cutoff_by_identity = {
+            (source_execution_id, segment_sequence): message_count
+            for source_execution_id, segment_sequence, message_count in fixed_cutoffs
+        }
+        if len(cutoff_by_identity) != len(fixed_cutoffs):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        if any(identity not in source_by_identity for identity in cutoff_by_identity):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        sources = tuple(
+            source
+            for source in current_sources
+            if (source.record.execution_id, source.segment_sequence) in cutoff_by_identity
+        )
+        for source in sources:
+            identity = (source.record.execution_id, source.segment_sequence)
+            run_id = step_run_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=source.record.execution_id,
+                segment_sequence=source.segment_sequence,
+            )
+            if await self._transcript_high_water(run_id) < cutoff_by_identity[identity]:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+        page = await self._history_page(
+            sources,
+            cursor_coordinate=cursor_coordinate,
+            high_waters=cutoff_by_identity,
+            tenant_id=tenant_id,
             limit=limit,
         )
         selected = tuple(occurrence.item for occurrence in page[:limit])
@@ -317,6 +371,7 @@ class StepExecutionHistoryReader:
                 tenant_id,
                 execution_id,
                 page[limit],
+                fixed_cutoffs,
                 self._cursor_signer,
             )
         _logger.debug(
@@ -992,17 +1047,11 @@ class StepExecutionHistoryReader:
         self,
         sources: Sequence[_HistorySource],
         *,
-        cursor: str | None,
+        cursor_coordinate: "tuple[str, int, int, int] | None",
+        high_waters: Mapping[tuple[str, int], int],
         tenant_id: str,
-        execution_id: str,
         limit: int,
     ) -> list[_HistoryOccurrence]:
-        cursor_coordinate = _decode_history_cursor(
-            cursor,
-            tenant_id=tenant_id,
-            execution_id=execution_id,
-            signer=self._cursor_signer,
-        )
         source_by_identity = {
             (source.record.execution_id, source.segment_sequence): source
             for source in sources
@@ -1022,9 +1071,7 @@ class StepExecutionHistoryReader:
                 AsyncGenerator[_HistoryOccurrence, None],
             ]
         ] = []
-        cursor_prefix = (
-            None if cursor_source is None else cursor_source.merge_prefix
-        )
+        cursor_prefix = None if cursor_source is None else cursor_source.merge_prefix
         try:
             for index, source in enumerate(sources):
                 start_message_index = 0
@@ -1035,10 +1082,15 @@ class StepExecutionHistoryReader:
                     if source is cursor_source:
                         start_message_index = cursor_coordinate[2]
                         start_item_offset = cursor_coordinate[3]
+                identity = (source.record.execution_id, source.segment_sequence)
+                high_water = high_waters.get(identity)
+                if high_water is None or start_message_index > high_water:
+                    raise AIError(ErrorCode.CURSOR_INVALID)
                 iterator = self._iter_history_source(
                     source,
                     tenant_id=tenant_id,
                     start_message_index=start_message_index,
+                    end_message_index=high_water,
                     start_item_offset=start_item_offset,
                     from_cursor=source is cursor_source,
                 )
@@ -1075,6 +1127,7 @@ class StepExecutionHistoryReader:
         *,
         tenant_id: str,
         start_message_index: int,
+        end_message_index: int,
         start_item_offset: int,
         from_cursor: bool,
     ) -> AsyncGenerator[_HistoryOccurrence, None]:
@@ -1087,6 +1140,7 @@ class StepExecutionHistoryReader:
         messages = self._message_range(
             run_id,
             start=start_message_index,
+            end=end_message_index,
             from_cursor=from_cursor,
         )
         tool_metadata = await self._tool_call_metadata(
@@ -1144,30 +1198,43 @@ class StepExecutionHistoryReader:
         ):
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
 
+    async def _transcript_high_water(self, run_id: str) -> int:
+        if isinstance(self._store, _RangedTranscriptStore):
+            return await self._store.transcript_message_count(run_id)
+        count = 0
+        async for _message in self._store.iter_messages(run_id=run_id):
+            count += 1
+        return count
+
     async def _message_range(
         self,
         run_id: str,
         *,
         start: int,
+        end: int,
         from_cursor: bool,
     ) -> AsyncIterator[object]:
+        if start < 0 or end < start:
+            raise AIError(ErrorCode.CURSOR_INVALID)
         if isinstance(self._store, _RangedTranscriptStore):
             total = await self._store.transcript_message_count(run_id)
-            if start > total or from_cursor and start == total:
+            if end > total or from_cursor and start == end:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             async for message in self._store.iter_message_range(
                 run_id=run_id,
                 start=start,
-                end=total,
+                end=end,
             ):
                 yield message
             return
         index = 0
         async for message in self._store.iter_messages(run_id=run_id):
+            if index >= end:
+                break
             if index >= start:
                 yield message
             index += 1
-        if from_cursor and index <= start:
+        if index < end or from_cursor and start == end:
             raise AIError(ErrorCode.CURSOR_INVALID)
 
     async def transcript(
