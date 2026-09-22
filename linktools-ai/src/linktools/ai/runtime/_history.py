@@ -1405,20 +1405,25 @@ class StepExecutionHistoryReader:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-        result = [(selected, 0)]
+        result: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
         visited = {selected.execution_id}
-        for child in await self._executions.list_children(
-            selected.execution_id, tenant_id=tenant_id
-        ):
-            if (
-                child.execution_id in visited
-                or child.lineage_kind.value != "SUBAGENT"
-                or child.parent_execution_id != selected.execution_id
-                or child.root_execution_id != selected.root_execution_id
+        pending: list[tuple[ExecutionRecord, int]] = [(selected, 0)]
+        while pending:
+            parent, depth = pending.pop(0)
+            for child in await self._executions.list_children(
+                parent.execution_id,
+                tenant_id=tenant_id,
             ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            visited.add(child.execution_id)
-            result.append((child, 1))
+                if (
+                    child.execution_id in visited
+                    or child.lineage_kind.value != "SUBAGENT"
+                    or child.parent_execution_id != parent.execution_id
+                    or child.root_execution_id != selected.root_execution_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                visited.add(child.execution_id)
+                result.append((child, depth + 1))
+                pending.append((child, depth + 1))
         return result
 
 
