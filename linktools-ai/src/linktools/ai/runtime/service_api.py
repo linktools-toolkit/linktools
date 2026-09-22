@@ -487,10 +487,10 @@ class UsageSummary:
     cache_write_tokens: int = 0
     model_duration_ns: int = 0
     unknown_usage_requests: int = 0
-    unknown_duration_requests: int = 0
     transport_retries: "int | None" = None
     unrecorded_executions: int = 0
     cutoffs: "tuple[UsageReadCutoff, ...]" = ()
+    unknown_duration_requests: int = 0
 
     def __post_init__(self) -> None:
         counts = (
