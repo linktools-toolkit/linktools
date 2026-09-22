@@ -84,7 +84,7 @@ def _is_sha256(value: object) -> bool:
 def _normalize_model_attachment_fact(
     value: Mapping[str, JsonValue],
 ) -> Mapping[str, JsonValue]:
-    expected = {
+    required = {
         "fact",
         "attachment_id",
         "source",
@@ -95,7 +95,9 @@ def _normalize_model_attachment_fact(
         "position",
         "call_id",
     }
-    if set(value) != expected:
+    allowed = required | {"input_identifier"}
+    fields = set(value)
+    if not required.issubset(fields) or not fields.issubset(allowed):
         raise ValueError("model attachment fact fields are invalid")
     fact = value.get("fact")
     attachment_id = value.get("attachment_id")
@@ -104,6 +106,7 @@ def _normalize_model_attachment_fact(
     size = value.get("size")
     digest = value.get("digest")
     content_key = value.get("content_key")
+    input_identifier = value.get("input_identifier")
     position = value.get("position")
     call_id = value.get("call_id")
     if (
@@ -118,6 +121,8 @@ def _normalize_model_attachment_fact(
         or digest is not None
         and not _is_sha256(digest)
         or not _is_sha256(content_key)
+        or input_identifier is not None
+        and not isinstance(input_identifier, str)
         or isinstance(position, bool)
         or not isinstance(position, int)
         or position < 0
@@ -125,7 +130,9 @@ def _normalize_model_attachment_fact(
         and (not isinstance(call_id, str) or not call_id)
     ):
         raise ValueError("model attachment fact is invalid")
-    return dict(value)
+    normalized = dict(value)
+    normalized.setdefault("input_identifier", None)
+    return normalized
 
 
 def _validate_tool_arguments_payload(

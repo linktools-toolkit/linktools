@@ -1508,6 +1508,10 @@ def _project_attachment_fact(
             ),
             step_index=step_index if fact == "included_in_request" else None,
             call_id=cast("str | None", value.get("call_id")),
+            input_identifier=cast(
+                "str | None",
+                value.get("input_identifier"),
+            ),
         )
     except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

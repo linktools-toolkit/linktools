@@ -32,6 +32,7 @@ def _fact(
     position: int,
     source: str = "binary",
     call_id: str | None = None,
+    input_identifier: str | None = None,
 ) -> dict[str, object]:
     return {
         "fact": fact,
@@ -41,6 +42,7 @@ def _fact(
         "size": 4,
         "digest": digest,
         "content_key": digest,
+        "input_identifier": input_identifier,
         "position": position,
         "call_id": call_id,
     }
@@ -224,6 +226,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
                     attachment_id=initial_id,
                     digest=initial_digest,
                     position=0,
+                    input_identifier="caller-attachment",
                 )
             ],
         },
@@ -254,6 +257,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
                     attachment_id=initial_id,
                     digest=initial_digest,
                     position=0,
+                    input_identifier="caller-attachment",
                 ),
             ),
         ),
@@ -301,6 +305,10 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
         ("accepted", initial_id),
         ("included_in_request", initial_id),
     ]
+    assert [item.input_identifier for item in first.items] == [
+        "caller-attachment",
+        "caller-attachment",
+    ]
     assert first.next_cursor is not None
 
     interactions.append(
@@ -342,6 +350,7 @@ async def test_attachment_fact_cursor_freezes_model_request_high_water() -> None
     assert second.items[0].request_sequence is None
     assert second.items[0].step_index is None
     assert second.items[0].call_id == "call-1"
+    assert second.items[0].input_identifier is None
     assert second.items[1].request_sequence == 2
     assert second.items[1].step_index == 2
     assert second.items[1].processing_status == "unknown"
