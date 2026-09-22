@@ -44,7 +44,7 @@ _CLI_EXTRAS = {
     "linktools": "cli",
     "linktools-ai": "sqlite",
 }
-_REQUIREMENT_NAME = re.compile(r"^\\s*([A-Za-z0-9_.-]+)")
+_REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9_.-]+)")
 _AI_SQLITE_SMOKE = """
 import asyncio
 import pathlib
