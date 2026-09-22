@@ -803,8 +803,18 @@ def _dependency_identity_payload(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if set(dependency_states) != set(node.dependencies):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    node_dependencies = set(node.dependencies)
     result: list[dict[str, JsonValue]] = []
-    for dependency_id in sorted(node.dependencies):
+    for dependency_id in sorted(node_dependencies | set(dependencies)):
+        if dependency_id not in node_dependencies:
+            result.append(
+                {
+                    "node_id": dependency_id,
+                    "result_digest": dependencies[dependency_id].result_digest,
+                }
+            )
+            continue
         state = dependency_states[dependency_id]
         if state.status is TaskStatus.SUCCEEDED:
             dependency = dependencies.get(dependency_id)
