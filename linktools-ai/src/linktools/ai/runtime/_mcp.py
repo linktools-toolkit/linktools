@@ -211,7 +211,7 @@ async def _materialize_server_args(
     )
     await snapshot.initialize()
     directory = tempfile.TemporaryDirectory(
-        prefix=f"linktools-mcp-{server.id}-",
+        prefix="linktools-mcp-",
     )
     try:
         infos = await snapshot.metadata_snapshot()

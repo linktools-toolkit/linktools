@@ -270,7 +270,7 @@ async def test_mcp_resource_snapshot_materializes_deleted_source_bytes() -> None
         await store.delete(helper)
 
         server = MCPServerSpec(
-            "server",
+            "foo/bar",
             "python",
             ("resource:script.py",),
             root,
@@ -287,31 +287,6 @@ async def test_mcp_resource_snapshot_materializes_deleted_source_bytes() -> None
     finally:
         if directory is not None:
             directory.cleanup()
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_mcp_resource_snapshot_rejects_a_changed_asset_revision() -> None:
-    backend = InMemoryAssetBackend()
-    store = AssetStore(StorageOverlay(backend, writer=backend))
-    objects = InMemoryObjectStore("runtime")
-    await store.initialize()
-    try:
-        root = AssetKey("mcp", "server/assets")
-        await store.put(AssetKey("mcp", "server/assets/script.py"), b"old")
-        revision = await store.current_revision()
-        await store.put(AssetKey("mcp", "server/assets/script.py"), b"new")
-
-        with pytest.raises(AIError) as raised:
-            await _snapshot_mcp_resources(
-                store,
-                root,
-                ("resource:script.py",),
-                object_store=objects,
-                expected_revision=revision,
-            )
-        assert raised.value.code is ErrorCode.SNAPSHOT_CONFLICT
-    finally:
         await store.close()
 
 

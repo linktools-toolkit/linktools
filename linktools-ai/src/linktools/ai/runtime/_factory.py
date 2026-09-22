@@ -31,7 +31,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import AgentSpec, MCPServerSpec
-from ..storage import ObjectStore, PayloadPolicy, StorageRevision
+from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
     LocalRepositoryInstructionResolver,
@@ -130,7 +130,7 @@ async def compose_runtime_components(
     ownership_transferred = False
     try:
         frozen: list[CapabilityContribution[object]] = []
-        mcp_assets: dict[str, tuple[AssetStore, StorageRevision | None]] = {}
+        mcp_assets: dict[str, AssetStore] = {}
         for group in groups:
             values = await group.freeze()
             frozen.extend(values)
@@ -153,10 +153,7 @@ async def compose_runtime_components(
                 )
             if group.asset_store is not None:
                 for candidate in resource_mcp:
-                    mcp_assets[candidate.id] = (
-                        group.asset_store,
-                        group.asset_revision,
-                    )
+                    mcp_assets[candidate.id] = group.asset_store
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -446,7 +443,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
-    mcp_assets: Mapping[str, tuple[AssetStore, StorageRevision | None]],
+    mcp_assets: Mapping[str, AssetStore],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,

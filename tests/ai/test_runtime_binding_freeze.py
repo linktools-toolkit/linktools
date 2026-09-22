@@ -337,14 +337,30 @@ async def test_non_durable_snapshot_freezes_existing_child_mcp_resources(
             SkillSourceRegistry(),
             fixture.objects,
             freeze_dependencies=False,
-            mcp_assets={"server": (store, None)},
+            mcp_assets={"server": store},
         )
+        await store.put(
+            AssetKey("mcp", "server/assets/script.py"),
+            b"print('updated')",
+        )
+        await store.put(AssetKey("skill", "unrelated"), b"changed")
         frozen = await freezer.freeze_snapshot(snapshot)
         server, resource_snapshot = codec.from_frozen_payload(
             frozen.subagent_bindings[0].selected[0].contract
         )
         assert server.resource_root == root
         assert resource_snapshot is not None
+        resource_store = AssetStore.from_snapshot(
+            resource_snapshot,
+            object_store=fixture.objects,
+        )
+        await resource_store.initialize()
+        try:
+            assert await resource_store.get(
+                AssetKey("mcp", "server/assets/script.py")
+            ) == b"print('updated')"
+        finally:
+            await resource_store.close()
         with pytest.raises(AIError) as raised:
             await freezer.freeze_snapshot(frozen)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

@@ -36,9 +36,7 @@ class _RuntimeBindingFreezer:
         object_store: ObjectStore,
         *,
         freeze_dependencies: bool,
-        mcp_assets: (
-            Mapping[str, tuple[AssetStore, StorageRevision | None]] | None
-        ) = None,
+        mcp_assets: "Mapping[str, AssetStore] | None" = None,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -156,19 +154,17 @@ class _RuntimeBindingFreezer:
             if server.resource_root is None:
                 selected.append(pin)
                 continue
-            asset = self._mcp_assets.get(server.id)
-            if asset is None:
+            store = self._mcp_assets.get(server.id)
+            if store is None:
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
                     safe_details={"kind": "mcp_resource", "server_id": server.id},
                 )
-            store, expected_revision = asset
             reference = await _snapshot_mcp_resources(
                 store,
                 server.resource_root,
                 server.args,
                 object_store=self._objects,
-                expected_revision=expected_revision,
             )
             selected.append(
                 SemanticPin(
@@ -257,11 +253,8 @@ async def _snapshot_mcp_resources(
     args: Sequence[str],
     *,
     object_store: ObjectStore,
-    expected_revision: StorageRevision | None = None,
 ) -> ObjectRef:
     revision = await store.current_revision()
-    if expected_revision is not None and revision != expected_revision:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     infos = await store.metadata_snapshot()
     prefix = f"{root.id}/"
     selected = tuple(
