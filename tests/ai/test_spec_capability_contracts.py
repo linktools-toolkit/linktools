@@ -3,6 +3,7 @@
 """Declaration, capability semantic, and runtime-leaf contracts."""
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -19,8 +20,11 @@ from linktools.ai.capability import (
     tool_semantic_metadata,
     validate_tool_semantic_metadata,
 )
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime._binding_freeze import _snapshot_mcp_resources
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
+from linktools.ai.runtime._mcp import _materialize_server_args
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
     RuntimeToolBoundaryToolset,
@@ -37,7 +41,9 @@ from linktools.ai.spec import (
     MCPServerSpecCodec,
     SkillSpec,
     SkillSpecCodec,
+    capability_identity_payload,
 )
+from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StorageOverlay
 
 
 def test_memory_owner_selects_only_its_declared_tools() -> None:
@@ -148,6 +154,31 @@ def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
     assert AgentSpecCodec().decode(json.dumps(agent_payload).encode()) == AgentSpec(
         "agent"
     )
+
+
+def test_mcp_resource_snapshot_is_serialized_but_locator_is_not_semantic() -> None:
+    first = MCPServerSpec(
+        "mcp",
+        "server",
+        ("resource:script.py",),
+        AssetKey("mcp", "server"),
+        ObjectRef("runtime", "v1/asset-snapshot/one", "a" * 64, 1),
+    )
+    second = MCPServerSpec(
+        "mcp",
+        "server",
+        first.args,
+        first.resource_root,
+        ObjectRef("other", "v1/asset-snapshot/two", "a" * 64, 1),
+    )
+
+    restored = MCPServerSpecCodec().decode(MCPServerSpecCodec().encode(first))
+    assert restored == first
+    assert capability_identity_payload(
+        "mcp", first.id, MCPServerSpecCodec().to_payload(first)
+    ) == capability_identity_payload(
+        "mcp", second.id, MCPServerSpecCodec().to_payload(second)
+    )
     skill_payload = {
         "version": 1,
         "id": "skill",
@@ -166,6 +197,110 @@ def test_declaration_codecs_ignore_unknown_additive_fields() -> None:
     assert MCPServerSpecCodec().decode(json.dumps(mcp_payload).encode()) == MCPServerSpec(
         "mcp", "echo"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "paths", (("a/./b.py",), ("a//b.py",), ("../escape.py",), ("lib", "lib/helper.py"))
+)
+@pytest.mark.parametrize("boundary", ("snapshot", "materialization"))
+async def test_mcp_resource_snapshot_rejects_unmaterializable_tree(
+    paths: tuple[str, ...],
+    boundary: str,
+) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        objects = InMemoryObjectStore("runtime")
+        root = AssetKey("mcp", "server/assets")
+        keys = tuple(AssetKey("mcp", f"server/assets/{path}") for path in paths)
+        for key in keys:
+            await store.put(key, b"data")
+        reference = (
+            await store.snapshot(keys, object_store=objects)
+            if boundary == "materialization"
+            else None
+        )
+        with pytest.raises(AIError) as raised:
+            if boundary == "snapshot":
+                await _snapshot_mcp_resources(store, root, (), object_store=objects)
+            else:
+                await _materialize_server_args(
+                    MCPServerSpec("server", "python", (), root, reference),
+                    resource_objects=objects,
+                )
+        assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_resource_snapshot_materializes_deleted_source_bytes() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    objects = InMemoryObjectStore("runtime")
+    await store.initialize()
+    directory = None
+    try:
+        resource = AssetKey("mcp", "server/assets/script.py")
+        root = AssetKey("mcp", "server/assets")
+        await store.put(resource, b"print('frozen')\n")
+        helper = AssetKey("mcp", "server/assets/lib/helper.py")
+        await store.put(helper, b"VALUE = 42\n")
+        reference = await _snapshot_mcp_resources(
+            store,
+            root,
+            ("resource:script.py",),
+            object_store=objects,
+        )
+        await store.delete(resource)
+        await store.delete(helper)
+
+        server = MCPServerSpec(
+            "server",
+            "python",
+            ("resource:script.py",),
+            root,
+            reference,
+        )
+        arguments, directory = await _materialize_server_args(
+            server,
+            resource_objects=objects,
+        )
+
+        assert len(arguments) == 1
+        assert Path(arguments[0]).read_bytes() == b"print('frozen')\n"
+        assert (Path(directory.name) / "lib/helper.py").read_bytes() == b"VALUE = 42\n"
+    finally:
+        if directory is not None:
+            directory.cleanup()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_resource_snapshot_rejects_a_changed_asset_revision() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    objects = InMemoryObjectStore("runtime")
+    await store.initialize()
+    try:
+        root = AssetKey("mcp", "server/assets")
+        await store.put(AssetKey("mcp", "server/assets/script.py"), b"old")
+        revision = await store.current_revision()
+        await store.put(AssetKey("mcp", "server/assets/script.py"), b"new")
+
+        with pytest.raises(AIError) as raised:
+            await _snapshot_mcp_resources(
+                store,
+                root,
+                ("resource:script.py",),
+                object_store=objects,
+                expected_revision=revision,
+            )
+        assert raised.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    finally:
+        await store.close()
 
 
 def test_agent_spec_codec_ignores_unknown_usage_limit_fields() -> None:

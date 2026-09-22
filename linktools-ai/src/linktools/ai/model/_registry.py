@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """Thread-safe model registry and immutable snapshots."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from threading import RLock
 from types import MappingProxyType
 
 from linktools.core import environ
+from pydantic_ai.models import Model
 
 from ..core import JsonValue
 from ..errors import AIError, ErrorCode
@@ -33,6 +34,7 @@ class ModelRegistry:
         max_retries: int = 2,
         retry_delay: "int | float" = 1.0,
         max_tokens: "int | None" = None,
+        connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
     ) -> "ModelRegistry":
         registry = cls()
         registry.register_openai(
@@ -45,6 +47,7 @@ class ModelRegistry:
             max_retries=max_retries,
             retry_delay=retry_delay,
             max_tokens=max_tokens,
+            connection_resolver=connection_resolver,
         )
         return registry
 
@@ -67,6 +70,7 @@ class ModelRegistry:
         max_retries: int = 2,
         retry_delay: "int | float" = 1.0,
         max_tokens: "int | None" = None,
+        connection_resolver: "Callable[[], Mapping[str, object]] | None" = None,
     ) -> None:
         self.register(
             _OpenAIModelBinding(
@@ -79,8 +83,28 @@ class ModelRegistry:
                 max_retries=max_retries,
                 retry_delay=retry_delay,
                 max_tokens=max_tokens,
+                connection_resolver=connection_resolver,
             )
         )
+
+    def register_alias(self, alias_id: str, target_route_id: str) -> None:
+        """Register an immutable route alias to an existing binding."""
+        if not isinstance(alias_id, str) or not alias_id.strip():
+            raise ValueError("model alias is required")
+        if not isinstance(target_route_id, str) or not target_route_id.strip():
+            raise ValueError("model alias target is required")
+        with self._lock:
+            target = self._bindings.get(target_route_id)
+            if target is None:
+                raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
+            while isinstance(target, _ModelAliasBinding):
+                target = target._target
+            self._bindings[alias_id] = _ModelAliasBinding(alias_id, target)
+            _logger.info(
+                "model binding alias registered: alias=%s target=%s",
+                alias_id,
+                target.route_id,
+            )
 
     def remove(self, route_id: str) -> None:
         with self._lock:
@@ -120,3 +144,43 @@ class _ModelRegistrySnapshot:
 
 
 __all__ = ["ModelRegistry"]
+
+
+class _ModelAliasBinding:
+    __slots__ = ("_route_id", "_target")
+
+    def __init__(self, route_id: str, target: ModelBinding) -> None:
+        self._route_id = route_id
+        self._target = target
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self.__slots__ and hasattr(self, name):
+            raise AttributeError("model alias binding is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def route_id(self) -> str:
+        return self._route_id
+
+    @property
+    def provider(self) -> str:
+        return self._target.provider
+
+    @property
+    def model_identity(self) -> str:
+        return self._target.model_identity
+
+    @property
+    def vision(self) -> bool:
+        return self._target.vision
+
+    @property
+    def semantic_payload(self) -> Mapping[str, JsonValue]:
+        return self._target.semantic_payload
+
+    @property
+    def fingerprint(self) -> str:
+        return self._target.fingerprint
+
+    def materialize(self) -> Model:
+        return self._target.materialize()

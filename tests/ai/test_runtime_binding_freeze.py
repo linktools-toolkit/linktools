@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for execution-owned binding dependency snapshots."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,7 +13,9 @@ from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
+    SemanticPin,
 )
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
     CapabilityContribution,
     FrozenSkillResourceSource,
@@ -36,8 +38,8 @@ from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapsho
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
-from linktools.ai.spec import AgentSpec, SkillSpec
-from linktools.ai.storage import InMemoryObjectStore, StoredPayload
+from linktools.ai.spec import AgentSpec, MCPServerSpec, MCPServerSpecCodec, SkillSpec
+from linktools.ai.storage import InMemoryObjectStore, StorageOverlay, StoredPayload
 from linktools.ai.task import (
     TaskGraph,
     TaskGraphAdmission,
@@ -290,6 +292,59 @@ async def test_non_durable_binding_does_not_require_skill_snapshots(
     assert frozen is fixture.binding
     assert frozen.snapshot == fixture.binding.snapshot
     assert frozen.snapshot.subagent_bindings == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parent_resources", (False, True))
+async def test_non_durable_snapshot_freezes_existing_child_mcp_resources(
+    tmp_path: Path,
+    parent_resources: bool,
+) -> None:
+    fixture = _fixture(tmp_path)
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        root = AssetKey("mcp", "server/assets")
+        await store.put(AssetKey("mcp", "server/assets/script.py"), b"print('ok')")
+        codec = MCPServerSpecCodec()
+        pin = SemanticPin(
+            "mcp",
+            "server",
+            codec.to_payload(
+                MCPServerSpec(
+                    "server",
+                    "python",
+                    ("resource:script.py",),
+                    root,
+                )
+            ),
+        )
+        child = replace(
+            fixture.compiler.bind_subagent(
+                fixture.catalog.root_definition("child")
+            ).snapshot,
+            selected=(pin,),
+        )
+        snapshot = replace(
+            fixture.binding.snapshot,
+            selected=(pin,) if parent_resources else (),
+            subagent_bindings=(child,),
+        )
+        freezer = _RuntimeBindingFreezer(
+            fixture.catalog,
+            fixture.compiler,
+            SkillSourceRegistry(),
+            fixture.objects,
+            freeze_dependencies=False,
+            mcp_assets={"server": (store, None)},
+        )
+        frozen = await freezer.freeze_snapshot(snapshot)
+        server = codec.from_payload(frozen.subagent_bindings[0].selected[0].contract)
+        assert server.resource_snapshot is not None
+        assert await freezer.freeze_snapshot(frozen) == frozen
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

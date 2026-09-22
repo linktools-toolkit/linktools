@@ -55,6 +55,7 @@ from ...core import (
     canonical_json_bytes,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
+from ...spec import MCPServerSpecCodec
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskBindingSnapshot,
@@ -428,6 +429,8 @@ def _encode_v1_task_node(
         fields["output_contract"] = dict(value.output_contract)
     if value.effect != "none":
         fields["effect"] = value.effect
+    if value.dependency_policy != "all_succeeded":
+        fields["dependency_policy"] = value.dependency_policy
     return fields
 
 
@@ -447,6 +450,7 @@ def _decode_v1_task_node(
             "retry_delay_seconds",
             "output_contract",
             "effect",
+            "dependency_policy",
         }
     )
     keys = set(raw_fields)
@@ -495,6 +499,9 @@ def _decode_v1_task_node(
     effect = raw_fields.get("effect", "none")
     if not isinstance(effect, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    dependency_policy = raw_fields.get("dependency_policy", "all_succeeded")
+    if dependency_policy not in {"all_succeeded", "all_terminal"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
@@ -534,6 +541,7 @@ def _decode_v1_task_node(
             output_contract,
         ),
         effect=effect,
+        dependency_policy=dependency_policy,
     )
 
 
@@ -1597,6 +1605,14 @@ def _iter_agent_binding_object_refs(
     domain: RuntimeDomain,
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     for pin in snapshot.selected:
+        if pin.kind == "mcp":
+            try:
+                server = MCPServerSpecCodec().from_payload(pin.contract)
+            except AIError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if server.resource_snapshot is not None:
+                yield domain, server.resource_snapshot
+            continue
         if pin.kind != "skill":
             continue
         source = pin.contract.get("source")
@@ -1681,6 +1697,38 @@ def iter_runtime_object_dependencies(
             yield default_domain, nested
         return
 
+    if reference.key.startswith("v1/asset-snapshot/"):
+        if (
+            manifest.get("kind") != "asset-snapshot"
+            or manifest.get("format_version") != 1
+            or not isinstance(manifest.get("entries"), list)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for item in cast(list[object], manifest["entries"]):
+            if not isinstance(item, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            content = item.get("content")
+            if not isinstance(content, Mapping) or not {
+                "key",
+                "digest",
+                "size",
+            }.issubset(content):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            size = content["size"]
+            if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                nested = ObjectRef(
+                    reference.store_id,
+                    cast(str, content["key"]),
+                    cast(str, content["digest"]),
+                    size,
+                )
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            yield default_domain, nested
+        return
+
     if reference.key.startswith("v1/task-capability-snapshot/"):
         if (
             manifest.get("kind") != "task-capability-snapshot"
@@ -1722,6 +1770,21 @@ def _iter_runtime_object_refs(
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
+        if dataclass_name == codec.wire_ids.get(TaskNode):
+            node = cast(TaskNode, _decode_domain(value, TaskNode, codec, persisted=True))
+            prompt = node.input.get("user_prompt")
+            if (
+                node.input.get("type") == "linktools.ai.agent"
+                and isinstance(prompt, Mapping)
+                and prompt.get("kind") == "stored-user-content-v1"
+            ):
+                stored = cast(
+                    StoredUserInput,
+                    _decode_domain(prompt.get("value"), StoredUserInput, codec),
+                )
+                yield from _iter_runtime_object_refs(
+                    stored.payload, RuntimeDomain.TASK, codec,
+                )
         if dataclass_name == codec.wire_ids.get(ExecutionRecord):
             fields_value = value.get("fields")
             if not isinstance(fields_value, Mapping):
@@ -2430,6 +2493,7 @@ def _validate_v1_codec_definition() -> None:
         "output_schema",
         "output_contract",
         "effect",
+        "dependency_policy",
         "_input",
     ):
         raise RuntimeError("Runtime v1 task_node source contract changed")

@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 
@@ -635,8 +633,9 @@ async def test_task_graph_observer_error_cleans_waiter_without_cancelling_graph(
     async def observer(_event: TaskGraphRunEvent) -> None:
         raise RuntimeError("observer failed")
 
-    with pytest.raises(RuntimeError, match="observer failed"):
+    with pytest.raises(AIError) as raised:
         await run.wait(observer=observer)
+    assert raised.value.code is ErrorCode.TASK_OBSERVER_FAILED
 
     await asyncio.wait_for(service.wait_cancelled.wait(), 1)
     await _assert_no_graph_observer_tasks()

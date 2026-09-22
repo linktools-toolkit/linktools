@@ -4,13 +4,14 @@
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar, cast
 
 from linktools.core import environ
 
+from ..asset import AssetStore
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
     CapabilityContribution,
@@ -29,8 +30,8 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
-from ..spec import AgentSpec
-from ..storage import ObjectStore, PayloadPolicy
+from ..spec import AgentSpec, MCPServerSpec
+from ..storage import ObjectStore, PayloadPolicy, StorageRevision
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
     LocalRepositoryInstructionResolver,
@@ -129,8 +130,21 @@ async def compose_runtime_components(
     ownership_transferred = False
     try:
         frozen: list[CapabilityContribution[object]] = []
+        mcp_assets: dict[str, tuple[AssetStore, StorageRevision | None]] = {}
         for group in groups:
-            frozen.extend(await group.freeze())
+            values = await group.freeze()
+            frozen.extend(values)
+            if group.asset_store is not None:
+                for candidate in values:
+                    if (
+                        candidate.kind == "mcp"
+                        and isinstance(candidate.value, MCPServerSpec)
+                        and candidate.value.resource_root is not None
+                    ):
+                        mcp_assets[candidate.id] = (
+                            group.asset_store,
+                            group.asset_revision,
+                        )
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -244,6 +258,7 @@ async def compose_runtime_components(
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
+            mcp_assets=mcp_assets,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
@@ -418,6 +433,7 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
+    mcp_assets: Mapping[str, tuple[AssetStore, StorageRevision | None]],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
@@ -469,6 +485,7 @@ async def _build_local_components(
                 state.plan.route(RuntimeDomain.EXECUTION).retention
                 is RuntimeRetentionMode.DURABLE
             ),
+            mcp_assets=mcp_assets,
         )
         execution = DefaultExecutionService(
             state.execution,
@@ -498,6 +515,7 @@ async def _build_local_components(
         executor = AgentExecutor(
             skill_sources,
             skill_snapshot_store=state.object_store(RuntimeDomain.EXECUTION),
+            mcp_resource_store=state.object_store(RuntimeDomain.EXECUTION),
             metrics=metric_buffer,
         )
     except BaseException:
@@ -615,6 +633,14 @@ async def _build_local_components(
             artifact_objects=state.object_store(RuntimeDomain.ARTIFACT),
             object_key_factory=object_key_factory,
             capability_snapshots=task_capability_snapshots,
+            input_materializer=ExecutionInputMaterializer(
+                input_materializer.access,
+                limits,
+                object_store=state.object_store(RuntimeDomain.TASK),
+                object_key_factory=object_key_factory,
+                payload_policy=PayloadPolicy(inline_limit_bytes=0),
+                object_domain=RuntimeDomain.TASK,
+            ),
             handlers=task_handlers,
             expanders=task_expanders,
             release_dependency_hold=execution.release_dependency_hold,

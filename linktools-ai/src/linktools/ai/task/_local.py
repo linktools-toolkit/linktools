@@ -451,6 +451,11 @@ class LocalTaskGraphLauncher:
                 launch.correlation,
                 {},
                 execution_id,
+                dependency_states=await self._dependency_states(
+                    graph_id,
+                    node,
+                    tenant_id=tenant_id,
+                ),
             ),
             execution_id,
             value,
@@ -1115,6 +1120,11 @@ class LocalTaskGraphLauncher:
             request.principal,
             request.correlation,
             await self._dependency_results(graph_id, node, tenant_id=tenant_id),
+            dependency_states=await self._dependency_states(
+                graph_id,
+                node,
+                tenant_id=tenant_id,
+            ),
         )
         try:
             completion = await self._runner.wait_bound(invocation, execution_id)
@@ -1240,6 +1250,11 @@ class LocalTaskGraphLauncher:
         dependency_results = await self._dependency_results(
             graph_id, node, tenant_id=tenant_id
         )
+        dependency_states = await self._dependency_states(
+            graph_id,
+            node,
+            tenant_id=tenant_id,
+        )
         heartbeat_stop = asyncio.Event()
         control = _TaskNodeRunControlImpl(
             self._repository,
@@ -1256,6 +1271,7 @@ class LocalTaskGraphLauncher:
                     request.principal,
                     request.correlation,
                     dependency_results,
+                    dependency_states=dependency_states,
                 ),
                 control=control,
             ),
@@ -1574,11 +1590,13 @@ class LocalTaskGraphLauncher:
         result: dict[str, TaskDependencyResult] = {}
         for dependency_id in node.dependencies:
             state = by_id.get(dependency_id)
-            if (
-                state is None
-                or state.status is not TaskStatus.SUCCEEDED
-                or state.result_digest is None
-            ):
+            if state is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if state.status is not TaskStatus.SUCCEEDED:
+                if node.dependency_policy == "all_terminal":
+                    continue
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if state.result_digest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             record = records.get(dependency_id)
             if (
@@ -1596,6 +1614,24 @@ class LocalTaskGraphLauncher:
                 state.execution_id,
             )
         return result
+
+    async def _dependency_states(
+        self,
+        graph_id: str,
+        node: TaskNode,
+        *,
+        tenant_id: str,
+    ) -> "dict[str, TaskNodeView]":
+        if not node.dependencies:
+            return {}
+        states = await self._repository.list_nodes(graph_id, tenant_id=tenant_id)
+        values = {state.node_id: state for state in states}
+        if any(dependency not in values for dependency in node.dependencies):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return {
+            dependency: values[dependency]
+            for dependency in node.dependencies
+        }
 
     async def _notify(self, run: _GraphRun) -> None:
         async with run.condition:

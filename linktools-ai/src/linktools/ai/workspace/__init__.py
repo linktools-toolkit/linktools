@@ -21,6 +21,7 @@ from ._local_sandbox import LocalSandbox
 from ._bubblewrap import BubblewrapSandbox
 from ._sandbox import (
     DisabledSandbox,
+    ReadOnlySandboxPolicy,
     Sandbox,
     SandboxOperationRejected,
     SandboxResource,
@@ -30,6 +31,7 @@ from ._sandbox import (
 
 __all__ = [
     "DisabledSandbox",
+    "ReadOnlySandboxPolicy",
     "BubblewrapSandbox",
     "LocalRepositoryInstructionResolver",
     "LocalRuleCatalog",

@@ -809,6 +809,7 @@ def _status_value(value: object) -> str | None:
             EvaluationRecord,
             ApprovalRecord,
             ExternalCallRecord,
+            TaskGraphView,
             TaskNodeView,
             ToolOperationRecord,
         ),

@@ -8,7 +8,7 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel
 from pydantic_ai.messages import UserContent
 
-from ..core import JsonValue, Principal, ThinkingValue
+from ..core import JsonValue, Principal, ThinkingValue, WorkspaceFileInput
 from ..task import TaskExpanderRef, TaskNode
 
 
@@ -29,7 +29,7 @@ class TaskExpansionContext(Protocol):
         self,
         agent_id: str,
         node_id: str,
-        user_prompt: str | Sequence[UserContent],
+        user_prompt: str | Sequence[UserContent | WorkspaceFileInput],
         *,
         dependencies: tuple[str, ...] = (),
         budget_cost: int = 1,
@@ -37,6 +37,7 @@ class TaskExpansionContext(Protocol):
         planning: bool | None = None,
         thinking: ThinkingValue | None = None,
         expander: TaskExpanderRef | None = None,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode: ...
 
 

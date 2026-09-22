@@ -13,6 +13,7 @@ from ..core import (
     JsonValue,
     Principal,
     CorrelationData,
+    TaskStatus,
     canonical_sha256,
     normalize_json_value,
     normalize_correlation,
@@ -21,6 +22,7 @@ from ..errors import AIError, ErrorCode
 from ._graph import (
     TaskExpanderRef,
     TaskNode,
+    TaskNodeView,
     TaskResultRef,
     normalize_retry_delay_seconds,
     normalize_timeout_seconds,
@@ -160,6 +162,7 @@ class TaskNodeContext(Generic[AppT]):
     )
     correlation: CorrelationData = field(default_factory=dict)
     artifacts: "TaskArtifactPublisher | None" = None
+    dependency_states: "Mapping[str, TaskNodeView]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.graph_id, str) or not self.graph_id.strip():
@@ -187,12 +190,26 @@ class TaskNodeContext(Generic[AppT]):
             raise ValueError("task dependency mapping is invalid")
         object.__setattr__(self, "input", ImmutableJsonMapping(normalized_input))
         object.__setattr__(self, "dependencies", MappingProxyType(dependencies))
+        dependency_states = dict(self.dependency_states)
+        if any(
+            not isinstance(key, str) or not isinstance(value, TaskNodeView)
+            for key, value in dependency_states.items()
+        ):
+            raise ValueError("task dependency states are invalid")
+        object.__setattr__(
+            self,
+            "dependency_states",
+            MappingProxyType(dependency_states),
+        )
         object.__setattr__(self, "correlation", normalize_correlation(self.correlation))
 
     async def read_dependency(self, name: str) -> JsonValue:
         """Read one dependency body through its authorized Execution owner."""
         if not isinstance(name, str) or not name:
             raise KeyError(name)
+        state = self.dependency_states.get(name)
+        if state is not None and state.status is not TaskStatus.SUCCEEDED:
+            raise AIError(ErrorCode.TASK_DEPENDENCY_FAILED)
         try:
             dependency = self.dependencies[name]
         except KeyError as error:
@@ -277,6 +294,7 @@ class TaskFunction(Generic[AppT]):
         timeout_seconds: "float | None" = None,
         max_attempts: int = 1,
         retry_delay_seconds: float = 0,
+        dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         normalized = self.normalize({} if input is None else input)
         return TaskNode(
@@ -293,6 +311,7 @@ class TaskFunction(Generic[AppT]):
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delay_seconds=retry_delay_seconds,
+            dependency_policy=dependency_policy,
         )
 
 

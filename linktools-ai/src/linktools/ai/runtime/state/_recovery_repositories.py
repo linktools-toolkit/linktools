@@ -388,7 +388,10 @@ class _RecoveryCheckpointRepository(_ResourceRepository[RecoveryCheckpoint]):
         await _replace_checked(
             transaction,
             replace(
-                self._stored(self._KIND, execution_id, next_record),
+                self._stored(
+                    self._KIND, execution_id, next_record,
+                    state=_record_state(next_record),
+                ),
                 storage_version=current_record.storage_version + 1,
             ),
             current_record.storage_version,

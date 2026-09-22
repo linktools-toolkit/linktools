@@ -64,7 +64,6 @@ _RECOVERABLE_GRAPH_STATES = frozenset(
     {
         TaskStatus.PENDING.value,
         TaskStatus.RUNNING.value,
-        TaskStatus.RECOVERY_REQUIRED.value,
     }
 )
 

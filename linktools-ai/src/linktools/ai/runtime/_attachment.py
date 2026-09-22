@@ -23,21 +23,44 @@ from pydantic_ai.messages import (
     VideoUrl,
 )
 
-from ..core import JsonValue, canonical_sha256, normalize_json_value
+from ..core import (
+    JsonValue,
+    WorkspaceFileInput,
+    canonical_sha256,
+    normalize_json_value,
+)
 from ..errors import AIError, ErrorCode
 
 _URL_TYPES = (ImageUrl, AudioUrl, DocumentUrl, VideoUrl)
 
 
 def input_attachment_views(
-    value: str | Sequence[UserContent],
+    value: str | Sequence[UserContent | WorkspaceFileInput],
     files: Sequence[Mapping[str, JsonValue]] = (),
 ) -> tuple[dict[str, JsonValue], ...]:
     """Project accepted input occurrences without retaining raw external references."""
     result: list[dict[str, JsonValue]] = []
     position = 0
+    workspace_files = iter(
+        raw for raw in files if raw.get("_prompt_occurrence") is True
+    )
     if not isinstance(value, str):
         for item in value:
+            if isinstance(item, WorkspaceFileInput):
+                try:
+                    raw = next(workspace_files)
+                except StopIteration as error:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                descriptor = _workspace_descriptor(raw)
+                result.append(
+                    _accepted_occurrence(
+                        descriptor,
+                        source="workspace",
+                        position=position,
+                    )
+                )
+                position += 1
+                continue
             descriptor = _content_descriptor(item)
             if descriptor is None:
                 continue
@@ -51,6 +74,8 @@ def input_attachment_views(
             position += 1
 
     for raw in files:
+        if raw.get("_prompt_occurrence") is True:
+            continue
         media_type = raw.get("media_type")
         size = raw.get("size")
         digest = raw.get("digest")
@@ -69,7 +94,7 @@ def input_attachment_views(
             "size": size,
             "digest": cast(str, digest),
             "content_key": cast(str, digest),
-            "input_identifier": None,
+            "input_identifier": raw.get("input_identifier"),
         }
         result.append(
             _accepted_occurrence(
@@ -79,7 +104,11 @@ def input_attachment_views(
             )
         )
         position += 1
-    return tuple(result)
+    try:
+        next(workspace_files)
+    except StopIteration:
+        return tuple(result)
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def bind_tool_return_attachments(
@@ -406,6 +435,31 @@ def _content_descriptor(item: object) -> dict[str, JsonValue] | None:
             "input_identifier": item.identifier,
         }
     return None
+
+
+def _workspace_descriptor(
+    raw: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    media_type = raw.get("media_type")
+    size = raw.get("size")
+    digest = raw.get("digest")
+    if (
+        not isinstance(media_type, str)
+        or not media_type
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+        or not _is_digest(digest)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return {
+        "source": "workspace",
+        "media_type": media_type,
+        "size": size,
+        "digest": cast(str, digest),
+        "content_key": cast(str, digest),
+        "input_identifier": raw.get("input_identifier"),
+    }
 
 
 def _attachment_id(

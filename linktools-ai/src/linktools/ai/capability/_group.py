@@ -25,7 +25,7 @@ from ..asset import (
 )
 from ..core import DEFAULT_DISCOVERY_POLICY, ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..storage import StorageOverlay
+from ..storage import StorageOverlay, StorageRevision
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
@@ -427,6 +427,7 @@ class CapabilityGroup(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         self._id = group_id
         self._store = assets
+        self._asset_revision: StorageRevision | None = None
         self._owned_store_factory: "Callable[[], AssetStore] | None" = None
         self._workspace = workspace
         self._skill_source = skill_source
@@ -480,6 +481,16 @@ class CapabilityGroup(Generic[AppT]):
     @property
     def skill_source(self) -> "SkillResourceSource | None":
         return self._skill_source
+
+    @property
+    def asset_store(self) -> "AssetStore | None":
+        """Return the explicit AssetStore used by this capability group."""
+        return self._store
+
+    @property
+    def asset_revision(self) -> "StorageRevision | None":
+        """Return the declaration revision captured by the last freeze."""
+        return self._asset_revision
 
     def tool(
         self,
@@ -680,6 +691,7 @@ class CapabilityGroup(Generic[AppT]):
             if store is not None:
                 if not store.ready:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                captured_revision = await store.current_revision()
                 metadata = await store.metadata_snapshot()
                 entries = tuple(
                     CapabilityLoadEntry(
@@ -700,6 +712,7 @@ class CapabilityGroup(Generic[AppT]):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     contributions.extend(loaded)
                 await context.verify()
+                self._asset_revision = captured_revision
             elif loaders:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         except BaseException as error:

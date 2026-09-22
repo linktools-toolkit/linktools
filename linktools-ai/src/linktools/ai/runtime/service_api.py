@@ -7,8 +7,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, cast
 
-from pydantic_ai.messages import UserContent
-
 from ..agent import AgentBindingSnapshot
 from ..core import (
     ApprovalDecision,
@@ -34,7 +32,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..task import TaskBindingSnapshot, TaskEffectResolution, TaskEvent
-from ._input_contract import validate_user_input
+from ._input_contract import UserPromptInput, validate_user_input
 from ._snapshot_contract import RunSnapshot
 from .recovery import (
     ExecutionRecoveryEffect,
@@ -64,7 +62,7 @@ def _request_files(value: Sequence[str]) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     principal: Principal
     idempotency_key: str
     memory_scope: "str | None"
@@ -92,7 +90,7 @@ class ExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
@@ -108,7 +106,7 @@ class RetryExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     principal: Principal
     idempotency_key: str
     correlation: CorrelationData = field(default_factory=dict)
@@ -677,7 +675,7 @@ class ListExecutionRequest:
 @dataclass(frozen=True, slots=True)
 class ResumeSessionRequest:
     principal: Principal
-    user_prompt: "str | Sequence[UserContent]"
+    user_prompt: "UserPromptInput"
     idempotency_key: str
     memory_scope: "str | None"
     mode: ExecutionMode

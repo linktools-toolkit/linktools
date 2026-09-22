@@ -11,6 +11,8 @@ import re
 import stat
 import subprocess
 import sys
+import shutil
+import tempfile
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,6 +23,7 @@ from linktools.core import environ
 from ..errors import AIError, ErrorCode
 from ._sandbox import (
     SandboxOperationRejected,
+    ReadOnlySandboxPolicy,
     SandboxResource,
     SandboxSession,
     normalize_workspace_path,
@@ -74,6 +77,7 @@ class BubblewrapSandbox:
         runtime_root: Path,
         bwrap_executable: Path,
         hidden_paths: tuple[str, ...] = (),
+        read_policy: ReadOnlySandboxPolicy | None = None,
     ) -> None:
         if not isinstance(runtime_root, Path) or not runtime_root.is_absolute():
             raise ValueError("runtime_root must be an absolute Path")
@@ -84,12 +88,19 @@ class BubblewrapSandbox:
         self._runtime_root = runtime_root
         self._bwrap_executable = bwrap_executable
         self._hidden_paths = _normalize_hidden_paths(hidden_paths)
+        if read_policy is not None and not isinstance(
+            read_policy,
+            ReadOnlySandboxPolicy,
+        ):
+            raise TypeError("read_policy must be ReadOnlySandboxPolicy")
+        self._read_policy = read_policy
 
     async def open(
         self,
         *,
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
+        read_policy: ReadOnlySandboxPolicy | None = None,
     ) -> SandboxSession:
         if sys.platform != "linux" or os.geteuid() == 0:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
@@ -98,19 +109,31 @@ class BubblewrapSandbox:
         normalized_root = _resolve_directory(root)
         runtime_root = _resolve_directory(self._runtime_root)
         bwrap = _resolve_executable(self._bwrap_executable)
-        hidden_paths = _prepare_hidden_paths(normalized_root, self._hidden_paths)
-        lock_root = normalized_root / ".linktools" / "locks"
-        _prepare_directory(lock_root)
-        _validate_rootfs(runtime_root, normalized_root)
-        _validate_bwrap(bwrap)
-        normalized_resources = _validate_resources(
-            normalized_root,
-            runtime_root,
-            resources,
+        policy = self._read_policy if read_policy is None else read_policy
+        if policy is not None and not isinstance(policy, ReadOnlySandboxPolicy):
+            raise TypeError("read_policy must be ReadOnlySandboxPolicy")
+        hidden_paths = _prepare_hidden_paths(
+            normalized_root, self._hidden_paths, create_missing=policy is None,
         )
-        runtime_pidfd = _open_runtime_pidfd()
+        cleanup_lock_root = policy is not None
+        lock_root = (
+            Path(tempfile.mkdtemp(prefix="linktools-sandbox-locks-"))
+            if cleanup_lock_root
+            else normalized_root / ".linktools" / "locks"
+        )
+        runtime_pidfd = -1
         process: asyncio.subprocess.Process | None = None
+        session_transferred = False
         try:
+            _prepare_directory(lock_root)
+            _validate_rootfs(runtime_root, normalized_root)
+            _validate_bwrap(bwrap)
+            normalized_resources = _validate_resources(
+                normalized_root,
+                runtime_root,
+                resources,
+            )
+            runtime_pidfd = _open_runtime_pidfd()
             config = _guardian_config(
                 root=normalized_root,
                 runtime_root=runtime_root,
@@ -118,6 +141,7 @@ class BubblewrapSandbox:
                 lock_root=lock_root,
                 resources=normalized_resources,
                 hidden_paths=hidden_paths,
+                read_policy=policy,
             )
             process = await _spawn_guardian(config, runtime_pidfd)
             _close_fd(runtime_pidfd)
@@ -128,12 +152,14 @@ class BubblewrapSandbox:
                     resource.key: f"/skills/{resource.key}"
                     for resource in normalized_resources
                 },
+                lock_root=lock_root if cleanup_lock_root else None,
             )
             try:
                 await session._open_handshake()
             except BaseException:
                 await session._stop_background_tasks()
                 raise
+            session_transferred = True
             _logger.info(
                 "bubblewrap sandbox session opened: root=%s resources=%s",
                 normalized_root,
@@ -155,6 +181,8 @@ class BubblewrapSandbox:
         finally:
             if runtime_pidfd >= 0:
                 _close_fd(runtime_pidfd)
+            if cleanup_lock_root and not session_transferred:
+                shutil.rmtree(lock_root, ignore_errors=True)
 
 
 class _BubblewrapSandboxSession:
@@ -162,9 +190,11 @@ class _BubblewrapSandboxSession:
         self,
         process: asyncio.subprocess.Process,
         resources: Mapping[str, str],
+        lock_root: Path | None = None,
     ) -> None:
         self._process = process
         self._resources = dict(resources)
+        self._lock_root = lock_root
         self._state = "OPENING"
         self._state_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
@@ -555,6 +585,8 @@ class _BubblewrapSandboxSession:
                 )
             await self._fail_pending(ErrorCode.SANDBOX_SESSION_CLOSED)
             await self._stop_background_tasks()
+            if self._lock_root is not None:
+                shutil.rmtree(self._lock_root, ignore_errors=True)
             async with self._state_lock:
                 self._state = "CLOSED"
             _logger.debug("bubblewrap sandbox session closed")
@@ -759,6 +791,7 @@ def _guardian_config(
     lock_root: Path,
     resources: tuple[SandboxResource, ...],
     hidden_paths: tuple[str, ...],
+    read_policy: ReadOnlySandboxPolicy | None,
 ) -> dict[str, Any]:
     resource_specs = [
         {"key": resource.key, "path": f"/skills/{resource.key}"}
@@ -772,6 +805,7 @@ def _guardian_config(
         resources=resources,
         hidden_paths=hidden_paths,
         worker_resources=resource_specs,
+        read_policy=read_policy,
     )
     return {
         "version": PROTOCOL_VERSION,
@@ -788,6 +822,7 @@ def _build_bwrap_args(
     resources: tuple[SandboxResource, ...],
     hidden_paths: tuple[str, ...],
     worker_resources: list[dict[str, str]],
+    read_policy: ReadOnlySandboxPolicy | None = None,
 ) -> list[str]:
     args = [
         str(bwrap),
@@ -806,7 +841,7 @@ def _build_bwrap_args(
         "--ro-bind",
         str(runtime_root),
         "/",
-        "--bind",
+        "--bind" if read_policy is None else "--ro-bind",
         str(root),
         "/workspace",
         "--size",
@@ -869,6 +904,23 @@ def _build_bwrap_args(
             "/__linktools_locks",
         )
     )
+    if read_policy is not None:
+        args.extend(
+            (
+                "--read-policy-json",
+                json.dumps(
+                    {
+                        "readable_paths": list(read_policy.readable_paths),
+                        "resource_paths": {
+                            key: list(values)
+                            for key, values in read_policy.resource_paths.items()
+                        },
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        )
     return args
 
 
@@ -1066,7 +1118,9 @@ def _normalize_hidden_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _prepare_hidden_paths(root: Path, paths: tuple[str, ...]) -> tuple[str, ...]:
+def _prepare_hidden_paths(
+    root: Path, paths: tuple[str, ...], *, create_missing: bool = True,
+) -> tuple[str, ...]:
     for path in paths:
         current = root
         for part in path.split("/"):
@@ -1075,6 +1129,8 @@ def _prepare_hidden_paths(root: Path, paths: tuple[str, ...]) -> tuple[str, ...]
                 if current.is_symlink() or not current.is_dir():
                     raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             else:
+                if not create_missing:
+                    raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
                 _prepare_directory(current)
     return paths
 

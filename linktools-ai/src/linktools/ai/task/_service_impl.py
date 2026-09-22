@@ -89,7 +89,7 @@ class _TaskGraphPreflight(Protocol):
         self,
         admission: TaskGraphAdmission,
         graph: TaskGraph,
-    ) -> None: ...
+    ) -> TaskGraph: ...
 
     async def load_admission(
         self,
@@ -338,18 +338,24 @@ class DefaultTaskGraphService(TaskGraphService):
         if self._preflight is not None:
             self._preflight.validate_request(request.graph)
         admission = TaskGraphAdmission.from_request(request)
-        if self._preflight is not None:
-            await self._preflight.capture_admission(
+        existing = await self._persistence.admissions.get(
+            graph_id, tenant_id=tenant_id,
+        )
+        graph = request.graph
+        if self._preflight is not None and existing is None:
+            graph = await self._preflight.capture_admission(
                 admission,
                 request.graph,
             )
-        view = await self._persistence.admissions.admit(admission, request.graph)
+        view = await self._persistence.admissions.admit(admission, graph)
         durable_admission = await self._persistence.admissions.get(
             graph_id,
             tenant_id=tenant_id,
         )
         if durable_admission is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._preflight is not None:
+            await self._preflight.load_admission(durable_admission)
         snapshot = await self._persistence.tasks.scheduler_snapshot(
             graph_id,
             tenant_id=tenant_id,
