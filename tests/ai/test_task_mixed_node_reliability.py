@@ -258,6 +258,19 @@ async def _echo_task(context: TaskNodeContext[None]) -> JsonValue:
     }
 
 
+def test_all_terminal_uses_a_distinct_persisted_task_node_wire() -> None:
+    default_node = TaskNode("default")
+    terminal_node = TaskNode("terminal", dependency_policy="all_terminal")
+
+    default_wire = _encode_persisted_domain(default_node)
+    terminal_wire = _encode_persisted_domain(terminal_node)
+
+    assert default_wire["$dataclass"] == "task_node"
+    assert "dependency_policy" not in default_wire["fields"]
+    assert terminal_wire["$dataclass"] == "task_node_terminal"
+    assert terminal_wire["fields"]["dependency_policy"] == "all_terminal"
+
+
 @pytest.mark.asyncio
 async def test_all_terminal_tasks_run_after_failed_and_blocked_dependencies() -> None:
     observed: dict[str, TaskStatus] = {}
