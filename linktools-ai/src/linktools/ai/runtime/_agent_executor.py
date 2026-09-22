@@ -115,6 +115,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
+from ..spec import MCPServerSpecCodec
 from ..storage import ObjectRef, ObjectStore
 from ..workspace import LocalSandbox, SandboxResource, SandboxSession, Workspace
 
@@ -644,6 +645,21 @@ class AgentExecutor:
             await close_mcp_resources(capabilities)
 
 
+def _mcp_resource_snapshots(binding: AgentBinding) -> dict[str, ObjectRef]:
+    codec = MCPServerSpecCodec()
+    result: dict[str, ObjectRef] = {}
+    for pin in binding.snapshot.selected:
+        if pin.kind != "mcp":
+            continue
+        server, reference = codec.from_frozen_payload(pin.contract)
+        if reference is None:
+            continue
+        if server.id in result:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result[server.id] = reference
+    return result
+
+
 async def _close_sandbox_session(session: SandboxSession) -> None:
     try:
         await session.close()
@@ -928,6 +944,7 @@ async def _materialize_agent(
                 ),
                 execution_root=scope.mcp_cwd,
                 resource_objects=mcp_resource_store,
+                resource_snapshots=_mcp_resource_snapshots(scope.binding),
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
                 background_tasks=scope.background_tasks,
