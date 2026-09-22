@@ -22,6 +22,10 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONUNBUFFERED: "1"
 
+concurrency:
+  group: python-publish-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -139,16 +143,11 @@ jobs:
         VERSION: ${{ inputs.version }}
       run: |
         echo "restored=false" >> "$GITHUB_OUTPUT"
-        echo "published=false" >> "$GITHUB_OUTPUT"
         rm -f release-sha256sums.txt
 
         if ! IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
           exit 0
         fi
-        if [[ "$IS_DRAFT" != "true" ]]; then
-          echo "published=true" >> "$GITHUB_OUTPUT"
-        fi
-
         if ! gh release download "$VERSION"           --pattern 'release-sha256sums.txt'           --output release-sha256sums.txt >/dev/null 2>&1; then
           exit 0
         fi
