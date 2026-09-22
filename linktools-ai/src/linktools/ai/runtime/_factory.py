@@ -371,6 +371,7 @@ def _execution_history_reader(
         executions=state.execution.executions,
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("execution-history", runtime_token_seed),
+        tool_operations=state.recovery.tools,
     )
 
 
