@@ -115,7 +115,6 @@ class Sandbox(Protocol):
         *,
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
-        read_policy: "ReadOnlySandboxPolicy | None" = None,
     ) -> "SandboxSession": ...
 
 
@@ -230,9 +229,8 @@ class DisabledSandbox:
         *,
         root: Path,
         resources: tuple[SandboxResource, ...] = (),
-        read_policy: "ReadOnlySandboxPolicy | None" = None,
     ) -> SandboxSession:
-        del root, resources, read_policy
+        del root, resources
         raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
 
 
