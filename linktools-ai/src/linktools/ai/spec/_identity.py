@@ -221,9 +221,22 @@ def _capability_semantic(
 
 
 def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
-    result = _fields(contract, ("version", "id", "command", "args"))
+    result = _fields(contract, ("version", "id", "command"))
     resource_root = contract.get("resource_root")
     resource_snapshot = contract.get("resource_snapshot")
+    frozen_args = contract.get("frozen_args")
+    raw_args = contract.get("args")
+    if resource_snapshot is None:
+        if frozen_args is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        args = raw_args
+    else:
+        if raw_args is not None or not isinstance(frozen_args, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        args = frozen_args
+    if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result["args"] = args
     if resource_root is None:
         if resource_snapshot is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
