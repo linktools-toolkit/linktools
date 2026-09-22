@@ -1645,11 +1645,13 @@ def _iter_agent_binding_object_refs(
     for pin in snapshot.selected:
         if pin.kind == "mcp":
             try:
-                server = MCPServerSpecCodec().from_payload(pin.contract)
+                _server, resource_snapshot = MCPServerSpecCodec().from_frozen_payload(
+                    pin.contract
+                )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if server.resource_snapshot is not None:
-                yield domain, server.resource_snapshot
+            if resource_snapshot is not None:
+                yield domain, resource_snapshot
             continue
         if pin.kind != "skill":
             continue
