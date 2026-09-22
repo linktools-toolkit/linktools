@@ -63,7 +63,11 @@ from ..task import (
     TaskResultRecord,
     TaskResultRef,
 )
-from ._agent_task import _AgentTaskNodeHandler, _execution_failure
+from ._agent_task import (
+    _AgentTaskNodeHandler,
+    _dependency_identity_payload,
+    _execution_failure,
+)
 from ._input import (
     CanonicalUserInput,
     ExecutionInputMaterializer,
@@ -968,6 +972,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             node,
             principal,
             dependencies,
+            dependency_states,
         )
         handle = await self._execution.start_task(
             binding,
@@ -1119,7 +1124,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution_id,
             body,
             dependencies,
-            _custom_idempotency_key(graph_id, node, principal, dependencies),
+            _custom_idempotency_key(
+                graph_id,
+                node,
+                principal,
+                dependencies,
+                dependency_states,
+            ),
             lambda dependency: self._read_dependency(
                 dependency,
                 principal=principal,
@@ -1306,7 +1317,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             execution_id,
             body,
             dependencies,
-            _custom_idempotency_key(graph_id, node, principal, dependencies),
+            _custom_idempotency_key(
+                graph_id,
+                node,
+                principal,
+                dependencies,
+                dependency_states,
+            ),
             lambda dependency: self._read_dependency(
                 dependency,
                 principal=principal,
@@ -1746,6 +1763,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 node,
                 principal,
                 dependencies,
+                dependency_states,
             ),
             lambda dependency: self._read_dependency(
                 dependency,
@@ -2242,6 +2260,7 @@ def _custom_idempotency_key(
     node: TaskNode,
     principal: Principal,
     dependencies: Mapping[str, TaskDependency],
+    dependency_states: Mapping[str, TaskNodeView],
 ) -> str:
     return canonical_sha256(
         {
@@ -2249,13 +2268,11 @@ def _custom_idempotency_key(
             "graph_id": graph_id,
             "node_id": node.node_id,
             "input": node.input,
-            "dependencies": [
-                {
-                    "node_id": dependency_id,
-                    "result_digest": dependencies[dependency_id].result_digest,
-                }
-                for dependency_id in sorted(dependencies)
-            ],
+            "dependencies": _dependency_identity_payload(
+                node,
+                dependencies,
+                dependency_states,
+            ),
             "principal": principal_identity_payload(principal),
         }
     )
