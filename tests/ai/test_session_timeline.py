@@ -28,7 +28,7 @@ from linktools.ai.core import (
     UsageMetrics,
     step_conversation_id,
 )
-import linktools.ai.runtime._session as session_module
+import linktools.ai.runtime._session_timeline as timeline_module
 from linktools.ai.runtime._session import DefaultSessionService
 from linktools.ai.runtime.service_api import ExecutionView, SessionHistoryItem
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeState
@@ -392,10 +392,10 @@ def test_timeline_projection_ignores_unrecognized_response_items(monkeypatch) ->
             SessionHistoryItem(2, "provider_internal", {"secret": "hidden"}),
         )
 
-    monkeypatch.setattr(session_module, "project_session_history_message", project)
+    monkeypatch.setattr(timeline_module, "project_session_history_message", project)
     response = ModelResponse(parts=[TextPart(content="visible")])
 
-    items = session_module._timeline_items((response,))
+    items = timeline_module._timeline_items((response,))
 
     assert [item.item_kind for item in items] == ["assistant"]
     assert [item.content for item in items] == ["visible"]
