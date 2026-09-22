@@ -183,7 +183,7 @@ def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() ->
         AssetKey("mcp", "server"),
     )
     declaration = codec.to_payload(server)
-    assert declaration["version"] == 2
+    assert declaration["version"] == 1
     assert codec.from_payload(declaration) == server
 
     first = codec.to_frozen_payload(
@@ -193,6 +193,14 @@ def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() ->
     second = codec.to_frozen_payload(
         server,
         ObjectRef("other", "v1/asset-snapshot/two", "a" * 64, 1),
+    )
+    assert first["version"] == 1
+    assert first["args"] is None
+    assert first["frozen_args"] == ["resource:script.py"]
+    restored, reference = codec.from_frozen_payload(first)
+    assert restored == server
+    assert reference == ObjectRef(
+        "runtime", "v1/asset-snapshot/one", "a" * 64, 1
     )
     assert capability_identity_payload("mcp", server.id, first) == (
         capability_identity_payload("mcp", server.id, second)
