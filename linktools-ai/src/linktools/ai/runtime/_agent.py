@@ -35,6 +35,7 @@ from .service_api import (
     SessionView,
     StartEvaluationRequest,
     TranscriptItem,
+    UsageReadCutoff,
 )
 
 if TYPE_CHECKING:
@@ -283,6 +284,7 @@ class Execution(Generic[AppT]):
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> "Page[ModelInteractionItem]":
         return await self._runtime.execution.model_interactions(
             self.execution_id,
@@ -290,6 +292,7 @@ class Execution(Generic[AppT]):
             cursor=cursor,
             include_content=include_content,
             limit=limit,
+            cutoffs=cutoffs,
         )
 
 
