@@ -4,6 +4,8 @@ Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一�
 
 ## 开始使用
 
+`linktools-cntr` 需要 Python 3.6 及以上，并仅支持 Docker / Docker Compose（不支持 Podman）。
+
 以基于 Debian 的系统为例，先安装运行环境：
 
 ```bash
@@ -16,7 +18,7 @@ sudo apt-get install -y python3 python3-pip git docker-compose-plugin
 安装 linktools-cntr：
 
 ```bash
-python3 -m pip install -U linktools linktools-cntr
+python3 -m pip install -U linktools-cntr
 
 # 安装 GitHub 最新开发版
 python3 -m pip install --ignore-installed \
