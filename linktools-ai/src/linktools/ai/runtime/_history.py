@@ -1685,13 +1685,36 @@ def _interaction_occurrence_groups(
     return tuple(tuple(group) for group in groups.values())
 
 
+def _normalize_usage_cutoffs(
+    value: "tuple[UsageReadCutoff, ...] | None",
+) -> "tuple[UsageReadCutoff, ...] | None":
+    if value is None:
+        return None
+    try:
+        normalized = tuple(
+            sorted(
+                value,
+                key=lambda item: (item.execution_id, item.segment_sequence),
+            )
+        )
+    except (AttributeError, TypeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if (
+        any(not isinstance(item, UsageReadCutoff) for item in normalized)
+        or len({(item.execution_id, item.segment_sequence) for item in normalized})
+        != len(normalized)
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return normalized
+
+
 def _decode_model_interaction_cursor(
     cursor: str | None,
     *,
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
-) -> tuple[str, int, int] | None:
+) -> "tuple[tuple[str, int, int], tuple[UsageReadCutoff, ...]] | None":
     if cursor is None:
         return None
     payload = decode_runtime_cursor(
@@ -1701,9 +1724,21 @@ def _decode_model_interaction_cursor(
         resource_kind="model_interactions",
         filter_digest=_model_interaction_filter_digest(execution_id),
     )
-    coordinate = _decode_position(payload.position, 3)
+    try:
+        value = json.loads(payload.position)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
     if (
         payload.revision != 0
+        or not isinstance(value, Mapping)
+        or set(value) != {"position", "cutoffs"}
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    coordinate = value["position"]
+    raw_cutoffs = value["cutoffs"]
+    if (
+        not isinstance(coordinate, list)
+        or len(coordinate) != 3
         or not isinstance(coordinate[0], str)
         or not coordinate[0]
         or isinstance(coordinate[1], bool)
@@ -1712,30 +1747,65 @@ def _decode_model_interaction_cursor(
         or isinstance(coordinate[2], bool)
         or not isinstance(coordinate[2], int)
         or coordinate[2] < 1
+        or not isinstance(raw_cutoffs, list)
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return coordinate[0], coordinate[1], coordinate[2]
+    cutoffs: list[UsageReadCutoff] = []
+    for raw in raw_cutoffs:
+        if (
+            not isinstance(raw, list)
+            or len(raw) != 3
+            or not isinstance(raw[0], str)
+            or not raw[0]
+            or isinstance(raw[1], bool)
+            or not isinstance(raw[1], int)
+            or raw[1] < 1
+            or isinstance(raw[2], bool)
+            or not isinstance(raw[2], int)
+            or raw[2] < 0
+        ):
+            raise AIError(ErrorCode.CURSOR_INVALID)
+        cutoffs.append(UsageReadCutoff(raw[0], raw[1], raw[2]))
+    normalized = _normalize_usage_cutoffs(tuple(cutoffs))
+    if normalized is None:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return (coordinate[0], coordinate[1], coordinate[2]), normalized
 
 
 def _model_interaction_cursor(
     tenant_id: str,
     execution_id: str,
     occurrence: _InteractionOccurrence,
+    cutoffs: tuple[UsageReadCutoff, ...],
     signer: CursorSigner,
 ) -> str:
+    normalized = _normalize_usage_cutoffs(cutoffs)
+    if normalized is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return encode_runtime_cursor(
         signer,
         tenant_id=tenant_id,
         resource_kind="model_interactions",
         filter_digest=_model_interaction_filter_digest(execution_id),
         position=json.dumps(
-            [
-                occurrence.source_execution_id,
-                occurrence.segment_sequence,
-                occurrence.interaction.request_sequence,
-            ],
+            {
+                "position": [
+                    occurrence.source_execution_id,
+                    occurrence.segment_sequence,
+                    occurrence.interaction.request_sequence,
+                ],
+                "cutoffs": [
+                    [
+                        value.execution_id,
+                        value.segment_sequence,
+                        value.request_sequence,
+                    ]
+                    for value in normalized
+                ],
+            },
             ensure_ascii=False,
             separators=(",", ":"),
+            sort_keys=True,
         ),
     )
 
