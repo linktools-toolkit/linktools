@@ -2137,7 +2137,7 @@ def _decode_history_cursor(
         or not isinstance(raw_cutoffs, list)
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    cutoffs: list[tuple[str, int, int]] = []
+    cutoffs: list[tuple[str, int, int, int]] = []
     for raw in raw_cutoffs:
         if (
             not isinstance(raw, list)
