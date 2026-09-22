@@ -10,6 +10,8 @@ from ..core import ExecutionLineageKind, Principal
 from ..errors import AIError, ErrorCode
 from .service_api import ExecutionStreamEvent, ExecutionTreeEvent, ExecutionView
 
+_DISCOVERY_BACKOFF_MAX = 30.0
+
 
 class _ExecutionTreeReader(Protocol):
     async def inspect(
@@ -180,6 +182,17 @@ class ExecutionTreeStreamer:
             if add_child(child):
                 start(child)
 
+        async def discover_persisted_children() -> bool:
+            added = False
+            for child in await self._executions.list_children(
+                execution_id,
+                principal=principal,
+            ):
+                if add_child(child):
+                    start(child)
+                    added = True
+            return added
+
         try:
             for child in await self._executions.list_children(
                 execution_id,
@@ -197,27 +210,24 @@ class ExecutionTreeStreamer:
                 subscription.wait(),
                 name=f"execution-tree-children-{execution_id}",
             )
+            discovery_backoff = 1.0
+            discovery_wait = asyncio.create_task(
+                asyncio.sleep(discovery_backoff),
+                name=f"execution-tree-discovery-{execution_id}",
+            )
             try:
                 while True:
-                    if child_wait.done():
-                        child_ids = child_wait.result()
-                        for child_id in child_ids:
-                            await discover_child(child_id)
-                        child_wait = asyncio.create_task(
-                            subscription.wait(),
-                            name=f"execution-tree-children-{execution_id}",
-                        )
-
                     if not pending:
-                        child_ids = subscription.drain()
-                        if not child_ids:
-                            return
-                        for child_id in child_ids:
+                        for child_id in subscription.drain():
                             await discover_child(child_id)
-                        continue
+                        if pending:
+                            continue
+                        if await discover_persisted_children():
+                            continue
+                        return
 
                     done, _ = await asyncio.wait(
-                        (*pending.values(), child_wait),
+                        (*pending.values(), child_wait, discovery_wait),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
 
@@ -228,6 +238,21 @@ class ExecutionTreeStreamer:
                         child_wait = asyncio.create_task(
                             subscription.wait(),
                             name=f"execution-tree-children-{execution_id}",
+                        )
+
+                    if discovery_wait in done:
+                        added = await discover_persisted_children()
+                        discovery_backoff = (
+                            1.0
+                            if added
+                            else min(
+                                _DISCOVERY_BACKOFF_MAX,
+                                discovery_backoff * 2,
+                            )
+                        )
+                        discovery_wait = asyncio.create_task(
+                            asyncio.sleep(discovery_backoff),
+                            name=f"execution-tree-discovery-{execution_id}",
                         )
 
                     ready = sorted(
@@ -262,14 +287,13 @@ class ExecutionTreeStreamer:
                             execution_key,
                         )
             finally:
-                if not child_wait.done():
-                    child_wait.cancel()
-                for task in pending.values():
+                for task in (child_wait, discovery_wait, *pending.values()):
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(
                     *pending.values(),
                     child_wait,
+                    discovery_wait,
                     return_exceptions=True,
                 )
                 for stream in tuple(streams.values()):
