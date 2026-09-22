@@ -48,8 +48,6 @@ from linktools.ai.runtime.state._model_interaction_store import (
     ModelInteractionStagingStepStore,
 )
 from linktools.ai.runtime.state._step_contracts import ContinuableSnapshot, RunRecord
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
-from linktools.ai.workspace import Workspace
 
 
 class _TextModelBinding:
@@ -90,12 +88,10 @@ class _TextModels:
         return _TextModelBinding()
 
 
-def _write_default_agent(root: Path) -> None:
-    path = root / ".linktools" / "agents" / "default"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(
-        AgentSpecCodec().encode(AgentSpec("default", model="default", allow_tools=()))
-    )
+def _agent_group() -> CapabilityGroup[object]:
+    group = CapabilityGroup[object]("application")
+    group.agent("default", model="default", allow_tools=())
+    return group
 
 
 def _journal() -> ModelRequestJournal:
@@ -715,13 +711,11 @@ async def _assert_public_interaction(runtime: Runtime[object]) -> None:
 
 @pytest.mark.asyncio
 async def test_execution_model_interactions_are_durable_and_public(tmp_path: Path) -> None:
-    _write_default_agent(tmp_path)
-    workspace = Workspace.load(tmp_path)
     async with Runtime.open(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(_agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
@@ -737,7 +731,7 @@ async def test_execution_model_interactions_support_volatile_memory_state(
         "default",
         models=_TextModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(_agent_group(),),
         metrics=Metrics.in_memory(),
     ) as runtime:
         await _assert_public_interaction(runtime)
