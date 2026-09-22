@@ -32,7 +32,7 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.storage import StorageOverlay, StoredPayload
 from pydantic import BaseModel
 
-from ._runtime_test_helpers import RuntimeUsageModels, runtime_usage_workspace
+from ._runtime_test_helpers import RuntimeUsageModels
 
 
 class _DenyAuthorization:
@@ -249,16 +249,15 @@ async def test_subagent_unknown_cancel_requires_recovery() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_persists_model_usage_through_history_views(
-    tmp_path: Path,
-) -> None:
-    workspace = runtime_usage_workspace(tmp_path / "workspace")
+async def test_runtime_persists_model_usage_through_history_views() -> None:
+    application = CapabilityGroup("application")
+    application.agent("default", model="default", allow_tools=())
 
     async with Runtime.open(
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(application,),
     ) as runtime:
         result = await runtime.agent("default").run(
             "hello",
