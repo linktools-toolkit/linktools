@@ -185,6 +185,8 @@ def _reachable_definitions(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
 
     def collect(node: object, owner: str, path: tuple[str | int, ...]) -> None:
         if isinstance(node, Mapping):
+            if path and isinstance(node.get("$id"), str):
+                return
             for key in sorted(node):
                 child = node[key]
                 if key == "$defs":
@@ -257,6 +259,8 @@ def _rewrite_schema(
     path: tuple[str | int, ...],
 ) -> object:
     if isinstance(value, Mapping):
+        if path and isinstance(value.get("$id"), str):
+            return dict(value)
         result: dict[str, object] = {}
         for key, child in value.items():
             if key == "$defs":
