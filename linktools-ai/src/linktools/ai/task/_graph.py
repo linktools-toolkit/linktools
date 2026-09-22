@@ -691,7 +691,7 @@ class TaskNodeInfo:
     output_schema: object | None
     output_contract: "Mapping[str, JsonValue] | None"
     effect: str
-    dependency_policy: str
+    dependency_policy: str = "all_succeeded"
 
     @classmethod
     def from_node(cls, node: TaskNode) -> "TaskNodeInfo":
