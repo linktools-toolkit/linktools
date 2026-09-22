@@ -28,10 +28,11 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..task import (
     TaskDependency,
+    TaskDependencyState,
     TaskNode,
     TaskNodeRunControl,
     TaskNodeRunError,
-    TaskNodeView,
+    TaskDependencyState,
 )
 from ._input import (
     ExecutionInputMaterializer,
@@ -230,7 +231,7 @@ class _AgentTaskNodeHandler:
         dependencies: Mapping[str, TaskDependency],
         dependency_reader: Callable[[TaskDependency], Awaitable[JsonValue]],
         control: TaskNodeRunControl,
-        dependency_states: Mapping[str, TaskNodeView] | None = None,
+        dependency_states: Mapping[str, TaskDependencyState] | None = None,
     ) -> tuple[JsonValue, str]:
         dependency_values = await self._read_dependencies(
             dependencies,
@@ -359,7 +360,7 @@ class _AgentTaskNodeHandler:
         dependencies: Mapping[str, TaskDependency],
         dependency_reader: Callable[[TaskDependency], Awaitable[JsonValue]],
         durable_execution_id: str | None,
-        dependency_states: Mapping[str, TaskNodeView] | None = None,
+        dependency_states: Mapping[str, TaskDependencyState] | None = None,
     ) -> None:
         key = (principal.tenant_id, graph_id, node.node_id)
         execution_id = durable_execution_id
@@ -455,7 +456,7 @@ class _AgentTaskNodeHandler:
         correlation: CorrelationData,
         dependencies: Mapping[str, TaskDependency],
         dependency_values: Mapping[str, JsonValue],
-        dependency_states: Mapping[str, TaskNodeView],
+        dependency_states: Mapping[str, TaskDependencyState],
     ) -> tuple[
         str,
         ExecutionRequest,
@@ -789,7 +790,7 @@ def _validate_dependency_result(result: ExecutionResult, expected_digest: str) -
 def _dependency_identity_payload(
     node: TaskNode,
     dependencies: Mapping[str, TaskDependency],
-    dependency_states: Mapping[str, TaskNodeView],
+    dependency_states: Mapping[str, TaskDependencyState],
 ) -> list[dict[str, JsonValue]]:
     if node.dependency_policy == "all_succeeded":
         return [
@@ -836,13 +837,8 @@ def _dependency_identity_payload(
     return result
 
 
-def _dependency_state_payload(state: TaskNodeView) -> dict[str, JsonValue]:
-    return {
-        "status": state.status.value,
-        "execution_id": state.execution_id,
-        "result_digest": state.result_digest,
-        "error_code": state.error_code,
-    }
+def _dependency_state_payload(state: TaskDependencyState) -> dict[str, JsonValue]:
+    return state.semantic_payload
 
 
 def _canonical_json(value: object) -> str:
