@@ -873,6 +873,47 @@ class StepExecutionHistoryReader:
         }
 
 
+    async def _tool_call_metadata(
+        self,
+        run_id: str,
+    ) -> dict[str, tuple[datetime | None, datetime | None, int | None, str]]:
+        values: dict[str, list[object | None]] = {}
+        for event in await self._store.list_events(run_id=run_id):
+            if event.kind not in {
+                "tool_call_started",
+                "tool_call_completed",
+                "tool_call_failed",
+            }:
+                continue
+            call_id = event.tool_call_id
+            if call_id is None or not call_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = values.setdefault(call_id, [None, None, None, "STARTED"])
+            timestamp = _event_timestamp(event)
+            if event.kind == "tool_call_started":
+                if value[0] is not None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                value[0] = timestamp
+                continue
+            if value[1] is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value[1] = timestamp
+            raw_duration = event.metadata.get(DURATION_NS_METADATA_KEY)
+            if raw_duration is not None:
+                if not raw_duration.isdigit():
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                value[2] = int(raw_duration)
+            value[3] = "SUCCEEDED" if event.kind == "tool_call_completed" else "FAILED"
+        return {
+            call_id: (
+                cast("datetime | None", value[0]),
+                cast("datetime | None", value[1]),
+                cast("int | None", value[2]),
+                cast(str, value[3]),
+            )
+            for call_id, value in values.items()
+        }
+
     async def _history_page(
         self,
         sources: Sequence[_HistorySource],
@@ -974,6 +1015,7 @@ class StepExecutionHistoryReader:
             start=start_message_index,
             from_cursor=from_cursor,
         )
+        tool_metadata = await self._tool_call_metadata(run_id)
         first = True
         message_index = start_message_index
         saw_message = False
@@ -986,14 +1028,25 @@ class StepExecutionHistoryReader:
             first = False
             for projected_offset in range(item_offset, len(projected)):
                 value = projected[projected_offset]
+                metadata = (
+                    None
+                    if value.tool_call_id is None
+                    else tool_metadata.get(value.tool_call_id)
+                )
                 yield _HistoryOccurrence(
                     ExecutionHistoryItem(
-                        source.record.execution_id,
-                        message_index + 1,
-                        value.item_kind,
-                        value.content,
-                        value.tool_name,
-                        value.tool_call_id,
+                        execution_id=source.record.execution_id,
+                        sequence=message_index + 1,
+                        item_kind=value.item_kind,
+                        content=value.content,
+                        tool_name=value.tool_name,
+                        tool_call_id=value.tool_call_id,
+                        content_included=True,
+                        segment_sequence=source.segment_sequence,
+                        started_at=None if metadata is None else metadata[0],
+                        finished_at=None if metadata is None else metadata[1],
+                        duration_ns=None if metadata is None else metadata[2],
+                        status=None if metadata is None else metadata[3],
                     ),
                     source.record.execution_id,
                     source.segment_sequence,
