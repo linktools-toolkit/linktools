@@ -18,6 +18,7 @@ from ..core import (
     ExecutionStatus,
     JsonValue,
     Page,
+    ToolOperationStatus,
     canonical_sha256,
     step_conversation_id,
     step_run_id,
@@ -55,6 +56,7 @@ from .state._contracts import (
     ExecutionRepository,
     ModelInteractionRecord,
     SessionRepository,
+    ToolOperationRecord,
 )
 from .state._step_contracts import RunRecord, StepEvent, StepStore
 from .state._views import (
@@ -190,6 +192,15 @@ class _RangedTranscriptStore(Protocol):
     ) -> AsyncIterator[object]: ...
 
 
+class _ToolOperationHistoryReader(Protocol):
+    async def list_by_execution(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+    ) -> tuple[ToolOperationRecord, ...]: ...
+
+
 class StepExecutionHistoryReader:
     """Own the adapter projection between StepStore facts and Runtime views."""
 
@@ -200,6 +211,7 @@ class StepExecutionHistoryReader:
         executions: ExecutionRepository,
         store: StepStore,
         cursor_signer: CursorSigner,
+        tool_operations: "_ToolOperationHistoryReader | None" = None,
     ) -> None:
         try:
             validate_persistence_namespace(namespace)
@@ -209,6 +221,7 @@ class StepExecutionHistoryReader:
         self._executions = executions
         self._store = store
         self._cursor_signer = cursor_signer
+        self._tool_operations = tool_operations
 
     async def trace(
         self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int
@@ -876,7 +889,20 @@ class StepExecutionHistoryReader:
     async def _tool_call_metadata(
         self,
         run_id: str,
-    ) -> dict[str, tuple[datetime | None, datetime | None, int | None, str]]:
+        *,
+        execution_id: str,
+        tenant_id: str,
+    ) -> dict[
+        str,
+        tuple[
+            datetime | None,
+            datetime | None,
+            int | None,
+            str,
+            int | None,
+            str | None,
+        ],
+    ]:
         values: dict[str, list[object | None]] = {}
         for event in await self._store.list_events(run_id=run_id):
             if event.kind not in {
@@ -888,7 +914,15 @@ class StepExecutionHistoryReader:
             call_id = event.tool_call_id
             if call_id is None or not call_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value = values.setdefault(call_id, [None, None, None, "STARTED"])
+            value = values.setdefault(call_id, [None, None, None, "STARTED", None, None])
+            raw_request = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
+            if raw_request is not None:
+                if not raw_request.isdigit() or int(raw_request) < 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                request_sequence = int(raw_request)
+                if value[4] is not None and value[4] != request_sequence:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                value[4] = request_sequence
             timestamp = _event_timestamp(event)
             if event.kind == "tool_call_started":
                 if value[0] is not None:
@@ -904,12 +938,52 @@ class StepExecutionHistoryReader:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value[2] = int(raw_duration)
             value[3] = "SUCCEEDED" if event.kind == "tool_call_completed" else "FAILED"
+
+        if self._tool_operations is not None:
+            operations = await self._tool_operations.list_by_execution(
+                execution_id,
+                tenant_id=tenant_id,
+            )
+            by_call: dict[str, ToolOperationRecord] = {}
+            for operation in operations:
+                if operation.step_run_id != run_id:
+                    continue
+                if operation.tool_call_id in by_call:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                by_call[operation.tool_call_id] = operation
+            for call_id, operation in by_call.items():
+                value = values.setdefault(
+                    call_id,
+                    [operation.created_at, None, None, "RUNNING", None, None],
+                )
+                value[5] = operation.tool_operation_id
+                if value[0] is None:
+                    value[0] = operation.created_at
+                status = {
+                    ToolOperationStatus.PENDING: "RUNNING",
+                    ToolOperationStatus.CLAIMED: "RUNNING",
+                    ToolOperationStatus.COMPLETED: "SUCCEEDED",
+                    ToolOperationStatus.FAILED: "FAILED",
+                    ToolOperationStatus.CANCELLED: "CANCELLED",
+                    ToolOperationStatus.EFFECT_UNKNOWN: "RECOVERY_REQUIRED",
+                }[operation.status]
+                value[3] = status
+                if operation.status in {
+                    ToolOperationStatus.COMPLETED,
+                    ToolOperationStatus.FAILED,
+                    ToolOperationStatus.CANCELLED,
+                    ToolOperationStatus.EFFECT_UNKNOWN,
+                } and value[1] is None:
+                    value[1] = operation.updated_at
+
         return {
             call_id: (
                 cast("datetime | None", value[0]),
                 cast("datetime | None", value[1]),
                 cast("int | None", value[2]),
                 cast(str, value[3]),
+                cast("int | None", value[4]),
+                cast("str | None", value[5]),
             )
             for call_id, value in values.items()
         }
@@ -1015,7 +1089,11 @@ class StepExecutionHistoryReader:
             start=start_message_index,
             from_cursor=from_cursor,
         )
-        tool_metadata = await self._tool_call_metadata(run_id)
+        tool_metadata = await self._tool_call_metadata(
+            run_id,
+            execution_id=source.record.execution_id,
+            tenant_id=tenant_id,
+        )
         first = True
         message_index = start_message_index
         saw_message = False
@@ -1043,6 +1121,8 @@ class StepExecutionHistoryReader:
                         tool_call_id=value.tool_call_id,
                         content_included=True,
                         segment_sequence=source.segment_sequence,
+                        request_sequence=None if metadata is None else metadata[4],
+                        tool_operation_id=None if metadata is None else metadata[5],
                         started_at=None if metadata is None else metadata[0],
                         finished_at=None if metadata is None else metadata[1],
                         duration_ns=None if metadata is None else metadata[2],
