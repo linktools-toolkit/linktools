@@ -58,7 +58,7 @@ async def test_in_memory_fork_survives_parent_close() -> None:
         "default",
         models=RuntimeUsageModels(),  # type: ignore[arg-type]
         state=RuntimeState.in_memory(),
-        capabilities=(CapabilityGroup("workspace", workspace=workspace),),
+        capabilities=(application,),
     ) as runtime:
         parent = await runtime.agent("default").create_session("parent")
         parent_turn = await parent.run("before fork", timeout_seconds=10)
