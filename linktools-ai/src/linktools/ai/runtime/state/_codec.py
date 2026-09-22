@@ -398,6 +398,8 @@ def _encode_v1_task_node(
 ) -> Mapping[str, JsonValue]:
     if not isinstance(value, TaskNode):
         raise TypeError("V1 task_node encoder received the wrong type")
+    if value.dependency_policy != "all_succeeded":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     fields: dict[str, JsonValue] = {
         "node_id": _encode_domain(value.node_id, codec, persisted=persisted),
         "dependencies": _encode_domain(
@@ -433,8 +435,6 @@ def _encode_v1_task_node(
         fields["output_contract"] = dict(value.output_contract)
     if value.effect != "none":
         fields["effect"] = value.effect
-    if value.dependency_policy != "all_succeeded":
-        fields["dependency_policy"] = value.dependency_policy
     return fields
 
 
@@ -454,7 +454,6 @@ def _decode_v1_task_node(
             "retry_delay_seconds",
             "output_contract",
             "effect",
-            "dependency_policy",
         }
     )
     keys = set(raw_fields)
@@ -503,9 +502,6 @@ def _decode_v1_task_node(
     effect = raw_fields.get("effect", "none")
     if not isinstance(effect, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    dependency_policy = raw_fields.get("dependency_policy", "all_succeeded")
-    if dependency_policy != "all_succeeded":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return TaskNode(
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
         tuple(
@@ -545,8 +541,35 @@ def _decode_v1_task_node(
             output_contract,
         ),
         effect=effect,
-        dependency_policy=dependency_policy,
+        dependency_policy="all_succeeded",
     )
+
+
+def _encode_v1_terminal_task_node(
+    value: object,
+    codec: "_VersionCodec",
+    persisted: bool,
+) -> Mapping[str, JsonValue]:
+    if not isinstance(value, TaskNode):
+        raise TypeError("V1 task_node_terminal encoder received the wrong type")
+    if value.dependency_policy != "all_terminal":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    normalized = TaskNode(
+        value.node_id,
+        value.dependencies,
+        input=value.input,
+        budget_cost=value.budget_cost,
+        expander=value.expander,
+        input_refs=value.input_refs,
+        timeout_seconds=value.timeout_seconds,
+        max_attempts=value.max_attempts,
+        retry_delay_seconds=value.retry_delay_seconds,
+        output_schema=value.output_schema,
+        output_contract=value.output_contract,
+        effect=value.effect,
+        dependency_policy="all_succeeded",
+    )
+    return _encode_v1_task_node(normalized, codec, persisted)
 
 
 def _decode_v1_terminal_task_node(
@@ -554,11 +577,7 @@ def _decode_v1_terminal_task_node(
     codec: "_VersionCodec",
     persisted: bool,
 ) -> TaskNode:
-    if raw_fields.get("dependency_policy") != "all_terminal":
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    normalized = dict(raw_fields)
-    normalized.pop("dependency_policy", None)
-    node = _decode_v1_task_node(normalized, codec, persisted)
+    node = _decode_v1_task_node(raw_fields, codec, persisted)
     return TaskNode(
         node.node_id,
         node.dependencies,
@@ -946,7 +965,7 @@ _V1_DATACLASS_ENCODERS: Mapping[str, DataclassEncoder] = MappingProxyType(
         "stored_user_input": _encode_v1_stored_user_input,
         "task_graph_view": _encode_v1_task_graph_view,
         "task_node": _encode_v1_task_node,
-        _TASK_NODE_TERMINAL_WIRE_ID: _encode_v1_task_node,
+        _TASK_NODE_TERMINAL_WIRE_ID: _encode_v1_terminal_task_node,
         "task_node_view": _encode_v1_task_node_view,
         "task_result": _encode_v1_task_result,
     }
