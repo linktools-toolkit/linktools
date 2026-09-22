@@ -352,7 +352,7 @@ class StepExecutionHistoryReader:
         )
         if cursor_state is None:
             cursor_coordinate = None
-            captured: list[tuple[str, int, int]] = []
+            captured: list[tuple[str, int, int, int]] = []
             for source in current_sources:
                 run_id = step_run_id(
                     namespace=self._namespace,
@@ -365,14 +365,23 @@ class StepExecutionHistoryReader:
                         source.record.execution_id,
                         source.segment_sequence,
                         await self._transcript_high_water(run_id),
+                        len(await self._store.list_events(run_id=run_id)),
                     )
                 )
             fixed_cutoffs = tuple(captured)
         else:
             cursor_coordinate, fixed_cutoffs = cursor_state
         cutoff_by_identity = {
-            (source_execution_id, segment_sequence): message_count
-            for source_execution_id, segment_sequence, message_count in fixed_cutoffs
+            (source_execution_id, segment_sequence): (
+                message_count,
+                event_count,
+            )
+            for (
+                source_execution_id,
+                segment_sequence,
+                message_count,
+                event_count,
+            ) in fixed_cutoffs
         }
         if len(cutoff_by_identity) != len(fixed_cutoffs):
             raise AIError(ErrorCode.CURSOR_INVALID)
@@ -391,7 +400,11 @@ class StepExecutionHistoryReader:
                 execution_id=source.record.execution_id,
                 segment_sequence=source.segment_sequence,
             )
-            if await self._transcript_high_water(run_id) < cutoff_by_identity[identity]:
+            message_high_water, event_high_water = cutoff_by_identity[identity]
+            if (
+                await self._transcript_high_water(run_id) < message_high_water
+                or len(await self._store.list_events(run_id=run_id)) < event_high_water
+            ):
                 raise AIError(ErrorCode.CURSOR_INVALID)
         page = await self._history_page(
             sources,
@@ -983,6 +996,7 @@ class StepExecutionHistoryReader:
         *,
         execution_id: str,
         tenant_id: str,
+        event_high_water: int,
     ) -> dict[
         str,
         tuple[
@@ -994,8 +1008,11 @@ class StepExecutionHistoryReader:
             str | None,
         ],
     ]:
+        events = await self._store.list_events(run_id=run_id)
+        if event_high_water < 0 or event_high_water > len(events):
+            raise AIError(ErrorCode.CURSOR_INVALID)
         values: dict[str, list[object | None]] = {}
-        for event in await self._store.list_events(run_id=run_id):
+        for event in events[:event_high_water]:
             if event.kind not in {
                 "tool_call_started",
                 "tool_call_completed",
@@ -1030,7 +1047,7 @@ class StepExecutionHistoryReader:
                 value[2] = int(raw_duration)
             value[3] = "SUCCEEDED" if event.kind == "tool_call_completed" else "FAILED"
 
-        if self._tool_operations is not None:
+        if self._tool_operations is not None and values:
             operations = await self._tool_operations.list_by_execution(
                 execution_id,
                 tenant_id=tenant_id,
@@ -1042,30 +1059,10 @@ class StepExecutionHistoryReader:
                 if operation.tool_call_id in by_call:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 by_call[operation.tool_call_id] = operation
-            for call_id, operation in by_call.items():
-                value = values.setdefault(
-                    call_id,
-                    [operation.created_at, None, None, "RUNNING", None, None],
-                )
-                value[5] = operation.tool_operation_id
-                if value[0] is None:
-                    value[0] = operation.created_at
-                status = {
-                    ToolOperationStatus.PENDING: "RUNNING",
-                    ToolOperationStatus.CLAIMED: "RUNNING",
-                    ToolOperationStatus.COMPLETED: "SUCCEEDED",
-                    ToolOperationStatus.FAILED: "FAILED",
-                    ToolOperationStatus.CANCELLED: "CANCELLED",
-                    ToolOperationStatus.EFFECT_UNKNOWN: "RECOVERY_REQUIRED",
-                }[operation.status]
-                value[3] = status
-                if operation.status in {
-                    ToolOperationStatus.COMPLETED,
-                    ToolOperationStatus.FAILED,
-                    ToolOperationStatus.CANCELLED,
-                    ToolOperationStatus.EFFECT_UNKNOWN,
-                } and value[1] is None:
-                    value[1] = operation.updated_at
+            for call_id, value in values.items():
+                operation = by_call.get(call_id)
+                if operation is not None:
+                    value[5] = operation.tool_operation_id
 
         return {
             call_id: (
@@ -1084,7 +1081,7 @@ class StepExecutionHistoryReader:
         sources: Sequence[_HistorySource],
         *,
         cursor_coordinate: "tuple[str, int, int, int] | None",
-        high_waters: Mapping[tuple[str, int], int],
+        high_waters: Mapping[tuple[str, int], tuple[int, int]],
         tenant_id: str,
         limit: int,
     ) -> list[_HistoryOccurrence]:
@@ -1119,14 +1116,18 @@ class StepExecutionHistoryReader:
                         start_message_index = cursor_coordinate[2]
                         start_item_offset = cursor_coordinate[3]
                 identity = (source.record.execution_id, source.segment_sequence)
-                high_water = high_waters.get(identity)
-                if high_water is None or start_message_index > high_water:
+                high_waters_for_source = high_waters.get(identity)
+                if high_waters_for_source is None:
+                    raise AIError(ErrorCode.CURSOR_INVALID)
+                message_high_water, event_high_water = high_waters_for_source
+                if start_message_index > message_high_water:
                     raise AIError(ErrorCode.CURSOR_INVALID)
                 iterator = self._iter_history_source(
                     source,
                     tenant_id=tenant_id,
                     start_message_index=start_message_index,
-                    end_message_index=high_water,
+                    end_message_index=message_high_water,
+                    event_high_water=event_high_water,
                     start_item_offset=start_item_offset,
                     from_cursor=source is cursor_source,
                 )
@@ -1164,6 +1165,7 @@ class StepExecutionHistoryReader:
         tenant_id: str,
         start_message_index: int,
         end_message_index: int,
+        event_high_water: int,
         start_item_offset: int,
         from_cursor: bool,
     ) -> AsyncGenerator[_HistoryOccurrence, None]:
@@ -1183,6 +1185,7 @@ class StepExecutionHistoryReader:
             run_id,
             execution_id=source.record.execution_id,
             tenant_id=tenant_id,
+            event_high_water=event_high_water,
         )
         first = True
         message_index = start_message_index
@@ -2093,7 +2096,7 @@ def _decode_history_cursor(
     tenant_id: str,
     execution_id: str,
     signer: CursorSigner,
-) -> "tuple[tuple[str, int, int, int], tuple[tuple[str, int, int], ...]] | None":
+) -> "tuple[tuple[str, int, int, int], tuple[tuple[str, int, int, int], ...]] | None":
     if cursor is None:
         return None
     payload = decode_runtime_cursor(
@@ -2138,7 +2141,7 @@ def _decode_history_cursor(
     for raw in raw_cutoffs:
         if (
             not isinstance(raw, list)
-            or len(raw) != 3
+            or len(raw) != 4
             or not isinstance(raw[0], str)
             or not raw[0]
             or isinstance(raw[1], bool)
@@ -2147,9 +2150,12 @@ def _decode_history_cursor(
             or isinstance(raw[2], bool)
             or not isinstance(raw[2], int)
             or raw[2] < 0
+            or isinstance(raw[3], bool)
+            or not isinstance(raw[3], int)
+            or raw[3] < 0
         ):
             raise AIError(ErrorCode.CURSOR_INVALID)
-        cutoffs.append((raw[0], raw[1], raw[2]))
+        cutoffs.append((raw[0], raw[1], raw[2], raw[3]))
     normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
     if len({(item[0], item[1]) for item in normalized}) != len(normalized):
         raise AIError(ErrorCode.CURSOR_INVALID)
@@ -2163,7 +2169,7 @@ def _history_cursor(
     tenant_id: str,
     execution_id: str,
     occurrence: _HistoryOccurrence,
-    cutoffs: tuple[tuple[str, int, int], ...],
+    cutoffs: tuple[tuple[str, int, int, int], ...],
     signer: CursorSigner,
 ) -> str:
     normalized = tuple(sorted(cutoffs, key=lambda item: (item[0], item[1])))
