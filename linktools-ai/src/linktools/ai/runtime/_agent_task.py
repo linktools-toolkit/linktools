@@ -16,6 +16,7 @@ from ..core import (
     ExecutionStatus,
     JsonValue,
     Principal,
+    TaskStatus,
     ThinkingValue,
     canonical_sha256,
     normalize_execution_mode,
@@ -528,29 +529,21 @@ class _AgentTaskNodeHandler:
             )
         if isinstance(effective_user_prompt, str):
             validate_user_prompt(effective_user_prompt)
-        idempotency_payload: dict[str, JsonValue] = {
-            "version": 1,
-            "graph_id": graph_id,
-            "node_id": node.node_id,
-            "binding_digest": binding.digest,
-            "input": node.input,
-            "dependencies": [
-                {
-                    "node_id": dependency_id,
-                    "result_digest": dependencies[dependency_id].result_digest,
-                }
-                for dependency_id in sorted(dependencies)
-            ],
-            "principal": principal_identity_payload(principal),
-        }
-        if node.dependency_policy == "all_terminal":
-            idempotency_payload["dependency_states"] = {
-                dependency_id: _dependency_state_payload(
-                    dependency_states[dependency_id]
-                )
-                for dependency_id in sorted(dependency_states)
+        idempotency_key = canonical_sha256(
+            {
+                "version": 1,
+                "graph_id": graph_id,
+                "node_id": node.node_id,
+                "binding_digest": binding.digest,
+                "input": node.input,
+                "dependencies": _dependency_identity_payload(
+                    node,
+                    dependencies,
+                    dependency_states,
+                ),
+                "principal": principal_identity_payload(principal),
             }
-        idempotency_key = canonical_sha256(idempotency_payload)
+        )
         request = ExecutionRequest(
             user_prompt=effective_user_prompt,
             principal=principal,
@@ -793,6 +786,56 @@ def _validate_dependency_result(result: ExecutionResult, expected_digest: str) -
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
+def _dependency_identity_payload(
+    node: TaskNode,
+    dependencies: Mapping[str, TaskDependency],
+    dependency_states: Mapping[str, TaskNodeView],
+) -> list[dict[str, JsonValue]]:
+    if node.dependency_policy == "all_succeeded":
+        return [
+            {
+                "node_id": dependency_id,
+                "result_digest": dependencies[dependency_id].result_digest,
+            }
+            for dependency_id in sorted(dependencies)
+        ]
+    if node.dependency_policy != "all_terminal":
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if set(dependency_states) != set(node.dependencies):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result: list[dict[str, JsonValue]] = []
+    terminal = {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    }
+    for dependency_id in sorted(node.dependencies):
+        state = dependency_states[dependency_id]
+        if state.status not in terminal:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value: dict[str, JsonValue] = {
+            "node_id": dependency_id,
+            "status": state.status.value,
+        }
+        if state.status is TaskStatus.SUCCEEDED:
+            dependency = dependencies.get(dependency_id)
+            if (
+                dependency is None
+                or state.result_digest is None
+                or dependency.result_digest != state.result_digest
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value["result_digest"] = dependency.result_digest
+        else:
+            if dependency_id in dependencies:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value["error_code"] = state.error_code
+            value["error_digest"] = state.error_digest
+        result.append(value)
+    return result
+
+
 def _dependency_state_payload(state: TaskNodeView) -> dict[str, JsonValue]:
     return {
         "status": state.status.value,
@@ -800,6 +843,8 @@ def _dependency_state_payload(state: TaskNodeView) -> dict[str, JsonValue]:
         "result_digest": state.result_digest,
         "error_code": state.error_code,
     }
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(
         value,
