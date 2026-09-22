@@ -190,6 +190,57 @@ def test_persisted_custom_dataclass_allows_additive_field() -> None:
     ) == node
 
 
+def test_persisted_model_interaction_accepts_legacy_attachment_without_identifier() -> None:
+    attachment_id = "a" * 64
+    digest = "b" * 64
+    interaction = ModelInteractionRecord(
+        run_id="run",
+        step_index=1,
+        request_sequence=1,
+        purpose="agent",
+        output_retry_index=None,
+        model={"route_id": "default"},
+        request_context=ContextProjection(()),
+        request_envelope=RuntimePayloadRef(
+            StoredPayload.inline_bytes(b"{}"),
+            RuntimeDomain.EXECUTION,
+        ),
+        response_context=None,
+        status="CANCELLED",
+        error_code=None,
+        duration_ns=1,
+        usage=None,
+        attachments=(
+            {
+                "fact": "accepted",
+                "attachment_id": attachment_id,
+                "source": "binary",
+                "media_type": "image/png",
+                "size": 4,
+                "digest": digest,
+                "content_key": digest,
+                "input_identifier": "caller-id",
+                "position": 0,
+                "call_id": None,
+            },
+        ),
+    )
+    payload = copy.deepcopy(_encode_persisted_domain(interaction))
+    encoded_attachment = payload["fields"]["attachments"]["$tuple"][0]["$mapping"]
+    assert any(pair[0] == "input_identifier" for pair in encoded_attachment)
+    payload["fields"]["attachments"]["$tuple"][0]["$mapping"] = [
+        pair for pair in encoded_attachment if pair[0] != "input_identifier"
+    ]
+
+    decoded = _decode_enveloped_domain(
+        _envelope(payload, wire_id="model_interaction"),
+        ModelInteractionRecord,
+    )
+
+    assert decoded.attachments[0]["attachment_id"] == attachment_id
+    assert decoded.attachments[0]["input_identifier"] is None
+
+
 def test_persisted_model_interaction_requires_attachments_field() -> None:
     interaction = ModelInteractionRecord(
         run_id="run",
