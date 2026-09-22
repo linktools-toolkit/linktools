@@ -20,6 +20,7 @@ from ._journal import (
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
     MODEL_USAGE_OUTPUT_METADATA_KEY,
+    REQUEST_SEQUENCE_METADATA_KEY,
     ModelRequestFact,
 )
 from ._message import encode_model_messages, freeze_model_messages, project_transient_binary_content
@@ -69,6 +70,7 @@ class RuntimeCaptureStore:
         self._step_run_id = step_run_id
         self._run: RunRecord | None = None
         self._event_sequence = 0
+        self._agent_request_by_step: dict[int, int] = {}
         self._initial_attachments = tuple(dict(value) for value in initial_attachments)
         self._accepted_attachment_ids = {
             attachment_id
@@ -361,6 +363,9 @@ class RuntimeCaptureStore:
             )
         )
 
+    def request_sequence_for_step(self, step_index: int) -> int | None:
+        return self._agent_request_by_step.get(step_index)
+
     async def record_model_event(
         self,
         fact: ModelRequestFact,
@@ -382,6 +387,8 @@ class RuntimeCaptureStore:
         kind = kinds.get(phase)
         if kind is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if fact.purpose == "agent" and phase == "completed":
+            self._agent_request_by_step[fact.step_index] = fact.request_sequence
         metadata = fact.metadata(
             include_observation=include_observation and fact.duration_ns is not None
         )
