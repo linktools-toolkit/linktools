@@ -25,6 +25,7 @@ from .service_api import (
     ListExecutionRequest,
     ModelInteractionItem,
     TranscriptItem,
+    UsageReadCutoff,
     UsageSummary,
     project_execution_view,
 )
@@ -270,8 +271,9 @@ class DefaultExecutionHistoryService:
         cursor: "str | None" = None,
         include_content: bool = False,
         limit: int = 100,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> Page[ModelInteractionItem]:
-        record = await self._authorize(execution_id, principal)
+        await self._authorize(execution_id, principal)
         inner_cursor = self._decode_content_cursor(
             cursor,
             execution_id=execution_id,
@@ -284,33 +286,11 @@ class DefaultExecutionHistoryService:
             tenant_id=self._executions.tenant_id,
             cursor=inner_cursor,
             limit=limit,
-        )
-        items = (
-            page.items
-            if include_content
-            else tuple(
-                ModelInteractionItem(
-                    item.execution_id,
-                    item.segment_sequence,
-                    item.depth,
-                    item.request_sequence,
-                    item.purpose,
-                    item.step_index,
-                    item.output_retry_index,
-                    item.model,
-                    {},
-                    None,
-                    item.status,
-                    item.error_code,
-                    item.duration_ns,
-                    item.usage,
-                    False,
-                )
-                for item in page.items
-            )
+            cutoffs=cutoffs,
+            include_content=include_content,
         )
         return Page(
-            items,
+            page.items,
             self._encode_content_cursor(
                 page.next_cursor,
                 execution_id=execution_id,
@@ -341,11 +321,13 @@ class DefaultExecutionHistoryService:
         execution_id: str,
         *,
         principal: Principal,
+        cutoffs: "tuple[UsageReadCutoff, ...] | None" = None,
     ) -> UsageSummary:
-        record = await self._authorize(execution_id, principal)
+        await self._authorize(execution_id, principal)
         return await self._reader.usage(
             execution_id,
             tenant_id=self._executions.tenant_id,
+            cutoffs=cutoffs,
         )
 
     def _content_filter_digest(
