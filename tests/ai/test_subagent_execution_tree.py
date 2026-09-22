@@ -343,6 +343,84 @@ async def test_tree_stream_does_not_close_terminal_source_before_delivery() -> N
 
 
 @pytest.mark.asyncio
+async def test_tree_stream_discovers_persisted_child_without_local_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_INITIAL",
+        0.01,
+    )
+    monkeypatch.setattr(
+        "linktools.ai.runtime._execution_tree._DISCOVERY_BACKOFF_MAX",
+        0.01,
+    )
+
+    class PersistedExecutionReader(_RootOnlyExecutionReader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.child_visible = False
+
+        async def list_children(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+        ) -> tuple[ExecutionView, ...]:
+            del principal
+            if execution_id != "root":
+                raise AssertionError("execution tree must only list direct children")
+            return (self.child,) if self.child_visible else ()
+
+    class PersistedEventStreamer:
+        def __init__(self) -> None:
+            self.release_root = asyncio.Event()
+
+        def stream(
+            self,
+            execution_id: str,
+            *,
+            principal: Principal,
+            after_sequence: int = 0,
+        ):
+            del principal
+
+            async def events():
+                if execution_id == "root":
+                    await self.release_root.wait()
+                yield ExecutionStreamEvent(
+                    execution_id,
+                    after_sequence + 1,
+                    ExecutionEventType.EXECUTION_SUCCEEDED.value,
+                    {},
+                )
+
+            return events()
+
+    reader = PersistedExecutionReader()
+    events = PersistedEventStreamer()
+    streamer = ExecutionTreeStreamer(
+        reader,
+        events,
+        ExecutionTreeBroker(),
+    )
+    stream = streamer.stream(
+        "root",
+        principal=Principal("owner", "tenant", "service"),
+    )
+    first = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    reader.child_visible = True
+
+    child = await asyncio.wait_for(first, timeout=1)
+    assert child.execution_id == "child"
+    assert child.depth == 1
+
+    events.release_root.set()
+    remaining = [item async for item in stream]
+    assert [item.execution_id for item in remaining] == ["root"]
+
+
+@pytest.mark.asyncio
 async def test_tree_stream_adds_dynamic_direct_child_once() -> None:
     class DynamicExecutionReader(_RootOnlyExecutionReader):
         async def list_children(
