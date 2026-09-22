@@ -4,6 +4,10 @@ Linktools 移动设备工具包，提供 Android 和 iOS 设备管理、动态�
 
 ## 开始使用
 
+### 依赖项
+
+Python & pip（3.6 及以上）：<https://www.python.org/downloads/>
+
 ### 安装
 
 ```bash
@@ -22,7 +26,7 @@ python3 -m pip install --ignore-installed \
 
 ```bash
 alias adb="at-adb"
-alias sib="it-sib"
+alias sib="it-ios"
 alias pidcat="at-pidcat"
 ```
 
