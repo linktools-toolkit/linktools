@@ -68,7 +68,7 @@ from .state._views import (
 _logger = environ.get_logger("ai.runtime.history")
 _EXECUTION_HISTORY_PROJECTION_VERSION = 2
 _EXECUTION_TRACE_PROJECTION_VERSION = 1
-_EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 1
+_EXECUTION_TRANSCRIPT_PROJECTION_VERSION = 2
 _MODEL_INTERACTION_PROJECTION_VERSION = 2
 _ATTACHMENT_FACT_PROJECTION_VERSION = 1
 
@@ -1270,16 +1270,25 @@ class StepExecutionHistoryReader:
             ),
             record.agent_run_sequence,
         )
-        message_index, item_offset = _decode_transcript_cursor(
+        cursor_state = _decode_transcript_cursor(
             cursor,
             tenant_id=tenant_id,
             execution_id=execution_id,
             run_id=final_run_id,
             signer=self._cursor_signer,
         )
+        if cursor_state is None:
+            high_water = await self._transcript_high_water(final_run_id)
+            message_index = 0
+            item_offset = 0
+        else:
+            high_water, message_index, item_offset = cursor_state
+            if await self._transcript_high_water(final_run_id) < high_water:
+                raise AIError(ErrorCode.CURSOR_INVALID)
         messages = self._message_range(
             final_run_id,
             start=message_index,
+            end=high_water,
             from_cursor=cursor is not None,
         )
         conversation_id = step_conversation_id(
@@ -1311,6 +1320,7 @@ class StepExecutionHistoryReader:
                 tenant_id,
                 execution_id,
                 final_run_id,
+                high_water,
                 next_coordinate[0],
                 next_coordinate[1],
                 self._cursor_signer,
@@ -2201,9 +2211,9 @@ def _decode_transcript_cursor(
     execution_id: str,
     run_id: str,
     signer: CursorSigner,
-) -> tuple[int, int]:
+) -> "tuple[int, int, int] | None":
     if cursor is None:
-        return 0, 0
+        return None
     payload = decode_runtime_cursor(
         cursor,
         signer,
@@ -2213,7 +2223,7 @@ def _decode_transcript_cursor(
             execution_id, _EXECUTION_TRANSCRIPT_PROJECTION_VERSION
         ),
     )
-    coordinate = _decode_position(payload.position, 3)
+    coordinate = _decode_position(payload.position, 4)
     if (
         payload.revision != 0
         or coordinate[0] != run_id
@@ -2223,19 +2233,31 @@ def _decode_transcript_cursor(
         or isinstance(coordinate[2], bool)
         or not isinstance(coordinate[2], int)
         or coordinate[2] < 0
+        or coordinate[2] > coordinate[1]
+        or isinstance(coordinate[3], bool)
+        or not isinstance(coordinate[3], int)
+        or coordinate[3] < 0
     ):
         raise AIError(ErrorCode.CURSOR_INVALID)
-    return coordinate[1], coordinate[2]
+    return coordinate[1], coordinate[2], coordinate[3]
 
 
 def _transcript_cursor(
     tenant_id: str,
     execution_id: str,
     run_id: str,
+    high_water: int,
     message_index: int,
     item_offset: int,
     signer: CursorSigner,
 ) -> str:
+    if (
+        high_water < 0
+        or message_index < 0
+        or message_index > high_water
+        or item_offset < 0
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return encode_runtime_cursor(
         signer,
         tenant_id=tenant_id,
@@ -2244,7 +2266,7 @@ def _transcript_cursor(
             execution_id, _EXECUTION_TRANSCRIPT_PROJECTION_VERSION
         ),
         position=json.dumps(
-            [run_id, message_index, item_offset],
+            [run_id, high_water, message_index, item_offset],
             ensure_ascii=False,
             separators=(",", ":"),
         ),
