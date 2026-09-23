@@ -224,8 +224,7 @@ async def test_session_tool_turn_commits_terminal_and_history(
             tool_trace = tuple(
                 item
                 for item in execution_trace.items
-                if item.payload.get("kind")
-                in {"TOOL_CALL", "TOOL_RESULT", "TOOL_ERROR"}
+                if item.payload.get("kind") in {"TOOL_CALL", "TOOL_RESULT", "TOOL_ERROR"}
             )
             assert [item.payload["kind"] for item in tool_trace] == [
                 "TOOL_CALL",
