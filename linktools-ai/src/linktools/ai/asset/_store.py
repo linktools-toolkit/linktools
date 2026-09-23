@@ -8,7 +8,8 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import cast
+from pathlib import Path
+from typing import Protocol, cast, runtime_checkable
 
 from linktools.core import environ
 
@@ -39,6 +40,11 @@ from ._domain import AssetInfo, AssetKey
 
 _logger = environ.get_logger("ai.asset.store")
 _SNAPSHOT_VERSION = 1
+
+
+@runtime_checkable
+class _LocalPathAssetBackend(Protocol):
+    def local_path(self, key: AssetKey) -> Path: ...
 
 
 class AssetCacheAdapter:
@@ -134,6 +140,21 @@ class AssetStore:
         """Return current file bytes in the same order as the requested keys."""
         self._ensure_ready()
         return await self._storage.get_many(keys)
+
+    async def local_path(self, key: AssetKey) -> "Path | None":
+        """Return the effective native file path when the owning backend exposes one."""
+        self._ensure_ready()
+        location = await self._storage.locate(key)
+        if (
+            location is None
+            or location.info.status is not StorageEntryStatus.NORMAL
+            or not isinstance(location.backend, _LocalPathAssetBackend)
+        ):
+            return None
+        path = location.backend.local_path(key)
+        if not isinstance(path, Path) or not path.is_absolute():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return path
 
     async def put(
         self,
