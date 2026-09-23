@@ -1,6 +1,6 @@
 # linktools
 
-Linktools 核心框架，提供命令行工具基础设施、环境管理及通用工具集。
+Linktools 核心框架，提供命令行基础设施、环境/配置、工具管理和子包能力发现。
 
 ## 开始使用
 
@@ -14,7 +14,7 @@ Python & pip（3.6 及以上）：<https://www.python.org/downloads/>
 # 安装核心包
 python3 -m pip install -U linktools
 
-# 安装完整功能（包含所有可选依赖）
+# 安装 core 的全部可选能力（包含 common/mobile/cntr 等，不包含独立的 linktools-ai）
 python3 -m pip install -U "linktools[all]"
 
 # 安装 GitHub 最新开发版
@@ -87,6 +87,7 @@ linktools 通过 Python entry points 机制加载各子包命令，安装对应�
 | `linktools-common` | `ct-` | 通用工具命令 |
 | `linktools-mobile` | `at-` / `it-` | Android / iOS 设备命令 |
 | `linktools-cntr` | `ct-cntr` | 容器管理命令 |
+| `linktools-ai` | `ai-` | AI Runtime 本地运行与调试命令 |
 
 ## Python API
 

@@ -55,12 +55,7 @@ def _add_local_runtime_arguments(parser: "CommandParser") -> None:
 
 def _load_workspace(root: "Path | None" = None) -> Workspace:
     start = Path.cwd()
-    try:
-        return Workspace.discover(start) if root is None else Workspace.discover(start, root=root)
-    except AIError as error:
-        if error.code is not ErrorCode.WORKSPACE_CONFIG_INVALID:
-            raise
-        return Workspace.initialize(start if root is None else root)
+    return Workspace.discover(start) if root is None else Workspace.discover(start, root=root)
 
 
 def _local_runtime_root(workspace: Workspace) -> Path:

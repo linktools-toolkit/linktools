@@ -26,16 +26,57 @@ _CAPABILITY_RESOURCES = {
     "linktools-common": "linktools/assets/tools/linktools-common.json",
     "linktools-mobile": "linktools/assets/tools/linktools-mobile.json",
 }
+_IMPORT_MODULES = {
+    "linktools": "linktools",
+    "linktools-common": "linktools.commands.common",
+    "linktools-mobile": "linktools.mobile",
+    "linktools-cntr": "linktools.cntr",
+    "linktools-ai": "linktools.ai",
+}
+_CLI_COMMANDS = {
+    "linktools": "lt",
+    "linktools-common": "ct-env",
+    "linktools-mobile": "at-adb",
+    "linktools-cntr": "ct-cntr",
+    "linktools-ai": "ai-run",
+}
+_CLI_EXTRAS = {
+    "linktools": "cli",
+    "linktools-ai": "sqlite",
+}
+_AI_SQLITE_SMOKE = """
+import asyncio
+import pathlib
+import sys
+
+from linktools.ai.runtime import RuntimeState
+
+async def main():
+    path = pathlib.Path(sys.argv[1])
+    state = RuntimeState.sqlite(path)
+    await state.initialize(namespace="verify", tenant_id="verify")
+    await state.close()
+    reopened = RuntimeState.sqlite(path)
+    await reopened.initialize(
+        namespace="verify",
+        tenant_id="verify",
+        read_only=True,
+    )
+    await reopened.close()
+
+asyncio.run(main())
+"""
 
 
 class _Artifact:
-    def __init__(self, path, kind, name, version, requires_python):
+    def __init__(self, path, kind, name, version, requires_python, requires_dist=()):
         self.path = path
         self.kind = kind
         self.name = name
         self.normalized_name = _normalize_name(name)
         self.version = version
         self.requires_python = requires_python
+        self.requires_dist = tuple(requires_dist)
 
 
 def _normalize_name(value):
@@ -94,7 +135,10 @@ def _read_artifact(path):
         requires_python = ""
     if not isinstance(requires_python, str):
         requires_python = str(requires_python)
-    return _Artifact(path, kind, name, version, requires_python)
+    requires_dist = getattr(metadata, "requires_dist", None) or ()
+    if isinstance(requires_dist, str):
+        requires_dist = (requires_dist,)
+    return _Artifact(path, kind, name, version, requires_python, requires_dist)
 
 
 def _load_artifacts(known_projects):
@@ -288,6 +332,8 @@ def _validate_sdist_rebuild(pairs, roots):
                 raise ValueError("%s rebuilt wheel Version mismatch" % project)
             if rebuilt.requires_python != wheel.requires_python:
                 raise ValueError("%s rebuilt wheel Requires-Python mismatch" % project)
+            if sorted(rebuilt.requires_dist) != sorted(wheel.requires_dist):
+                raise ValueError("%s rebuilt wheel Requires-Dist mismatch" % project)
 
 
 def _wheel_resource(wheel, resource):
@@ -389,6 +435,94 @@ def _validate_install_isolation(pairs, resources):
                 raise ValueError("%s resource changed after mobile uninstall" % project)
 
 
+def _candidate_constraints(wheels, *, exclude=None):
+    return tuple(
+        "%s @ %s" % (wheels[name].name, wheels[name].path.as_uri())
+        for name in sorted(wheels)
+        if name != exclude
+    )
+
+
+def _venv_command(environment, name):
+    directory = "Scripts" if os.name == "nt" else "bin"
+    suffix = ".exe" if os.name == "nt" else ""
+    return environment / directory / (name + suffix)
+
+
+def _validate_candidate_installs(pairs, known_projects):
+    if set(pairs) != set(known_projects):
+        return
+    wheels = {project: pair[0] for project, pair in pairs.items()}
+    with tempfile.TemporaryDirectory(prefix="linktools-candidate-install-") as temporary:
+        root = Path(temporary)
+        for project in sorted(wheels):
+            environment = root / project
+            venv.create(str(environment), with_pip=True, system_site_packages=False)
+            python = _venv_python(environment)
+            process_environment = dict(os.environ)
+            process_environment.pop("PYTHONPATH", None)
+            constraints = root / ("%s-constraints.txt" % project)
+            constraints.write_text(
+                "\n".join(_candidate_constraints(wheels, exclude=project)) + "\n",
+                encoding="utf-8",
+            )
+            target = "%s @ %s" % (wheels[project].name, wheels[project].path.as_uri())
+            if project in _CLI_EXTRAS:
+                target = "%s[%s] @ %s" % (
+                    wheels[project].name,
+                    _CLI_EXTRAS[project],
+                    wheels[project].path.as_uri(),
+                )
+            subprocess.check_call(
+                [
+                    str(python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--constraint",
+                    str(constraints),
+                    target,
+                ],
+                cwd=str(root),
+                env=process_environment,
+            )
+            subprocess.check_call(
+                [str(python), "-m", "pip", "check"],
+                cwd=str(root),
+                env=process_environment,
+            )
+            subprocess.check_call(
+                [
+                    str(python),
+                    "-I",
+                    "-c",
+                    "import importlib; importlib.import_module(%r)" % _IMPORT_MODULES[project],
+                ],
+                cwd=str(root),
+                env=process_environment,
+            )
+            command = _venv_command(environment, _CLI_COMMANDS[project])
+            if not command.is_file():
+                raise ValueError("%s CLI entry point is missing" % project)
+            subprocess.check_call(
+                [str(command), "--help"],
+                cwd=str(root),
+                env=process_environment,
+            )
+            if project == "linktools-ai":
+                subprocess.check_call(
+                    [
+                        str(python),
+                        "-I",
+                        "-c",
+                        _AI_SQLITE_SMOKE,
+                        str(root / "runtime.db"),
+                    ],
+                    cwd=str(root),
+                    env=process_environment,
+                )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("projects", nargs="*", help="registered projects to verify")
@@ -413,6 +547,7 @@ def main() -> int:
         _validate_sdist_rebuild(pairs, roots)
         resources = _validate_capability_resources(pairs)
         _validate_install_isolation(pairs, resources)
+        _validate_candidate_installs(pairs, project_paths)
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError, zipfile.BadZipFile) as error:
         print("[-] Artifact verification failed: %s" % error, file=sys.stderr)
         return 1

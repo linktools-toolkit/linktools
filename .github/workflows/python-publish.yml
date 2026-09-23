@@ -22,61 +22,105 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONUNBUFFERED: "1"
 
+concurrency:
+  group: python-publish-${{ inputs.version }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      release_ref: ${{ steps.version.outputs.release_ref }}
+      resume: ${{ steps.version.outputs.resume }}
     steps:
     - uses: actions/checkout@v7
-    - name: Validate version
+      with:
+        fetch-depth: 0
+    - name: Validate release state
+      id: version
+      env:
+        VERSION: ${{ inputs.version }}
       run: |
-        VERSION="${{ inputs.version }}"
         if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(rc[0-9]+)?$ ]]; then
           echo "::error::Invalid version format: $VERSION (expected vX.Y.Z or vX.Y.ZrcN, e.g. v1.2.3 or v1.2.3rc0)"
           exit 1
         fi
-        if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
-          echo "::error::Tag $VERSION already exists"
+        if [[ "$GITHUB_REF" != "refs/heads/master" ]]; then
+          echo "::error::Release workflow must be dispatched from master"
           exit 1
+        fi
+        if [[ "$VERSION" =~ rc[0-9]+$ ]]; then
+          echo "prerelease=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "prerelease=false" >> "$GITHUB_OUTPUT"
+        fi
+
+        git fetch origin master --tags
+
+        if git show-ref --verify --quiet "refs/tags/$VERSION"; then
+          RELEASE_COMMIT="$(git rev-list -n 1 "$VERSION")"
+          RELEASE_SUBJECT="$(git log -1 --format=%s "$RELEASE_COMMIT")"
+          if [[ "$RELEASE_SUBJECT" != "build(release): prepare $VERSION" ]]; then
+            echo "::error::Existing tag $VERSION is not owned by the release workflow"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$RELEASE_COMMIT" origin/master; then
+            echo "::error::Existing tag $VERSION is not reachable from master"
+            exit 1
+          fi
+          echo "resume=true" >> "$GITHUB_OUTPUT"
+          echo "release_ref=$VERSION" >> "$GITHUB_OUTPUT"
+        else
+          if [[ "$(git rev-parse origin/master)" != "$GITHUB_SHA" ]]; then
+            echo "::error::master moved after this release run was dispatched; start a new run"
+            exit 1
+          fi
+          echo "resume=false" >> "$GITHUB_OUTPUT"
+          echo "release_ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
         fi
 
   checks:
     needs: validate
+    if: ${{ needs.validate.outputs.resume != 'true' }}
     uses: ./.github/workflows/python-check.yml
 
   deploy:
     needs:
       - validate
       - checks
+    if: ${{ always() && needs.validate.result == 'success' && (needs.validate.outputs.resume == 'true' || needs.checks.result == 'success') }}
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v7
+      with:
+        ref: ${{ needs.validate.outputs.release_ref }}
+        fetch-depth: 0
 
-    # build frida.min.js
+    # build generated source only while preparing a new release commit
     - name: Set up Node
-      if: ${{ !env.ACT }}
+      if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       uses: actions/setup-node@v7
       with:
         node-version: 20
     - name: Build frida scripts
-      if: ${{ !env.ACT }}
+      if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       run: cd linktools-mobile/agents/frida && npm install && npm run build
 
-    # build android-tools.apk
     - name: Set up JDK 17
-      if: ${{ !env.ACT }}
+      if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       uses: actions/setup-java@v6
       with:
         distribution: temurin
         java-version: 17
     - name: Setup Android SDK
-      if: ${{ !env.ACT }}
+      if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       uses: android-actions/setup-android@v4
     - name: Build android tools
-      if: ${{ !env.ACT }}
+      if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
       run: cd linktools-mobile/agents/android && ./gradlew --no-daemon :tools:buildTools
 
-    # build python package
     - name: Set up Python
       uses: actions/setup-python@v7
       with:
@@ -89,12 +133,165 @@ jobs:
       run: python manage.py install --editable --quiet
     - name: Clean package
       run: python manage.py clean
+
+    # a completed draft archive is the exact recovery source for interrupted uploads
+    - name: Restore archived release artifacts
+      id: restore
+      if: ${{ needs.validate.outputs.resume == 'true' && !env.ACT }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        echo "restored=false" >> "$GITHUB_OUTPUT"
+        rm -f release-sha256sums.txt
+
+        if ! IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+          exit 0
+        fi
+        if ! gh release download "$VERSION"           --pattern 'release-sha256sums.txt'           --output release-sha256sums.txt >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        mkdir -p dist
+        gh release download "$VERSION"           --pattern '*.whl'           --pattern '*.tar.gz'           --dir dist
+        (
+          cd dist
+          sha256sum --check ../release-sha256sums.txt
+        )
+        echo "restored=true" >> "$GITHUB_OUTPUT"
+
     - name: Build package
-      run: VERSION=${{ inputs.version }} RELEASE=true python manage.py build
+      if: ${{ needs.validate.outputs.resume != 'true' || steps.restore.outputs.restored != 'true' }}
+      env:
+        RESUME: ${{ needs.validate.outputs.resume }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        if [[ "$RESUME" == "true" ]]; then
+          RELEASE=true python manage.py build
+        else
+          VERSION="$VERSION" RELEASE=true python manage.py build
+        fi
+
     - name: Verify package
       run: VERSION=${{ inputs.version }} RELEASE=true python manage.py verify
 
-    # publish python package
+    # freeze source and tag before any external package publication
+    - name: Create release commit and tag
+      if: ${{ needs.validate.outputs.resume != 'true' && !env.ACT }}
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        git config user.name github-actions[bot]
+        git config user.email github-actions[bot]@users.noreply.github.com
+
+        git add linktools*/linktools.yml \
+                linktools-mobile/src/linktools/assets/frida.js \
+                linktools-mobile/src/linktools/assets/frida-*.js \
+                linktools-mobile/src/linktools/assets/android-tools.*
+
+        if ! git diff --quiet; then
+          echo "::error::Release preparation left unstaged tracked changes"
+          git status --short
+          exit 1
+        fi
+
+        git commit --allow-empty -m "build(release): prepare $VERSION"
+        git tag "$VERSION"
+
+        git fetch origin master
+        if [[ "$(git rev-parse origin/master)" != "$GITHUB_SHA" ]]; then
+          echo "::error::master moved while preparing $VERSION; no release refs were pushed"
+          exit 1
+        fi
+
+        git push --atomic origin HEAD:master "refs/tags/$VERSION"
+        git checkout --detach "$VERSION"
+
+    - name: Verify fixed release ref
+      if: ${{ !env.ACT }}
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        TAG_COMMIT="$(git rev-list -n 1 "$VERSION")"
+        if [[ "$(git rev-parse HEAD)" != "$TAG_COMMIT" ]]; then
+          echo "::error::Release build is not on the fixed tag $VERSION"
+          exit 1
+        fi
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+          echo "::error::Release build changed tracked source after the tag was fixed"
+          git status --short
+          exit 1
+        fi
+
+    # archive the verified bytes before PyPI so retries never depend on reproducible builds
+    - name: Archive release artifacts
+      if: ${{ steps.restore.outputs.restored != 'true' && !env.ACT }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        if IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+          if [[ "$IS_DRAFT" != "true" ]]; then
+            echo "::error::Published release $VERSION has no complete recovery archive"
+            exit 1
+          fi
+        else
+          if [[ "$PRERELEASE" == "true" ]]; then
+            gh release create "$VERSION" --draft --generate-notes --prerelease --latest=false
+          else
+            gh release create "$VERSION" --draft --generate-notes
+          fi
+        fi
+
+        (
+          cd dist
+          sha256sum * | sort > ../release-sha256sums.txt
+        )
+        gh release upload "$VERSION" dist/* --clobber
+        gh release upload "$VERSION" release-sha256sums.txt --clobber
+
+    # any PyPI files from an interrupted upload must be byte-identical to the archived candidate
+    - name: Verify resumable PyPI state
+      if: ${{ needs.validate.outputs.resume == 'true' && !env.ACT }}
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        PYPI_VERSION="${VERSION#v}"
+        mapfile -t PROJECTS < <(python manage.py modules | jq -r '.[]')
+        for PROJECT in "${PROJECTS[@]}"; do
+          RESPONSE="$(mktemp)"
+          STATUS="$(curl --silent --show-error --location \
+            --output "$RESPONSE" --write-out '%{http_code}' \
+            "https://pypi.org/pypi/$PROJECT/$PYPI_VERSION/json")"
+          if [[ "$STATUS" == "404" ]]; then
+            rm -f "$RESPONSE"
+            continue
+          fi
+          if [[ "$STATUS" != "200" ]]; then
+            echo "::error::PyPI metadata request failed for $PROJECT $PYPI_VERSION: HTTP $STATUS"
+            rm -f "$RESPONSE"
+            exit 1
+          fi
+
+          while IFS='|' read -r FILENAME EXPECTED_SHA256; do
+            [[ -n "$FILENAME" ]] || continue
+            LOCAL_PATH="dist/$FILENAME"
+            if [[ ! -f "$LOCAL_PATH" ]]; then
+              echo "::error::PyPI contains unexpected artifact $PROJECT/$PYPI_VERSION/$FILENAME"
+              rm -f "$RESPONSE"
+              exit 1
+            fi
+            ACTUAL_SHA256="$(sha256sum "$LOCAL_PATH" | cut -d' ' -f1)"
+            if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+              echo "::error::PyPI artifact differs from archived candidate: $FILENAME"
+              rm -f "$RESPONSE"
+              exit 1
+            fi
+          done < <(jq -r '.urls[] | "\(.filename)|\(.digests.sha256)"' "$RESPONSE")
+          rm -f "$RESPONSE"
+        done
+
     - name: Publish package
       if: ${{ !env.ACT }}
       uses: pypa/gh-action-pypi-publish@release/v1
@@ -102,26 +299,23 @@ jobs:
         user: __token__
         password: ${{ secrets.PYPI_API_TOKEN }}
         packages_dir: dist/
+        skip-existing: ${{ needs.validate.outputs.resume }}
 
-    # commit and push artifacts (fast-forward, no tag yet)
-    - name: Commit files
-      if: ${{ !env.ACT }}
-      run: |
-        git config user.name github-actions[bot]
-        git config user.email github-actions[bot]@users.noreply.github.com
-        git add linktools*/linktools.yml \
-                linktools-mobile/src/linktools/assets/frida.js \
-                linktools-mobile/src/linktools/assets/frida-*.js \
-                linktools-mobile/src/linktools/assets/android-tools.*
-        git commit -m "Auto commit artifacts (${{ inputs.version }})"
-        git push origin HEAD:master
-
-    # tag and release only after artifacts are pushed, so they match exactly
-    - name: Create tag and release
+    - name: Publish GitHub release
       if: ${{ !env.ACT }}
       env:
         GH_TOKEN: ${{ github.token }}
+        PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        VERSION: ${{ inputs.version }}
       run: |
-        git tag ${{ inputs.version }}
-        git push origin ${{ inputs.version }}
-        gh release create ${{ inputs.version }} --generate-notes dist/*
+        IS_DRAFT="$(gh release view "$VERSION" --json isDraft --jq '.isDraft')"
+        if [[ "$IS_DRAFT" != "true" ]]; then
+          echo "GitHub release $VERSION is already published"
+          exit 0
+        fi
+
+        if [[ "$PRERELEASE" == "true" ]]; then
+          gh release edit "$VERSION" --draft=false --prerelease --latest=false
+        else
+          gh release edit "$VERSION" --draft=false --prerelease=false
+        fi
