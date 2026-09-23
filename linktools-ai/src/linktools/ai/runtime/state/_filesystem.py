@@ -39,6 +39,16 @@ _logger = environ.get_logger("ai.runtime.state.filesystem")
 _CommitOutcome = Literal["committed", "not_committed", "unknown"]
 
 
+async def _finish_owned_task(task: asyncio.Task[ValueT]) -> ValueT:
+    while True:
+        if task.done():
+            return task.result()
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+
+
 class _FilesystemGroupTransaction:
     def __init__(
         self,
@@ -636,20 +646,8 @@ class FilesystemStateStorageGroup:
             await asyncio.shield(physical)
         except asyncio.CancelledError as cancellation_error:
             cancellation = cancellation_error
-            if not physical.done():
-                self._poisoned = True
-                for member in self._members:
-                    member._poisoned = True
-                _logger.error(
-                    "filesystem group mutation cancelled with unknown outcome: "
-                    "scope=%s base=%s target=%s",
-                    self._scope_digest,
-                    base,
-                    target,
-                )
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from cancellation_error
             try:
-                physical.result()
+                await _finish_owned_task(physical)
             except BaseException as commit_error:  # noqa: BLE001
                 error = commit_error
         except BaseException as commit_error:  # noqa: BLE001
@@ -711,13 +709,11 @@ class FilesystemStateStorageGroup:
         )
         try:
             return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if not task.done():
-                self._poisoned = True
-                for member in self._members:
-                    member._poisoned = True
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-            return task.result()
+        except asyncio.CancelledError:
+            try:
+                return await _finish_owned_task(task)
+            except BaseException:  # noqa: BLE001
+                return "unknown"
 
     def _reconcile_sync(self, base: int, target: int) -> _CommitOutcome:
         try:
@@ -1144,18 +1140,8 @@ class FilesystemStateStore:
             await asyncio.shield(physical)
         except asyncio.CancelledError as error:
             cancellation = error
-            if not physical.done():
-                self._poisoned = True
-                _logger.error(
-                    "filesystem mutation cancelled with unknown outcome: "
-                    "domain=%s base=%s target=%s",
-                    self._runtime_domain,
-                    base,
-                    target,
-                )
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
             try:
-                physical.result()
+                await _finish_owned_task(physical)
             except BaseException as commit_error:  # noqa: BLE001
                 physical_error = commit_error
         except BaseException as error:  # noqa: BLE001
@@ -1227,11 +1213,11 @@ class FilesystemStateStore:
         )
         try:
             return await asyncio.shield(task)
-        except asyncio.CancelledError as error:
-            if not task.done():
-                self._poisoned = True
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-            return task.result()
+        except asyncio.CancelledError:
+            try:
+                return await _finish_owned_task(task)
+            except BaseException:  # noqa: BLE001
+                return "unknown"
 
     def _reconcile_commit_sync(self, base: int, target: int) -> _CommitOutcome:
         try:
