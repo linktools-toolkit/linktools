@@ -16,6 +16,7 @@ from ._store import (
     RecordQuery,
     RecordReplacement,
     RecordScanCursor,
+    StateTransaction,
     StoredAlias,
     StoredFact,
     StoredOperation,
@@ -99,7 +100,7 @@ class _MemoryTransaction:
         return self._now
 
     async def validate_integrity(self) -> None:
-        _validate_transaction_integrity(self)
+        await _validate_transaction_integrity(self)
 
     async def get_record(self, key: bytes) -> StoredRecord | None:
         return self.records.get(key)
@@ -560,17 +561,24 @@ def _require_scan_limit(limit: int) -> None:
         raise ValueError("scan page limit must be positive")
 
 
-def _validate_transaction_integrity(transaction: _MemoryTransaction) -> None:
+async def _validate_transaction_integrity(
+    transaction: StateTransaction,
+) -> None:
+    records = {
+        record.key_digest
+        for record in await transaction.scan_records()
+    }
     if any(
-        record_key not in transaction.records
-        for record_key in transaction.aliases.values()
+        alias.record_key_digest not in records
+        for alias in await transaction.scan_aliases()
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for fact in transaction.facts.values():
-        if fact.owner_key_digest not in transaction.records:
+    facts = await transaction.scan_facts()
+    for fact in facts:
+        if fact.owner_key_digest not in records:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     fact_sequences: dict[bytes, list[int]] = {}
-    for fact in transaction.facts.values():
+    for fact in facts:
         fact_sequences.setdefault(fact.stream_digest, []).append(fact.sequence)
     for sequences in fact_sequences.values():
         if sorted(sequences) != list(range(1, max(sequences) + 1)):
