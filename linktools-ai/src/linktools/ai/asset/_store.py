@@ -143,18 +143,29 @@ class AssetStore:
 
     async def local_path(self, key: AssetKey) -> "Path | None":
         """Return the effective native file path when the owning backend exposes one."""
+        return (await self.local_paths((key,)))[0]
+
+    async def local_paths(
+        self,
+        keys: "Sequence[AssetKey]",
+    ) -> "tuple[Path | None, ...]":
+        """Return effective native file paths from one storage metadata snapshot."""
         self._ensure_ready()
-        location = await self._storage.locate(key)
-        if (
-            location is None
-            or location.info.status is not StorageEntryStatus.NORMAL
-            or not isinstance(location.backend, _LocalPathAssetBackend)
-        ):
-            return None
-        path = location.backend.local_path(key)
-        if not isinstance(path, Path) or not path.is_absolute():
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return path
+        locations = await self._storage.locate_many(keys)
+        result: list[Path | None] = []
+        for key, location in zip(keys, locations, strict=True):
+            if (
+                location is None
+                or location.info.status is not StorageEntryStatus.NORMAL
+                or not isinstance(location.backend, _LocalPathAssetBackend)
+            ):
+                result.append(None)
+                continue
+            path = location.backend.local_path(key)
+            if not isinstance(path, Path) or not path.is_absolute():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result.append(path)
+        return tuple(result)
 
     async def put(
         self,
