@@ -25,6 +25,7 @@ from linktools.ai.runtime.state._steps import (
     StagingStepStore,
 )
 from linktools.ai.runtime.state._step_contracts import (
+    EventKind,
     StepEvent,
 )
 
@@ -372,10 +373,16 @@ def test_cached_successful_model_response_trace_rejects_invalid_usage(
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_tool_trace_accepts_request_sequence_without_request_purpose() -> None:
+@pytest.mark.parametrize(
+    "kind",
+    ("tool_call_started", "tool_call_completed", "tool_call_failed"),
+)
+def test_tool_trace_accepts_request_sequence_without_request_purpose(
+    kind: EventKind,
+) -> None:
     event = StepEvent(
         run_id="run",
-        kind="tool_call_started",
+        kind=kind,
         step_index=1,
         tool_call_id="call",
         tool_name="lookup",
