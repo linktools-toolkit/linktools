@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionTraceItem
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._capabilities import (
     _RuntimeStepPersistence,
@@ -25,6 +24,7 @@ from linktools.ai.runtime.state._steps import (
     StagingStepStore,
 )
 from linktools.ai.runtime.state._step_contracts import (
+    EventKind,
     StepEvent,
 )
 
@@ -199,7 +199,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
 
 
 @pytest.mark.asyncio
-async def test_asyncio_model_cancellation_records_failed_request() -> None:
+async def test_asyncio_model_cancellation_preserves_cancelled_status() -> None:
     store = StagingStepStore()
 
     async def cancelled_model(
@@ -219,10 +219,22 @@ async def test_asyncio_model_cancellation_records_failed_request() -> None:
     model_events = [
         event.kind for event in events if event.kind.startswith("model_request_")
     ]
-    assert model_events == ["model_request_started", "model_request_failed"]
-    failed = next(event for event in events if event.kind == "model_request_failed")
-    assert failed.metadata["linktools.ai.request_sequence"] == "1"
-    assert failed.metadata["linktools.ai.request_purpose"] == "agent"
+    assert model_events == ["model_request_started", "model_request_cancelled"]
+    cancelled = next(
+        event for event in events if event.kind == "model_request_cancelled"
+    )
+    assert cancelled.metadata["linktools.ai.request_sequence"] == "1"
+    assert cancelled.metadata["linktools.ai.request_purpose"] == "agent"
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        cancelled,
+    )
+    assert item is not None
+    assert item.payload["status"] == "CANCELLED"
+    assert item.payload["token_usage"] is None
 
 
 def _assert_token_sum(values: list[dict[str, object]], usage: RunUsage) -> None:
@@ -303,25 +315,25 @@ def test_model_response_trace_keeps_each_request_usage_separate() -> None:
     )
 
 
-def test_successful_model_response_trace_rejects_missing_usage_fact() -> None:
+def test_successful_model_response_trace_allows_missing_usage_fact() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_completed",
         step_index=1,
         metadata={},
     )
-    with pytest.raises(AIError) as error:
-        _trace_item(
-            SimpleNamespace(execution_id="execution"),
-            1,
-            0,
-            0,
-            event,
-        )
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["token_usage"] is None
 
 
-def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
+def test_successful_model_response_trace_allows_partial_usage_fact() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_completed",
@@ -330,6 +342,27 @@ def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
             "linktools.ai.model_usage.input_tokens": "10",
             "linktools.ai.model_usage.output_tokens": "2",
         },
+    )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["token_usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 2,
+    }
+
+
+def test_model_response_trace_rejects_invalid_usage_value() -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="model_request_completed",
+        step_index=1,
+        metadata={"linktools.ai.model_usage.input_tokens": "-1"},
     )
     with pytest.raises(AIError) as error:
         _trace_item(
@@ -343,40 +376,75 @@ def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
 
 
 @pytest.mark.parametrize(
-    "payload",
-    (
-        {"kind": "MODEL_RESPONSE", "status": "SUCCEEDED"},
-        {"kind": "MODEL_RESPONSE", "status": "SUCCEEDED", "token_usage": None},
-        {
-            "kind": "MODEL_RESPONSE",
-            "status": "SUCCEEDED",
-            "token_usage": {"input_tokens": 1, "output_tokens": 1},
-        },
-        {
-            "kind": "MODEL_RESPONSE",
-            "status": "SUCCEEDED",
-            "token_usage": {
-                "input_tokens": 1,
-                "output_tokens": 1,
-                "cache_read_tokens": -1,
-                "cache_write_tokens": 0,
-            },
-        },
-    ),
+    "kind",
+    ("tool_call_started", "tool_call_completed", "tool_call_failed"),
 )
-def test_cached_successful_model_response_trace_rejects_invalid_usage(
-    payload: dict[str, object],
+def test_tool_trace_accepts_request_sequence_without_request_purpose(
+    kind: EventKind,
 ) -> None:
-    with pytest.raises(AIError) as error:
-        ExecutionTraceItem("execution", 1, payload)
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    event = StepEvent(
+        run_id="run",
+        kind=kind,
+        step_index=1,
+        tool_call_id="call",
+        tool_name="lookup",
+        metadata={"linktools.ai.request_sequence": "1"},
+    )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["request_sequence"] == 1
+    assert "purpose" not in item.payload
 
 
-def test_failed_model_response_trace_has_no_request_usage() -> None:
+def test_model_trace_accepts_sparse_request_lineage() -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="model_request_started",
+        step_index=1,
+        metadata={"linktools.ai.request_sequence": "1"},
+    )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["request_sequence"] == 1
+    assert "purpose" not in item.payload
+
+
+def test_model_trace_preserves_unknown_request_purpose() -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="model_request_started",
+        step_index=1,
+        metadata={"linktools.ai.request_purpose": "future"},
+    )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["purpose"] == "future"
+
+
+def test_legacy_cancelled_model_response_trace_is_normalized() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_failed",
         step_index=1,
+        error=ErrorCode.EXECUTION_CANCELLED.value,
         metadata={},
     )
     item = _trace_item(
@@ -387,6 +455,33 @@ def test_failed_model_response_trace_has_no_request_usage() -> None:
         event,
     )
     assert item is not None
+    assert item.payload["status"] == "CANCELLED"
+    assert item.payload["token_usage"] is None
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    (None, ErrorCode.INTERNAL_ERROR.value),
+)
+def test_failed_model_response_trace_has_no_request_usage(
+    error_code: str | None,
+) -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="model_request_failed",
+        step_index=1,
+        error=error_code,
+        metadata={},
+    )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["status"] == "FAILED"
     assert item.payload["token_usage"] is None
 
 

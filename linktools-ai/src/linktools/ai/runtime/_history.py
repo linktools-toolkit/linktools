@@ -4,7 +4,6 @@
 
 import heapq
 import json
-import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -33,7 +32,6 @@ from ._journal import (
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
-    MODEL_USAGE_METADATA_KEYS,
     MODEL_USAGE_OUTPUT_METADATA_KEY,
     OBSERVATION_ID_METADATA_KEY,
     OUTPUT_RETRY_INDEX_METADATA_KEY,
@@ -828,7 +826,6 @@ class StepExecutionHistoryReader:
                     if (
                         raw.run_id != run_id
                         or raw.request_sequence != expected
-                        or raw.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
                     ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     after_sequence = raw.request_sequence
@@ -945,14 +942,12 @@ class StepExecutionHistoryReader:
                 "model_request_started",
                 "model_request_completed",
                 "model_request_failed",
+                "model_request_cancelled",
             }:
                 continue
-            raw_sequence = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
-            if raw_sequence is None:
+            sequence = _event_request_sequence(event)
+            if sequence is None:
                 continue
-            if not raw_sequence.isdigit() or int(raw_sequence) < 1:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            sequence = int(raw_sequence)
             pair = values.setdefault(sequence, [None, None])
             index = 0 if event.kind == "model_request_started" else 1
             timestamp = _event_timestamp(event)
@@ -963,7 +958,6 @@ class StepExecutionHistoryReader:
             sequence: (pair[0], pair[1])
             for sequence, pair in values.items()
         }
-
 
     async def _tool_call_metadata(
         self,
@@ -998,11 +992,8 @@ class StepExecutionHistoryReader:
             if call_id is None or not call_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             value = values.setdefault(call_id, [None, None, None, "STARTED", None, None])
-            raw_request = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
-            if raw_request is not None:
-                if not raw_request.isdigit() or int(raw_request) < 1:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                request_sequence = int(raw_request)
+            request_sequence = _event_request_sequence(event)
+            if request_sequence is not None:
                 if value[4] is not None and value[4] != request_sequence:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 value[4] = request_sequence
@@ -1703,6 +1694,7 @@ def _trace_item(
         "model_request_started": ("MODEL_REQUEST", "STARTED"),
         "model_request_completed": ("MODEL_RESPONSE", "SUCCEEDED"),
         "model_request_failed": ("MODEL_RESPONSE", "FAILED"),
+        "model_request_cancelled": ("MODEL_RESPONSE", "CANCELLED"),
         "tool_call_started": ("TOOL_CALL", "STARTED"),
         "tool_call_completed": ("TOOL_RESULT", "SUCCEEDED"),
         "tool_call_failed": ("TOOL_ERROR", "FAILED"),
@@ -1711,6 +1703,11 @@ def _trace_item(
     if value is None:
         return None
     kind, status = value
+    if (
+        event.kind == "model_request_failed"
+        and event.error == ErrorCode.EXECUTION_CANCELLED.value
+    ):
+        status = "CANCELLED"
     payload = {
         "kind": kind,
         "status": status,
@@ -1722,26 +1719,18 @@ def _trace_item(
     }
     observation_id = event.metadata.get(OBSERVATION_ID_METADATA_KEY)
     if observation_id is not None:
-        if not observation_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["observation_id"] = observation_id
     duration_ns = event.metadata.get(DURATION_NS_METADATA_KEY)
     if duration_ns is not None:
         if not duration_ns.isdigit():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["duration_ns"] = int(duration_ns)
-    request_sequence = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
+    request_sequence = _event_request_sequence(event)
     request_purpose = event.metadata.get(REQUEST_PURPOSE_METADATA_KEY)
-    if request_sequence is not None or request_purpose is not None:
-        if (
-            request_sequence is None
-            or not request_sequence.isdigit()
-            or int(request_sequence) < 1
-            or request_purpose not in {"agent", "compaction"}
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        payload["request_sequence"] = int(request_sequence)
+    if request_purpose is not None:
         payload["purpose"] = request_purpose
+    if request_sequence is not None:
+        payload["request_sequence"] = request_sequence
     retry_value = event.metadata.get(OUTPUT_RETRY_INDEX_METADATA_KEY)
     if retry_value is not None:
         if not retry_value.isdigit() or int(retry_value) < 1:
@@ -1762,42 +1751,37 @@ def _trace_item(
     return ExecutionTraceItem(record.execution_id, ordinal + 1, payload)
 
 
+def _event_request_sequence(event: StepEvent) -> "int | None":
+    raw = event.metadata.get(REQUEST_SEQUENCE_METADATA_KEY)
+    if raw is None:
+        return None
+    if not raw.isdigit() or int(raw) < 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return int(raw)
+
+
 def _model_token_usage(event: StepEvent) -> "dict[str, JsonValue] | None":
     metadata = event.metadata
-    present = MODEL_USAGE_METADATA_KEYS.intersection(metadata)
-    if not present:
-        return None
-    if (
-        MODEL_USAGE_INPUT_METADATA_KEY not in metadata
-        or MODEL_USAGE_OUTPUT_METADATA_KEY not in metadata
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return {
-        "input_tokens": _metadata_token(metadata, MODEL_USAGE_INPUT_METADATA_KEY),
-        "output_tokens": _metadata_token(metadata, MODEL_USAGE_OUTPUT_METADATA_KEY),
-        "cache_read_tokens": _metadata_token(
-            metadata,
-            MODEL_USAGE_CACHE_READ_METADATA_KEY,
-            required=False,
-        ),
-        "cache_write_tokens": _metadata_token(
-            metadata,
-            MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
-            required=False,
-        ),
+    values = {
+        "input_tokens": MODEL_USAGE_INPUT_METADATA_KEY,
+        "output_tokens": MODEL_USAGE_OUTPUT_METADATA_KEY,
+        "cache_read_tokens": MODEL_USAGE_CACHE_READ_METADATA_KEY,
+        "cache_write_tokens": MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     }
+    usage = {
+        name: value
+        for name, key in values.items()
+        if (value := _metadata_token(metadata, key)) is not None
+    }
+    return usage or None
 
 
 def _metadata_token(
     metadata: Mapping[str, str],
     key: str,
-    *,
-    required: bool = True,
 ) -> "int | None":
     raw = metadata.get(key)
     if raw is None:
-        if required:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return None
     if not raw.isdigit():
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1811,12 +1795,6 @@ def _validate_run(
         run.run_id != expected_id
         or run.conversation_id != conversation_id
         or run.metadata.get("segment_sequence") != str(sequence)
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    agent_name = run.metadata.get("agent_name")
-    if (
-        agent_name is None
-        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", agent_name) is None
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

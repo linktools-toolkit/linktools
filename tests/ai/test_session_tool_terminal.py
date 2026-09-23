@@ -216,6 +216,30 @@ async def test_session_tool_turn_commits_terminal_and_history(
             assert tool_items[0].duration_ns is not None
             assert tool_items[0].status == "SUCCEEDED"
 
+            execution_trace = await runtime.history.trace(
+                execution.execution_id,
+                principal=runtime.default_principal,
+                include_content=True,
+            )
+            tool_trace = tuple(
+                item
+                for item in execution_trace.items
+                if item.payload.get("kind") in {"TOOL_CALL", "TOOL_RESULT", "TOOL_ERROR"}
+            )
+            assert [item.payload["kind"] for item in tool_trace] == [
+                "TOOL_CALL",
+                "TOOL_RESULT",
+            ]
+            assert (
+                tool_trace[0].payload["request_sequence"]
+                == tool_items[0].request_sequence
+            )
+            assert (
+                tool_trace[1].payload["request_sequence"]
+                == tool_items[0].request_sequence
+            )
+            assert all("purpose" not in item.payload for item in tool_trace)
+
             retried = await session.start(
                 "inspect",
                 idempotency_key="turn-1",
