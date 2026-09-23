@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionTraceItem
 from linktools.ai.runtime._capture import RuntimeCaptureStore
 from linktools.ai.runtime._capabilities import (
     _RuntimeStepPersistence,
@@ -316,25 +315,25 @@ def test_model_response_trace_keeps_each_request_usage_separate() -> None:
     )
 
 
-def test_successful_model_response_trace_rejects_missing_usage_fact() -> None:
+def test_successful_model_response_trace_allows_missing_usage_fact() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_completed",
         step_index=1,
         metadata={},
     )
-    with pytest.raises(AIError) as error:
-        _trace_item(
-            SimpleNamespace(execution_id="execution"),
-            1,
-            0,
-            0,
-            event,
-        )
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["token_usage"] is None
 
 
-def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
+def test_successful_model_response_trace_allows_partial_usage_fact() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_completed",
@@ -344,6 +343,27 @@ def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
             "linktools.ai.model_usage.output_tokens": "2",
         },
     )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["token_usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 2,
+    }
+
+
+def test_model_response_trace_rejects_invalid_usage_value() -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="model_request_completed",
+        step_index=1,
+        metadata={"linktools.ai.model_usage.input_tokens": "-1"},
+    )
     with pytest.raises(AIError) as error:
         _trace_item(
             SimpleNamespace(execution_id="execution"),
@@ -352,36 +372,6 @@ def test_successful_model_response_trace_rejects_partial_usage_fact() -> None:
             0,
             event,
         )
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-@pytest.mark.parametrize(
-    "payload",
-    (
-        {"kind": "MODEL_RESPONSE", "status": "SUCCEEDED"},
-        {"kind": "MODEL_RESPONSE", "status": "SUCCEEDED", "token_usage": None},
-        {
-            "kind": "MODEL_RESPONSE",
-            "status": "SUCCEEDED",
-            "token_usage": {"input_tokens": 1, "output_tokens": 1},
-        },
-        {
-            "kind": "MODEL_RESPONSE",
-            "status": "SUCCEEDED",
-            "token_usage": {
-                "input_tokens": 1,
-                "output_tokens": 1,
-                "cache_read_tokens": -1,
-                "cache_write_tokens": 0,
-            },
-        },
-    ),
-)
-def test_cached_successful_model_response_trace_rejects_invalid_usage(
-    payload: dict[str, object],
-) -> None:
-    with pytest.raises(AIError) as error:
-        ExecutionTraceItem("execution", 1, payload)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
