@@ -342,17 +342,15 @@ def _resolve_local_skill_package(
     relatives: Sequence[str],
     paths: Sequence[Path],
 ) -> "tuple[Path, dict[str, Path]] | None":
-    package_path: Path | None = None
-    for relative, path in zip(relatives, paths, strict=True):
+    package_path = paths[0]
+    for _part in PurePosixPath(relatives[0]).parts:
+        package_path = package_path.parent
+    for relative, path in zip(relatives[1:], paths[1:], strict=True):
         candidate = path
         for _part in PurePosixPath(relative).parts:
             candidate = candidate.parent
-        if package_path is None:
-            package_path = candidate
-        elif package_path != candidate:
+        if package_path != candidate:
             return None
-    if package_path is None:
-        return None
     try:
         package = package_path.resolve(strict=True)
     except (OSError, RuntimeError) as error:
