@@ -200,7 +200,7 @@ async def test_model_usage_trace_does_not_depend_on_registration_order() -> None
 
 
 @pytest.mark.asyncio
-async def test_asyncio_model_cancellation_records_failed_request() -> None:
+async def test_asyncio_model_cancellation_preserves_cancelled_status() -> None:
     store = StagingStepStore()
 
     async def cancelled_model(
@@ -220,10 +220,22 @@ async def test_asyncio_model_cancellation_records_failed_request() -> None:
     model_events = [
         event.kind for event in events if event.kind.startswith("model_request_")
     ]
-    assert model_events == ["model_request_started", "model_request_failed"]
-    failed = next(event for event in events if event.kind == "model_request_failed")
-    assert failed.metadata["linktools.ai.request_sequence"] == "1"
-    assert failed.metadata["linktools.ai.request_purpose"] == "agent"
+    assert model_events == ["model_request_started", "model_request_cancelled"]
+    cancelled = next(
+        event for event in events if event.kind == "model_request_cancelled"
+    )
+    assert cancelled.metadata["linktools.ai.request_sequence"] == "1"
+    assert cancelled.metadata["linktools.ai.request_purpose"] == "agent"
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        cancelled,
+    )
+    assert item is not None
+    assert item.payload["status"] == "CANCELLED"
+    assert item.payload["token_usage"] is None
 
 
 def _assert_token_sum(values: list[dict[str, object]], usage: RunUsage) -> None:
@@ -400,12 +412,31 @@ def test_tool_trace_accepts_request_sequence_without_request_purpose(
     assert "purpose" not in item.payload
 
 
-def test_model_trace_rejects_request_sequence_without_request_purpose() -> None:
+def test_model_trace_accepts_sparse_request_lineage() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_started",
         step_index=1,
         metadata={"linktools.ai.request_sequence": "1"},
+    )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["request_sequence"] == 1
+    assert "purpose" not in item.payload
+
+
+def test_model_trace_rejects_invalid_request_purpose() -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="model_request_started",
+        step_index=1,
+        metadata={"linktools.ai.request_purpose": "invalid"},
     )
     with pytest.raises(AIError) as error:
         _trace_item(
