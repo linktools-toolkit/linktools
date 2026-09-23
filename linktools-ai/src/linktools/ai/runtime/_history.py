@@ -1731,12 +1731,7 @@ def _trace_item(
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if (
-        event.kind
-        in {
-            "model_request_started",
-            "model_request_completed",
-            "model_request_failed",
-        }
+        kind in {"MODEL_REQUEST", "MODEL_RESPONSE"}
         and request_sequence is not None
         and request_purpose is None
     ):
