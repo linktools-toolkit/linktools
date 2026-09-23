@@ -107,28 +107,10 @@ def canonicalize_json_schema(
             ),
         )
         Draft202012Validator.check_schema(copied)
-        reachable = _reachable_definitions(copied)
-        result = _rewrite_schema(
+        result = _canonicalize_schema_resource(
             copied,
-            reachable,
             generated_title_paths,
-            (),
         )
-        if reachable:
-            definitions = copied.get("$defs")
-            if not isinstance(definitions, Mapping):
-                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-            result["$defs"] = {
-                f"d{index}": _rewrite_schema(
-                    definitions[name],
-                    reachable,
-                    generated_title_paths,
-                    ("$defs", name),
-                )
-                for index, name in enumerate(reachable)
-            }
-        else:
-            result.pop("$defs", None)
         Draft202012Validator.check_schema(result)
         return cast("dict[str, JsonValue]", result)
     except AIError:
@@ -175,6 +157,53 @@ def _replace_generated_title_markers(
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _replace_generated_title_markers(child, (*path, index), paths)
+
+
+def _canonicalize_schema_resource(
+    schema: Mapping[str, JsonValue],
+    generated_title_paths: frozenset[tuple[str | int, ...]],
+) -> "dict[str, JsonValue]":
+    reachable = _reachable_definitions(schema)
+    result = cast(
+        "dict[str, JsonValue]",
+        _rewrite_schema(
+            schema,
+            reachable,
+            generated_title_paths,
+            (),
+        ),
+    )
+    if not reachable:
+        result.pop("$defs", None)
+        return result
+    definitions = schema.get("$defs")
+    if not isinstance(definitions, Mapping):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    result["$defs"] = {
+        f"d{index}": cast(
+            JsonValue,
+            _rewrite_schema(
+                definitions[name],
+                reachable,
+                generated_title_paths,
+                ("$defs", name),
+            ),
+        )
+        for index, name in enumerate(reachable)
+    }
+    return result
+
+
+def _relative_title_paths(
+    paths: frozenset[tuple[str | int, ...]],
+    prefix: tuple[str | int, ...],
+) -> frozenset[tuple[str | int, ...]]:
+    size = len(prefix)
+    return frozenset(
+        path[size:]
+        for path in paths
+        if path[:size] == prefix
+    )
 
 
 def _reachable_definitions(schema: Mapping[str, JsonValue]) -> tuple[str, ...]:
@@ -260,7 +289,10 @@ def _rewrite_schema(
 ) -> object:
     if isinstance(value, Mapping):
         if path and isinstance(value.get("$id"), str):
-            return dict(value)
+            return _canonicalize_schema_resource(
+                cast("Mapping[str, JsonValue]", value),
+                _relative_title_paths(generated_title_paths, path),
+            )
         result: dict[str, object] = {}
         for key, child in value.items():
             if key == "$defs":
