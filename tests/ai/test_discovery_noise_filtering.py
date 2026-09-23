@@ -16,6 +16,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import (
     AssetSkillResourceSource,
+    FrozenSkillResourceSource,
     LocalSkillResourceSource,
     SkillCapability,
     SkillDefinition,
@@ -24,7 +25,7 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.spec import SkillSpec
-from linktools.ai.storage import StorageLayer, StorageOverlay
+from linktools.ai.storage import InMemoryObjectStore, StorageLayer, StorageOverlay
 from linktools.ai.workspace import LocalRuleCatalog, WorkspacePolicy
 
 
@@ -214,6 +215,50 @@ async def test_directory_asset_skill_preserves_local_path_and_executable_mode(
         os.chmod(script, 0o644)
         after = await source.current_revision("review")
         assert after != before
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_skill_snapshot_preserves_materialization_and_mode(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    script = package / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(script, 0o755)
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        objects = InMemoryObjectStore("runtime")
+        revision = await source.current_revision("review")
+        snapshot = await source.snapshot(
+            "review",
+            expected_revision=revision,
+            object_store=objects,
+        )
+        frozen = FrozenSkillResourceSource(
+            "application",
+            {"review": snapshot},
+            objects,
+        )
+
+        assert await frozen.sandbox_materialize("review") is True
+        assert await frozen.resource_mode("review", "run.sh") == 0o111
+        assert await frozen.read("review", "run.sh") == b"#!/bin/sh\n"
     finally:
         await store.close()
 
