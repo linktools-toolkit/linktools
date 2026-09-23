@@ -212,7 +212,7 @@ class AssetSkillResourceSource:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         resources = await self._resource_infos(logical_root)
         return SkillResourceView(
-            SkillLocation("virtual", f"{self._id}/skills/{logical_root}"),
+            await self._location(logical_root, resources),
             tuple(relative for relative, _info in resources),
         )
 
@@ -224,21 +224,25 @@ class AssetSkillResourceSource:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         return bytes(value)
 
-
     async def current_revision(self, root: str) -> StorageRevision:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         resources = await self._resource_infos(logical_root)
-        return _skill_revision(
-            [
+        location = await self._location(logical_root, resources)
+        entries: list[dict[str, JsonValue]] = []
+        for relative, info in resources:
+            mode = await self.resource_mode(logical_root, relative)
+            _validate_resource_mode(mode)
+            entries.append(
                 {
                     "path": relative,
                     "digest": info.etag,
                     "size": info.size,
-                    "mode": 0,
+                    "mode": mode,
                 }
-                for relative, info in resources
-            ],
-            sandbox_materialize=False,
+            )
+        return _skill_revision(
+            entries,
+            sandbox_materialize=location.kind == "local",
         )
 
     async def _resource_infos(
@@ -260,10 +264,46 @@ class AssetSkillResourceSource:
             selected.append((normalized, info))
         return tuple(sorted(selected, key=lambda item: item[0]))
 
+    async def _location(
+        self,
+        root: str,
+        resources: "Sequence[tuple[str, AssetInfo]]",
+    ) -> SkillLocation:
+        virtual = SkillLocation("virtual", f"{self._id}/skills/{root}")
+        marker = await self._store.local_path(
+            AssetKey("skill", f"{root}/SKILL.md")
+        )
+        if marker is None:
+            return virtual
+        package = marker.parent
+        for relative, _info in resources:
+            path = await self._store.local_path(
+                AssetKey("skill", f"{root}/{relative}")
+            )
+            if path is None:
+                return virtual
+            try:
+                expected = package.joinpath(
+                    *PurePosixPath(relative).parts
+                ).resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+            if path != expected:
+                return virtual
+        return SkillLocation("local", str(package))
+
     async def resource_mode(self, root: str, path: str) -> int:
-        _normalize_relative_path(root, field_name="skill root")
-        _normalize_resource_path(path)
-        return 0
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        relative = _normalize_resource_path(path)
+        local = await self._store.local_path(
+            AssetKey("skill", f"{logical_root}/{relative}")
+        )
+        if local is None:
+            return 0
+        try:
+            return (await asyncio.to_thread(local.stat)).st_mode & 0o111
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     async def snapshot(
         self,
