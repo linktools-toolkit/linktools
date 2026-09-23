@@ -230,8 +230,14 @@ async def test_session_tool_turn_commits_terminal_and_history(
                 "TOOL_CALL",
                 "TOOL_RESULT",
             ]
-            assert tool_trace[0].payload["request_sequence"] == tool_items[0].request_sequence
-            assert tool_trace[1].payload["request_sequence"] == tool_items[0].request_sequence
+            assert (
+                tool_trace[0].payload["request_sequence"]
+                == tool_items[0].request_sequence
+            )
+            assert (
+                tool_trace[1].payload["request_sequence"]
+                == tool_items[0].request_sequence
+            )
             assert all("purpose" not in item.payload for item in tool_trace)
 
             retried = await session.start(
