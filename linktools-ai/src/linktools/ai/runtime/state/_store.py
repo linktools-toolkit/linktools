@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Generic, Protocol, TypeVar
 
-from ...core import JsonValue, canonical_json_bytes
+from ...core import ImmutableJsonMapping, JsonValue, canonical_json_bytes
 
 ValueT = TypeVar("ValueT")
 
@@ -300,7 +300,9 @@ class StoredRecord:
         _require_optional_string(self.lease_owner, "lease_owner")
         _require_nonnegative_int(self.lease_fence, "lease_fence")
         _require_optional_aware_datetime(self.lease_expires_at, "lease_expires_at")
-        _require_data_mapping(self.data, "record data")
+        if not isinstance(self.data, ImmutableJsonMapping):
+            _require_data_mapping(self.data, "record data")
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,7 +334,9 @@ class StoredFact:
         if not isinstance(self.kind, str) or not 0 < len(self.kind) <= 32:
             raise ValueError("fact kind must contain at most 32 characters")
         _require_state(self.state, "fact state", optional=True)
-        _require_data_mapping(self.data, "fact data")
+        if not isinstance(self.data, ImmutableJsonMapping):
+            _require_data_mapping(self.data, "fact data")
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,7 +355,9 @@ class StoredOperation:
         _require_state(self.state, "operation state", optional=False)
         if not isinstance(self.compactable, bool):
             raise TypeError("operation compactable must be a bool")
-        _require_data_mapping(self.data, "operation data")
+        if not isinstance(self.data, ImmutableJsonMapping):
+            _require_data_mapping(self.data, "operation data")
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -941,7 +947,7 @@ def validate_record_identity(record: StoredRecord) -> None:
             raise ValueError(f"record {name} is invalid")
     encode_sort_key(record.sort_key)
     try:
-        canonical_json_bytes(record.data)
+        canonical_json_bytes(dict(record.data))
     except (TypeError, ValueError) as error:
         raise ValueError("record data is not canonical JSON") from error
 

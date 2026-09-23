@@ -22,6 +22,7 @@ from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
 from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+from linktools.ai.runtime.state._memory import MemoryStateStore
 from linktools.ai.runtime.state._sql import SqlStateStore
 from linktools.ai.runtime.state._store import (
     FactQuery,
@@ -70,6 +71,52 @@ def _tool_run(run_id: str) -> RunRecord:
         metadata={},
         started_at=datetime.now(timezone.utc),
     )
+
+
+async def test_memory_state_store_detaches_nested_record_data() -> None:
+    store = MemoryStateStore()
+    await store.initialize()
+    source = {"nested": {"value": "original"}}
+    record = StoredRecord(
+        b"r" * 32,
+        None,
+        None,
+        "test",
+        "record",
+        None,
+        0,
+        None,
+        0,
+        None,
+        source,
+    )
+    try:
+        await store.mutate(lambda transaction: transaction.insert_record(record))
+        source["nested"]["value"] = "caller-mutated"
+
+        async def fail_after_read(transaction: StateTransaction) -> None:
+            stored = await transaction.get_record(record.key_digest)
+            assert stored is not None
+            nested = stored.data["nested"]
+            assert isinstance(nested, dict)
+            nested["value"] = "read-mutated"
+            raise RuntimeError("rollback")
+
+        with pytest.raises(RuntimeError):
+            await store.mutate(fail_after_read)
+
+        await store.validate_integrity()
+        stored = await store.read(
+            lambda transaction: transaction.get_record(record.key_digest)
+        )
+        assert stored is not None
+        assert tuple(stored.data) == ("nested",)
+        assert stored.data == {
+            "nested": {"value": "original"},
+        }
+        assert stored.storage_version == 0
+    finally:
+        await store.close()
 
 
 async def test_sql_state_group_maps_programming_failure_to_internal(
@@ -135,7 +182,7 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
         None,
         0,
         None,
-        {},
+        {"nested": {"value": "stored"}},
     )
     facts = (
         StoredFact(stream, 1, owner, "test", subject_a, None, {"value": 1}),
@@ -151,6 +198,11 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
 
     try:
         await store.mutate(seed)
+        stored = await store.read(
+            lambda transaction: transaction.get_record(owner)
+        )
+        assert stored is not None
+        assert stored.data == {"nested": {"value": "stored"}}
         statements.clear()
         values = await store.read(
             lambda transaction: transaction.list_facts(

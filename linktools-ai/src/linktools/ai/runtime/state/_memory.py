@@ -191,7 +191,7 @@ class MemoryStateStore:
         self._ensure_ready()
 
         async def check(transaction: StateTransaction) -> None:
-            _validate_transaction_integrity(transaction)
+            await _validate_transaction_integrity(transaction)
 
         await self.read(check)
 

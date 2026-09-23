@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Harness Planning must preserve the intentionally narrow LinkTools surface."""
 
+from dataclasses import replace
+
 import pytest
 from linktools.ai.core import PromptLimits
 from linktools.ai.errors import AIError, ErrorCode
@@ -149,25 +151,36 @@ async def test_runtime_plan_persists_only_the_current_payload_shape() -> None:
         }
         assert _decode_payload(record) == ([RuntimePlanItem("ship it")], 1)
 
-        record.data["future"] = True
+        data = dict(record.data)
+        data["future"] = True
+        corrupted = replace(record, data=data)
         with pytest.raises(AIError) as raised:
-            _decode_payload(record)
+            _decode_payload(corrupted)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        record.data.pop("future")
 
-        record.data["version"] = True
+        data = dict(record.data)
+        data["version"] = True
+        corrupted = replace(record, data=data)
         with pytest.raises(AIError) as raised:
-            _decode_payload(record)
+            _decode_payload(corrupted)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        record.data["version"] = 2
+
+        data = dict(record.data)
+        data["version"] = 2
+        corrupted = replace(record, data=data)
         with pytest.raises(AIError) as raised:
-            _decode_payload(record)
+            _decode_payload(corrupted)
         assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
-        record.data["version"] = 1
 
-        record.data["items"][0]["future"] = True
+        data = dict(record.data)
+        items = data["items"]
+        assert isinstance(items, list)
+        first = items[0]
+        assert isinstance(first, dict)
+        first["future"] = True
+        corrupted = replace(record, data=data)
         with pytest.raises(AIError) as raised:
-            _decode_payload(record)
+            _decode_payload(corrupted)
         assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await state.close()

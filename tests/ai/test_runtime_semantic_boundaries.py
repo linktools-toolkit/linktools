@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.capabilities import (
@@ -171,6 +172,43 @@ def test_output_schema_keeps_unknown_extension_refs_literal() -> None:
         "$ref": "literal-value",
         "$dynamicRef": "also-literal",
     }
+
+
+def test_output_schema_preserves_nested_resource_scope() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "value": {
+                "$id": "urn:linktools:test:nested",
+                "$defs": {"T": {"type": "integer"}},
+                "$ref": "#/$defs/T",
+            }
+        },
+    }
+
+    normalized = canonicalize_output_schema_v1(schema)
+
+    nested = normalized["properties"]["value"]
+    assert nested["$defs"] == {"d0": {"type": "integer"}}
+    assert nested["$ref"] == "#/$defs/d0"
+    assert "$defs" not in normalized
+    Draft202012Validator(normalized).validate({"value": 7})
+
+
+def test_output_schema_nested_resource_keeps_supported_subset() -> None:
+    with pytest.raises(AIError) as raised:
+        canonicalize_output_schema_v1(
+            {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "$id": "urn:linktools:test:nested-dynamic",
+                        "$dynamicRef": "#value",
+                    }
+                },
+            }
+        )
+    assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
 
 def test_output_schema_is_independent_of_mapping_insertion_order() -> None:

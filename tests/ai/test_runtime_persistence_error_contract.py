@@ -30,7 +30,7 @@ from linktools.ai.storage import StoredPayload
 
 
 def _future_schema(data: object) -> object:
-    value = copy.deepcopy(data)
+    value = copy.deepcopy(dict(data))
     value["value"]["payload"]["schema"] = 99
     return value
 
