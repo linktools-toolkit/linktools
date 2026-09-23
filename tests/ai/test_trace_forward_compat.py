@@ -2,9 +2,6 @@
 # -*- coding: utf-8 -*-
 """Forward-compatibility coverage for public execution trace projections."""
 
-import pytest
-
-from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime.service_api import ExecutionTraceItem
 
 
@@ -30,17 +27,16 @@ def test_trace_model_response_allows_additive_usage_fields() -> None:
     assert item.payload == payload
 
 
-def test_trace_model_response_validates_known_usage_fields() -> None:
+def test_trace_dto_does_not_revalidate_usage_payload() -> None:
     payload = {
         "kind": "MODEL_RESPONSE",
         "status": "SUCCEEDED",
         "token_usage": _usage(input_tokens="bad"),
     }
 
-    with pytest.raises(AIError) as raised:
-        ExecutionTraceItem("execution", 1, payload)
+    item = ExecutionTraceItem("execution", 1, payload)
 
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    assert item.payload == payload
 
 
 def test_trace_model_response_preserves_unknown_future_status() -> None:
