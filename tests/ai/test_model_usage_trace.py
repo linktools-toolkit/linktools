@@ -372,6 +372,45 @@ def test_cached_successful_model_response_trace_rejects_invalid_usage(
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+def test_tool_trace_accepts_request_sequence_without_request_purpose() -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="tool_call_started",
+        step_index=1,
+        tool_call_id="call",
+        tool_name="lookup",
+        metadata={"linktools.ai.request_sequence": "1"},
+    )
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["request_sequence"] == 1
+    assert "purpose" not in item.payload
+
+
+def test_model_trace_rejects_request_sequence_without_request_purpose() -> None:
+    event = StepEvent(
+        run_id="run",
+        kind="model_request_started",
+        step_index=1,
+        metadata={"linktools.ai.request_sequence": "1"},
+    )
+    with pytest.raises(AIError) as error:
+        _trace_item(
+            SimpleNamespace(execution_id="execution"),
+            1,
+            0,
+            0,
+            event,
+        )
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_failed_model_response_trace_has_no_request_usage() -> None:
     event = StepEvent(
         run_id="run",
