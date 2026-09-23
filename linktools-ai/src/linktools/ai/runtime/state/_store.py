@@ -947,7 +947,7 @@ def validate_record_identity(record: StoredRecord) -> None:
             raise ValueError(f"record {name} is invalid")
     encode_sort_key(record.sort_key)
     try:
-        canonical_json_bytes(record.data)
+        canonical_json_bytes(dict(record.data))
     except (TypeError, ValueError) as error:
         raise ValueError("record data is not canonical JSON") from error
 
