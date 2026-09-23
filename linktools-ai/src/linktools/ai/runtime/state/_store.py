@@ -301,7 +301,8 @@ class StoredRecord:
         _require_nonnegative_int(self.lease_fence, "lease_fence")
         _require_optional_aware_datetime(self.lease_expires_at, "lease_expires_at")
         _require_data_mapping(self.data, "record data")
-        object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
+        if not isinstance(self.data, ImmutableJsonMapping):
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,7 +335,8 @@ class StoredFact:
             raise ValueError("fact kind must contain at most 32 characters")
         _require_state(self.state, "fact state", optional=True)
         _require_data_mapping(self.data, "fact data")
-        object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
+        if not isinstance(self.data, ImmutableJsonMapping):
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +356,8 @@ class StoredOperation:
         if not isinstance(self.compactable, bool):
             raise TypeError("operation compactable must be a bool")
         _require_data_mapping(self.data, "operation data")
-        object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
+        if not isinstance(self.data, ImmutableJsonMapping):
+            object.__setattr__(self, "data", ImmutableJsonMapping(self.data))
 
 
 @dataclass(frozen=True, slots=True)
