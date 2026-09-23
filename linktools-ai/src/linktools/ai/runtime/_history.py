@@ -4,7 +4,6 @@
 
 import heapq
 import json
-import re
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -945,6 +944,7 @@ class StepExecutionHistoryReader:
                 "model_request_started",
                 "model_request_completed",
                 "model_request_failed",
+                "model_request_cancelled",
             }:
                 continue
             sequence = _event_request_sequence(event)
@@ -1696,6 +1696,7 @@ def _trace_item(
         "model_request_started": ("MODEL_REQUEST", "STARTED"),
         "model_request_completed": ("MODEL_RESPONSE", "SUCCEEDED"),
         "model_request_failed": ("MODEL_RESPONSE", "FAILED"),
+        "model_request_cancelled": ("MODEL_RESPONSE", "CANCELLED"),
         "tool_call_started": ("TOOL_CALL", "STARTED"),
         "tool_call_completed": ("TOOL_RESULT", "SUCCEEDED"),
         "tool_call_failed": ("TOOL_ERROR", "FAILED"),
@@ -1725,21 +1726,12 @@ def _trace_item(
         payload["duration_ns"] = int(duration_ns)
     request_sequence = _event_request_sequence(event)
     request_purpose = event.metadata.get(REQUEST_PURPOSE_METADATA_KEY)
-    if request_purpose is not None and (
-        request_sequence is None
-        or request_purpose not in {"agent", "compaction"}
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if (
-        kind in {"MODEL_REQUEST", "MODEL_RESPONSE"}
-        and request_sequence is not None
-        and request_purpose is None
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if request_purpose is not None:
+        if request_purpose not in {"agent", "compaction"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        payload["purpose"] = request_purpose
     if request_sequence is not None:
         payload["request_sequence"] = request_sequence
-    if request_purpose is not None:
-        payload["purpose"] = request_purpose
     retry_value = event.metadata.get(OUTPUT_RETRY_INDEX_METADATA_KEY)
     if retry_value is not None:
         if not retry_value.isdigit() or int(retry_value) < 1:
@@ -1818,12 +1810,6 @@ def _validate_run(
         run.run_id != expected_id
         or run.conversation_id != conversation_id
         or run.metadata.get("segment_sequence") != str(sequence)
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    agent_name = run.metadata.get("agent_name")
-    if (
-        agent_name is None
-        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", agent_name) is None
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
