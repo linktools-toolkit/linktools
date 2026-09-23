@@ -14,6 +14,7 @@ from linktools.core import environ
 from ..asset import AssetStore
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
+    AssetSkillResourceSource,
     CapabilityContribution,
     CapabilityGroup,
     SkillSourceRegistry,
@@ -157,9 +158,9 @@ async def compose_runtime_components(
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
-                source
+                AssetSkillResourceSource(group.id, store)
                 for group in groups
-                if (source := group.skill_source) is not None
+                if (store := group.asset_store) is not None
             )
         )
         task_handlers = tuple(
