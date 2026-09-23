@@ -439,18 +439,12 @@ def test_model_trace_preserves_unknown_request_purpose() -> None:
     assert item.payload["purpose"] == "future"
 
 
-@pytest.mark.parametrize(
-    "error_code",
-    (None, ErrorCode.EXECUTION_CANCELLED.value),
-)
-def test_legacy_cancelled_model_response_trace_is_normalized(
-    error_code: str | None,
-) -> None:
+def test_legacy_cancelled_model_response_trace_is_normalized() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_failed",
         step_index=1,
-        error=error_code,
+        error=ErrorCode.EXECUTION_CANCELLED.value,
         metadata={},
     )
     item = _trace_item(
@@ -465,12 +459,18 @@ def test_legacy_cancelled_model_response_trace_is_normalized(
     assert item.payload["token_usage"] is None
 
 
-def test_failed_model_response_trace_has_no_request_usage() -> None:
+@pytest.mark.parametrize(
+    "error_code",
+    (None, ErrorCode.INTERNAL_ERROR.value),
+)
+def test_failed_model_response_trace_has_no_request_usage(
+    error_code: str | None,
+) -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_failed",
         step_index=1,
-        error=ErrorCode.INTERNAL_ERROR.value,
+        error=error_code,
         metadata={},
     )
     item = _trace_item(
