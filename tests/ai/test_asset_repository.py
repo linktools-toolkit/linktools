@@ -12,6 +12,7 @@ from linktools.ai.capability import (
     CapabilityGroup,
     CapabilityLoadContext,
     SkillDefinition,
+    SkillSourceRef,
 )
 from linktools.ai.capability._group import (
     capability_fingerprint,
@@ -128,6 +129,34 @@ async def test_replacing_skill_loader_disables_builtin_skill_layout_validation()
     group.loader("skill", _NoopLoader())
 
     assert await group.freeze() == ()
+
+
+class _ForeignSkillSourceLoader:
+    async def load(
+        self,
+        context: CapabilityLoadContext,
+    ) -> "Sequence[CapabilityContribution[object]]":
+        del context
+        return (
+            CapabilityContribution.from_declaration(
+                SkillDefinition(
+                    SkillSpec("review", "review"),
+                    SkillSourceRef("other", "review"),
+                )
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_custom_loader_cannot_bind_skill_resources_to_another_group() -> None:
+    store = await _store()
+    group = CapabilityGroup("application", assets=store)
+    group.loader("skill", _ForeignSkillSourceLoader())
+
+    with pytest.raises(AIError) as error:
+        await group.freeze()
+
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
 class _OutsideSnapshotLoader:
