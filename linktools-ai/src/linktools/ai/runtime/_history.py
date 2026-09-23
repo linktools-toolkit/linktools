@@ -32,7 +32,6 @@ from ._journal import (
     MODEL_USAGE_CACHE_READ_METADATA_KEY,
     MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     MODEL_USAGE_INPUT_METADATA_KEY,
-    MODEL_USAGE_METADATA_KEYS,
     MODEL_USAGE_OUTPUT_METADATA_KEY,
     OBSERVATION_ID_METADATA_KEY,
     OUTPUT_RETRY_INDEX_METADATA_KEY,
@@ -1771,7 +1770,7 @@ def _model_token_usage(event: StepEvent) -> "dict[str, JsonValue] | None":
     usage = {
         name: value
         for name, key in values.items()
-        if (value := _metadata_token(metadata, key, required=False)) is not None
+        if (value := _metadata_token(metadata, key)) is not None
     }
     return usage or None
 
@@ -1779,13 +1778,9 @@ def _model_token_usage(event: StepEvent) -> "dict[str, JsonValue] | None":
 def _metadata_token(
     metadata: Mapping[str, str],
     key: str,
-    *,
-    required: bool = True,
 ) -> "int | None":
     raw = metadata.get(key)
     if raw is None:
-        if required:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return None
     if not raw.isdigit():
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
