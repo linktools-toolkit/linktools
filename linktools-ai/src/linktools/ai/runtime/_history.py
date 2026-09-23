@@ -961,7 +961,6 @@ class StepExecutionHistoryReader:
             for sequence, pair in values.items()
         }
 
-
     async def _tool_call_metadata(
         self,
         run_id: str,
