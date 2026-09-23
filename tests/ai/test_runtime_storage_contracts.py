@@ -105,6 +105,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
         with pytest.raises(RuntimeError):
             await store.mutate(fail_after_read)
 
+        await store.validate_integrity()
         stored = await store.read(
             lambda transaction: transaction.get_record(record.key_digest)
         )
