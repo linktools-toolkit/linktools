@@ -313,7 +313,6 @@ class AssetSkillResourceSource:
             local[relative] = path
         return package, local
 
-
     async def resource_mode(self, root: str, path: str) -> int:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         relative = _normalize_resource_path(path)
