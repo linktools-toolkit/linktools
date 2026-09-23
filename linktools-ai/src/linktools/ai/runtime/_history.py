@@ -827,7 +827,6 @@ class StepExecutionHistoryReader:
                     if (
                         raw.run_id != run_id
                         or raw.request_sequence != expected
-                        or raw.status not in {"SUCCEEDED", "FAILED", "CANCELLED"}
                     ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     after_sequence = raw.request_sequence
@@ -1763,28 +1762,18 @@ def _event_request_sequence(event: StepEvent) -> "int | None":
 
 def _model_token_usage(event: StepEvent) -> "dict[str, JsonValue] | None":
     metadata = event.metadata
-    present = MODEL_USAGE_METADATA_KEYS.intersection(metadata)
-    if not present:
-        return None
-    if (
-        MODEL_USAGE_INPUT_METADATA_KEY not in metadata
-        or MODEL_USAGE_OUTPUT_METADATA_KEY not in metadata
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return {
-        "input_tokens": _metadata_token(metadata, MODEL_USAGE_INPUT_METADATA_KEY),
-        "output_tokens": _metadata_token(metadata, MODEL_USAGE_OUTPUT_METADATA_KEY),
-        "cache_read_tokens": _metadata_token(
-            metadata,
-            MODEL_USAGE_CACHE_READ_METADATA_KEY,
-            required=False,
-        ),
-        "cache_write_tokens": _metadata_token(
-            metadata,
-            MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
-            required=False,
-        ),
+    values = {
+        "input_tokens": MODEL_USAGE_INPUT_METADATA_KEY,
+        "output_tokens": MODEL_USAGE_OUTPUT_METADATA_KEY,
+        "cache_read_tokens": MODEL_USAGE_CACHE_READ_METADATA_KEY,
+        "cache_write_tokens": MODEL_USAGE_CACHE_WRITE_METADATA_KEY,
     }
+    usage = {
+        name: value
+        for name, key in values.items()
+        if (value := _metadata_token(metadata, key, required=False)) is not None
+    }
+    return usage or None
 
 
 def _metadata_token(
