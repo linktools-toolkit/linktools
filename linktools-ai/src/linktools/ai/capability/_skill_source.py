@@ -312,9 +312,11 @@ class AssetSkillResourceSource:
     async def resource_mode(self, root: str, path: str) -> int:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         relative = _normalize_resource_path(path)
-        local = await self._store.local_path(
-            AssetKey("skill", f"{logical_root}/{relative}")
-        )
+        local = (
+            await self._store.local_paths(
+                (AssetKey("skill", f"{logical_root}/{relative}"),)
+            )
+        )[0]
         if local is None:
             return 0
         try:
