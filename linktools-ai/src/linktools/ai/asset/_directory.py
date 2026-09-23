@@ -202,7 +202,7 @@ class DirectoryAssetBackend:
         _logger.debug("local directory asset backend closed: root=%s", self._directory)
 
     def local_path(self, key: AssetKey) -> Path:
-        """Return the native absolute mapping path for one local Asset key."""
+        """Return the native lexical mapping path for one local Asset key."""
         return self._asset_path(self._validate_key(key))
 
     async def head_revision(self) -> StorageRevision:
