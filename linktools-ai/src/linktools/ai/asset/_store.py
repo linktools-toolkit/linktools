@@ -141,10 +141,6 @@ class AssetStore:
         self._ensure_ready()
         return await self._storage.get_many(keys)
 
-    async def local_path(self, key: AssetKey) -> "Path | None":
-        """Return the effective native file path when the owning backend exposes one."""
-        return (await self.local_paths((key,)))[0]
-
     async def local_paths(
         self,
         keys: "Sequence[AssetKey]",
