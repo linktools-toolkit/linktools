@@ -603,7 +603,7 @@ class CapabilityGroup(Generic[AppT]):
         kind: str,
         loader: CapabilityLoader[AppT],
     ) -> CapabilityLoader[AppT]:
-        """Replace or append the loader for one input Asset kind."""
+        """Register the sole loader for one input Asset kind, replacing its slot."""
         if not isinstance(kind, str) or not kind.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if not callable(getattr(loader, "load", None)):
