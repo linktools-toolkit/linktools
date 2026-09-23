@@ -1705,7 +1705,7 @@ def _trace_item(
     kind, status = value
     if (
         event.kind == "model_request_failed"
-        and event.error in {None, ErrorCode.EXECUTION_CANCELLED.value}
+        and event.error == ErrorCode.EXECUTION_CANCELLED.value
     ):
         status = "CANCELLED"
     payload = {
