@@ -110,6 +110,7 @@ async def test_memory_state_store_detaches_nested_record_data() -> None:
             lambda transaction: transaction.get_record(record.key_digest)
         )
         assert stored is not None
+        assert tuple(stored.data) == ("", "nested")
         assert stored.data == {
             "nested": {"value": "original"},
             "": {"allowed": True},
