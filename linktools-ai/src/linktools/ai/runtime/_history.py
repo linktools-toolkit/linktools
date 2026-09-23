@@ -1703,6 +1703,11 @@ def _trace_item(
     if value is None:
         return None
     kind, status = value
+    if (
+        event.kind == "model_request_failed"
+        and event.error in {None, ErrorCode.EXECUTION_CANCELLED.value}
+    ):
+        status = "CANCELLED"
     payload = {
         "kind": kind,
         "status": status,
