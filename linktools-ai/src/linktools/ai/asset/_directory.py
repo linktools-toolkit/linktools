@@ -201,6 +201,11 @@ class DirectoryAssetBackend:
             self._revision = _store_revision(())
         _logger.debug("local directory asset backend closed: root=%s", self._directory)
 
+    def local_path(self, key: AssetKey) -> Path:
+        """Return the native absolute path represented by one local Asset key."""
+        self._validate_key(key)
+        return self._file_path(key)
+
     async def head_revision(self) -> StorageRevision:
         async with self._lock:
             entries = await asyncio.to_thread(self._scan)
