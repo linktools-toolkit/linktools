@@ -12,7 +12,7 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import CapabilityGroup, LocalSkillResourceSource
+from linktools.ai.capability import AssetSkillResourceSource, CapabilityGroup, LocalSkillResourceSource
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
@@ -164,6 +164,7 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
         "---\nname: review\ndescription: Review changes\n---\n\nReview changes.\n",
         encoding="utf-8",
     )
+    (external_skill / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     agent = external / "agent"
     mcp = external / "mcp"
     agent.write_bytes(AgentSpecCodec().encode(AgentSpec("review")))
@@ -202,6 +203,10 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
             ("mcp", "server"),
             ("skill", "review"),
         }
+        source = AssetSkillResourceSource("workspace", store)
+        view = await source.inspect("review")
+        assert Path(view.location.path) == external_skill.resolve()
+        assert view.resources == ("run.sh",)
         assert await store.get(AssetKey("agent", "review")) == agent.read_bytes()
         assert await store.get(AssetKey("mcp", "server")) == mcp.read_bytes()
     finally:
