@@ -34,7 +34,12 @@ from ._sandbox import (
     ReadOnlySandboxPolicy,
     SandboxResource,
     SandboxSession,
-    normalize_workspace_path,
+    normalize_workspace_input_path,
+)
+from ._paths import (
+    is_workspace_storage_path,
+    workspace_locks_root,
+    workspace_storage_name,
 )
 from ._sandbox_protocol import validate_request_size
 from ._local_process import (
@@ -109,9 +114,9 @@ class LocalSandbox:
         _logger.debug(
             "opening local sandbox session: root=%s resources=%s",
             normalized_root,
-            tuple(resource.key for resource in normalized_resources),
+            tuple(resource.id for resource in normalized_resources),
         )
-        lock_root = normalized_root / ".linktools" / "locks"
+        lock_root = workspace_locks_root(normalized_root)
         if policy is None:
             _prepare_lock_root(lock_root)
         return _LocalSandboxSession(
@@ -135,9 +140,9 @@ class _LocalSandboxSession:
     ) -> None:
         self._root = root
         self._resources = {
-            resource.key: resource.source.resolve() for resource in resources
+            resource.id: resource.source.resolve() for resource in resources
         }
-        self._lock_root = lock_root or root / ".linktools" / "locks"
+        self._lock_root = lock_root or workspace_locks_root(root)
         self._read_policy = read_policy
         self._environment = _command_environment()
         self._state = "OPEN"
@@ -152,18 +157,21 @@ class _LocalSandboxSession:
         self._starting_background = 0
         self._process_lock = asyncio.Lock()
 
-    def resource_path(self, key: str) -> str:
+    def resource_path(self, resource_id: str) -> "str | None":
         self._ensure_open_sync()
-        if not isinstance(key, str):
+        if not isinstance(resource_id, str):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        source = self._resources.get(key)
+        source = self._resources.get(resource_id)
         if source is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if (
             self._read_policy is not None
-            and not self._read_policy.may_descend(".", resource_key=key)
+            and not self._read_policy.may_descend(
+                ".",
+                resource_key=resource_id,
+            )
         ):
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            return None
         return str(source)
 
     def managed_process_ids(self) -> frozenset[int]:
@@ -1292,7 +1300,7 @@ def _validate_resources(
     seen: set[str] = set()
     values: list[SandboxResource] = []
     for resource in resources:
-        if not isinstance(resource, SandboxResource) or resource.key in seen:
+        if not isinstance(resource, SandboxResource) or resource.id in seen:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source = resource.source
         try:
@@ -1304,17 +1312,17 @@ def _validate_resources(
             or source.is_symlink()
             or resolved == root
             or _inside(resolved, root)
-            or resolved == root / ".linktools"
-            or _inside(resolved, root / ".linktools")
+            or resolved == workspace_locks_root(root).parent
+            or _inside(resolved, workspace_locks_root(root).parent)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        seen.add(resource.key)
+        seen.add(resource.id)
         values.append(resource)
     return tuple(values)
 
 
 def _normalize_path(path: str) -> str:
-    value = normalize_workspace_path(path)
+    value = normalize_workspace_input_path(path)
     if os.name == "nt":
         _validate_windows_path(value)
     return value
@@ -1367,8 +1375,7 @@ def _check_parent_chain(root: Path, parent: Path) -> None:
 def _is_protected(path: str) -> bool:
     normalized = path.replace("\\", "/")
     if (
-        normalized == ".linktools"
-        or normalized.startswith(".linktools/")
+        is_workspace_storage_path(normalized)
         or normalized == ".git"
         or normalized.startswith(".git/")
     ):
@@ -1783,7 +1790,7 @@ def _check_expected_digest(actual: str | None, expected: str) -> None:
 def _create_temp_file(parent: Path) -> tuple[int, Path]:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     for _ in range(8):
-        target = parent / f".linktools-{uuid.uuid4().hex}"
+        target = parent / f"{workspace_storage_name()}-{uuid.uuid4().hex}"
         try:
             return os.open(str(target), flags, 0o666), target
         except FileExistsError:

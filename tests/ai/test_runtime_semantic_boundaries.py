@@ -287,10 +287,10 @@ def test_tool_argument_set_digest_is_stable_across_hash_seeds() -> None:
     assert len(set(values)) == 1
 
 
-def test_agent_tool_retry_default_is_finite() -> None:
-    assert AgentSpec("agent").tool_retries == 10000
-    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries == 10000
-    assert CapabilityGroup("group").agent("agent").tool_retries == 10000
+def test_agent_tool_retry_default_matches_v1_contract() -> None:
+    assert AgentSpec("agent").tool_retries == 10
+    assert AgentSpecCodec().decode(b'{"version":1,"id":"agent"}').tool_retries == 10
+    assert CapabilityGroup("group").agent("agent").tool_retries == 10
 
 
 def _request_context(model: TestModel) -> ModelRequestContext:

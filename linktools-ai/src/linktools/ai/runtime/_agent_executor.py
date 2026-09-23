@@ -13,6 +13,7 @@ from collections.abc import (
     Awaitable,
     Callable,
     Mapping,
+    Sequence,
 )
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -59,7 +60,6 @@ from pydantic_ai.messages import (
     AgentStreamEvent,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
-    InstructionPart,
     ModelMessage,
     PartDeltaEvent,
     PartEndEvent,
@@ -105,8 +105,6 @@ from ..core import (
     ExecutionMode,
     JsonValue,
     PromptLimits,
-    ResourceKind,
-    ResourceRef,
     ThinkingValue,
     ToolOperationStatus,
     UsageMetrics,
@@ -127,11 +125,20 @@ from ._capture import RuntimeCaptureStore
 from ._compaction import RuntimeCompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
-from ._mcp import close_mcp_resources, materialize_mcp_capabilities
+from ._mcp import (
+    _FrozenMCPResources,
+    _MCPResourceProjection,
+    close_mcp_projections,
+    close_mcp_resources,
+    materialize_mcp_capabilities,
+    prepare_mcp_resource_projections,
+    validate_frozen_mcp_policy,
+)
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
 from ._plan import RuntimePlanStore
 from ._pydantic_tool_control import PydanticToolControlCapability
+from ._repository_instructions import _RepositoryInstructionCapability
 from ._tool import ToolOperationBridge
 from ._tool_boundary import (
     ManagedToolDescriptor,
@@ -207,7 +214,13 @@ class _RunScope:
         Callable[[PydanticRunContext[object]], RuntimePlanStore] | None
     ) = None
     sandbox_session: "SandboxSession | None" = None
-    skill_resource_paths: Mapping[str, str] = field(default_factory=dict)
+    skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
+    mcp_frozen_resources: Mapping[str, _FrozenMCPResources] = field(
+        default_factory=dict
+    )
+    mcp_resource_projections: Mapping[str, _MCPResourceProjection] = field(
+        default_factory=dict
+    )
     mode: ExecutionMode = "run"
     planning: bool = False
     thinking: ThinkingValue = False
@@ -431,9 +444,7 @@ class AgentExecutor:
         run_usage: RunUsage,
         usage_limits: UsageLimits,
     ) -> AgentExecutionOutcome:
-        skill_sources = self._skill_sources_for(
-            scope.binding.definition
-        )
+        skill_sources = self._skill_sources_for(scope.binding.definition)
         selected = tuple(
             candidate.id
             for candidate in scope.binding.definition.selected_tools
@@ -442,36 +453,87 @@ class AgentExecutor:
         )
         workspace = scope.workspace
         temporary_resources: tuple[TemporaryDirectory[str], ...] = ()
+        mcp_frozen_resources = _mcp_resource_snapshots(scope.binding)
         if workspace is None:
-            resources: tuple[SandboxResource, ...] = ()
-            resource_keys: Mapping[str, str] = {}
+            skill_resources: tuple[SandboxResource, ...] = ()
+            resource_keys: Mapping[str, "str | None"] = {
+                skill.id: None
+                for skill in scope.binding.definition.skill_definitions
+            }
         else:
-            resources, resource_keys, temporary_resources = (
+            skill_resources, resource_keys, temporary_resources = (
                 await _skill_sandbox_resources(
                     scope.binding.definition,
                     skill_sources,
                 )
             )
         try:
-            if not selected and not resources:
+            mcp_projections = await prepare_mcp_resource_projections(
+                scope.binding.definition.mcp_servers,
+                mcp_frozen_resources,
+                object_store=self._mcp_resource_store,
+                sandboxed=workspace is not None,
+            )
+        except BaseException:
+            await _cleanup_skill_resources(temporary_resources)
+            raise
+        resources = (*skill_resources, *(
+            resource
+            for projection in mcp_projections.values()
+            for resource in projection.resources
+        ))
+        primary_error: BaseException | None = None
+        try:
+            resource_ids = tuple(resource.id for resource in resources)
+            if len(resource_ids) != len(set(resource_ids)):
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            if (
+                not selected
+                and not resources
+                and not scope.binding.definition.mcp_servers
+            ):
                 return await self._execute(
-                    scope,
+                    replace(
+                        scope,
+                        skill_resource_paths={
+                            skill.id: None
+                            for skill in scope.binding.definition.skill_definitions
+                        },
+                        mcp_frozen_resources=mcp_frozen_resources,
+                        mcp_resource_projections=mcp_projections,
+                    ),
                     run_usage=run_usage,
                     usage_limits=usage_limits,
                     skill_sources=skill_sources,
                 )
             if workspace is None:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                return await self._execute(
+                    replace(
+                        scope,
+                        skill_resource_paths={
+                            skill.id: None
+                            for skill in scope.binding.definition.skill_definitions
+                        },
+                        mcp_frozen_resources=mcp_frozen_resources,
+                        mcp_resource_projections=mcp_projections,
+                    ),
+                    run_usage=run_usage,
+                    usage_limits=usage_limits,
+                )
             sandbox = workspace.sandbox
             backend = sandbox if sandbox is not None else LocalSandbox()
+            if scope.binding.definition.mcp_servers:
+                validate_frozen_mcp_policy(mcp_frozen_resources, workspace)
             session = await backend.open(
                 root=workspace.root,
-                resources=resources,
+                resources=tuple(resources),
             )
             try:
                 resource_paths = {
-                    skill_id: session.resource_path(key)
-                    for skill_id, key in resource_keys.items()
+                    skill_id: None
+                    if resource_id is None
+                    else session.resource_path(resource_id)
+                    for skill_id, resource_id in resource_keys.items()
                 }
                 _logger.debug(
                     "workspace sandbox opened for agent run: "
@@ -485,6 +547,8 @@ class AgentExecutor:
                         scope,
                         sandbox_session=session,
                         skill_resource_paths=resource_paths,
+                        mcp_frozen_resources=mcp_frozen_resources,
+                        mcp_resource_projections=mcp_projections,
                     ),
                     run_usage=run_usage,
                     usage_limits=usage_limits,
@@ -509,8 +573,15 @@ class AgentExecutor:
                 raise
             await _close_sandbox_session(session)
             return result
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            await _cleanup_skill_resources(temporary_resources)
+            await _cleanup_agent_run_resources(
+                mcp_projections,
+                temporary_resources,
+                primary_error,
+            )
 
 
     async def _execute(
@@ -551,7 +622,6 @@ class AgentExecutor:
             deferred_pause_sink=capture_deferred_step,
             metrics=self._metrics,
             model_journal=model_journal,
-            mcp_resource_store=self._mcp_resource_store,
         )
         capabilities = cast(
             "tuple[AbstractCapability[AgentContext[object]], ...]",
@@ -585,6 +655,7 @@ class AgentExecutor:
             deferred_kwargs["deferred_tool_results"] = rehydrate_deferred_tool_results(
                 scope.deferred_tool_results
             )
+        primary_error: BaseException | None = None
         try:
             final_result = await agent.run(
                 user_prompt,
@@ -641,22 +712,57 @@ class AgentExecutor:
             return AgentExecutionResult(
                 scope.step_run_id, payload, final_result.all_messages(), usage
             )
+        except BaseException as error:
+            primary_error = error
+            raise
         finally:
-            await close_mcp_resources(capabilities)
+            await _close_mcp_resources(
+                capabilities,
+                scope.mcp_resource_projections,
+                primary_error,
+            )
 
 
-def _mcp_resource_snapshots(binding: AgentBinding) -> dict[str, ObjectRef]:
+async def _close_mcp_resources(
+    capabilities: Sequence[AbstractCapability[AgentContext[object]]],
+    projections: Mapping[str, _MCPResourceProjection],
+    primary_error: BaseException | None,
+) -> None:
+    try:
+        await close_mcp_resources(capabilities)
+        await close_mcp_projections(projections)
+    except BaseException as cleanup_error:
+        if primary_error is None or cleanup_error is primary_error:
+            raise
+        raise primary_error from cleanup_error
+
+
+def _mcp_resource_snapshots(
+    binding: AgentBinding,
+) -> dict[str, _FrozenMCPResources]:
     codec = MCPServerSpecCodec()
-    result: dict[str, ObjectRef] = {}
+    result: dict[str, _FrozenMCPResources] = {}
     for pin in binding.snapshot.selected:
         if pin.kind != "mcp":
             continue
         server, reference = codec.from_frozen_payload(pin.contract)
-        if reference is None:
-            continue
+        if server.resource_root is not None and reference is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if server.resource_root is None and reference is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if server.id in result:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result[server.id] = reference
+        policy = pin.contract.get("execution_policy")
+        if not isinstance(policy, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        digest = pin.contract.get("resource_semantic_digest")
+        if digest is not None and not isinstance(digest, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result[server.id] = _FrozenMCPResources(
+            reference,
+            digest,
+            cast(Mapping[str, JsonValue], policy),
+        )
     return result
 
 
@@ -678,17 +784,18 @@ async def _skill_sandbox_resources(
     sources: SkillSourceRegistry,
 ) -> tuple[
     tuple[SandboxResource, ...],
-    Mapping[str, str],
+    Mapping[str, "str | None"],
     tuple[TemporaryDirectory[str], ...],
 ]:
     resources: dict[str, SandboxResource] = {}
-    resource_keys: dict[str, str] = {}
+    resource_keys: dict[str, str | None] = {}
     temporary: list[TemporaryDirectory[str]] = []
     try:
         for skill in definition.skill_definitions:
             source_ref = skill.source_ref
             if source_ref is None:
                 continue
+            resource_keys[skill.id] = None
             source = sources.resolve(source_ref.source_id)
             view = await source.inspect(source_ref.root)
             source_path: Path | None
@@ -726,23 +833,12 @@ async def _skill_sandbox_resources(
                     )
             else:
                 continue
-            key = canonical_sha256(
-                {
-                    "source_id": source_ref.source_id,
-                    "root": source_ref.root,
-                    "snapshot": (
-                        None
-                        if source_ref.snapshot is None
-                        else source_ref.snapshot.digest
-                    ),
-                }
-            )
-            resource = SandboxResource(key=key, source=source_path)
-            existing = resources.get(key)
+            resource = SandboxResource(id=skill.id, source=source_path)
+            existing = resources.get(skill.id)
             if existing is not None and existing.source != resource.source:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            resources[key] = resource
-            resource_keys[skill.id] = key
+            resources[skill.id] = resource
+            resource_keys[skill.id] = skill.id
         ordered = tuple(resources[key] for key in sorted(resources))
         return ordered, resource_keys, tuple(temporary)
     except BaseException:
@@ -755,6 +851,22 @@ async def _cleanup_skill_resources(
 ) -> None:
     for value in values:
         await asyncio.to_thread(value.cleanup)
+
+
+async def _cleanup_agent_run_resources(
+    projections: Mapping[str, _MCPResourceProjection],
+    temporary_resources: tuple[TemporaryDirectory[str], ...],
+    primary_error: BaseException | None,
+) -> None:
+    try:
+        try:
+            await close_mcp_projections(projections)
+        finally:
+            await _cleanup_skill_resources(temporary_resources)
+    except BaseException as cleanup_error:
+        if primary_error is not None and cleanup_error is not primary_error:
+            raise primary_error from cleanup_error
+        raise
 
 
 def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
@@ -782,7 +894,6 @@ async def _materialize_agent(
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
     model_journal: ModelRequestJournal,
-    mcp_resource_store: ObjectStore | None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -858,6 +969,13 @@ async def _materialize_agent(
                     instructions=workspace_guidance,
                 )
             )
+    if repository_boundary is not None or scope.repository_instructions is not None:
+        capabilities.append(
+            _RepositoryInstructionCapability(
+                scope.repository_instructions,
+                repository_boundary,
+            )
+        )
 
     if scope.subagent_available and scope.binding.snapshot.subagents:
         if scope.subagent_delegate is None:
@@ -936,15 +1054,11 @@ async def _materialize_agent(
             await materialize_mcp_capabilities(
                 definition.mcp_servers,
                 definition.mcp_selector_policy,
-                principal=scope.context.principal,
-                execution=ResourceRef(
-                    ResourceKind.EXECUTION,
-                    scope.context.execution_id,
-                    scope.context.principal.tenant_id,
-                ),
-                execution_root=scope.mcp_cwd,
-                resource_objects=mcp_resource_store,
-                resource_snapshots=_mcp_resource_snapshots(scope.binding),
+                workspace=scope.workspace,
+                sandbox_session=scope.sandbox_session,
+                host_cwd=(scope.mcp_cwd if scope.workspace is None else None),
+                frozen_resources=scope.mcp_frozen_resources,
+                projections=scope.mcp_resource_projections,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
                 background_tasks=scope.background_tasks,
@@ -1000,24 +1114,6 @@ async def _materialize_agent(
         cast("tuple[AbstractCapability[AgentContext[object]], ...]", platform)
     )
 
-    repository_initial_instructions = (
-        repository_boundary.render_initial()
-        if repository_boundary is not None
-        else ""
-        if scope.repository_instructions is None
-        else scope.repository_instructions.render()
-    )
-    if repository_initial_instructions:
-        capabilities.append(
-            Capability(
-                id="linktools.ai.repository-initial",
-                instructions=InstructionPart(
-                    content=repository_initial_instructions,
-                    dynamic=False,
-                ),
-            )
-        )
-
     business_output_type: object
     if scope.binding.output_binding.mode == "text":
         business_output_type = TextOutput(_assistant_text_output)
@@ -1028,15 +1124,6 @@ async def _materialize_agent(
     runtime_instructions: list[Any] = []
     if base_instructions:
         runtime_instructions.append(base_instructions)
-    if repository_boundary is not None:
-
-        def repository_overlay(
-            _: PydanticRunContext[object],
-        ) -> str:
-            return repository_boundary.render_overlay()
-
-        runtime_instructions.append(repository_overlay)
-
     agent = cast(
         "PydanticAgent[AgentContext[object], object]",
         PydanticAgent(

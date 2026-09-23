@@ -67,6 +67,7 @@ from ._validation import (
     validate_tenant_id,
     validate_tool_arguments,
     validate_user_prompt,
+    validate_logical_id,
 )
 from ._value import (
     ApprovalDecision,
@@ -177,4 +178,5 @@ __all__ = [
     "validate_tenant_id",
     "validate_tool_arguments",
     "validate_user_prompt",
+    "validate_logical_id",
 ]

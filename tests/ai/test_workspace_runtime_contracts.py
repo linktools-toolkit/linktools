@@ -192,7 +192,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
 
     frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
-    assert [(item.kind, item.id) for item in frozen] == [
+    assert [(item.kind, item.id) for item in frozen.contributions] == [
         ("agent", "default"),
         ("mcp", "local"),
         ("skill", "review"),

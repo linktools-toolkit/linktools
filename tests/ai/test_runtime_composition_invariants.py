@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from linktools.ai.agent import AgentBindingSnapshot
 from linktools.ai.agent._output import bind_output, restore_output
-from linktools.ai.asset import AssetStore, InMemoryAssetBackend
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -23,6 +23,7 @@ from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import Runtime
 from linktools.ai.runtime._agent_task import _cancel_execution
 from linktools.ai.runtime._approval import DefaultApprovalService
+from linktools.ai.runtime import _factory as runtime_factory
 from linktools.ai.runtime._factory import compose_runtime_components
 from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.state import RuntimeState
@@ -143,6 +144,41 @@ async def test_runtime_does_not_close_borrowed_asset_store(tmp_path: Path) -> No
     assert store.ready
     await store.close()
     await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_source_change_during_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    original_build = runtime_factory._build_local_components
+
+    async def build_then_change_source(**kwargs: object):
+        components = await original_build(**kwargs)  # type: ignore[arg-type]
+        await store.put(AssetKey("agent", "late"), b"changed")
+        return components
+
+    monkeypatch.setattr(
+        runtime_factory,
+        "_build_local_components",
+        build_then_change_source,
+    )
+    try:
+        with pytest.raises(AIError) as error:
+            await compose_runtime_components(
+                "workspace",
+                models=RuntimeUsageModels(),  # type: ignore[arg-type]
+                state=RuntimeState.in_memory(),
+                capabilities=(CapabilityGroup("workspace", assets=store),),
+            )
+
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+        assert store.ready
+    finally:
+        await store.close()
+        await backend.close()
 
 
 @pytest.mark.asyncio

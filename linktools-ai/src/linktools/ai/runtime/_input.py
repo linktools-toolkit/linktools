@@ -22,7 +22,7 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
-from ..workspace import normalize_workspace_path
+from ..workspace import normalize_workspace_input_path
 from ._attachment import input_attachment_views
 from .state._plan import RuntimeDomain
 from ._input_contract import (
@@ -219,7 +219,7 @@ class ExecutionInputMaterializer:
                 access = self._access
                 if access is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                canonical = normalize_workspace_path(
+                canonical = normalize_workspace_input_path(
                     await access.canonicalize_path(path)
                 )
             except AIError as error:
@@ -258,7 +258,7 @@ class ExecutionInputMaterializer:
                 # Keep request intent independent of the file's current
                 # existence; the actual read below is the authorization and
                 # freeze boundary.
-                path = normalize_workspace_path(item.path)
+                path = normalize_workspace_input_path(item.path)
             except (AIError, TypeError, ValueError) as error:
                 mapped = _file_request_error(
                     error
@@ -570,7 +570,7 @@ def _require_canonical_files(value: Sequence[str]) -> tuple[str, ...]:
     files = _require_files(value)
     for path in files:
         try:
-            canonical = normalize_workspace_path(path)
+            canonical = normalize_workspace_input_path(path)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if canonical != path:

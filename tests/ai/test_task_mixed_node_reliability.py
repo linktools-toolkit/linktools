@@ -470,7 +470,7 @@ async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed(
     group.task(v2, effect="none")
     frozen = await group.freeze()
 
-    assert {(item.kind, item.id) for item in frozen} == {
+    assert {(item.kind, item.id) for item in frozen.contributions} == {
         ("task", "example.echo@1"),
         ("task", "example.echo@2"),
     }

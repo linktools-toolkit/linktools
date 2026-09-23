@@ -11,12 +11,13 @@ from typing import TypeVar, cast
 
 from linktools.core import environ
 
-from ..asset import AssetStore
+from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
     AssetSkillResourceSource,
     CapabilityContribution,
     CapabilityGroup,
+    CapabilityGroupSnapshot,
     SkillSourceRegistry,
     TaskExpander,
     WorkspaceAccess,
@@ -32,7 +33,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import AgentSpec, MCPServerSpec
-from ..storage import ObjectStore, PayloadPolicy
+from ..storage import ObjectStore, PayloadPolicy, StorageRevision
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
     LocalRepositoryInstructionResolver,
@@ -98,7 +99,7 @@ async def compose_runtime_components(
     tenant_id: "str | None" = None,
     models: ModelRegistry,
     state: RuntimeState,
-    capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
+    capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupSnapshot[AppT]]" = (),
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
 ) -> _RuntimeComponents:
@@ -111,10 +112,25 @@ async def compose_runtime_components(
     selected_limits = PromptLimits() if limits is None else limits
     if not isinstance(selected_limits, PromptLimits):
         raise TypeError("limits must be PromptLimits")
-    groups = tuple(capabilities)
-    if any(not isinstance(group, CapabilityGroup) for group in groups):
-        raise TypeError("capabilities must contain CapabilityGroup values")
-    group_ids = tuple(group.id for group in groups)
+    sources = tuple(capabilities)
+    if any(
+        not isinstance(source, (CapabilityGroup, CapabilityGroupSnapshot))
+        for source in sources
+    ):
+        raise TypeError(
+            "capabilities must contain CapabilityGroup or CapabilityGroupSnapshot"
+        )
+    snapshots: list[CapabilityGroupSnapshot[AppT]] = []
+    for source in sources:
+        snapshot = (
+            await source.freeze()
+            if isinstance(source, CapabilityGroup)
+            else source
+        )
+        await snapshot.verify_source_revision()
+        snapshots.append(cast(CapabilityGroupSnapshot[AppT], snapshot))
+    groups = tuple(snapshots)
+    group_ids = tuple(group.group_id for group in groups)
     if len(group_ids) != len(set(group_ids)):
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
     workspace_groups = tuple(group for group in groups if group.workspace is not None)
@@ -131,10 +147,18 @@ async def compose_runtime_components(
     ownership_transferred = False
     try:
         frozen: list[CapabilityContribution[object]] = []
-        mcp_assets: dict[str, AssetStore] = {}
+        mcp_assets: dict[str, AssetStoreReader] = {}
+        mcp_revisions: dict[str, StorageRevision] = {}
+        asset_sources: dict[str, tuple[AssetStoreReader, StorageRevision]] = {}
         for group in groups:
-            values = await group.freeze()
+            values = group.contributions
             frozen.extend(values)
+            reader = group.asset_reader
+            source_revision = group.source_revision
+            if reader is not None:
+                if not isinstance(source_revision, StorageRevision):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                asset_sources[group.group_id] = (reader, source_revision)
             resource_mcp = tuple(
                 candidate
                 for candidate in values
@@ -144,23 +168,24 @@ async def compose_runtime_components(
                     and candidate.value.resource_root is not None
                 )
             )
-            if resource_mcp and group.asset_store is None:
+            if resource_mcp and reader is None:
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
                     safe_details={
                         "kind": "mcp_resource_store",
-                        "group_id": group.id,
+                        "group_id": group.group_id,
                     },
                 )
-            if group.asset_store is not None:
+            if reader is not None:
                 for candidate in resource_mcp:
-                    mcp_assets[candidate.id] = group.asset_store
+                    mcp_assets[candidate.id] = reader
+                    mcp_revisions[candidate.id] = source_revision
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
-                AssetSkillResourceSource(group.id, store)
+                AssetSkillResourceSource(group.group_id, reader)
                 for group in groups
-                if (store := group.asset_store) is not None
+                if (reader := group.asset_reader) is not None
             )
         )
         task_handlers = tuple(
@@ -251,7 +276,7 @@ async def compose_runtime_components(
         )
         authorization = TenantAuthorizationPolicy(effective_tenant_id)
         ownership_transferred = True
-        return await _build_local_components(
+        components = await _build_local_components(
             state=selected_state,
             catalog=catalog,
             compiler=compiler,
@@ -269,6 +294,8 @@ async def compose_runtime_components(
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
             mcp_assets=mcp_assets,
+            asset_sources=asset_sources,
+            mcp_revisions=mcp_revisions,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
@@ -277,6 +304,17 @@ async def compose_runtime_components(
             session_execution_ready=True,
             metrics=metrics,
         )
+        try:
+            for snapshot in groups:
+                await snapshot.verify_source_revision()
+        except BaseException as primary_error:
+            try:
+                await components.close_callback()
+            except BaseException as cleanup_error:
+                raise primary_error from cleanup_error
+            raise
+        _logger.info("runtime capability snapshots admitted: groups=%s", group_ids)
+        return components
     except BaseException:
         if not ownership_transferred:
             await _cleanup_compose_resources(
@@ -444,7 +482,9 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
-    mcp_assets: Mapping[str, AssetStore],
+    mcp_assets: Mapping[str, AssetStoreReader],
+    asset_sources: Mapping[str, tuple[AssetStoreReader, StorageRevision]],
+    mcp_revisions: Mapping[str, StorageRevision],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
@@ -492,11 +532,10 @@ async def _build_local_components(
             compiler,
             skill_sources,
             state.object_store(RuntimeDomain.EXECUTION),
-            freeze_dependencies=(
-                state.plan.route(RuntimeDomain.EXECUTION).retention
-                is RuntimeRetentionMode.DURABLE
-            ),
+            workspace=workspace,
             mcp_assets=mcp_assets,
+            asset_sources=asset_sources,
+            mcp_revisions=mcp_revisions,
         )
         execution = DefaultExecutionService(
             state.execution,

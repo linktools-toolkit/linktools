@@ -11,8 +11,7 @@ from pydantic import BaseModel
 from ..capability import (
     CapabilityContribution,
     SkillDefinition,
-    mcp_server_namespace,
-    mcp_server_selector,
+    workspace_tool_declarations,
 )
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -24,6 +23,7 @@ from ..spec import (
     SubagentRef,
     bound_agent_spec_identity_payload,
     capability_identity_payload,
+    mcp_server_selector,
     parse_mcp_tool_selector,
 )
 from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
@@ -62,14 +62,25 @@ class AgentCompiler:
         self._by_identity = {(item.kind, item.id): item for item in ordered}
         self._agents: Mapping[str, AgentSpec] = MappingProxyType(current_agents)
         self._agent_ids = tuple(sorted(current_agents))
-        self._mcp_by_namespace: dict[str, CapabilityContribution[object]] = {}
+        self._mcp_by_id: dict[str, CapabilityContribution[object]] = {}
+        server_tokens: dict[str, str] = {}
         for candidate in ordered:
+            if candidate.kind == "tool" and candidate.id.startswith("mcp__"):
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             if candidate.kind != "mcp":
                 continue
-            namespace = mcp_server_namespace(candidate.id)
-            if namespace in self._mcp_by_namespace:
+            token = canonical_sha256(
+                {
+                    "version": 1,
+                    "kind": "mcp-server-name",
+                    "server_id": candidate.id,
+                }
+            )[:24]
+            previous = server_tokens.get(token)
+            if previous is not None and previous != candidate.id:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            self._mcp_by_namespace[namespace] = candidate
+            server_tokens[token] = candidate.id
+            self._mcp_by_id[candidate.id] = candidate
 
     def compile(self, spec: AgentSpec) -> AgentDefinition:
         """Compile one current declaration from the frozen candidate universe."""
@@ -172,6 +183,7 @@ class AgentCompiler:
             selected = self._restore_selected(snapshot.selected)
             ordinary_policy, mcp_policy = self._restore_policies(
                 snapshot.agent_spec,
+                selected["tool"],
                 selected["mcp"],
             )
             definition = self._build_definition(
@@ -258,27 +270,42 @@ class AgentCompiler:
         if spec.allow_tools == ("*",):
             selected_tools = tuple(tools[name] for name in sorted(tools))
             selected_mcp = tuple(
-                sorted(self._mcp_by_namespace.values(), key=lambda item: item.id)
+                sorted(self._mcp_by_id.values(), key=lambda item: item.id)
             )
             return (
                 selected_tools,
                 selected_mcp,
                 ("*",),
-                tuple(f"{mcp_server_selector(item.id)}__*" for item in selected_mcp),
+                tuple(mcp_server_selector(item.id) for item in selected_mcp),
             )
         selected_tool_ids: set[str] = set()
         selected_mcp_by_id: dict[str, CapabilityContribution[object]] = {}
         ordinary_policy: list[str] = []
         mcp_policy: list[str] = []
+        workspace_tool_classes = {
+            declaration.name: declaration.metadata["linktools.ai.tool_class"]
+            for declaration in workspace_tool_declarations()
+        }
         for selector in spec.allow_tools:
+            workspace_classes = _workspace_selector_classes(selector)
+            if workspace_classes is not None:
+                selected_workspace_tools = {
+                    name
+                    for name in tools
+                    if workspace_tool_classes.get(name) in workspace_classes
+                }
+                selected_tool_ids.update(selected_workspace_tools)
+                ordinary_policy.extend(selected_workspace_tools)
+                continue
             parsed = parse_mcp_tool_selector(selector)
             if parsed is None:
                 ordinary_policy.append(selector)
-                if selector in tools:
-                    selected_tool_ids.add(selector)
+                if selector not in tools:
+                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                selected_tool_ids.add(selector)
                 continue
-            namespace, _tool = parsed
-            candidate = self._mcp_by_namespace.get(namespace)
+            server_id, _tool = parsed
+            candidate = self._mcp_by_id.get(server_id)
             if candidate is None:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             selected_mcp_by_id[candidate.id] = candidate
@@ -335,33 +362,46 @@ class AgentCompiler:
     def _restore_policies(
         self,
         spec: AgentSpec,
+        selected_tools: Sequence[CapabilityContribution[object]],
         selected_mcp: Sequence[CapabilityContribution[object]],
     ) -> "tuple[tuple[str, ...], tuple[str, ...]]":
         if spec.allow_tools == ("*",):
             return (
                 ("*",),
                 tuple(
-                    f"{mcp_server_selector(item.id)}__*"
+                    mcp_server_selector(item.id)
                     for item in sorted(selected_mcp, key=lambda item: item.id)
                 ),
             )
-        ordinary = tuple(
-            sorted(
-                selector
-                for selector in spec.allow_tools
-                if parse_mcp_tool_selector(selector) is None
-            )
-        )
-        allowed_namespaces = {mcp_server_namespace(item.id) for item in selected_mcp}
+        selected_tool_names = {item.id for item in selected_tools}
+        ordinary: set[str] = set()
+        workspace_tool_classes = {
+            declaration.name: declaration.metadata["linktools.ai.tool_class"]
+            for declaration in workspace_tool_declarations()
+        }
+        for selector in spec.allow_tools:
+            workspace_classes = _workspace_selector_classes(selector)
+            if workspace_classes is not None:
+                ordinary.update(
+                    item.id
+                    for item in selected_tools
+                    if item.id in selected_tool_names
+                    and workspace_tool_classes.get(item.id) in workspace_classes
+                )
+            elif parse_mcp_tool_selector(selector) is None:
+                if selector not in selected_tool_names:
+                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                ordinary.add(selector)
+        allowed_server_ids = {item.id for item in selected_mcp}
         mcp_policy = []
         for selector in spec.allow_tools:
             parsed = parse_mcp_tool_selector(selector)
             if parsed is None:
                 continue
-            if parsed[0] not in allowed_namespaces:
+            if parsed[0] not in allowed_server_ids:
                 raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
             mcp_policy.append(selector)
-        return ordinary, tuple(sorted(set(mcp_policy)))
+        return tuple(sorted(ordinary)), tuple(sorted(set(mcp_policy)))
 
     def _build_definition(
         self,
@@ -443,6 +483,20 @@ def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
     if pin.fingerprint != candidate.fingerprint:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     return pin
+
+
+def _workspace_selector_classes(
+    selector: str,
+) -> "frozenset[str] | None":
+    if selector == "file:*":
+        return frozenset({"filesystem.read", "filesystem.write"})
+    if selector == "file:read":
+        return frozenset({"filesystem.read"})
+    if selector == "file:write":
+        return frozenset({"filesystem.write"})
+    if selector == "terminal:*":
+        return frozenset({"shell"})
+    return None
 
 
 __all__ = ["AgentCompiler"]

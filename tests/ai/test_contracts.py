@@ -149,6 +149,27 @@ def test_task_graph_rejects_cycles_and_agent_spec_is_stable() -> None:
     )
 
 
+def test_task_graph_exposes_deterministic_topological_order() -> None:
+    nodes = (
+        TaskNode("late", ("right", "left")),
+        TaskNode("right", ("root",)),
+        TaskNode("independent"),
+        TaskNode("left", ("root",)),
+        TaskNode("root"),
+    )
+    graph = TaskGraph("topology", nodes)
+    shuffled = TaskGraph("topology-shuffled", tuple(reversed(nodes)))
+
+    assert graph.topological_order() == (
+        "independent",
+        "root",
+        "left",
+        "right",
+        "late",
+    )
+    assert shuffled.topological_order() == graph.topological_order()
+
+
 def test_model_registry_snapshot_is_instance_owned() -> None:
     registry = ModelRegistry()
     registry.register_openai("route", model="model")

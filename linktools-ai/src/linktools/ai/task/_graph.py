@@ -370,9 +370,10 @@ class TaskGraph:
                 "task graph contains an unknown dependency",
                 safe_details={"reason": "dependency_unknown"},
             )
-        self._topological_order()
+        self.topological_order()
 
-    def _topological_order(self) -> "tuple[str, ...]":
+    def topological_order(self) -> "tuple[str, ...]":
+        """Return the deterministic node order used to validate this DAG."""
         indegree = {node.node_id: len(node.dependencies) for node in self.nodes}
         dependents: dict[str, list[str]] = {node.node_id: [] for node in self.nodes}
         for node in self.nodes:
@@ -401,7 +402,7 @@ class TaskGraph:
             raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds node limit")
         nodes = {node.node_id: node for node in self.nodes}
         depths: dict[str, int] = {}
-        for node_id in self._topological_order():
+        for node_id in self.topological_order():
             node = nodes[node_id]
             depths[node_id] = 1 + max(
                 (depths[item] for item in node.dependencies),

@@ -93,7 +93,7 @@ def test_semantic_pin_persists_contract_once() -> None:
     assert "fingerprint" not in decoded.to_payload()
 
 
-def test_agent_binding_snapshot_ignores_unknown_fields() -> None:
+def test_agent_binding_snapshot_preserves_unknown_fields() -> None:
     payload = AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"version": 1, "id": "model"},
@@ -106,7 +106,7 @@ def test_agent_binding_snapshot_ignores_unknown_fields() -> None:
 
     decoded = AgentBindingSnapshot.from_payload(payload)
 
-    assert "future" not in decoded.to_payload()
+    assert decoded.to_payload()["future"] == 3
 
 
 class _AllowAuthorization:

@@ -3,13 +3,15 @@
 """Workspace filesystem and process execution boundary."""
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
+from ._paths import validate_workspace_path
 
 
 class SandboxOperationRejected(AIError):
@@ -47,15 +49,20 @@ class SandboxOperationRejected(AIError):
 class SandboxResource:
     """One explicitly authorized read-only directory exposed to a session."""
 
-    key: str
+    id: str
     source: Path
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.key, str)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", self.key)
+            not isinstance(self.id, str)
+            or not self.id
+            or not self.id.strip()
         ):
-            raise ValueError("sandbox resource key is invalid")
+            raise ValueError("sandbox resource id is invalid")
+        try:
+            self.id.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as error:
+            raise ValueError("sandbox resource id is invalid") from error
         if not isinstance(self.source, Path):
             raise TypeError("sandbox resource source must be a Path")
         source = self.source
@@ -126,7 +133,7 @@ class SandboxSession(Protocol):
     Ordinary ``AIError`` values carry no effect-certainty guarantee.
     """
 
-    def resource_path(self, key: str) -> str: ...
+    def resource_path(self, resource_id: str) -> "str | None": ...
 
     async def canonicalize_path(self, path: str) -> str: ...
 
@@ -199,7 +206,51 @@ class SandboxSession(Protocol):
     async def close(self) -> None: ...
 
 
-def normalize_workspace_path(path: str) -> str:
+@dataclass(frozen=True, slots=True)
+class SandboxResourcePath:
+    """One file path inside a resource explicitly granted to a process."""
+
+    resource_id: str
+    path: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resource_id, str) or not self.resource_id:
+            raise ValueError("sandbox resource id is invalid")
+        try:
+            validate_workspace_path(self.path)
+        except (TypeError, ValueError) as error:
+            raise ValueError("sandbox resource path is invalid") from error
+        if self.path == ".":
+            raise ValueError("sandbox resource path must name a file")
+
+
+class SandboxStdioProcess(Protocol):
+    async def write_stdin(self, data: bytes) -> None: ...
+
+    async def read_stdout(self, max_bytes: int = 65536) -> bytes: ...
+
+    async def close_stdin(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
+class StdioSandbox(Sandbox, Protocol):
+    def stdio_execution_policy(self) -> Mapping[str, JsonValue]: ...
+
+
+@runtime_checkable
+class StdioSandboxSession(SandboxSession, Protocol):
+    async def open_stdio_process(
+        self,
+        command: str,
+        args: "Sequence[str | SandboxResourcePath]" = (),
+        *,
+        resources: "Sequence[SandboxResource]" = (),
+    ) -> SandboxStdioProcess: ...
+
+
+def normalize_workspace_input_path(path: str) -> str:
     """Normalize one logical workspace-relative POSIX path."""
     if not isinstance(path, str) or "\x00" in path or "\\" in path:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -220,7 +271,11 @@ def normalize_workspace_path(path: str) -> str:
         if part == "..":
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         parts.append(part)
-    return "." if not parts else "/".join(parts)
+    normalized = "." if not parts else "/".join(parts)
+    try:
+        return validate_workspace_path(normalized)
+    except ValueError as error:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
 
 
 class DisabledSandbox:
@@ -310,7 +365,11 @@ __all__ = [
     "Sandbox",
     "SandboxOperationRejected",
     "SandboxResource",
+    "SandboxResourcePath",
     "SandboxSession",
+    "SandboxStdioProcess",
+    "StdioSandbox",
+    "StdioSandboxSession",
     "ReadOnlySandboxPolicy",
-    "normalize_workspace_path",
+    "normalize_workspace_input_path",
 ]

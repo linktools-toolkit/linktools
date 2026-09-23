@@ -93,6 +93,24 @@ def _snapshot() -> AgentBindingSnapshot:
     )
 
 
+def test_binding_round_trip_preserves_nonsemantic_wire_extensions() -> None:
+    original = _snapshot()
+    payload = original.to_payload()
+    agent_spec = dict(payload["agent_spec"])
+    agent_spec["future_display_note"] = {"source": "declaration"}
+    payload["agent_spec"] = agent_spec
+    payload["future_binding_note"] = {"source": "envelope"}
+
+    restored = AgentBindingSnapshot.from_payload(payload)
+    written = restored.to_payload()
+
+    assert written["agent_spec"]["future_display_note"] == {
+        "source": "declaration"
+    }
+    assert written["future_binding_note"] == {"source": "envelope"}
+    assert restored.binding_digest == original.binding_digest
+
+
 def _execution(
     *,
     binding: AgentBindingSnapshot | None = None,
@@ -146,6 +164,7 @@ def test_skill_snapshot_semantics_ignore_physical_store_id() -> None:
             "application",
             "review",
             ObjectRef("store-a", "skill/snapshot", "a" * 64, 1),
+            "b" * 64,
         ),
     )
     second = SkillDefinition(
@@ -154,6 +173,7 @@ def test_skill_snapshot_semantics_ignore_physical_store_id() -> None:
             "application",
             "review",
             ObjectRef("store-b", "skill/snapshot", "a" * 64, 1),
+            "b" * 64,
         ),
     )
 
@@ -177,6 +197,7 @@ def test_skill_snapshot_identity_ignores_integrity_size() -> None:
                 "application",
                 "review",
                 ObjectRef("store", "skill/snapshot", "a" * 64, 1),
+                "b" * 64,
             ),
         ).semantic_contract,
     )
@@ -189,6 +210,7 @@ def test_skill_snapshot_identity_ignores_integrity_size() -> None:
                 "application",
                 "review",
                 ObjectRef("store", "skill/snapshot", "a" * 64, 2),
+                "b" * 64,
             ),
         ).semantic_contract,
     )
@@ -207,6 +229,7 @@ def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
                 "source": {
                     "source_id": "application",
                     "root": "review",
+                    "resource_semantic_digest": "b" * 64,
                     "snapshot": {
                         "store_id": 1,
                         "key": "snapshot",
@@ -229,6 +252,7 @@ def test_skill_snapshot_reference_defaults_store_id_to_runtime() -> None:
             "source": {
                 "source_id": "application",
                 "root": "review",
+                "resource_semantic_digest": "b" * 64,
                 "snapshot": {
                     "key": "snapshot",
                     "digest": "a" * 64,
@@ -258,6 +282,7 @@ def test_binding_object_dependency_scan_defaults_skill_store_id() -> None:
             "source": {
                 "source_id": "application",
                 "root": "review",
+                "resource_semantic_digest": "b" * 64,
                 "snapshot": {
                     "key": "snapshot",
                     "digest": "a" * 64,

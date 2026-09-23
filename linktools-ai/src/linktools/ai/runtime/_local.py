@@ -1110,7 +1110,7 @@ class LocalExecutionBackend:
             "local execution worker failed: execution=%s code=%s",
             execution_id,
             failure.code.value,
-            exc_info=environ.debug,
+            exc_info=True,
         )
         self._live_broker.complete(execution_id)
 
@@ -3008,7 +3008,7 @@ class LocalExecutionBackend:
                     execution_id,
                     current.error_code,
                     current.safe_error_details,
-                    exc_info=environ.debug,
+                    exc_info=True,
                 )
                 return
             if isinstance(result, DeferredToolRequests):
@@ -4461,7 +4461,7 @@ class LocalExecutionBackend:
                         "local terminal finalization failed after durable commit: "
                         "execution=%s",
                         current.execution_id,
-                        exc_info=environ.debug,
+                        exc_info=True,
                     )
                     if plan is not None:
                         try:
@@ -4475,7 +4475,7 @@ class LocalExecutionBackend:
                                 "local terminal seal reconciliation failed after "
                                 "durable commit: execution=%s",
                                 current.execution_id,
-                                exc_info=environ.debug,
+                                exc_info=True,
                             )
                 return committed
             except BaseException as error:

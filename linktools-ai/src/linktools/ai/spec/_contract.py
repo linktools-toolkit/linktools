@@ -3,6 +3,7 @@
 """Immutable declaration contracts for Agent, Skill, and MCP specifications."""
 
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import ClassVar, Literal
@@ -12,37 +13,52 @@ from ..core import (
     ThinkingEffort,
     ThinkingValue,
     normalize_thinking,
+    validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
 
-_MCP_NAMESPACE = re.compile(r"^[A-Za-z0-9_-]+$")
+_SELECTOR_SAFE_BYTES = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
 
 
 def parse_mcp_tool_selector(selector: str) -> "tuple[str, str | None] | None":
-    """Parse one MCP selector into its namespace and optional exact tool."""
-    if not isinstance(selector, str) or not selector.startswith("mcp__"):
+    """Parse one canonical MCP selector into its server and optional tool."""
+    if not isinstance(selector, str) or not selector.startswith("mcp:"):
         return None
-    parts = selector[5:].split("__")
-    if len(parts) == 1:
-        namespace = parts[0]
-        tool = None
-    elif len(parts) == 2:
-        namespace, tool = parts
-        if not tool or tool == "*":
-            if tool != "*":
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            tool = None
-    else:
+    parts = selector.split(":")
+    if len(parts) != 3 or parts[0] != "mcp":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    if not namespace or _MCP_NAMESPACE.fullmatch(namespace) is None:
+    server_id = _decode_selector_component(parts[1])
+    if not server_id or not server_id.strip():
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    if tool is not None and (
-        not tool
-        or tool != tool.strip()
-        or "*" in tool
-    ):
+    if parts[2] == "*":
+        return server_id, None
+    tool_name = _decode_selector_component(parts[2])
+    if not tool_name or tool_name != tool_name.strip() or _has_control(tool_name):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return namespace, tool
+    return server_id, tool_name
+
+
+def mcp_server_selector(server_id: str) -> str:
+    """Return the selector for every tool from one MCP server."""
+    if not isinstance(server_id, str) or not server_id.strip():
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return f"mcp:{_encode_selector_component(server_id)}:*"
+
+
+def mcp_tool_selector(server_id: str, tool_name: str) -> str:
+    """Return the selector for one exact upstream MCP tool."""
+    if not isinstance(server_id, str) or not server_id.strip():
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if not isinstance(tool_name, str) or not tool_name:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    if tool_name != tool_name.strip() or _has_control(tool_name):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return (
+        f"mcp:{_encode_selector_component(server_id)}:"
+        f"{_encode_selector_component(tool_name)}"
+    )
 
 
 def canonical_selectors(
@@ -54,25 +70,48 @@ def canonical_selectors(
     if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} must be an array of strings")
     selectors: set[str] = set()
+    has_all = False
     for raw in value:
         if not isinstance(raw, str) or not raw or raw != raw.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid selector")
         if raw == "*":
-            return ("*",)
+            has_all = True
+            continue
+        workspace_selector = raw in {
+            "file:*",
+            "file:read",
+            "file:write",
+            "terminal:*",
+        }
+        if (
+            raw.startswith(("file:", "terminal:"))
+            and not workspace_selector
+        ):
+            raise AIError(
+                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                f"{field_name} contains an unsupported selector",
+            )
+        if workspace_selector and not mcp:
+            raise AIError(
+                ErrorCode.CAPABILITY_RESOLUTION_INVALID,
+                f"{field_name} contains an invalid selector",
+            )
         if not mcp and "*" in raw:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid selector")
         selector = raw
         parsed = parse_mcp_tool_selector(raw) if mcp else None
         if parsed is not None:
-            namespace, tool = parsed
+            server_id, tool_name = parsed
             selector = (
-                f"mcp__{namespace}__*"
-                if tool is None
-                else f"mcp__{namespace}__{tool}"
+                mcp_server_selector(server_id)
+                if tool_name is None
+                else mcp_tool_selector(server_id, tool_name)
             )
-        elif "*" in raw:
+        elif raw.startswith("mcp__") or ("*" in raw and not workspace_selector):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid selector")
         selectors.add(selector)
+    if has_all:
+        return ("*",)
     if mcp:
         wildcard_servers = {
             parsed[0]
@@ -90,6 +129,53 @@ def canonical_selectors(
             )
         }
     return tuple(sorted(selectors))
+
+
+def _encode_selector_component(value: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    try:
+        payload = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    return "".join(
+        chr(byte) if byte in _SELECTOR_SAFE_BYTES else f"%{byte:02X}"
+        for byte in payload
+    )
+
+
+def _decode_selector_component(value: str) -> str:
+    if not value:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    payload = bytearray()
+    index = 0
+    while index < len(value):
+        character = value[index]
+        if character == "%":
+            if index + 2 >= len(value):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            encoded = value[index + 1 : index + 3]
+            if re.fullmatch(r"[0-9A-Fa-f]{2}", encoded) is None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            payload.append(int(encoded, 16))
+            index += 3
+            continue
+        try:
+            encoded = character.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        if encoded[0] not in _SELECTOR_SAFE_BYTES:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        payload.extend(encoded)
+        index += 1
+    try:
+        return payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+
+
+def _has_control(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +206,7 @@ class AgentUsageLimits:
 class AgentSpec:
     """Durable, runtime-independent declaration of one Agent."""
 
-    DEFAULT_TOOL_RETRIES: ClassVar[int] = 10000
+    DEFAULT_TOOL_RETRIES: ClassVar[int] = 10
     DEFAULT_OUTPUT_RETRIES: ClassVar[int] = 3
 
     id: str
@@ -140,10 +226,7 @@ class AgentSpec:
     preload_skills: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, str):
-            raise TypeError("agent id must be a string")
-        if not self.id.strip():
-            raise ValueError("agent id must be non-empty")
+        validate_logical_id(self.id)
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("agent model must be a non-empty string")
         if not isinstance(self.system_prompt, str):
@@ -204,8 +287,7 @@ class SkillSpec:
     description: "str | None" = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.id, str) or not self.id.strip():
-            raise ValueError("skill id must be non-empty")
+        validate_logical_id(self.id)
         if not isinstance(self.content, str):
             raise TypeError("skill content must be a string")
         if self.description is not None and (
@@ -223,8 +305,12 @@ class SubagentRef:
     description: "str | None" = None
 
     def __post_init__(self) -> None:
-        if self.kind != "agent" or not isinstance(self.id, str) or not self.id.strip():
+        if self.kind != "agent":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            validate_logical_id(self.id)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if self.description is not None and (
             not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
         ):
@@ -246,8 +332,6 @@ class SubagentRef:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         identity = value.get("id")
         description = value.get("description")
-        if not isinstance(identity, str) or not identity.strip():
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if description is not None and not isinstance(description, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return cls("agent", identity, description)
@@ -284,6 +368,8 @@ __all__ = [
     "ThinkingEffort",
     "ThinkingValue",
     "canonical_selectors",
+    "mcp_server_selector",
+    "mcp_tool_selector",
     "normalize_thinking",
     "parse_mcp_tool_selector",
 ]

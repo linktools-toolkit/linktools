@@ -6,7 +6,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pytest
-from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
+from linktools.ai.asset import (
+    AssetKey,
+    AssetStore,
+    AssetStoreReader,
+    InMemoryAssetBackend,
+)
 from linktools.ai.capability import (
     CapabilityContribution,
     CapabilityGroup,
@@ -42,13 +47,36 @@ async def test_builtin_loader_freezes_agent_skill_and_mcp_declarations() -> None
 
     frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
-    assert [(item.kind, item.id) for item in frozen] == [
+    assert [(item.kind, item.id) for item in frozen.contributions] == [
         ("agent", "agent"),
         ("mcp", "server"),
         ("skill", "skill"),
     ]
-    assert [item.value for item in frozen] == [agent, mcp, SkillDefinition(skill)]
-    assert all("semantic_revision" not in item.semantic_contract for item in frozen)
+    assert [item.value for item in frozen.contributions] == [
+        agent,
+        mcp,
+        SkillDefinition(skill),
+    ]
+    assert all(
+        "semantic_revision" not in item.semantic_contract
+        for item in frozen.contributions
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_snapshot_exposes_only_read_only_asset_access() -> None:
+    store = await _store()
+    key = AssetKey("custom", "file")
+    await store.put(key, b"contents")
+
+    snapshot = await CapabilityGroup("workspace", assets=store).freeze()
+    reader = snapshot.asset_reader
+
+    assert isinstance(reader, AssetStoreReader)
+    assert reader is not None
+    assert not hasattr(snapshot, "asset_store")
+    assert not hasattr(reader, "put")
+    assert await reader.get(key) == b"contents"
 
 
 @pytest.mark.asyncio
@@ -105,7 +133,7 @@ async def test_custom_loader_receives_frozen_metadata_and_reads_explicit_keys_on
     group = CapabilityGroup("workspace", assets=store)
     group.loader("custom", loader)
 
-    assert await group.freeze() == ()
+    assert (await group.freeze()).contributions == ()
     assert loader.calls == 1
     assert [entry.key for entry in loader.entries] == [AssetKey("custom", "a"), AssetKey("custom", "b")]
     assert loader.read_value == b"a"
@@ -128,7 +156,7 @@ async def test_replacing_skill_loader_disables_builtin_skill_layout_validation()
     group = CapabilityGroup("workspace", assets=store)
     group.loader("skill", _NoopLoader())
 
-    assert await group.freeze() == ()
+    assert (await group.freeze()).contributions == ()
 
 
 class _ForeignSkillSourceLoader:
@@ -212,7 +240,7 @@ async def test_custom_loader_cannot_read_key_outside_frozen_metadata() -> None:
 
     with pytest.raises(AIError) as error:
         await group.freeze()
-    assert error.value.code is ErrorCode.STORAGE_CONFLICT
+    assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
 
 
 @dataclass
@@ -271,15 +299,34 @@ class _RaceStore(AssetStore):
 
 
 @pytest.mark.asyncio
-async def test_freeze_ignores_assets_added_after_the_captured_snapshot() -> None:
+async def test_freeze_rejects_assets_added_during_declaration_loading() -> None:
     backend = InMemoryAssetBackend()
     store = _RaceStore(backend)
     await store.initialize()
     await store.put(AssetKey("skill", "first"), SkillSpecCodec().encode(SkillSpec("first", "first")))
 
-    frozen = await CapabilityGroup("workspace", assets=store).freeze()
+    with pytest.raises(AIError) as error:
+        await CapabilityGroup("workspace", assets=store).freeze()
 
-    assert [item.id for item in frozen] == ["first"]
+    assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_group_snapshot_rejects_source_changes_before_admission() -> None:
+    store = await _store()
+    await store.put(
+        AssetKey("agent", "agent"),
+        AgentSpecCodec().encode(AgentSpec("agent", model="model")),
+    )
+    snapshot = await CapabilityGroup("workspace", assets=store).freeze()
+    await store.put(AssetKey("other", "late"), b"changed")
+
+    with pytest.raises(AIError) as error:
+        await snapshot.verify_source_revision()
+
+    assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    updated = await CapabilityGroup("workspace", assets=store).freeze()
+    assert updated.source_revision != snapshot.source_revision
 
 
 class _BatchReadStore(AssetStore):
@@ -324,7 +371,11 @@ async def test_builtin_loader_batches_declaration_body_reads() -> None:
 
     frozen = await CapabilityGroup("workspace", assets=store).freeze()
 
-    assert [item.id for item in frozen] == ["agent", "server", "skill"]
+    assert [item.id for item in frozen.contributions] == [
+        "agent",
+        "server",
+        "skill",
+    ]
     assert len(store.batch_reads) == 3
     assert tuple(store.batch_reads) == (
         (AssetKey("agent", "agent"),),

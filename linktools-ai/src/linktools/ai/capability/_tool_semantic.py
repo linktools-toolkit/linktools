@@ -106,7 +106,7 @@ def validate_tool_semantic_metadata(
 
     path_fields = metadata.get(TOOL_PATH_FIELDS_METADATA_KEY)
     if path_fields is not None or TOOL_PATH_FIELDS_METADATA_KEY in metadata:
-        if not isinstance(path_fields, list):
+        if not isinstance(path_fields, (list, tuple)):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if any(
             not isinstance(field, str) or not field
@@ -151,7 +151,7 @@ def tool_path_fields_from_metadata(
 ) -> tuple[str, ...]:
     validate_tool_semantic_metadata(metadata)
     value = None if metadata is None else metadata.get(TOOL_PATH_FIELDS_METADATA_KEY)
-    return () if value is None else tuple(cast(list[str], value))
+    return () if value is None else tuple(cast(Sequence[str], value))
 
 
 def tool_compaction_keep_result_from_metadata(

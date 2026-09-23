@@ -47,6 +47,35 @@ class _LocalPathAssetBackend(Protocol):
     def local_path(self, key: AssetKey) -> Path: ...
 
 
+@runtime_checkable
+class AssetStoreReader(Protocol):
+    """Read-only AssetStore operations used by declaration snapshots."""
+
+    async def current_revision(self) -> StorageRevision: ...
+
+    async def get(self, key: AssetKey) -> "bytes | None": ...
+
+    async def get_many(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[bytes | None, ...]": ...
+
+    async def local_paths(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[Path | None, ...]": ...
+
+    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]": ...
+
+    async def snapshot(
+        self,
+        keys: Sequence[AssetKey],
+        *,
+        object_store: ObjectStore,
+        expected_revision: "StorageRevision | None" = None,
+    ) -> ObjectRef: ...
+
+
 class AssetCacheAdapter:
     """Cache raw Asset file bytes using immutable metadata."""
 

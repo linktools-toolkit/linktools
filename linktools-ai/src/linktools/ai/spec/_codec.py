@@ -5,11 +5,11 @@
 import json
 import re
 from collections.abc import Mapping
-from typing import Protocol, TypeVar, cast
+from typing import Literal, Protocol, TypeVar, cast
 
 import yaml
 
-from ..core import JsonValue
+from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..asset import AssetKey
 from ..storage import ObjectRef
@@ -24,8 +24,32 @@ _USAGE_LIMIT_FIELDS = (
     "output_tokens",
     "total_tokens",
 )
-
-
+_AGENT_AUTHOR_FIELDS = frozenset(
+    {
+        "id",
+        "model",
+        "instructions",
+        "allow_tools",
+        "allow_skills",
+        "allow_subagents",
+        "allow_capabilities",
+        "usage_limits",
+        "planning",
+        "thinking",
+        "tool_retries",
+        "output_retries",
+        "description",
+        "preload_skills",
+        "system_prompt",
+        "version",
+    }
+)
+_MCP_AUTHOR_FIELDS = frozenset(
+    {"version", "id", "command", "args", "resource_root"}
+)
+_SKILL_AUTHOR_FIELDS = frozenset(
+    {"version", "id", "content", "description"}
+)
 class SpecCodec(Protocol[SpecT]):
     def encode(self, value: SpecT) -> bytes: ...
     def decode(self, data: bytes) -> SpecT: ...
@@ -72,6 +96,7 @@ class AgentSpecCodec:
 
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
         _require_v1(raw)
+        _require_usage_limit_fields(raw.get("usage_limits"))
         identity = raw.get("id")
         model = raw.get("model", "default")
         system_prompt = raw.get("system_prompt", "")
@@ -147,6 +172,18 @@ class AgentSpecCodec:
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
 
+    def from_author_payload(self, raw: Mapping[str, object]) -> AgentSpec:
+        """Strictly decode one canonical authoring payload."""
+        _require_author_fields(raw, _AGENT_AUTHOR_FIELDS)
+        _require_usage_limit_fields(raw.get("usage_limits"))
+        if "version" not in raw:
+            raw = {**raw, "version": _VERSION}
+        return self.from_payload(raw)
+
+    def decode_author_mapping(self, data: bytes) -> dict[str, object]:
+        """Decode a strict JSON author mapping for contextual adapters."""
+        return decode_author_json_mapping(data)
+
     def encode(self, value: AgentSpec) -> bytes:
         return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
 
@@ -190,6 +227,15 @@ class SkillSpecCodec:
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
+
+    def from_author_payload(self, raw: Mapping[str, object]) -> SkillSpec:
+        """Decode one strict flat Skill declaration."""
+        _require_author_fields(raw, _SKILL_AUTHOR_FIELDS)
+        return self.from_payload(raw)
+
+    def decode_author(self, data: bytes) -> SkillSpec:
+        """Decode one strict JSON Skill declaration."""
+        return self.from_author_payload(decode_author_json_mapping(data))
 
     def encode(self, value: SkillSpec) -> bytes:
         return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
@@ -286,17 +332,26 @@ class MCPServerSpecCodec:
         self,
         value: MCPServerSpec,
         resource_snapshot: ObjectRef | None,
+        *,
+        resource_semantic_digest: "str | None" = None,
+        execution_policy: "Mapping[str, JsonValue] | None" = None,
     ) -> "dict[str, JsonValue]":
         payload = self.to_payload(value)
+        if execution_policy is not None:
+            payload["execution_policy"] = _execution_policy_payload(
+                execution_policy
+            )
         if value.resource_root is None:
-            if resource_snapshot is not None:
+            if resource_snapshot is not None or resource_semantic_digest is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
         if not isinstance(resource_snapshot, ObjectRef):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _require_digest(resource_semantic_digest)
         payload["args"] = None
         payload["frozen_args"] = list(value.args)
         payload["resource_snapshot"] = _object_ref_payload(resource_snapshot)
+        payload["resource_semantic_digest"] = resource_semantic_digest
         return payload
 
     def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
@@ -307,6 +362,51 @@ class MCPServerSpecCodec:
         if resource_snapshot is not None:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return value
+
+    def decode_author(
+        self,
+        data: bytes,
+        *,
+        format: Literal["json", "yaml"],
+        package_id: "str | None" = None,
+    ) -> MCPServerSpec:
+        """Decode a strict flat or package MCP declaration."""
+        if format not in {"json", "yaml"}:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        raw = (
+            decode_author_json_mapping(data)
+            if format == "json"
+            else decode_author_yaml_mapping(data)
+        )
+        _require_author_fields(raw, _MCP_AUTHOR_FIELDS)
+        version = raw.get("version")
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version != _VERSION
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        identity = raw.get("id")
+        if package_id is None:
+            if not isinstance(identity, str) or not identity.strip():
+                raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        elif "id" in raw and identity != package_id:
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+        resource_root = raw.get("resource_root")
+        if resource_root is not None and (
+            not isinstance(resource_root, Mapping)
+            or set(resource_root) != {"kind", "id"}
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        payload = dict(raw)
+        if package_id is not None:
+            payload["id"] = package_id
+            package_root = {"kind": "mcp", "id": package_id}
+            explicit_root = payload.get("resource_root")
+            if "resource_root" in raw and explicit_root != package_root:
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+            payload["resource_root"] = package_root
+        return self.from_payload(payload)
 
     def from_frozen_payload(
         self,
@@ -322,7 +422,10 @@ class MCPServerSpecCodec:
     ) -> "tuple[MCPServerSpec, ObjectRef | None]":
         _require_v1(raw)
         if not frozen and (
-            "resource_snapshot" in raw or "frozen_args" in raw
+            "resource_snapshot" in raw
+            or "frozen_args" in raw
+            or "resource_semantic_digest" in raw
+            or "execution_policy" in raw
         ):
             raise AIError(
                 ErrorCode.OUTPUT_CONTRACT_INVALID,
@@ -335,7 +438,11 @@ class MCPServerSpecCodec:
         resource_snapshot = (
             _decode_object_ref(raw_snapshot) if raw_snapshot is not None else None
         )
+        if frozen and "execution_policy" in raw:
+            _execution_policy_payload(raw["execution_policy"])
         if resource_snapshot is None:
+            if frozen and "resource_semantic_digest" in raw:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if frozen and "frozen_args" in raw:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             args = raw.get("args", [])
@@ -343,6 +450,7 @@ class MCPServerSpecCodec:
             if resource_root is None or raw.get("args") is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             args = raw.get("frozen_args")
+            _require_digest(raw.get("resource_semantic_digest"))
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")
         if not isinstance(command, str) or not command.strip():
@@ -380,10 +488,48 @@ def _object_ref_payload(value: ObjectRef) -> dict[str, JsonValue]:
     }
 
 
+def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    policy = dict(cast(Mapping[str, object], value))
+    boundary = policy.get("boundary")
+    if boundary == "host-stdio":
+        if policy != {"version": 1, "boundary": "host-stdio"}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return {"version": 1, "boundary": "host-stdio"}
+    expected = {
+        "version",
+        "boundary",
+        "workspace_access",
+        "hidden_paths",
+        "network",
+    }
+    hidden_paths = policy.get("hidden_paths")
+    if (
+        set(policy) != expected
+        or policy.get("version") != 1
+        or isinstance(policy.get("version"), bool)
+        or boundary != "workspace-stdio"
+        or policy.get("workspace_access") not in {"read", "read_write", "none"}
+        or policy.get("network") != "isolated"
+        or not isinstance(hidden_paths, list)
+        or any(not isinstance(path, str) or not path for path in hidden_paths)
+        or hidden_paths != sorted(set(hidden_paths))
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return {
+        "version": 1,
+        "boundary": "workspace-stdio",
+        "workspace_access": cast(str, policy["workspace_access"]),
+        "hidden_paths": list(cast(list[str], hidden_paths)),
+        "network": "isolated",
+    }
+
+
 def _decode_asset_key(value: object) -> AssetKey | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping):
+    if not isinstance(value, Mapping) or set(value) != {"kind", "id"}:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid")
     kind = value.get("kind")
     identity = value.get("id")
@@ -398,7 +544,12 @@ def _decode_asset_key(value: object) -> AssetKey | None:
 def _decode_object_ref(value: object) -> ObjectRef | None:
     if value is None:
         return None
-    if not isinstance(value, Mapping):
+    if not isinstance(value, Mapping) or set(value) != {
+        "store_id",
+        "key",
+        "digest",
+        "size",
+    }:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid")
     store_id = value.get("store_id")
     key = value.get("key")
@@ -428,6 +579,78 @@ def _decode(data: bytes) -> "dict[str, object]":
     return value
 
 
+def decode_author_json_mapping(data: bytes) -> dict[str, object]:
+    """Decode an author JSON object while rejecting duplicate keys."""
+    try:
+        value = json.loads(
+            data.decode("utf-8"),
+            object_pairs_hook=_strict_json_mapping,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    if not isinstance(value, dict):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return value
+
+
+def decode_author_yaml_mapping(data: bytes) -> dict[str, object]:
+    """Decode finite JSON-shaped YAML with duplicate and merge keys rejected."""
+    try:
+        text = data.decode("utf-8", errors="strict")
+        value = yaml.load(text, Loader=_StrictSafeLoader)
+        normalized = normalize_json_value(value)
+    except AIError:
+        raise
+    except (UnicodeDecodeError, yaml.YAMLError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    if not isinstance(normalized, dict):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    return cast(dict[str, object], normalized)
+
+
+def _strict_json_mapping(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"unsupported JSON constant: {value}")
+
+
+def _require_author_fields(
+    raw: Mapping[str, object],
+    allowed: frozenset[str],
+) -> None:
+    if not isinstance(raw, Mapping) or any(
+        not isinstance(key, str) or key not in allowed for key in raw
+    ):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+
+
+def _require_usage_limit_fields(value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) or key not in _USAGE_LIMIT_FIELDS
+        for key in value
+    ):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+
+
+def _require_digest(value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
 def _require_version(raw: Mapping[str, object], supported: set[int]) -> int:
     version = raw.get("version")
     if version is None:
@@ -446,6 +669,7 @@ def _require_v1(raw: Mapping[str, object]) -> None:
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
     if value is None:
         return None
+    _require_usage_limit_fields(value)
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits must be an object or null")
     if any(not isinstance(name, str) for name in value):
@@ -467,6 +691,8 @@ class _StrictSafeLoader(yaml.SafeLoader):
 def _construct_mapping(loader: _StrictSafeLoader, node: yaml.nodes.MappingNode, deep: bool = False) -> dict[object, object]:
     mapping: dict[object, object] = {}
     for key_node, value_node in node.value:
+        if key_node.tag == "tag:yaml.org,2002:merge":
+            raise ValueError("YAML merge keys are not supported")
         key = loader.construct_object(key_node, deep=deep)
         if key in mapping:
             raise ValueError("duplicate YAML key")

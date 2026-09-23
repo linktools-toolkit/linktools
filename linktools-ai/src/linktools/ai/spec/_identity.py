@@ -222,6 +222,11 @@ def _capability_semantic(
 
 def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
     result = _fields(contract, ("version", "id", "command"))
+    execution_policy = contract.get("execution_policy")
+    if execution_policy is not None:
+        result["execution_policy"] = _execution_policy_semantic(
+            execution_policy
+        )
     resource_root = contract.get("resource_root")
     resource_snapshot = contract.get("resource_snapshot")
     frozen_args = contract.get("frozen_args")
@@ -240,6 +245,8 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
     if resource_root is None:
         if resource_snapshot is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if contract.get("resource_semantic_digest") is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
     if not isinstance(resource_root, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -253,22 +260,45 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         "id": resource_root["id"],
     }
     if resource_snapshot is None:
+        if contract.get("resource_semantic_digest") is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
     if not isinstance(resource_snapshot, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    digest = resource_snapshot.get("digest")
-    size = resource_snapshot.get("size")
+    digest = contract.get("resource_semantic_digest")
+    if not _is_digest(digest):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    result["resource_semantic_digest"] = digest
+    return result
+
+
+def _execution_policy_semantic(value: JsonValue) -> "dict[str, JsonValue]":
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    policy = dict(cast(Mapping[str, JsonValue], value))
+    if policy == {"version": 1, "boundary": "host-stdio"}:
+        return policy
+    hidden_paths = policy.get("hidden_paths")
     if (
-        not isinstance(digest, str)
-        or len(digest) != 64
-        or any(character not in "0123456789abcdef" for character in digest)
-        or isinstance(size, bool)
-        or not isinstance(size, int)
-        or size < 0
+        set(policy)
+        != {
+            "version",
+            "boundary",
+            "workspace_access",
+            "hidden_paths",
+            "network",
+        }
+        or policy.get("version") != 1
+        or isinstance(policy.get("version"), bool)
+        or policy.get("boundary") != "workspace-stdio"
+        or policy.get("workspace_access") not in {"read", "read_write", "none"}
+        or policy.get("network") != "isolated"
+        or not isinstance(hidden_paths, list)
+        or any(not isinstance(path, str) or not path for path in hidden_paths)
+        or hidden_paths != sorted(set(hidden_paths))
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    result["resource_snapshot"] = {"digest": digest, "size": size}
-    return result
+    return policy
 
 
 def _agent_spec_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
@@ -368,8 +398,13 @@ def _skill_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]"
     source_projection = _fields(source_value, ("source_id", "root"))
     snapshot = source_value.get("snapshot")
     if snapshot is not None:
-        snapshot_value = _mapping(snapshot)
-        source_projection["snapshot"] = _fields(snapshot_value, ("digest",))
+        _mapping(snapshot)
+        digest = source_value.get("resource_semantic_digest")
+        if not _is_digest(digest):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        source_projection["resource_semantic_digest"] = digest
+    elif source_value.get("resource_semantic_digest") is not None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result["source"] = source_projection
     return result
 
@@ -399,6 +434,14 @@ def _fields(
     if any(name not in value for name in names):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return {name: value[name] for name in names}
+
+
+def _is_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _mapping(value: object) -> "dict[str, JsonValue]":

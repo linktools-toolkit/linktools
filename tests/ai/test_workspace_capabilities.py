@@ -7,14 +7,17 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
     CapabilityGroup,
     ToolCallFailed,
     tool_class_from_metadata,
     workspace_capabilities,
+    workspace_tool_declarations,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelRegistry
 from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.runtime._tool_boundary import (
@@ -198,18 +201,18 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
 
     assert tuple(item.id for item in contributions) == (
         "attach_files",
+        "check_command",
         "create_directory",
         "edit_file",
         "file_info",
         "find_files",
         "list_directory",
         "read_file",
-        "search_files",
-        "write_file",
-        "check_command",
         "run_command",
+        "search_files",
         "start_command",
         "stop_command",
+        "write_file",
     )
     assert all(item.kind == "tool" for item in contributions)
     assert all(len(item.fingerprint) == 64 for item in contributions)
@@ -218,22 +221,91 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         for item in contributions
     ) == (
         "filesystem.read",
+        "shell",
         "filesystem.write",
         "filesystem.write",
         "filesystem.read",
         "filesystem.read",
         "filesystem.read",
         "filesystem.read",
+        "shell",
         "filesystem.read",
+        "shell",
+        "shell",
         "filesystem.write",
-        "shell",
-        "shell",
-        "shell",
-        "shell",
     )
     assert tuple(item.fingerprint for item in contributions) == tuple(
         item.fingerprint for item in _workspace_tool_contributions(workspace)
     )
+
+
+@pytest.mark.parametrize(
+    ("selectors", "tool_classes"),
+    (
+        (("file:read",), {"filesystem.read"}),
+        (("file:write",), {"filesystem.write"}),
+        (("file:*",), {"filesystem.read", "filesystem.write"}),
+        (("terminal:*",), {"shell"}),
+        (("file:read", "read_file"), {"filesystem.read"}),
+    ),
+)
+@pytest.mark.asyncio
+async def test_workspace_selector_expands_registered_tool_declarations(
+    tmp_path: Path,
+    selectors: tuple[str, ...],
+    tool_classes: set[str],
+) -> None:
+    workspace = Workspace.load(tmp_path)
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).freeze()
+    spec = AgentSpec(
+        "agent",
+        allow_tools=selectors,
+        allow_skills=(),
+        allow_subagents=(),
+        allow_capabilities=(),
+    )
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=snapshot.contributions,
+        agents={"agent": spec},
+    )
+
+    definition = compiler.compile(spec)
+    expected = {
+        declaration.name
+        for declaration in workspace_tool_declarations()
+        if tool_class_from_metadata(declaration.metadata) in tool_classes
+    }
+    assert {item.id for item in definition.selected_tools} == expected
+
+
+@pytest.mark.asyncio
+async def test_workspace_selector_validation_and_candidate_boundaries(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(AIError) as error:
+        AgentSpec("agent", allow_tools=("*", "file:delete"))
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    workspace = Workspace.load(tmp_path)
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).freeze()
+    spec = AgentSpec("agent", allow_tools=("new_tool",))
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=snapshot.contributions,
+        agents={"agent": spec},
+    )
+    with pytest.raises(AIError) as error:
+        compiler.compile(spec)
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    empty = AgentSpec("agent", allow_tools=())
+    empty_compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(),
+        agents={"agent": empty},
+    )
+    assert empty_compiler.compile(empty).selected_tools == ()
 
 
 @pytest.mark.asyncio
@@ -267,7 +339,10 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
     finally:
         await store.close()
 
-    identities = {(item.kind, item.id) for item in frozen}
+    identities = {
+        (item.kind, item.id)
+        for item in frozen.contributions
+    }
     assert ("agent", "audit") in identities
     assert ("tool", "read_file") in identities
     assert ("tool", "run_command") in identities
@@ -505,5 +580,5 @@ async def test_workspace_group_does_not_discover_declarations(
 
     assert group.workspace is workspace
     assert frozen
-    assert all(item.kind == "tool" for item in frozen)
+    assert all(item.kind == "tool" for item in frozen.contributions)
     assert sandbox.sessions == []

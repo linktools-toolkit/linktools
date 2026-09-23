@@ -8,6 +8,7 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar, cast, get_type_hints
 
 from linktools.core import environ
@@ -16,7 +17,7 @@ from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import AssetKey, AssetStore
+from ..asset import AssetInfo, AssetKey, AssetStore, AssetStoreReader
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
@@ -25,9 +26,6 @@ from ..spec import (
     AgentUsageLimits,
     MCPServerSpec,
     MCPServerSpecCodec,
-    SkillMarkdownSpecAdapter,
-    SkillMarkdownSpecCodec,
-    SkillSpecCodec,
     ThinkingValue,
     canonicalize_json_schema,
     canonicalize_pydantic_model_schema,
@@ -35,10 +33,10 @@ from ..spec import (
     parse_mcp_tool_selector,
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
+from ..storage import ObjectRef, ObjectStore, StorageRevision
 from ..workspace import Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
-from ._skill_source import SkillSourceRef
 from ._task import TaskExpander
 from ._tool_semantic import (
     tool_semantic_metadata,
@@ -259,6 +257,83 @@ class _SemanticContribution(CapabilityContribution[AppT]):
 
 
 @dataclass(frozen=True, slots=True)
+class _CapabilityAssetReader:
+    _store: AssetStore = field(repr=False, compare=False)
+
+    async def current_revision(self) -> StorageRevision:
+        return await self._store.current_revision()
+
+    async def get(self, key: AssetKey) -> "bytes | None":
+        return await self._store.get(key)
+
+    async def get_many(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[bytes | None, ...]":
+        return await self._store.get_many(keys)
+
+    async def local_paths(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[Path | None, ...]":
+        return await self._store.local_paths(keys)
+
+    async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
+        return await self._store.metadata_snapshot()
+
+    async def snapshot(
+        self,
+        keys: Sequence[AssetKey],
+        *,
+        object_store: ObjectStore,
+        expected_revision: "StorageRevision | None" = None,
+    ) -> ObjectRef:
+        return await self._store.snapshot(
+            keys,
+            object_store=object_store,
+            expected_revision=expected_revision,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityGroupSnapshot(Generic[AppT]):
+    """One parsed declaration set bound to its source revision."""
+
+    group_id: str
+    contributions: tuple[CapabilityContribution[AppT], ...]
+    source_revision: "StorageRevision | None"
+    workspace: "Workspace | None"
+    _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.group_id, str) or not self.group_id.strip():
+            raise ValueError("snapshot group_id must be non-empty")
+        contributions = tuple(self.contributions)
+        if any(
+            not isinstance(value, CapabilityContribution)
+            for value in contributions
+        ):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if (self._asset_reader is None) != (self.source_revision is None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        object.__setattr__(self, "contributions", contributions)
+
+    @property
+    def asset_reader(self) -> "AssetStoreReader | None":
+        """Return read-only access to this snapshot's source resources."""
+        return self._asset_reader
+
+    async def verify_source_revision(self) -> None:
+        """Fail if the declaration source changed after this snapshot was made."""
+        if self._asset_reader is None:
+            return
+        if not isinstance(self.source_revision, StorageRevision):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if await self._asset_reader.current_revision() != self.source_revision:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+
+
+@dataclass(frozen=True, slots=True)
 class CapabilityLoadEntry:
     """Declaration-relevant metadata captured at the start of a group freeze."""
 
@@ -318,17 +393,17 @@ class CapabilityLoadContext:
     async def read(self, key: AssetKey) -> bytes:
         entry = self._by_key.get(key)
         if entry is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         cached = self._cache.get(key)
         if cached is not None:
             self._read_keys.add(key)
             return cached
         value = await self._store.get(key)
         if value is None:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         data = bytes(value)
         if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.etag:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         self._cache[key] = data
         self._read_keys.add(key)
         return data
@@ -337,7 +412,7 @@ class CapabilityLoadContext:
         """Read captured assets once, preserving the requested order."""
         requested = tuple(dict.fromkeys(keys))
         if any(key not in self._by_key for key in requested):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         pending = tuple(
             self._by_key[key]
             for key in requested
@@ -346,14 +421,14 @@ class CapabilityLoadContext:
         if not pending:
             return tuple(self._cache[key] for key in keys)
         values = await self._store.get_many(tuple(entry.key for entry in pending))
-        for entry, value in zip(pending, values):
+        for entry, value in zip(pending, values, strict=True):
             if (
                 value is None
             ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
             data = bytes(value)
             if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.etag:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
             self._cache[entry.key] = data
             self._read_keys.add(entry.key)
         return tuple(self._cache[key] for key in keys)
@@ -376,14 +451,14 @@ class CapabilityLoadContext:
                 or info.size != entry.size
                 or info.metadata != entry.metadata
             ):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 
 
 class CapabilityLoader(Protocol[AppT]):
     async def load(
         self,
         context: CapabilityLoadContext,
-    ) -> "Sequence[CapabilityContribution[AppT]]": ...
+    ) -> "Sequence[CapabilityContribution[AppT] | AgentSpec | SkillDefinition | MCPServerSpec]": ...
 
 
 class CapabilityGroup(Generic[AppT]):
@@ -413,10 +488,12 @@ class CapabilityGroup(Generic[AppT]):
                 for tool in _workspace_tool_definitions(workspace)
             )
         if assets is not None:
+            from ._declaration import BuiltinDeclarationLoader
+
             for kind in ("agent", "skill", "mcp"):
                 self._loaders[kind] = cast(
                     "CapabilityLoader[AppT]",
-                    _BuiltinDeclarationLoader(kind),
+                    BuiltinDeclarationLoader(kind),
                 )
 
     @property
@@ -608,17 +685,24 @@ class CapabilityGroup(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if not callable(getattr(loader, "load", None)):
             raise TypeError("loader must implement load")
+        source_kind = getattr(loader, "source_kind", None)
+        if source_kind is not None and source_kind != kind:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         self._loaders[kind] = loader
         return loader
 
-    async def freeze(self) -> "tuple[CapabilityContribution[AppT], ...]":
-        """Freeze direct registrations and a metadata-stable Store snapshot."""
+    async def freeze(self) -> "CapabilityGroupSnapshot[AppT]":
+        """Freeze direct registrations and declarations at one source revision."""
         contributions = list(tuple(self._contributions))
-        loaders = tuple(self._loaders.values())
+        loaders = tuple(self._loaders.items())
         store = self._store
+        source_revision: StorageRevision | None = None
         if store is not None:
             if not store.ready:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            source_revision = await store.current_revision()
+            if not isinstance(source_revision, StorageRevision):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             metadata = await store.metadata_snapshot()
             entries = tuple(
                 CapabilityLoadEntry(
@@ -630,15 +714,26 @@ class CapabilityGroup(Generic[AppT]):
                 for info in metadata
             )
             context = CapabilityLoadContext(self._id, store, entries)
-            for loader in loaders:
-                loaded = await loader.load(context)
-                if any(
-                    not isinstance(item, CapabilityContribution)
-                    for item in loaded
-                ):
+            for kind, loader in loaders:
+                if getattr(loader, "source_kind", kind) != kind:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                for item in loaded:
+                loaded = await loader.load(context)
+                normalized: list[CapabilityContribution[AppT]] = []
+                for value in loaded:
+                    if isinstance(
+                        value,
+                        (AgentSpec, SkillDefinition, MCPServerSpec),
+                    ):
+                        item = cast(
+                            "CapabilityContribution[AppT]",
+                            CapabilityContribution.from_declaration(value),
+                        )
+                    elif isinstance(value, CapabilityContribution):
+                        item = cast("CapabilityContribution[AppT]", value)
+                    else:
+                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     if item.kind != "skill":
+                        normalized.append(item)
                         continue
                     skill = cast(SkillDefinition, item.value)
                     if skill.source_ref is not None and (
@@ -646,8 +741,11 @@ class CapabilityGroup(Generic[AppT]):
                         or skill.source_ref.snapshot is not None
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                contributions.extend(loaded)
+                    normalized.append(item)
+                contributions.extend(normalized)
             await context.verify()
+            if await store.current_revision() != source_revision:
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         elif loaders:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         frozen = tuple(_freeze_contribution(item) for item in contributions)
@@ -657,128 +755,22 @@ class CapabilityGroup(Generic[AppT]):
             (item for item in frozen if item.kind != "capability"),
             key=lambda item: (item.kind, item.id, item.fingerprint),
         )
-        return tuple((*declarations, *generic))
-
-
-class _BuiltinDeclarationLoader:
-    def __init__(self, kind: str) -> None:
-        self._kind = kind
-
-    async def load(
-        self,
-        context: CapabilityLoadContext,
-    ) -> "Sequence[CapabilityContribution[object]]":
-        entries = context.list(kind=self._kind)
-        directory_roots: tuple[str, ...] = ()
-        directory_root_set: frozenset[str] = frozenset()
-        if self._kind == "skill":
-            directory_roots = tuple(
-                sorted(
-                    entry.key.id[: -len("/SKILL.md")]
-                    for entry in entries
-                    if entry.key.id.endswith("/SKILL.md")
-                )
-            )
-            if any(not root for root in directory_roots):
-                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
-            _validate_skill_roots(directory_roots)
-            directory_root_set = frozenset(directory_roots)
-            flat_skill_ids = {
-                entry.key.id
-                for entry in entries
-                if not entry.key.id.endswith("/SKILL.md")
-                and not _inside_skill_root(entry.key.id, directory_root_set)
-            }
-            if directory_root_set.intersection(flat_skill_ids):
-                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
-        declaration_keys = tuple(
-            entry.key
-            for entry in entries
-            if (
-                entry.key.kind in {"agent", "mcp"}
-                or entry.key.kind == "skill"
-                and (
-                    entry.key.id.endswith("/SKILL.md")
-                    or not _inside_skill_root(entry.key.id, directory_root_set)
-                )
-            )
+        frozen_contributions = tuple((*declarations, *generic))
+        snapshot = CapabilityGroupSnapshot(
+            self._id,
+            frozen_contributions,
+            source_revision,
+            self._workspace,
+            None if store is None else _CapabilityAssetReader(store),
         )
-        values = dict(
-            zip(
-                declaration_keys,
-                await context.read_many(declaration_keys),
-                strict=True,
-            )
+        _logger.info(
+            "capability group frozen: group=%s contributions=%d source_revision=%s",
+            self._id,
+            len(frozen_contributions),
+            None if source_revision is None else source_revision.value,
         )
+        return snapshot
 
-        result: list[CapabilityContribution[object]] = []
-        skill_codec = SkillSpecCodec()
-        markdown_codec = SkillMarkdownSpecCodec()
-        adapter = SkillMarkdownSpecAdapter()
-        for entry in entries:
-            key = entry.key
-            if key.kind == "agent":
-                value = AgentSpecCodec().decode(values[key])
-                if value.id != key.id:
-                    raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-                result.append(CapabilityContribution.from_declaration(value))
-                continue
-            if key.kind == "mcp":
-                value = MCPServerSpecCodec().decode(values[key])
-                if value.id != key.id:
-                    raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-                result.append(CapabilityContribution.from_declaration(value))
-                continue
-            if key.kind != "skill":
-                continue
-            if key.id.endswith("/SKILL.md"):
-                logical_id = key.id[: -len("/SKILL.md")]
-                value = adapter.to_logical(
-                    logical_id,
-                    markdown_codec.decode(values[key]),
-                )
-                result.append(
-                    CapabilityContribution.from_declaration(
-                        SkillDefinition(
-                            value,
-                            SkillSourceRef(context.group_id, logical_id),
-                        ),
-                    )
-                )
-                continue
-            if _inside_skill_root(key.id, directory_root_set):
-                continue
-            value = skill_codec.decode(values[key])
-            if value.id != key.id:
-                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
-            result.append(
-                CapabilityContribution.from_declaration(SkillDefinition(value))
-            )
-        return result
-
-
-def _validate_skill_roots(roots: Sequence[str]) -> None:
-    seen: set[str] = set()
-    for root in roots:
-        if root in seen:
-            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        parts = root.split("/")
-        prefix: list[str] = []
-        for part in parts[:-1]:
-            prefix.append(part)
-            if "/".join(prefix) in seen:
-                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
-        seen.add(root)
-
-
-def _inside_skill_root(identifier: str, roots: frozenset[str]) -> bool:
-    parts = identifier.split("/")
-    prefix: list[str] = []
-    for part in parts[:-1]:
-        prefix.append(part)
-        if "/".join(prefix) in roots:
-            return True
-    return False
 
 def _freeze_contribution(
     value: CapabilityContribution[AppT],

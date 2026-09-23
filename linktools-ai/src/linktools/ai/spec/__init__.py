@@ -10,6 +10,7 @@ from ._codec import (
     SkillSpecCodec,
     SpecCodec,
 )
+from ._agent_markdown import AgentMarkdownSpecCodec
 from ._contract import (
     AgentSpec,
     AgentUsageLimits,
@@ -20,8 +21,11 @@ from ._contract import (
     ThinkingValue,
     canonical_selectors,
     normalize_thinking,
+    mcp_server_selector,
+    mcp_tool_selector,
     parse_mcp_tool_selector,
 )
+from ..core import validate_logical_id
 from ._identity import (
     agent_spec_identity_payload,
     bound_agent_spec_identity_payload,
@@ -33,12 +37,14 @@ from ._schema import canonicalize_json_schema, canonicalize_pydantic_model_schem
 __all__ = [
     "AgentSpec",
     "AgentSpecCodec",
+    "AgentMarkdownSpecCodec",
     "AgentUsageLimits",
     "agent_spec_identity_payload",
     "bound_agent_spec_identity_payload",
     "binding_identity_payload",
     "canonicalize_json_schema",
     "canonicalize_pydantic_model_schema",
+    "validate_logical_id",
     "capability_identity_payload",
     "MCPServerSpec",
     "MCPServerSpecCodec",
@@ -52,5 +58,7 @@ __all__ = [
     "ThinkingValue",
     "canonical_selectors",
     "normalize_thinking",
+    "mcp_server_selector",
+    "mcp_tool_selector",
     "parse_mcp_tool_selector",
 ]

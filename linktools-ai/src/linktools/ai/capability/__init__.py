@@ -3,14 +3,19 @@
 """Public capability extension contracts."""
 
 from ._context import AgentContext
+from ._declaration import (
+    AgentDeclarationLoader,
+    validate_resource_path,
+    validate_resource_tree,
+)
 from ._group import (
     CapabilityContribution,
     CapabilityGroup,
+    CapabilityGroupSnapshot,
     CapabilityLoadContext,
     CapabilityLoadEntry,
     CapabilityLoader,
 )
-from ._mcp import mcp_server_namespace, mcp_server_selector
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
@@ -42,12 +47,20 @@ from ._tool_semantic import (
     tool_semantic_metadata,
     validate_tool_semantic_metadata,
 )
-from ._workspace import WorkspaceAccess, workspace_capabilities
+from ._workspace import (
+    ToolDeclaration,
+    WorkspaceAccess,
+    workspace_capabilities,
+    workspace_tool_declarations,
+)
+from ..spec import mcp_server_selector, mcp_tool_selector
 
 __all__ = [
     "AgentContext",
+    "AgentDeclarationLoader",
     "CapabilityContribution",
     "CapabilityGroup",
+    "CapabilityGroupSnapshot",
     "CapabilityLoadContext",
     "CapabilityLoadEntry",
     "CapabilityLoader",
@@ -62,6 +75,7 @@ __all__ = [
     "TOOL_EFFECT_METADATA_KEY",
     "TOOL_PATH_FIELDS_METADATA_KEY",
     "TOOL_PLAN_SAFE_METADATA_KEY",
+    "ToolDeclaration",
     "SkillDefinition",
     "SkillLocation",
     "SkillResourceSource",
@@ -75,9 +89,12 @@ __all__ = [
     "ToolCallFailed",
     "ToolCallRetry",
     "WorkspaceAccess",
-    "mcp_server_namespace",
     "mcp_server_selector",
+    "mcp_tool_selector",
     "workspace_capabilities",
+    "workspace_tool_declarations",
+    "validate_resource_path",
+    "validate_resource_tree",
     "tool_class_from_metadata",
     "tool_compaction_keep_result_from_metadata",
     "tool_context_dedupe_from_metadata",

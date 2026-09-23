@@ -12,8 +12,13 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal, Protocol, cast, runtime_checkable
 
-from ..asset import AssetInfo, AssetKey, AssetStore
-from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_json_bytes
+from ..asset import AssetInfo, AssetKey, AssetStoreReader
+from ..core import (
+    DEFAULT_DISCOVERY_POLICY,
+    JsonValue,
+    canonical_json_bytes,
+    validate_logical_id,
+)
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
 
@@ -23,22 +28,36 @@ class SkillSourceRef:
     source_id: str
     root: str
     snapshot: "ObjectRef | None" = None
+    resource_semantic_digest: "str | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not self.source_id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.snapshot is not None and not isinstance(self.snapshot, ObjectRef):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        object.__setattr__(
-            self,
-            "root",
-            _normalize_relative_path(self.root, field_name="skill root"),
-        )
+        try:
+            validate_logical_id(self.root)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        if self.snapshot is None:
+            if self.resource_semantic_digest is not None:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        elif not _valid_digest(self.resource_semantic_digest):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-    def with_snapshot(self, snapshot: ObjectRef) -> "SkillSourceRef":
+    def with_snapshot(
+        self,
+        snapshot: ObjectRef,
+        resource_semantic_digest: str,
+    ) -> "SkillSourceRef":
         if not isinstance(snapshot, ObjectRef):
             raise TypeError("snapshot must be ObjectRef")
-        return SkillSourceRef(self.source_id, self.root, snapshot)
+        return SkillSourceRef(
+            self.source_id,
+            self.root,
+            snapshot,
+            resource_semantic_digest,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,11 +215,11 @@ class LocalSkillResourceSource:
 
 
 class AssetSkillResourceSource:
-    def __init__(self, source_id: str, store: AssetStore) -> None:
+    def __init__(self, source_id: str, store: AssetStoreReader) -> None:
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError("skill source id must be non-empty")
-        if not isinstance(store, AssetStore):
-            raise TypeError("store must be AssetStore")
+        if not isinstance(store, AssetStoreReader):
+            raise TypeError("store must provide read-only AssetStore operations")
         self._id = source_id
         self._store = store
 
@@ -568,6 +587,7 @@ class FrozenSkillResourceSource:
         self._snapshots = MappingProxyType(dict(sorted(roots.items())))
         self._object_store = object_store
         self._manifests: dict[str, Mapping[str, object]] = {}
+        self._semantic_digests: dict[str, str] = {}
 
     @property
     def id(self) -> str:
@@ -597,6 +617,56 @@ class FrozenSkillResourceSource:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         manifest = await self._manifest(logical_root)
         return bool(manifest.get("sandbox_materialize", False))
+
+    async def semantic_digest(self, root: str) -> str:
+        """Return the behavior digest for one validated resource snapshot."""
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        cached = self._semantic_digests.get(logical_root)
+        if cached is not None:
+            return cached
+        manifest = await self._manifest(logical_root)
+        materialize = manifest.get("sandbox_materialize")
+        entries = manifest.get("resources")
+        if not isinstance(materialize, bool) or not isinstance(entries, list):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        files: list[JsonValue] = []
+        for raw in entries:
+            if not isinstance(raw, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            path = raw.get("path")
+            mode = raw.get("mode", 0)
+            content = raw.get("content")
+            if not isinstance(path, str) or not isinstance(content, Mapping):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            digest = content.get("digest")
+            if not _valid_digest(digest):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if (
+                isinstance(mode, bool)
+                or not isinstance(mode, int)
+                or mode < 0
+                or mode > 0o111
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            files.append(
+                {
+                    "path": path,
+                    "sha256": digest,
+                    "executable_bits": mode & 0o111,
+                }
+            )
+        semantic_digest = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "version": 1,
+                    "kind": "skill-resource-semantics",
+                    "sandbox_materialize": materialize,
+                    "files": files,
+                }
+            )
+        ).hexdigest()
+        self._semantic_digests[logical_root] = semantic_digest
+        return semantic_digest
 
     async def resource_mode(self, root: str, path: str) -> int:
         logical_root = _normalize_relative_path(root, field_name="skill root")
@@ -776,6 +846,14 @@ def normalize_skill_resource_path(path: str) -> str:
 
 def _normalize_resource_path(path: str) -> str:
     return _normalize_relative_path(path, field_name="skill resource path")
+
+
+def _valid_digest(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _normalize_relative_path(path: str, *, field_name: str) -> str:

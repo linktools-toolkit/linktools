@@ -16,6 +16,8 @@ from ..storage import ObjectRef
 from ..spec import SkillSpec
 from ._context import AgentContext
 from ._skill_source import (
+    FrozenSkillResourceSource,
+    SkillLocation,
     SkillResourceView,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -61,6 +63,9 @@ class SkillDefinition:
                     "digest": self.source_ref.snapshot.digest,
                     "size": self.source_ref.snapshot.size,
                 }
+                source["resource_semantic_digest"] = (
+                    self.source_ref.resource_semantic_digest
+                )
             contract["source"] = source
         return contract
 
@@ -89,6 +94,7 @@ class SkillDefinition:
             if not isinstance(source_id, str) or not isinstance(root, str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             snapshot_ref = None
+            resource_semantic_digest = source.get("resource_semantic_digest")
             if snapshot is not None:
                 if not isinstance(snapshot, Mapping) or not {
                     "key",
@@ -117,8 +123,22 @@ class SkillDefinition:
                     snapshot_ref = ObjectRef(store_id, key, digest, size)
                 except ValueError as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            if resource_semantic_digest is not None and (
+                not isinstance(resource_semantic_digest, str)
+                or len(resource_semantic_digest) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in resource_semantic_digest
+                )
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
-                source_ref = SkillSourceRef(source_id, root, snapshot_ref)
+                source_ref = SkillSourceRef(
+                    source_id,
+                    root,
+                    snapshot_ref,
+                    resource_semantic_digest,
+                )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:
@@ -136,7 +156,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         skills: Sequence[SkillDefinition],
         sources: SkillSourceRegistry,
         *,
-        resource_paths: Mapping[str, str] | None = None,
+        resource_paths: Mapping[str, "str | None"] | None = None,
         preloaded_skill_ids: Sequence[str] = (),
         max_preloaded_bytes: int = 256 * 1024,
     ) -> None:
@@ -198,13 +218,10 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         ) -> dict[str, str | list[str]]:
             """Load skill instructions or one relative text resource."""
             try:
-                result = cast(
+                return cast(
                     dict[str, str | list[str]],
                     await self.load_skill(skill_id, path),
                 )
-                if path is None and skill_id in self._resource_paths:
-                    result["location"] = self._resource_paths[skill_id]
-                return result
             except AIError as error:
                 if error.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID:
                     raise ToolCallRetry(
@@ -306,6 +323,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if source_ref is None:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         source = self._sources.resolve(source_ref.source_id)
+        await _verify_resource_semantics(source_ref, source)
         data = await source.read(source_ref.root, relative)
         try:
             content = data.decode("utf-8")
@@ -331,8 +349,20 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if source_ref is None:
             return result
         source = self._sources.resolve(source_ref.source_id)
+        await _verify_resource_semantics(source_ref, source)
         view = await source.inspect(source_ref.root)
         _validate_view(view)
+        if definition.id in self._resource_paths:
+            native_path = self._resource_paths[definition.id]
+            location = (
+                SkillLocation(
+                    "virtual",
+                    f"{source_ref.source_id}/skills/{source_ref.root}",
+                )
+                if native_path is None
+                else SkillLocation("local", native_path)
+            )
+            view = SkillResourceView(location, view.resources)
         result["location"] = view.location.display()
         result["resources"] = list(view.resources)
         if view.resources:
@@ -346,6 +376,24 @@ def _skill_description(specification: SkillSpec) -> str:
 
 def _validate_view(view: SkillResourceView) -> None:
     if not isinstance(view, SkillResourceView):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+async def _verify_resource_semantics(
+    source_ref: SkillSourceRef,
+    source: object,
+) -> None:
+    if source_ref.snapshot is None:
+        return
+    if (
+        not isinstance(source, FrozenSkillResourceSource)
+        or source_ref.resource_semantic_digest is None
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if (
+        await source.semantic_digest(source_ref.root)
+        != source_ref.resource_semantic_digest
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 

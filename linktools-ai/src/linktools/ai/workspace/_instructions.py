@@ -17,6 +17,7 @@ import yaml
 
 from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
+from ._paths import workspace_rules_root
 
 if TYPE_CHECKING:
     from ._root import WorkspacePolicy
@@ -176,7 +177,7 @@ class LocalRuleCatalog:
         policy: "WorkspacePolicy",
     ) -> tuple[RepositoryInstructionDocument, ...]:
         resolved_workspace_root = _resolve_existing_path(root)
-        rules_root = root / ".linktools" / "rules"
+        rules_root = workspace_rules_root(root)
         try:
             root_lstat = rules_root.lstat()
         except FileNotFoundError:
@@ -284,7 +285,7 @@ class LocalRuleCatalog:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             scope, body = _parse_rule_markdown(content)
             logical_relative = candidate.relative_to(
-                resolved_workspace_root / ".linktools" / "rules"
+                workspace_rules_root(resolved_workspace_root)
             ).with_suffix("").as_posix()
             source = f"rule:{_validate_rule_id(logical_relative)}"
             collected.append((candidate, RepositoryInstructionDocument(source, scope, body)))

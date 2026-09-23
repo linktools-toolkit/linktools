@@ -17,6 +17,7 @@ from linktools.ai.agent import (
 )
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
+    AssetSkillResourceSource,
     CapabilityContribution,
     FrozenSkillResourceSource,
     LocalSkillResourceSource,
@@ -135,7 +136,7 @@ def _fixture(tmp_path: Path) -> _BindingFixture:
             (LocalSkillResourceSource("application", skill_root),)
         ),
         objects,
-        freeze_dependencies=True,
+        workspace=None,
     )
     return _BindingFixture(
         compiler,
@@ -275,23 +276,15 @@ async def test_runtime_start_admits_frozen_binding(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_durable_binding_does_not_require_skill_snapshots(
+async def test_execution_binding_freezes_selected_child_skills(
     tmp_path: Path,
 ) -> None:
     fixture = _fixture(tmp_path)
-    freezer = _RuntimeBindingFreezer(
-        fixture.catalog,
-        fixture.compiler,
-        SkillSourceRegistry(),
-        InMemoryObjectStore("volatile"),
-        freeze_dependencies=False,
-    )
+    frozen = await fixture.freezer.freeze(fixture.binding)
 
-    frozen = await freezer.freeze(fixture.binding)
-
-    assert frozen is fixture.binding
-    assert frozen.snapshot == fixture.binding.snapshot
-    assert frozen.snapshot.subagent_bindings == ()
+    assert frozen.snapshot != fixture.binding.snapshot
+    child = _frozen_child(frozen.snapshot)
+    assert _skill_snapshot(child).store_id == "runtime"
 
 
 @pytest.mark.asyncio
@@ -336,7 +329,7 @@ async def test_non_durable_snapshot_freezes_existing_child_mcp_resources(
             fixture.compiler,
             SkillSourceRegistry(),
             fixture.objects,
-            freeze_dependencies=False,
+            workspace=None,
             mcp_assets={"server": store},
         )
         await store.put(
@@ -361,9 +354,86 @@ async def test_non_durable_snapshot_freezes_existing_child_mcp_resources(
             ) == b"print('updated')"
         finally:
             await resource_store.close()
-        with pytest.raises(AIError) as raised:
-            await freezer.freeze_snapshot(frozen)
-        assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert await freezer.freeze_snapshot(frozen) == frozen
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_rejects_changed_mcp_asset_source(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        root = AssetKey("mcp", "server/assets")
+        await store.put(AssetKey("mcp", "server/assets/script.py"), b"print('ok')")
+        codec = MCPServerSpecCodec()
+        pin = SemanticPin(
+            "mcp",
+            "server",
+            codec.to_payload(
+                MCPServerSpec(
+                    "server",
+                    "python",
+                    ("resource:script.py",),
+                    root,
+                )
+            ),
+        )
+        snapshot = replace(fixture.binding.snapshot, selected=(pin,))
+        source_revision = await store.current_revision()
+        freezer = _RuntimeBindingFreezer(
+            fixture.catalog,
+            fixture.compiler,
+            SkillSourceRegistry(),
+            fixture.objects,
+            workspace=None,
+            mcp_assets={"server": store},
+            mcp_revisions={"server": source_revision},
+        )
+        await store.put(AssetKey("mcp", "server/assets/script.py"), b"changed")
+
+        with pytest.raises(AIError) as error:
+            await freezer.freeze_snapshot(snapshot)
+
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_rejects_changed_skill_asset_source(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        skill = SkillDefinition(
+            SkillSpec("skill", "instructions"),
+            SkillSourceRef("source", "guide"),
+        )
+        pin = SemanticPin("skill", skill.id, skill.semantic_contract)
+        snapshot = replace(fixture.binding.snapshot, selected=(pin,))
+        source_revision = await store.current_revision()
+        freezer = _RuntimeBindingFreezer(
+            fixture.catalog,
+            fixture.compiler,
+            SkillSourceRegistry((AssetSkillResourceSource("source", store),)),
+            fixture.objects,
+            workspace=None,
+            asset_sources={"source": (store, source_revision)},
+        )
+        await store.put(AssetKey("skill", "guide/manual.txt"), b"changed")
+
+        with pytest.raises(AIError) as error:
+            await freezer.freeze_snapshot(snapshot)
+
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
     finally:
         await store.close()
 
@@ -389,7 +459,7 @@ async def test_runtime_state_snapshot_restores_frozen_skill_objects(
                 )
             ),
             state.object_store(RuntimeDomain.EXECUTION),
-            freeze_dependencies=True,
+            workspace=None,
         )
         frozen = await freezer.freeze(fixture.binding)
         now = datetime.now(timezone.utc)
@@ -521,7 +591,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
                 )
             ),
             state.object_store(RuntimeDomain.EXECUTION),
-            freeze_dependencies=True,
+            workspace=None,
         )
         capabilities = TaskCapabilitySnapshotStore(
             "namespace",
@@ -578,7 +648,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
             fixture.compiler,
             SkillSourceRegistry(),
             restored.object_store(RuntimeDomain.EXECUTION),
-            freeze_dependencies=True,
+            workspace=None,
         )
         restored_capabilities = TaskCapabilitySnapshotStore(
             "namespace",

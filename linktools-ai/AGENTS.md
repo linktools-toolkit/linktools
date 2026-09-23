@@ -12,6 +12,15 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Runtime dependencies must remain acyclic; annotation-only back-references belong under `TYPE_CHECKING`.
 - Keep lower-level infrastructure independent from higher-level composition and SDK semantics. Do not introduce duplicate abstractions that compete for the same ownership.
 - Keep vendor-specific behavior out of vendor-neutral core abstractions.
+- Keep authoring adapters separate from durable codecs. Fill defaults before
+  canonical decoding; explicit values always win, and persistence stores
+  resolved execution meaning.
+- Freeze a CapabilityGroup declaration result once and reuse it for host
+  inspection and Runtime composition. Bind cross-source reads to the captured
+  revision or an immutable reference.
+- Keep visibility, execution authorization, and OS isolation as separate
+  boundaries. A successful close for a restricted child process requires
+  proof that its owned process tree is quiescent.
 - Architecture and release gates encode long-lived invariants only. Do not freeze current package names, module depth, class names, or layout as policy.
 - Build/release tooling must not become a second owner of Runtime semantic truth.
 

@@ -18,7 +18,7 @@ from ..agent import (
     AgentCompiler,
     AgentDefinition,
 )
-from ..capability import CapabilityGroup
+from ..capability import CapabilityGroup, CapabilityGroupSnapshot
 from ..core import (
     CorrelationData,
     ExecutionMode,
@@ -270,7 +270,7 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         state: RuntimeState,
         context: None = None,
-        capabilities: "Sequence[CapabilityGroup[None]]" = (),
+        capabilities: "Sequence[CapabilityGroup[None] | CapabilityGroupSnapshot[None]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[None]]": ...
@@ -284,7 +284,7 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         state: RuntimeState,
         context: RuntimeContext[AppT],
-        capabilities: "Sequence[CapabilityGroup[AppT]]" = (),
+        capabilities: "Sequence[CapabilityGroup[AppT] | CapabilityGroupSnapshot[AppT]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[AppT]]": ...
@@ -297,7 +297,7 @@ class Runtime(Generic[AppT]):
         models: ModelRegistry,
         state: RuntimeState,
         context: "RuntimeContext[object] | None" = None,
-        capabilities: "Sequence[CapabilityGroup[object]]" = (),
+        capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupSnapshot[object]]" = (),
         metrics: "Metrics | None" = None,
         limits: "PromptLimits | None" = None,
     ) -> "AbstractAsyncContextManager[Runtime[object]]":
@@ -1190,7 +1190,7 @@ async def _open_runtime(
     context: RuntimeContext[object],
     models: ModelRegistry,
     state: RuntimeState,
-    capabilities: "Sequence[CapabilityGroup[object]]",
+    capabilities: "Sequence[CapabilityGroup[object] | CapabilityGroupSnapshot[object]]",
     metrics: "Metrics | None",
     limits: PromptLimits,
 ):

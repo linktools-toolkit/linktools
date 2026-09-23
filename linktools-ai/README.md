@@ -158,6 +158,23 @@ CapabilityGroup AssetStore; a custom loader may change the declaration format
 or layout but cannot redirect Skill resources to another source. No additional
 Registry/Provider abstraction is required.
 
+The built-in Agent loader accepts flat JSON at `<id>` and Markdown packages
+at `<id>/AGENT.md`; Skill packages use `<id>/SKILL.md`, and MCP packages use
+`<id>/mcp.json` or `<id>/mcp.yaml`. `AgentMarkdownSpecCodec` exposes strict
+`parse()`, `from_payload()`, and `decode()` entry points for `AGENT.md`.
+Custom source kinds such as `worker` can use
+`AgentDeclarationLoader("worker", defaults=...)` to load the same Agent
+layouts with validated defaults. Defaults fill missing declaration fields;
+explicit Agent fields take precedence.
+
+`CapabilityGroup.freeze()` returns a `CapabilityGroupSnapshot`. Pass that
+snapshot to `Runtime.open()` when the host also needs to inspect the same
+frozen contributions; this avoids parsing the source declarations twice.
+The snapshot contains the group id, contributions, source revision, and
+Workspace association. A changed source revision fails Runtime admission.
+Runtime reads snapshot resources through `AssetStoreReader`, a read-only view
+that does not expose the mutable `AssetStore`.
+
 Directory-backed Skill packages retain a native absolute package path when
 all effective Skill assets under the declared resource root map to one
 consistent local package tree. The declaration filename is loader-defined; it
@@ -171,8 +188,11 @@ a filesystem path is required.
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
 value starts with `resource:` then name files below that root. Runtime freezes
-and verifies the selected AssetStore tree, rejects absolute paths, traversal,
-and missing files, and materializes the frozen files for the MCP process.
+and verifies the selected AssetStore tree against the GroupSnapshot revision,
+rejects absolute paths, traversal, and missing files, and materializes the
+frozen files for the MCP process. After the source changes, new executions
+that need those resources fail with `SNAPSHOT_CONFLICT`; existing executions
+keep using their frozen bytes.
 Without `resource_root`, existing argument strings keep their original
 meaning.
 
@@ -193,11 +213,13 @@ execution boundary, not an operating-system security boundary. On Linux,
 `BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
 user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted
 read-only runtime rootfs containing the same LinkTools build and Python >=
-3.10. It has no automatic Local fallback. Bubblewrap isolates only Session
-file/command execution; the host Agent, model requests, Python custom tools,
-and MCP remain outside it. Its network namespace provides Session loopback and
-no external route, but shared workspace files and explicitly shared IPC remain
-outside that guarantee.
+3.10. It has no automatic Local fallback. Bubblewrap isolates Session
+file/command execution and Workspace-bound MCP stdio. The host Agent, model
+requests, and Python custom tools remain outside it. A restricted MCP process
+sees the Workspace under its configured read policy and its own declared
+resources as read-only, with no external network route. LocalSandbox,
+DisabledSandbox, and file-only custom sessions reject Workspace-bound MCP
+stdio. MCP stdio without a Workspace remains a trusted host process.
 
 Selected local Skills are exposed as read-only `SandboxResource` directories at
 `/skills/<key>` in Bubblewrap and at their validated host location in Local
@@ -236,7 +258,7 @@ spec = AgentSpec(
     model="default",
     system_prompt="Audit the supplied change.",
     instructions=("Cite concrete evidence.",),
-    allow_tools=("read_file", "mcp__security__*"),
+    allow_tools=("read_file", "mcp:security:*"),
     allow_skills=("review",),
     allow_subagents=("triage",),
     planning=True,
@@ -244,7 +266,13 @@ spec = AgentSpec(
 )
 ```
 
-The compiler resolves these selectors once from the frozen candidate universe. Missing or conflicting required candidates fail closed.
+The compiler resolves these selectors once from the frozen candidate universe.
+Missing or conflicting required candidates fail closed. MCP selectors use
+`mcp:<encoded-server>:<encoded-tool>` or `mcp:<encoded-server>:*`; use
+`mcp_server_selector()` and `mcp_tool_selector()` to encode logical ids and
+upstream tool names. For example, `security/audit` and `scan:file` become
+`mcp:security%2Faudit:scan%3Afile`. The `mcp__` prefix is reserved for
+model-visible transport names and is not an authoring selector.
 
 Model-visible control text is partitioned by lifecycle. Binding-static Agent instructions, Skill catalog/preloads, and Workspace guidance form the most stable prefix. Execution-static capability guidance and the repository instructions already active when the Execution starts follow that prefix and remain fixed for that Execution. Repository sources first discovered later through declared workspace path fields are kept in one refreshable overlay; only that overlay changes when a new scope becomes effective. Provider adapters may serialize these instruction parts as `system`, `developer`, or another supported instruction channel, and the physical request may still carry the same fixed prefix on every model call so provider prompt caching can reuse it.
 
@@ -304,7 +332,12 @@ A Session owns conversation continuity and the stable Agent id. Every new execut
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
-URL and uploaded-file content remains an external reference: Runtime persists its declared metadata and does not implicitly download it. Inline binary content and workspace file inputs are frozen as bytes before execution reservation when their durable contract requires it. Model transport retries use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults to `tool_retries=10000`, and output correction defaults to `output_retries=3`.
+URL and uploaded-file content remains an external reference: Runtime persists
+its declared metadata and does not implicitly download it. Inline binary
+content and workspace file inputs are frozen as bytes before execution
+reservation when their durable contract requires it. Model transport retries
+use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
+to `tool_retries=10`, and output correction defaults to `output_retries=3`.
 
 OpenAI model declarations accept explicit `vision=True` or `vision=False`
 (`False` by default). The value is part of the model semantic fingerprint. A
@@ -491,6 +524,12 @@ from linktools.ai import (
 )
 ```
 
-Package-specific public contracts remain available from their owning packages, for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`, and `linktools.ai.runtime`. `ErrorDiagnostics` is available from `linktools.ai.errors`.
+Package-specific public contracts remain available from their owning packages,
+for example `linktools.ai.asset`, `linktools.ai.model`, `linktools.ai.spec`,
+`linktools.ai.capability`, `linktools.ai.workspace`, and `linktools.ai.runtime`.
+These include `AgentMarkdownSpecCodec`, `AgentDeclarationLoader`,
+`CapabilityGroupSnapshot`, MCP selector helpers, `ToolDeclaration`, and the
+optional stdio sandbox protocols. `ErrorDiagnostics` is available from
+`linktools.ai.errors`.
 
 Private modules prefixed with `_` are implementation details. Downstream applications should not import Runtime execution infrastructure, state repository internals, or private compiler helpers directly.

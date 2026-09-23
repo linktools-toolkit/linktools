@@ -112,6 +112,16 @@ class AgentBindingSnapshot:
     output_mode: OutputMode
     output_schema: Mapping[str, JsonValue]
     subagent_bindings: "tuple[AgentBindingSnapshot, ...]" = ()
+    _wire_extensions: Mapping[str, JsonValue] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
+    _agent_spec_extensions: Mapping[str, JsonValue] = field(
+        default_factory=dict,
+        repr=False,
+        compare=False,
+    )
     _binding_digest: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -120,10 +130,20 @@ class AgentBindingSnapshot:
         try:
             base_model = ImmutableJsonMapping(self.base_model)
             output_schema = ImmutableJsonMapping(self.output_schema)
+            wire_extensions = ImmutableJsonMapping(self._wire_extensions)
+            agent_spec_extensions = ImmutableJsonMapping(
+                self._agent_spec_extensions
+            )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         object.__setattr__(self, "base_model", base_model)
         object.__setattr__(self, "output_schema", output_schema)
+        object.__setattr__(self, "_wire_extensions", wire_extensions)
+        object.__setattr__(
+            self,
+            "_agent_spec_extensions",
+            agent_spec_extensions,
+        )
         selected = tuple(
             (
                 *sorted(
@@ -185,9 +205,12 @@ class AgentBindingSnapshot:
         return self._binding_digest
 
     def to_payload(self) -> "dict[str, JsonValue]":
+        agent_spec = AgentSpecCodec().to_wire_payload(self.agent_spec)
+        for key, value in self._agent_spec_extensions.items():
+            agent_spec.setdefault(key, value)
         payload: dict[str, JsonValue] = {
             "version": _BINDING_VERSION,
-            "agent_spec": AgentSpecCodec().to_wire_payload(self.agent_spec),
+            "agent_spec": agent_spec,
             "base_model": dict(self.base_model),
             "selected": [item.to_payload() for item in self.selected],
             "subagents": [item.to_payload() for item in self.subagents],
@@ -199,6 +222,8 @@ class AgentBindingSnapshot:
                 item.to_payload()
                 for item in self.subagent_bindings
             ]
+        for key, value in self._wire_extensions.items():
+            payload.setdefault(key, value)
         return payload
 
     @classmethod
@@ -224,20 +249,36 @@ class AgentBindingSnapshot:
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
+            agent_spec_payload = _require_mapping(value["agent_spec"])
+            agent_spec_codec = AgentSpecCodec()
+            agent_spec = agent_spec_codec.from_payload(agent_spec_payload)
+            canonical_agent_spec = agent_spec_codec.to_wire_payload(agent_spec)
+            agent_spec_extensions = {
+                key: item
+                for key, item in agent_spec_payload.items()
+                if key not in canonical_agent_spec
+            }
+            subagent_bindings = (
+                ()
+                if "subagent_bindings" not in value
+                else _decode_subagent_bindings(value["subagent_bindings"])
+            )
+            wire_extensions = {
+                key: item
+                for key, item in value.items()
+                if key not in _BINDING_FIELDS
+                and key != "subagent_bindings"
+            }
             return cls(
-                agent_spec=AgentSpecCodec().from_payload(_require_mapping(value["agent_spec"])),
+                agent_spec=agent_spec,
                 base_model=_normalize_mapping(value["base_model"]),
                 selected=tuple(SemanticPin.from_payload(item) for item in selected),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=cast(OutputMode, mode),
                 output_schema=_normalize_mapping(value["output_schema"]),
-                subagent_bindings=(
-                    ()
-                    if "subagent_bindings" not in value
-                    else _decode_subagent_bindings(
-                        value["subagent_bindings"]
-                    )
-                ),
+                subagent_bindings=subagent_bindings,
+                _wire_extensions=wire_extensions,
+                _agent_spec_extensions=agent_spec_extensions,
             )
         except AIError:
             raise

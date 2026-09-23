@@ -15,7 +15,7 @@ from ._domain import AssetBackend, AssetInfo, AssetKey, AssetRoot, WritableAsset
 from ._filesystem import FilesystemAssetBackend, filesystem_root
 from ._object import AssetObjectKeyFactory
 from ._sql import SqlAssetBackend, build_asset_sql_metadata
-from ._store import AssetCacheAdapter, AssetStore
+from ._store import AssetCacheAdapter, AssetStore, AssetStoreReader
 
 __all__ = [
     "AssetBackend",
@@ -27,6 +27,7 @@ __all__ = [
     "AssetPathAdapter",
     "AssetRoot",
     "AssetStore",
+    "AssetStoreReader",
     "DirectoryAssetBackend",
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",

@@ -67,14 +67,14 @@ def test_agent_binding_v1_fixture_matches_current_contract() -> None:
     assert decoded.binding_digest == expected.binding_digest
 
 
-def test_agent_binding_ignores_unknown_fields() -> None:
+def test_agent_binding_preserves_unknown_fields() -> None:
     value = cast(dict[str, object], _load_json("runtime_agent_binding_snapshot_v1.json"))
     value["future_metadata"] = {"future": True}
 
     decoded = AgentBindingSnapshot.from_payload(value)
 
     assert decoded == _binding_fixture_value()
-    assert "future_metadata" not in decoded.to_payload()
+    assert decoded.to_payload()["future_metadata"] == {"future": True}
 
 
 

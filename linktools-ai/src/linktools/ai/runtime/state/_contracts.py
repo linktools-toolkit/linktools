@@ -65,7 +65,7 @@ from ...task import (
     TaskResultRecord,
     TaskTerminalRecord,
 )
-from ...workspace import normalize_workspace_path
+from ...workspace import validate_workspace_path
 from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
@@ -598,7 +598,7 @@ class SessionRecord:
             raise ValueError("closed session cannot have an active execution")
         if self.cwd is not None:
             try:
-                normalized_cwd = normalize_workspace_path(self.cwd)
+                normalized_cwd = validate_workspace_path(self.cwd)
             except (TypeError, ValueError) as error:
                 raise ValueError(
                     "session cwd must be a canonical workspace path"

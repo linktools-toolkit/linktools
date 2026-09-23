@@ -47,9 +47,7 @@ async def test_read_only_policy_hides_unauthorized_resource_root(
         resources=(SandboxResource("resource", resource),),
     )
     try:
-        with pytest.raises(AIError) as raised:
-            session.resource_path("resource")
-        assert raised.value.code is ErrorCode.AUTHORIZATION_DENIED
+        assert session.resource_path("resource") is None
     finally:
         await session.close()
 

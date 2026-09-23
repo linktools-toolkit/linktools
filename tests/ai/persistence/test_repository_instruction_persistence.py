@@ -137,6 +137,7 @@ def test_object_ref_traversal_allows_additive_skill_snapshot_fields() -> None:
         "source": {
             "source_id": "application",
             "root": "review",
+            "resource_semantic_digest": "d" * 64,
             "snapshot": {
                 "key": reference.key,
                 "digest": reference.digest,
