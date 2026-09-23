@@ -92,8 +92,8 @@ class ImmutableJsonMapping(Mapping[str, JsonValue]):
 def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
     normalized: dict[str, JsonValue] = {}
     for key, item in value.items():
-        if not isinstance(key, str):
-            raise ValueError("JSON object keys must be strings")
+        if not isinstance(key, str) or not key:
+            raise ValueError("JSON object keys must be non-empty strings")
         normalized[key] = _normalize_value(item)
     return normalized
 
