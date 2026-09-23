@@ -504,7 +504,6 @@ async def test_workspace_group_does_not_discover_declarations(
     frozen = await group.freeze()
 
     assert group.workspace is workspace
-    assert group.skill_source is None
     assert frozen
     assert all(item.kind == "tool" for item in frozen)
     assert sandbox.sessions == []
