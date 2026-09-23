@@ -29,6 +29,27 @@ from linktools.ai.storage import InMemoryObjectStore, StorageLayer, StorageOverl
 from linktools.ai.workspace import LocalRuleCatalog, WorkspacePolicy
 
 
+class _SuffixSkillPathAdapter:
+    def validate(self, kinds: "Sequence[str]") -> None:
+        if tuple(kinds) != ("skill",):
+            raise ValueError("unexpected kinds")
+
+    def root_path(self, kind: str) -> str:
+        if kind != "skill":
+            raise ValueError("unexpected kind")
+        return "skills"
+
+    def to_path(self, key: AssetKey) -> str:
+        return f"skills/{key.id}.asset"
+
+    def from_path(self, path: str) -> "AssetKey | None":
+        prefix = "skills/"
+        suffix = ".asset"
+        if not path.startswith(prefix) or not path.endswith(suffix):
+            return None
+        return AssetKey("skill", path[len(prefix) : -len(suffix)])
+
+
 @pytest.mark.asyncio
 async def test_directory_declaration_assets_ignore_noise_without_restricting_ids(
     tmp_path: Path,
@@ -245,6 +266,35 @@ async def test_directory_asset_skill_local_path_does_not_require_skill_markdown(
 
         assert view.location.kind == "local"
         assert Path(view.location.path) == package.resolve()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_skill_with_remapped_paths_is_virtual(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    mapped = root / "skills" / "review"
+    mapped.mkdir(parents=True)
+    (mapped / "manifest.yaml.asset").write_text("name: review\n", encoding="utf-8")
+    (mapped / "run.sh.asset").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=_SuffixSkillPathAdapter(),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "virtual"
     finally:
         await store.close()
 
