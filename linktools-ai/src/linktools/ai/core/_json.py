@@ -67,7 +67,7 @@ class ImmutableJsonMapping(Mapping[str, JsonValue]):
         self._payload = canonical_json_bytes(_normalize_mapping(value))
 
     def __getitem__(self, key: str) -> JsonValue:
-        return self._decode()[key]
+        return _normalize_value(self._decode()[key])
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._decode())
@@ -79,10 +79,14 @@ class ImmutableJsonMapping(Mapping[str, JsonValue]):
         return isinstance(other, Mapping) and self._decode() == dict(other)
 
     def _decode(self) -> "dict[str, JsonValue]":
-        value = json.loads(self._payload.decode("utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("immutable JSON mapping payload must be an object")  # noqa: TRY004
-        return cast("dict[str, JsonValue]", value)
+        if isinstance(self._payload, bytes):
+            value = json.loads(self._payload.decode("utf-8"))
+            if not isinstance(value, dict):
+                raise ValueError(
+                    "immutable JSON mapping payload must be an object"
+                )  # noqa: TRY004
+            self._payload = cast("dict[str, JsonValue]", value)
+        return cast("dict[str, JsonValue]", self._payload)
 
 
 def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
