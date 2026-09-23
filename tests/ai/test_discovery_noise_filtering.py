@@ -220,6 +220,36 @@ async def test_directory_asset_skill_preserves_local_path_and_executable_mode(
 
 
 @pytest.mark.asyncio
+async def test_directory_asset_skill_local_path_does_not_require_skill_markdown(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    (package / "scripts").mkdir(parents=True)
+    (package / "manifest.yaml").write_text("name: review\n", encoding="utf-8")
+    (package / "scripts" / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "local"
+        assert Path(view.location.path) == package.resolve()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_directory_asset_skill_snapshot_preserves_materialization_and_mode(
     tmp_path: Path,
 ) -> None:
