@@ -641,9 +641,9 @@ class CapabilityGroup(Generic[AppT]):
                     if item.kind != "skill":
                         continue
                     skill = cast(SkillDefinition, item.value)
-                    if (
-                        skill.source_ref is not None
-                        and skill.source_ref.source_id != self._id
+                    if skill.source_ref is not None and (
+                        skill.source_ref.source_id != self._id
+                        or skill.source_ref.snapshot is not None
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 contributions.extend(loaded)
