@@ -147,12 +147,24 @@ identities or layouts fail closed.
 
 For downstream declaration formats or custom kinds such as `worker` or
 `audit`, implement `CapabilityLoader` and register it for its input Asset
-kind with `group.loader("audit", loader)`. Registering `agent`, `skill`, or
-`mcp` replaces only that built-in parser slot. The loader receives one
-`CapabilityLoadContext`, can inspect captured metadata and read captured keys
-with `read()` / `read_many()`, and returns normal `CapabilityContribution`
-values. Use `CapabilityContribution.from_declaration(...)` for Agent, Skill,
-and MCP declarations. No additional Registry/Provider abstraction is required.
+kind with `group.loader("audit", loader)`. One kind has exactly one loader;
+registering `agent`, `skill`, or `mcp` replaces that built-in parser slot
+instead of chaining with it. The loader receives one `CapabilityLoadContext`,
+can inspect captured metadata and read captured keys with `read()` /
+`read_many()`, and returns normal `CapabilityContribution` values. Use
+`CapabilityContribution.from_declaration(...)` for Agent, Skill, and MCP
+declarations. Resource-backed Skill declarations remain owned by the same
+CapabilityGroup AssetStore; a custom loader may change the declaration format
+or layout but cannot redirect Skill resources to another source. No additional
+Registry/Provider abstraction is required.
+
+Directory-backed Skill packages retain a native absolute package path when
+`SKILL.md` and every discovered resource resolve from the same local Asset
+backend. This allows Skill scripts to be invoked by absolute path. If an
+overlay mixes resource origins, the Skill is exposed as virtual instead of
+claiming a partial local tree. Durable executions continue to use frozen Skill
+resource snapshots and materialize them into the execution sandbox when a
+filesystem path is required.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
