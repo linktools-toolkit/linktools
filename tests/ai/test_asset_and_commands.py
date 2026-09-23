@@ -206,6 +206,12 @@ def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
         assert await store.get(key) == b"builtin"
         location = await storage.locate(key)
         assert location is not None and location.layer == "fallback"
+        locations = await storage.locate_many(
+            (key, AssetKey("sample", "missing"), key)
+        )
+        assert tuple(
+            None if item is None else item.layer for item in locations
+        ) == ("fallback", None, "fallback")
         override_again = await store.put(key, b"override-again")
         batch = await store.apply_batch(
             (StorageChange(StorageOperation.RESET, key, None, override_again.revision),)
