@@ -421,22 +421,22 @@ def test_model_trace_accepts_sparse_request_lineage() -> None:
     assert "purpose" not in item.payload
 
 
-def test_model_trace_rejects_invalid_request_purpose() -> None:
+def test_model_trace_preserves_unknown_request_purpose() -> None:
     event = StepEvent(
         run_id="run",
         kind="model_request_started",
         step_index=1,
-        metadata={"linktools.ai.request_purpose": "invalid"},
+        metadata={"linktools.ai.request_purpose": "future"},
     )
-    with pytest.raises(AIError) as error:
-        _trace_item(
-            SimpleNamespace(execution_id="execution"),
-            1,
-            0,
-            0,
-            event,
-        )
-    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    item = _trace_item(
+        SimpleNamespace(execution_id="execution"),
+        1,
+        0,
+        0,
+        event,
+    )
+    assert item is not None
+    assert item.payload["purpose"] == "future"
 
 
 def test_failed_model_response_trace_has_no_request_usage() -> None:
