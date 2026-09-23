@@ -381,7 +381,7 @@ class RuntimeCaptureStore:
             "started": "model_request_started",
             "completed": "model_request_completed",
             "failed": "model_request_failed",
-            "cancelled": "model_request_failed",
+            "cancelled": "model_request_cancelled",
         }
         kind = kinds.get(phase)
         if kind is None:
