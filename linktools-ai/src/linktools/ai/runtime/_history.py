@@ -1714,8 +1714,6 @@ def _trace_item(
     }
     observation_id = event.metadata.get(OBSERVATION_ID_METADATA_KEY)
     if observation_id is not None:
-        if not observation_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["observation_id"] = observation_id
     duration_ns = event.metadata.get(DURATION_NS_METADATA_KEY)
     if duration_ns is not None:
@@ -1725,8 +1723,6 @@ def _trace_item(
     request_sequence = _event_request_sequence(event)
     request_purpose = event.metadata.get(REQUEST_PURPOSE_METADATA_KEY)
     if request_purpose is not None:
-        if request_purpose not in {"agent", "compaction"}:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         payload["purpose"] = request_purpose
     if request_sequence is not None:
         payload["request_sequence"] = request_sequence
