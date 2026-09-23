@@ -275,7 +275,7 @@ class ExecutionTraceItem:
         ):
             return
         status = self.payload.get("status")
-        if status == "FAILED":
+        if status in {"FAILED", "CANCELLED"}:
             if self.payload.get("token_usage") is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
