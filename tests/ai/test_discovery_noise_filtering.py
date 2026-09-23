@@ -24,7 +24,7 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.spec import SkillSpec
-from linktools.ai.storage import StorageOverlay
+from linktools.ai.storage import StorageLayer, StorageOverlay
 from linktools.ai.workspace import LocalRuleCatalog, WorkspacePolicy
 
 
@@ -175,6 +175,81 @@ async def test_virtual_skill_resource_discovery_applies_the_same_noise_policy() 
         assert view.resources == ("assets/payload.bin", "references/rules.md")
         assert await source.read("review", ".hidden.md") == b"hidden"
         assert await source.read("review", "scripts/helper.PYC") == b"\xff"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_skill_preserves_local_path_and_executable_mode(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    script = package / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(script, 0o755)
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "local"
+        assert Path(view.location.path) == package.resolve()
+        assert view.resources == ("run.sh",)
+        assert await source.resource_mode("review", "run.sh") == 0o111
+
+        before = await source.current_revision("review")
+        os.chmod(script, 0o644)
+        after = await source.current_revision("review")
+        assert after != before
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_asset_skill_uses_virtual_location_when_overlay_mixes_origins(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (package / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    primary = InMemoryAssetBackend()
+    await primary.put(AssetKey("skill", "review/run.sh"), b"override")
+    directory = DirectoryAssetBackend(
+        str(root),
+        path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+        kinds=("skill",),
+    )
+    store = AssetStore(
+        StorageOverlay(
+            primary,
+            layers=(StorageLayer("directory", directory),),
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "virtual"
+        assert view.resources == ("run.sh",)
+        assert await source.read("review", "run.sh") == b"override"
+        assert await source.resource_mode("review", "run.sh") == 0
     finally:
         await store.close()
 
