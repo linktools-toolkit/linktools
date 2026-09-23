@@ -89,14 +89,18 @@ def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]"
 
 
 def _normalize_value(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, bool)):
-        return value
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, bool):
+        return bool(value)
     if isinstance(value, int):
-        return value
+        return int(value)
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("JSON numbers must be finite")
-        return value
+        return float(value)
     if isinstance(value, list):
         return [_normalize_value(item) for item in value]
     if isinstance(value, Mapping):
