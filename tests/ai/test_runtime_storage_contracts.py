@@ -182,7 +182,7 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
         None,
         0,
         None,
-        {},
+        {"nested": {"value": "stored"}},
     )
     facts = (
         StoredFact(stream, 1, owner, "test", subject_a, None, {"value": 1}),
@@ -198,6 +198,11 @@ async def test_sql_latest_per_subject_uses_portable_aggregate_query(
 
     try:
         await store.mutate(seed)
+        stored = await store.read(
+            lambda transaction: transaction.get_record(owner)
+        )
+        assert stored is not None
+        assert stored.data == {"nested": {"value": "stored"}}
         statements.clear()
         values = await store.read(
             lambda transaction: transaction.list_facts(
