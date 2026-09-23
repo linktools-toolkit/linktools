@@ -538,7 +538,7 @@ class OperationLedgerRepository(_RepositoryBase):
                         "key": value.key_digest.hex(),
                         "stream": value.stream_digest.hex(),
                         "sequence": value.sequence,
-                        "data": value.data,
+                        "data": dict(value.data),
                     }
                     for value in values
                 ]
