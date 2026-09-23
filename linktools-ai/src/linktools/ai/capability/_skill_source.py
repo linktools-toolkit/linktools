@@ -211,8 +211,14 @@ class AssetSkillResourceSource:
     async def inspect(self, root: str) -> SkillResourceView:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         resources = await self._resource_infos(logical_root)
+        local = await self._local_resources(logical_root, resources)
+        location = (
+            SkillLocation("virtual", f"{self._id}/skills/{logical_root}")
+            if local is None
+            else SkillLocation("local", str(local[0]))
+        )
         return SkillResourceView(
-            await self._location(logical_root, resources),
+            location,
             tuple(relative for relative, _info in resources),
         )
 
@@ -227,14 +233,17 @@ class AssetSkillResourceSource:
     async def current_revision(self, root: str) -> StorageRevision:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         resources = await self._resource_infos(logical_root)
-        location = await self._location(logical_root, resources)
+        local = await self._local_resources(logical_root, resources)
         entries: list[dict[str, JsonValue]] = []
         for relative, info in resources:
-            mode = (
-                await self.resource_mode(logical_root, relative)
-                if location.kind == "local"
-                else 0
-            )
+            mode = 0
+            if local is not None:
+                try:
+                    mode = (
+                        await asyncio.to_thread(local[1][relative].stat)
+                    ).st_mode & 0o111
+                except OSError as error:
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             _validate_resource_mode(mode)
             entries.append(
                 {
@@ -246,7 +255,7 @@ class AssetSkillResourceSource:
             )
         return _skill_revision(
             entries,
-            sandbox_materialize=location.kind == "local",
+            sandbox_materialize=local is not None,
         )
 
     async def _resource_infos(
@@ -268,24 +277,31 @@ class AssetSkillResourceSource:
             selected.append((normalized, info))
         return tuple(sorted(selected, key=lambda item: item[0]))
 
-    async def _location(
+    async def _local_resources(
         self,
         root: str,
         resources: "Sequence[tuple[str, AssetInfo]]",
-    ) -> SkillLocation:
-        virtual = SkillLocation("virtual", f"{self._id}/skills/{root}")
-        marker = await self._store.local_path(
-            AssetKey("skill", f"{root}/SKILL.md")
-        )
-        if marker is None:
-            return virtual
-        package = marker.parent
-        for relative, _info in resources:
-            path = await self._store.local_path(
+    ) -> "tuple[Path, dict[str, Path]] | None":
+        keys = (
+            AssetKey("skill", f"{root}/SKILL.md"),
+            *(
                 AssetKey("skill", f"{root}/{relative}")
-            )
+                for relative, _info in resources
+            ),
+        )
+        paths = await self._store.local_paths(keys)
+        marker = paths[0]
+        if marker is None:
+            return None
+        package = marker.parent
+        local: dict[str, Path] = {}
+        for (relative, _info), path in zip(
+            resources,
+            paths[1:],
+            strict=True,
+        ):
             if path is None:
-                return virtual
+                return None
             try:
                 expected = package.joinpath(
                     *PurePosixPath(relative).parts
@@ -293,8 +309,10 @@ class AssetSkillResourceSource:
             except (OSError, RuntimeError) as error:
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             if path != expected:
-                return virtual
-        return SkillLocation("local", str(package))
+                return None
+            local[relative] = path
+        return package, local
+
 
     async def resource_mode(self, root: str, path: str) -> int:
         logical_root = _normalize_relative_path(root, field_name="skill root")
