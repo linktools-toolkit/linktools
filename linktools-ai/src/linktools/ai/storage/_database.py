@@ -86,10 +86,6 @@ class SqlStorageContext:
                 await transaction.__aenter__()
                 entered = True
                 try:
-                    if self.dialect.name == "sqlite":
-                        from sqlalchemy import text
-
-                        await session.execute(text("BEGIN IMMEDIATE"))
                     result = await callback(session)
                 except BaseException as error:
                     disposition = self.dialect.classify_transaction_error(
