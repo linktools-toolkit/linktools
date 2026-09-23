@@ -230,7 +230,11 @@ class AssetSkillResourceSource:
         location = await self._location(logical_root, resources)
         entries: list[dict[str, JsonValue]] = []
         for relative, info in resources:
-            mode = await self.resource_mode(logical_root, relative)
+            mode = (
+                await self.resource_mode(logical_root, relative)
+                if location.kind == "local"
+                else 0
+            )
             _validate_resource_mode(mode)
             entries.append(
                 {
@@ -331,7 +335,11 @@ async def _skill_source_revision(
     entries: list[dict[str, JsonValue]] = []
     for relative in view.resources:
         value = await source.read(root, relative)
-        mode = await source.resource_mode(root, relative)
+        mode = (
+            await source.resource_mode(root, relative)
+            if view.location.kind == "local"
+            else 0
+        )
         _validate_resource_mode(mode)
         entries.append(
             {
@@ -394,7 +402,11 @@ async def _snapshot_skill_source(
     entries: list[dict[str, JsonValue]] = []
     for relative in view.resources:
         value = await source.read(root, relative)
-        mode = await source.resource_mode(root, relative)
+        mode = (
+            await source.resource_mode(root, relative)
+            if view.location.kind == "local"
+            else 0
+        )
         _validate_resource_mode(mode)
         digest = hashlib.sha256(value).hexdigest()
         size = len(value)
