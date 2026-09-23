@@ -17,6 +17,7 @@ EventKind = Literal[
     "model_request_started",
     "model_request_completed",
     "model_request_failed",
+    "model_request_cancelled",
     "tool_call_started",
     "tool_call_completed",
     "tool_call_failed",
