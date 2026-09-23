@@ -9,12 +9,16 @@ from pathlib import Path
 
 import pytest
 import linktools.ai.asset._directory as directory_module
+import linktools.ai.capability._skill_source as skill_source_module
 from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
+    AssetStore,
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
+from linktools.ai.capability import AssetSkillResourceSource
+from linktools.ai.storage import StorageOverlay
 
 
 @pytest.mark.asyncio
@@ -46,6 +50,50 @@ async def test_directory_asset_stat_hashes_content_off_event_loop(
         assert all(thread is not main_thread for thread in observed_threads)
     finally:
         await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_asset_skill_package_resolution_runs_off_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (package / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    main_thread = threading.current_thread()
+    observed_threads: list[threading.Thread] = []
+    original_resolve = skill_source_module._resolve_local_skill_package
+
+    def tracked_resolve(relatives, paths):
+        observed_threads.append(threading.current_thread())
+        return original_resolve(relatives, paths)
+
+    monkeypatch.setattr(
+        skill_source_module,
+        "_resolve_local_skill_package",
+        tracked_resolve,
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "local"
+        assert observed_threads
+        assert all(thread is not main_thread for thread in observed_threads)
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

@@ -12,7 +12,11 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import CapabilityGroup, LocalSkillResourceSource
+from linktools.ai.capability import (
+    AssetSkillResourceSource,
+    CapabilityGroup,
+    LocalSkillResourceSource,
+)
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
@@ -153,6 +157,39 @@ async def test_directory_asset_backend_does_not_follow_symlinks_by_default(
 
 
 @pytest.mark.asyncio
+async def test_asset_skill_file_symlink_does_not_expand_local_package(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    external = tmp_path / "shared"
+    package.mkdir(parents=True)
+    external.mkdir()
+    target = external / "SKILL.md"
+    target.write_text("skill", encoding="utf-8")
+    _symlink(target, package / "SKILL.md")
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+                follow_external_symlinks=True,
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "virtual"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
     tmp_path: Path,
 ) -> None:
@@ -164,6 +201,7 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
         "---\nname: review\ndescription: Review changes\n---\n\nReview changes.\n",
         encoding="utf-8",
     )
+    (external_skill / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     agent = external / "agent"
     mcp = external / "mcp"
     agent.write_bytes(AgentSpecCodec().encode(AgentSpec("review")))
@@ -202,6 +240,10 @@ async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
             ("mcp", "server"),
             ("skill", "review"),
         }
+        source = AssetSkillResourceSource("workspace", store)
+        view = await source.inspect("review")
+        assert Path(view.location.path) == external_skill.resolve()
+        assert view.resources == ("run.sh",)
         assert await store.get(AssetKey("agent", "review")) == agent.read_bytes()
         assert await store.get(AssetKey("mcp", "server")) == mcp.read_bytes()
     finally:

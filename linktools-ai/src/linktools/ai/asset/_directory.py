@@ -201,6 +201,10 @@ class DirectoryAssetBackend:
             self._revision = _store_revision(())
         _logger.debug("local directory asset backend closed: root=%s", self._directory)
 
+    def local_path(self, key: AssetKey) -> Path:
+        """Return the native lexical mapping path for one local Asset key."""
+        return self._asset_path(self._validate_key(key))
+
     async def head_revision(self) -> StorageRevision:
         async with self._lock:
             entries = await asyncio.to_thread(self._scan)
@@ -311,7 +315,7 @@ class DirectoryAssetBackend:
             )
         )
 
-    def _file_path(self, key: AssetKey) -> Path:
+    def _asset_path(self, key: AssetKey) -> Path:
         relative = self._path_adapter.to_path(key)
         pure = PurePosixPath(relative)
         if (
@@ -325,7 +329,10 @@ class DirectoryAssetBackend:
         root_parts = _safe_asset_parts(self._path_adapter.root_path(key.kind))
         if pure.parts[: len(root_parts)] != root_parts or len(pure.parts) <= len(root_parts):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "asset path is outside its kind root")
-        path = _resolve_path(self._directory / Path(*pure.parts), strict=False)
+        return self._directory / Path(*pure.parts)
+
+    def _file_path(self, key: AssetKey) -> Path:
+        path = _resolve_path(self._asset_path(key), strict=False)
         if self._follow_external_symlinks:
             return path
         try:

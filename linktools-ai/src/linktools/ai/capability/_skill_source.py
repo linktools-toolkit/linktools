@@ -210,9 +210,16 @@ class AssetSkillResourceSource:
 
     async def inspect(self, root: str) -> SkillResourceView:
         logical_root = _normalize_relative_path(root, field_name="skill root")
-        resources = await self._resource_infos(logical_root)
+        assets = await self._asset_infos(logical_root)
+        resources = self._resource_infos(assets)
+        local = await self._local_resources(logical_root, assets)
+        location = (
+            SkillLocation("virtual", f"{self._id}/skills/{logical_root}")
+            if local is None
+            else SkillLocation("local", str(local[0]))
+        )
         return SkillResourceView(
-            SkillLocation("virtual", f"{self._id}/skills/{logical_root}"),
+            location,
             tuple(relative for relative, _info in resources),
         )
 
@@ -224,24 +231,36 @@ class AssetSkillResourceSource:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         return bytes(value)
 
-
     async def current_revision(self, root: str) -> StorageRevision:
         logical_root = _normalize_relative_path(root, field_name="skill root")
-        resources = await self._resource_infos(logical_root)
-        return _skill_revision(
-            [
+        assets = await self._asset_infos(logical_root)
+        resources = self._resource_infos(assets)
+        local = await self._local_resources(logical_root, assets)
+        entries: list[dict[str, JsonValue]] = []
+        for relative, info in resources:
+            mode = 0
+            if local is not None:
+                try:
+                    mode = (
+                        await asyncio.to_thread(local[1][relative].stat)
+                    ).st_mode & 0o111
+                except OSError as error:
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+            _validate_resource_mode(mode)
+            entries.append(
                 {
                     "path": relative,
                     "digest": info.etag,
                     "size": info.size,
-                    "mode": 0,
+                    "mode": mode,
                 }
-                for relative, info in resources
-            ],
-            sandbox_materialize=False,
+            )
+        return _skill_revision(
+            entries,
+            sandbox_materialize=local is not None,
         )
 
-    async def _resource_infos(
+    async def _asset_infos(
         self,
         root: str,
     ) -> "tuple[tuple[str, AssetInfo], ...]":
@@ -251,8 +270,6 @@ class AssetSkillResourceSource:
             if info.key.kind != "skill" or not info.key.id.startswith(prefix):
                 continue
             relative = info.key.id[len(prefix) :]
-            if relative == "SKILL.md" or DEFAULT_DISCOVERY_POLICY.ignores(relative):
-                continue
             try:
                 normalized = _normalize_resource_path(relative)
             except AIError as error:
@@ -260,10 +277,52 @@ class AssetSkillResourceSource:
             selected.append((normalized, info))
         return tuple(sorted(selected, key=lambda item: item[0]))
 
+    @staticmethod
+    def _resource_infos(
+        assets: "Sequence[tuple[str, AssetInfo]]",
+    ) -> "tuple[tuple[str, AssetInfo], ...]":
+        return tuple(
+            (relative, info)
+            for relative, info in assets
+            if relative != "SKILL.md"
+            and not DEFAULT_DISCOVERY_POLICY.ignores(relative)
+        )
+
+    async def _local_resources(
+        self,
+        root: str,
+        assets: "Sequence[tuple[str, AssetInfo]]",
+    ) -> "tuple[Path, dict[str, Path]] | None":
+        if not assets:
+            return None
+        paths = await self._store.local_paths(
+            tuple(
+                AssetKey("skill", f"{root}/{relative}")
+                for relative, _info in assets
+            )
+        )
+        if any(path is None for path in paths):
+            return None
+        return await asyncio.to_thread(
+            _resolve_local_skill_package,
+            tuple(relative for relative, _info in assets),
+            tuple(cast(Path, path) for path in paths),
+        )
+
     async def resource_mode(self, root: str, path: str) -> int:
-        _normalize_relative_path(root, field_name="skill root")
-        _normalize_resource_path(path)
-        return 0
+        logical_root = _normalize_relative_path(root, field_name="skill root")
+        relative = _normalize_resource_path(path)
+        local = (
+            await self._store.local_paths(
+                (AssetKey("skill", f"{logical_root}/{relative}"),)
+            )
+        )[0]
+        if local is None:
+            return 0
+        try:
+            return (await asyncio.to_thread(local.stat)).st_mode & 0o111
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     async def snapshot(
         self,
@@ -281,6 +340,44 @@ class AssetSkillResourceSource:
         )
 
 
+def _resolve_local_skill_package(
+    relatives: Sequence[str],
+    paths: Sequence[Path],
+) -> "tuple[Path, dict[str, Path]] | None":
+    package_path = paths[0]
+    for _part in PurePosixPath(relatives[0]).parts:
+        package_path = package_path.parent
+    for relative, path in zip(relatives[1:], paths[1:], strict=True):
+        candidate = path
+        for _part in PurePosixPath(relative).parts:
+            candidate = candidate.parent
+        if package_path != candidate:
+            return None
+    try:
+        package = package_path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+    if not package.is_dir():
+        return None
+
+    local: dict[str, Path] = {}
+    for relative, path in zip(relatives, paths, strict=True):
+        expected = package_path.joinpath(*PurePosixPath(relative).parts)
+        if path != expected:
+            return None
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(package)
+        except ValueError:
+            return None
+        except (OSError, RuntimeError) as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        if not resolved.is_file():
+            return None
+        local[relative] = resolved
+    return package, local
+
+
 async def _skill_source_revision(
     source: SnapshotSkillResourceSource,
     root: str,
@@ -291,7 +388,11 @@ async def _skill_source_revision(
     entries: list[dict[str, JsonValue]] = []
     for relative in view.resources:
         value = await source.read(root, relative)
-        mode = await source.resource_mode(root, relative)
+        mode = (
+            await source.resource_mode(root, relative)
+            if view.location.kind == "local"
+            else 0
+        )
         _validate_resource_mode(mode)
         entries.append(
             {
@@ -354,7 +455,11 @@ async def _snapshot_skill_source(
     entries: list[dict[str, JsonValue]] = []
     for relative in view.resources:
         value = await source.read(root, relative)
-        mode = await source.resource_mode(root, relative)
+        mode = (
+            await source.resource_mode(root, relative)
+            if view.location.kind == "local"
+            else 0
+        )
         _validate_resource_mode(mode)
         digest = hashlib.sha256(value).hexdigest()
         size = len(value)

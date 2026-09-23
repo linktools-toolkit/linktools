@@ -3,6 +3,7 @@
 """Automatic discovery ignores environment noise without restricting direct reads."""
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import (
     AssetSkillResourceSource,
+    FrozenSkillResourceSource,
     LocalSkillResourceSource,
     SkillCapability,
     SkillDefinition,
@@ -24,8 +26,29 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.spec import SkillSpec
-from linktools.ai.storage import StorageOverlay
+from linktools.ai.storage import InMemoryObjectStore, StorageLayer, StorageOverlay
 from linktools.ai.workspace import LocalRuleCatalog, WorkspacePolicy
+
+
+class _SuffixSkillPathAdapter:
+    def validate(self, kinds: "Sequence[str]") -> None:
+        if tuple(kinds) != ("skill",):
+            raise ValueError("unexpected kinds")
+
+    def root_path(self, kind: str) -> str:
+        if kind != "skill":
+            raise ValueError("unexpected kind")
+        return "skills"
+
+    def to_path(self, key: AssetKey) -> str:
+        return f"skills/{key.id}.asset"
+
+    def from_path(self, path: str) -> "AssetKey | None":
+        prefix = "skills/"
+        suffix = ".asset"
+        if not path.startswith(prefix) or not path.endswith(suffix):
+            return None
+        return AssetKey("skill", path[len(prefix) : -len(suffix)])
 
 
 @pytest.mark.asyncio
@@ -175,6 +198,184 @@ async def test_virtual_skill_resource_discovery_applies_the_same_noise_policy() 
         assert view.resources == ("assets/payload.bin", "references/rules.md")
         assert await source.read("review", ".hidden.md") == b"hidden"
         assert await source.read("review", "scripts/helper.PYC") == b"\xff"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_skill_preserves_local_path_and_executable_mode(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    script = package / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(script, 0o755)
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "local"
+        assert Path(view.location.path) == package.resolve()
+        assert view.resources == ("run.sh",)
+        assert await source.resource_mode("review", "run.sh") == 0o111
+
+        before = await source.current_revision("review")
+        os.chmod(script, 0o644)
+        after = await source.current_revision("review")
+        assert after != before
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_skill_local_path_does_not_require_skill_markdown(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    (package / "scripts").mkdir(parents=True)
+    (package / "manifest.yaml").write_text("name: review\n", encoding="utf-8")
+    (package / "scripts" / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "local"
+        assert Path(view.location.path) == package.resolve()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_skill_with_remapped_paths_is_virtual(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    mapped = root / "skills" / "review"
+    mapped.mkdir(parents=True)
+    (mapped / "manifest.yaml.asset").write_text("name: review\n", encoding="utf-8")
+    (mapped / "run.sh.asset").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=_SuffixSkillPathAdapter(),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "virtual"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_skill_snapshot_preserves_materialization_and_mode(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    script = package / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.chmod(script, 0o755)
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        objects = InMemoryObjectStore("runtime")
+        revision = await source.current_revision("review")
+        snapshot = await source.snapshot(
+            "review",
+            expected_revision=revision,
+            object_store=objects,
+        )
+        frozen = FrozenSkillResourceSource(
+            "application",
+            {"review": snapshot},
+            objects,
+        )
+
+        assert await frozen.sandbox_materialize("review") is True
+        assert await frozen.resource_mode("review", "run.sh") == 0o111
+        assert await frozen.read("review", "run.sh") == b"#!/bin/sh\n"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_asset_skill_uses_virtual_location_when_overlay_mixes_origins(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("skill", encoding="utf-8")
+    (package / "run.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    primary = InMemoryAssetBackend()
+    await primary.put(AssetKey("skill", "review/run.sh"), b"override")
+    directory = DirectoryAssetBackend(
+        str(root),
+        path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+        kinds=("skill",),
+    )
+    store = AssetStore(
+        StorageOverlay(
+            primary,
+            layers=(StorageLayer("directory", directory),),
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "virtual"
+        assert view.resources == ("run.sh",)
+        assert await source.read("review", "run.sh") == b"override"
+        assert await source.resource_mode("review", "run.sh") == 0
     finally:
         await store.close()
 
