@@ -161,10 +161,7 @@ class AssetStore:
             ):
                 result.append(None)
                 continue
-            path = location.backend.local_path(key)
-            if not isinstance(path, Path) or not path.is_absolute():
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            result.append(path)
+            result.append(location.backend.local_path(key))
         return tuple(result)
 
     async def put(
