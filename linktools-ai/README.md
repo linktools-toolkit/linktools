@@ -159,8 +159,8 @@ or layout but cannot redirect Skill resources to another source. No additional
 Registry/Provider abstraction is required.
 
 Directory-backed Skill packages retain a native absolute package path when
-`SKILL.md` and every discovered resource resolve from the same local Asset
-backend. This allows Skill scripts to be invoked by absolute path. If an
+`SKILL.md` and every discovered resource resolve to one consistent local
+package tree. This allows Skill scripts to be invoked by absolute path. If an
 overlay mixes resource origins, the Skill is exposed as virtual instead of
 claiming a partial local tree. Durable executions continue to use frozen Skill
 resource snapshots and materialize them into the execution sandbox when a
