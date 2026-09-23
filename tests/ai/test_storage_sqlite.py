@@ -27,7 +27,7 @@ async def test_sqlite_storage_context_configures_checked_out_connections(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_sqlite_mutations_reserve_writer_before_callback(tmp_path) -> None:
+async def test_sqlite_mutations_do_not_reserve_writer_before_callback(tmp_path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'writers.db'}")
     context = create_sql_storage_context(engine)
     first_entered = asyncio.Event()
@@ -47,12 +47,12 @@ async def test_sqlite_mutations_reserve_writer_before_callback(tmp_path) -> None
         await first_entered.wait()
 
         second_task = asyncio.create_task(context.run_mutation(second))
-        await asyncio.sleep(0.05)
-        assert not second_entered.is_set()
+        await asyncio.wait_for(second_entered.wait(), timeout=1)
+        await second_task
+        assert not first_task.done()
 
         release_first.set()
-        await asyncio.gather(first_task, second_task)
-        assert second_entered.is_set()
+        await first_task
     finally:
         release_first.set()
         await context.close()
