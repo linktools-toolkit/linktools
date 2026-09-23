@@ -59,48 +59,50 @@ def _normalize_json_value(value: object, seen: set[int]) -> JsonValue:
 
 
 class ImmutableJsonMapping(Mapping[str, JsonValue]):
-    """Store one detached JSON object and return detached values on access."""
+    """Store one JSON object canonically and return detached values on access."""
 
-    __slots__ = ("_value",)
+    __slots__ = ("_payload",)
 
     def __init__(self, value: Mapping[str, JsonValue]) -> None:
-        self._value = _normalize_mapping(value)
+        self._payload = canonical_json_bytes(_normalize_mapping(value))
 
     def __getitem__(self, key: str) -> JsonValue:
-        return _normalize_value(self._value[key])
+        return self._decode()[key]
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._value)
+        return iter(self._decode())
 
     def __len__(self) -> int:
-        return len(self._value)
+        return len(self._decode())
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Mapping) and self._value == dict(other)
+        return isinstance(other, Mapping) and self._decode() == dict(other)
+
+    def _decode(self) -> "dict[str, JsonValue]":
+        value = json.loads(self._payload.decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("immutable JSON mapping payload must be an object")  # noqa: TRY004
+        return cast("dict[str, JsonValue]", value)
 
 
 def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
-    if any(not isinstance(key, str) for key in value):
-        raise ValueError("JSON object keys must be strings")
-    return {
-        key: _normalize_value(value[key])
-        for key in sorted(value)
-    }
+    normalized: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError("JSON object keys must be strings")
+        normalized[key] = _normalize_value(item)
+    return normalized
 
 
 def _normalize_value(value: object) -> JsonValue:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return str(value)
-    if isinstance(value, bool):
-        return bool(value)
+    if value is None or isinstance(value, (str, bool)):
+        return value
     if isinstance(value, int):
-        return int(value)
+        return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("JSON numbers must be finite")
-        return float(value)
+        return value
     if isinstance(value, list):
         return [_normalize_value(item) for item in value]
     if isinstance(value, Mapping):
