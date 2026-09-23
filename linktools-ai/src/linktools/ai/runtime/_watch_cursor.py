@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Opaque resumable cursors for Runtime watch projections."""
+"""Opaque resumable cursors for Runtime watch projections.
+
+Cursor validation protects resumable state from accidental corruption; service
+authorization remains the access-control boundary.
+"""
 
 import json
 from collections.abc import Mapping
