@@ -365,13 +365,32 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
 
     async def locate(self, key: KeyT) -> 'StorageLocation[KeyT, ValueT, InfoT] | None':
         """Return the effective owner selected by layer precedence for one key."""
+        return (await self.locate_many((key,)))[0]
+
+    async def locate_many(
+        self,
+        keys: 'Sequence[KeyT]',
+    ) -> 'tuple[StorageLocation[KeyT, ValueT, InfoT] | None, ...]':
+        """Return effective owners for keys from one metadata snapshot."""
         state = await self._state()
-        info = state.entries.get(key)
-        if info is None:
-            return None
-        owner = state.owners[key]
-        backend = self._views[owner].backend
-        return StorageLocation(key, info, backend, self._owner_id(owner), self.is_writable_backend(backend))
+        result: list[StorageLocation[KeyT, ValueT, InfoT] | None] = []
+        for key in keys:
+            info = state.entries.get(key)
+            if info is None:
+                result.append(None)
+                continue
+            owner = state.owners[key]
+            backend = self._views[owner].backend
+            result.append(
+                StorageLocation(
+                    key,
+                    info,
+                    backend,
+                    self._owner_id(owner),
+                    self.is_writable_backend(backend),
+                )
+            )
+        return tuple(result)
 
     def invalidate(self) -> None:
         """Discard materialized metadata and preload markers after an external mutation."""
