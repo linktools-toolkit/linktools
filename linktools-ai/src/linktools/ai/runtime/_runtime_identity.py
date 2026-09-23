@@ -10,8 +10,9 @@ from ..core import canonical_sha256
 def token_seed(namespace: str) -> bytes:
     """Return a deterministic namespace-scoped integrity seed for opaque tokens.
 
-    This seed is not an authorization secret. Runtime services must authorize
-    access independently from cursor or token validation.
+    This seed is not an authorization secret. Runtime services must bind access
+    to an authorization policy or durable authorization receipt independently
+    of this signature.
     """
     return hashlib.sha256(f"runtime-token-v1:{namespace}".encode()).digest()
 
