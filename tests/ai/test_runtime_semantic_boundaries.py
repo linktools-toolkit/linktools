@@ -195,6 +195,22 @@ def test_output_schema_preserves_nested_resource_scope() -> None:
     Draft202012Validator(normalized).validate({"value": 7})
 
 
+def test_output_schema_nested_resource_keeps_supported_subset() -> None:
+    with pytest.raises(AIError) as raised:
+        canonicalize_output_schema_v1(
+            {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "$id": "urn:linktools:test:nested-dynamic",
+                        "$dynamicRef": "#value",
+                    }
+                },
+            }
+        )
+    assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
 def test_output_schema_is_independent_of_mapping_insertion_order() -> None:
     first = {
         "$defs": {
