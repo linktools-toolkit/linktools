@@ -20,7 +20,7 @@ from linktools.ai.capability._group import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec, SkillSpec, SkillSpecCodec
-from linktools.ai.storage import StorageOverlay
+from linktools.ai.storage import ObjectRef, StorageOverlay
 
 
 async def _store() -> AssetStore:
@@ -152,6 +152,37 @@ async def test_custom_loader_cannot_bind_skill_resources_to_another_group() -> N
     store = await _store()
     group = CapabilityGroup("application", assets=store)
     group.loader("skill", _ForeignSkillSourceLoader())
+
+    with pytest.raises(AIError) as error:
+        await group.freeze()
+
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+class _PinnedSkillSnapshotLoader:
+    async def load(
+        self,
+        context: CapabilityLoadContext,
+    ) -> "Sequence[CapabilityContribution[object]]":
+        return (
+            CapabilityContribution.from_declaration(
+                SkillDefinition(
+                    SkillSpec("review", "review"),
+                    SkillSourceRef(
+                        context.group_id,
+                        "review",
+                        ObjectRef("runtime", "snapshot", "0" * 64, 1),
+                    ),
+                )
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_custom_loader_cannot_prebind_skill_snapshot() -> None:
+    store = await _store()
+    group = CapabilityGroup("application", assets=store)
+    group.loader("skill", _PinnedSkillSnapshotLoader())
 
     with pytest.raises(AIError) as error:
         await group.freeze()
