@@ -59,30 +59,24 @@ def _normalize_json_value(value: object, seen: set[int]) -> JsonValue:
 
 
 class ImmutableJsonMapping(Mapping[str, JsonValue]):
-    """Store one JSON object canonically and return detached values on access."""
+    """Store one detached JSON object and return detached values on access."""
 
-    __slots__ = ("_payload",)
+    __slots__ = ("_value",)
 
     def __init__(self, value: Mapping[str, JsonValue]) -> None:
-        self._payload = canonical_json_bytes(_normalize_mapping(value))
+        self._value = _normalize_mapping(value)
 
     def __getitem__(self, key: str) -> JsonValue:
-        return self._decode()[key]
+        return _normalize_value(self._value[key])
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self._decode())
+        return iter(self._value)
 
     def __len__(self) -> int:
-        return len(self._decode())
+        return len(self._value)
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, Mapping) and self._decode() == dict(other)
-
-    def _decode(self) -> "dict[str, JsonValue]":
-        value = json.loads(self._payload.decode("utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("immutable JSON mapping payload must be an object")  # noqa: TRY004
-        return cast("dict[str, JsonValue]", value)
+        return isinstance(other, Mapping) and self._value == dict(other)
 
 
 def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
