@@ -157,6 +157,39 @@ async def test_directory_asset_backend_does_not_follow_symlinks_by_default(
 
 
 @pytest.mark.asyncio
+async def test_asset_skill_file_symlink_does_not_expand_local_package(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    external = tmp_path / "shared"
+    package.mkdir(parents=True)
+    external.mkdir()
+    target = external / "SKILL.md"
+    target.write_text("skill", encoding="utf-8")
+    _symlink(target, package / "SKILL.md")
+
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+                follow_external_symlinks=True,
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        source = AssetSkillResourceSource("application", store)
+        view = await source.inspect("review")
+
+        assert view.location.kind == "virtual"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_asset_declaration_symlinks_freeze_valid_external_declarations(
     tmp_path: Path,
 ) -> None:
