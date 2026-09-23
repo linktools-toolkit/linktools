@@ -189,8 +189,9 @@ def test_output_schema_preserves_nested_resource_scope() -> None:
     normalized = canonicalize_output_schema_v1(schema)
 
     nested = normalized["properties"]["value"]
-    assert nested["$defs"] == {"T": {"type": "integer"}}
-    assert nested["$ref"] == "#/$defs/T"
+    assert nested["$defs"] == {"d0": {"type": "integer"}}
+    assert nested["$ref"] == "#/$defs/d0"
+    assert "$defs" not in normalized
     Draft202012Validator(normalized).validate({"value": 7})
 
 
