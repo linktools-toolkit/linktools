@@ -3,6 +3,7 @@
 """Runtime storage error, concurrency, and schema contracts."""
 
 import asyncio
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from linktools.ai.migrate import build_sql_schema_metadata, provision_database
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._tool import RuntimeToolOperationBridge
 from linktools.ai.runtime.state._commands import RuntimeStateCommands
-from linktools.ai.runtime.state._filesystem import FilesystemStateStore
+from linktools.ai.runtime.state._filesystem import (
+    FilesystemStateStorageGroup,
+    FilesystemStateStore,
+)
 from linktools.ai.runtime.state._memory import MemoryStateStore
 from linktools.ai.runtime.state._sql import SqlStateStore
 from linktools.ai.runtime.state._store import (
@@ -389,9 +393,11 @@ async def test_filesystem_unknown_commit_poison_is_fail_closed(
         del args, kwargs
         raise OSError("commit failed")
 
-    async def unknown_outcome(*args: object, **kwargs: object) -> str:
+    async def unknown_outcome(
+        *args: object, **kwargs: object
+    ) -> tuple[str, None]:
         del args, kwargs
-        return "unknown"
+        return "unknown", None
 
     monkeypatch.setattr(store, "_commit_sync", failed_commit)
     monkeypatch.setattr(store, "_reconcile_commit", unknown_outcome)
@@ -407,6 +413,145 @@ async def test_filesystem_unknown_commit_poison_is_fail_closed(
             await store.read(lambda transaction: transaction.get_sequence(b"s" * 32))
         assert read_error.value.code is ErrorCode.STORAGE_COMMIT_UNKNOWN
     finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("grouped", (False, True))
+async def test_filesystem_cancelled_commit_settles_before_propagating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    grouped: bool,
+) -> None:
+    if grouped:
+        root = tmp_path / "group"
+        group = FilesystemStateStorageGroup(
+            root,
+            namespace="n",
+            tenant_id="t",
+            scope_digest="scope",
+        )
+        store = FilesystemStateStore(
+            root / "conversation",
+            namespace="n",
+            tenant_id="t",
+            runtime_domain="conversation",
+            group=group,
+        )
+        target = group
+    else:
+        store = FilesystemStateStore(
+            tmp_path / "state",
+            namespace="n",
+            tenant_id="t",
+            runtime_domain="conversation",
+        )
+        target = store
+    await store.initialize()
+
+    started = threading.Event()
+    release = threading.Event()
+    original_commit = target._commit_sync
+
+    def slow_commit(*args: object, **kwargs: object) -> None:
+        started.set()
+        if not release.wait(5):
+            raise RuntimeError("filesystem commit release timed out")
+        original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(target, "_commit_sync", slow_commit)
+
+    async def mutate(transaction: StateTransaction) -> int:
+        return await transaction.reserve_sequence(b"s" * 32, 1)
+
+    try:
+        task = asyncio.create_task(store.mutate(mutate))
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert await store.read(
+            lambda transaction: transaction.get_sequence(b"s" * 32)
+        ) == 1
+    finally:
+        release.set()
+        await store.close()
+
+
+@pytest.mark.parametrize("grouped", (False, True))
+async def test_filesystem_cancelled_reconcile_settles_known_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    grouped: bool,
+) -> None:
+    if grouped:
+        root = tmp_path / "group"
+        group = FilesystemStateStorageGroup(
+            root,
+            namespace="n",
+            tenant_id="t",
+            scope_digest="scope",
+        )
+        store = FilesystemStateStore(
+            root / "conversation",
+            namespace="n",
+            tenant_id="t",
+            runtime_domain="conversation",
+            group=group,
+        )
+        target = group
+        reconcile_name = "_reconcile_sync"
+    else:
+        store = FilesystemStateStore(
+            tmp_path / "state",
+            namespace="n",
+            tenant_id="t",
+            runtime_domain="conversation",
+        )
+        target = store
+        reconcile_name = "_reconcile_commit_sync"
+    await store.initialize()
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def failed_commit(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OSError("forced commit failure")
+
+    def delayed_reconcile(*args: object, **kwargs: object) -> str:
+        del args, kwargs
+        started.set()
+        if not release.wait(5):
+            raise RuntimeError("filesystem reconcile release timed out")
+        return "not_committed"
+
+    monkeypatch.setattr(target, "_commit_sync", failed_commit)
+    monkeypatch.setattr(target, reconcile_name, delayed_reconcile)
+
+    async def mutate(transaction: StateTransaction) -> int:
+        return await transaction.reserve_sequence(b"s" * 32, 1)
+
+    try:
+        task = asyncio.create_task(store.mutate(mutate))
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert await store.read(
+            lambda transaction: transaction.get_sequence(b"s" * 32)
+        ) == 0
+    finally:
+        release.set()
         await store.close()
 
 

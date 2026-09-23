@@ -290,7 +290,20 @@ class ArtifactRepositoryImpl(_ResourceRepository[ArtifactRecord]):
             )
             return record
 
-        return await self._store.mutate(mutate)
+        try:
+            return await self._store.mutate(mutate)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            current = await self.get_metadata(
+                record.artifact_id,
+                tenant_id=self._tenant_id,
+            )
+            if current is None:
+                raise
+            if current == record:
+                return current
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
 
     async def get_metadata(
         self, artifact_id: str, *, tenant_id: str

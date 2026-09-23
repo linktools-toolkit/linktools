@@ -37,6 +37,17 @@ from ._store import (
 ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.filesystem")
 _CommitOutcome = Literal["committed", "not_committed", "unknown"]
+_ReconcileResult = tuple[_CommitOutcome, asyncio.CancelledError | None]
+
+
+async def _finish_owned_task(task: asyncio.Task[ValueT]) -> ValueT:
+    while True:
+        if task.done():
+            return task.result()
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
 
 
 class _FilesystemGroupTransaction:
@@ -636,26 +647,16 @@ class FilesystemStateStorageGroup:
             await asyncio.shield(physical)
         except asyncio.CancelledError as cancellation_error:
             cancellation = cancellation_error
-            if not physical.done():
-                self._poisoned = True
-                for member in self._members:
-                    member._poisoned = True
-                _logger.error(
-                    "filesystem group mutation cancelled with unknown outcome: "
-                    "scope=%s base=%s target=%s",
-                    self._scope_digest,
-                    base,
-                    target,
-                )
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from cancellation_error
             try:
-                physical.result()
+                await _finish_owned_task(physical)
             except BaseException as commit_error:  # noqa: BLE001
                 error = commit_error
         except BaseException as commit_error:  # noqa: BLE001
             error = commit_error
         if error is not None:
-            outcome = await self._reconcile_commit(base, target)
+            outcome, reconcile_cancellation = await self._reconcile_commit(base, target)
+            if cancellation is None:
+                cancellation = reconcile_cancellation
             if outcome == "unknown":
                 self._poisoned = True
                 for member in self._members:
@@ -699,7 +700,7 @@ class FilesystemStateStorageGroup:
         sync_directory(self._transaction_root)
         self._journal.complete()
 
-    async def _reconcile_commit(self, base: int, target: int) -> _CommitOutcome:
+    async def _reconcile_commit(self, base: int, target: int) -> _ReconcileResult:
         task = asyncio.create_task(
             asyncio.to_thread(self._reconcile_sync, base, target),
             name=f"filesystem-group-reconcile-{self._scope_digest}",
@@ -710,14 +711,12 @@ class FilesystemStateStorageGroup:
             f"filesystem group reconcile {self._scope_digest}",
         )
         try:
-            return await asyncio.shield(task)
+            return await asyncio.shield(task), None
         except asyncio.CancelledError as error:
-            if not task.done():
-                self._poisoned = True
-                for member in self._members:
-                    member._poisoned = True
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-            return task.result()
+            try:
+                return await _finish_owned_task(task), error
+            except BaseException:  # noqa: BLE001
+                return "unknown", error
 
     def _reconcile_sync(self, base: int, target: int) -> _CommitOutcome:
         try:
@@ -1144,25 +1143,17 @@ class FilesystemStateStore:
             await asyncio.shield(physical)
         except asyncio.CancelledError as error:
             cancellation = error
-            if not physical.done():
-                self._poisoned = True
-                _logger.error(
-                    "filesystem mutation cancelled with unknown outcome: "
-                    "domain=%s base=%s target=%s",
-                    self._runtime_domain,
-                    base,
-                    target,
-                )
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
             try:
-                physical.result()
+                await _finish_owned_task(physical)
             except BaseException as commit_error:  # noqa: BLE001
                 physical_error = commit_error
         except BaseException as error:  # noqa: BLE001
             physical_error = error
 
         if physical_error is not None:
-            outcome = await self._reconcile_commit(base, target)
+            outcome, reconcile_cancellation = await self._reconcile_commit(base, target)
+            if cancellation is None:
+                cancellation = reconcile_cancellation
             if outcome == "unknown":
                 self._poisoned = True
                 _logger.error(
@@ -1171,8 +1162,6 @@ class FilesystemStateStore:
                     base,
                     target,
                 )
-                if cancellation is not None:
-                    raise cancellation
                 raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from physical_error
             if outcome == "not_committed":
                 if cancellation is not None:
@@ -1215,7 +1204,7 @@ class FilesystemStateStore:
         sync_directory(self._root)
         self._journal.complete()
 
-    async def _reconcile_commit(self, base: int, target: int) -> _CommitOutcome:
+    async def _reconcile_commit(self, base: int, target: int) -> _ReconcileResult:
         task = asyncio.create_task(
             asyncio.to_thread(self._reconcile_commit_sync, base, target),
             name=f"filesystem-reconcile-{self._runtime_domain}",
@@ -1226,12 +1215,12 @@ class FilesystemStateStore:
             f"filesystem reconcile {self._runtime_domain}",
         )
         try:
-            return await asyncio.shield(task)
+            return await asyncio.shield(task), None
         except asyncio.CancelledError as error:
-            if not task.done():
-                self._poisoned = True
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-            return task.result()
+            try:
+                return await _finish_owned_task(task), error
+            except BaseException:  # noqa: BLE001
+                return "unknown", error
 
     def _reconcile_commit_sync(self, base: int, target: int) -> _CommitOutcome:
         try:
