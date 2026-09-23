@@ -3,6 +3,7 @@
 """Automatic discovery ignores environment noise without restricting direct reads."""
 
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
