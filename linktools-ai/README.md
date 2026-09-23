@@ -159,12 +159,14 @@ or layout but cannot redirect Skill resources to another source. No additional
 Registry/Provider abstraction is required.
 
 Directory-backed Skill packages retain a native absolute package path when
-`SKILL.md` and every discovered resource resolve to one consistent local
-package tree. This allows Skill scripts to be invoked by absolute path. If an
-overlay mixes resource origins, the Skill is exposed as virtual instead of
-claiming a partial local tree. Durable executions continue to use frozen Skill
-resource snapshots and materialize them into the execution sandbox when a
-filesystem path is required.
+all effective Skill assets under the declared resource root map to one
+consistent local package tree. The declaration filename is loader-defined; it
+does not need to be `SKILL.md`. This allows Skill scripts to be invoked by
+absolute path without letting a single file symlink redefine the package root.
+If an overlay mixes resource origins, the Skill is exposed as virtual instead
+of claiming a partial local tree. Durable executions continue to use frozen
+Skill resource snapshots and materialize them into the execution sandbox when
+a filesystem path is required.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
