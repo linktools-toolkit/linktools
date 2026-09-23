@@ -12,7 +12,11 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
-from linktools.ai.capability import AssetSkillResourceSource, CapabilityGroup, LocalSkillResourceSource
+from linktools.ai.capability import (
+    AssetSkillResourceSource,
+    CapabilityGroup,
+    LocalSkillResourceSource,
+)
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
