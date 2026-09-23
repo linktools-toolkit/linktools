@@ -360,6 +360,9 @@ def _resolve_local_skill_package(
 
     local: dict[str, Path] = {}
     for relative, path in zip(relatives, paths, strict=True):
+        expected = package_path.joinpath(*PurePosixPath(relative).parts)
+        if path != expected:
+            return None
         try:
             resolved = path.resolve(strict=True)
             resolved.relative_to(package)
