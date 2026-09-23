@@ -38,11 +38,7 @@ from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskN
 from ..workspace import Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
-from ._skill_source import (
-    AssetSkillResourceSource,
-    SkillResourceSource,
-    SkillSourceRef,
-)
+from ._skill_source import SkillSourceRef
 from ._task import TaskExpander
 from ._tool_semantic import (
     tool_semantic_metadata,
@@ -399,7 +395,6 @@ class CapabilityGroup(Generic[AppT]):
         *,
         assets: "AssetStore | None" = None,
         workspace: "Workspace | None" = None,
-        skill_source: "SkillResourceSource | None" = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
@@ -407,18 +402,10 @@ class CapabilityGroup(Generic[AppT]):
             raise TypeError("assets must be AssetStore")
         if workspace is not None and not isinstance(workspace, Workspace):
             raise TypeError("workspace must be Workspace")
-        if skill_source is not None and not isinstance(
-            skill_source,
-            SkillResourceSource,
-        ):
-            raise TypeError("skill_source must implement SkillResourceSource")
-        if skill_source is not None and skill_source.id != group_id:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         self._id = group_id
         self._store = assets
         self._workspace = workspace
-        self._skill_source = skill_source
-        self._loaders: list[tuple[str, CapabilityLoader[AppT]]] = []
+        self._loaders: dict[str, CapabilityLoader[AppT]] = {}
         self._contributions: list[CapabilityContribution[AppT]] = []
         if workspace is not None:
             self._contributions.extend(
@@ -426,19 +413,10 @@ class CapabilityGroup(Generic[AppT]):
                 for tool in _workspace_tool_definitions(workspace)
             )
         if assets is not None:
-            self._skill_source = skill_source or AssetSkillResourceSource(
-                group_id,
-                assets,
-            )
             for kind in ("agent", "skill", "mcp"):
-                self._loaders.append(
-                    (
-                        kind,
-                        cast(
-                            "CapabilityLoader[AppT]",
-                            _BuiltinDeclarationLoader(kind),
-                        ),
-                    )
+                self._loaders[kind] = cast(
+                    "CapabilityLoader[AppT]",
+                    _BuiltinDeclarationLoader(kind),
                 )
 
     @property
@@ -448,10 +426,6 @@ class CapabilityGroup(Generic[AppT]):
     @property
     def workspace(self) -> "Workspace | None":
         return self._workspace
-
-    @property
-    def skill_source(self) -> "SkillResourceSource | None":
-        return self._skill_source
 
     @property
     def asset_store(self) -> "AssetStore | None":
@@ -634,17 +608,13 @@ class CapabilityGroup(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if not callable(getattr(loader, "load", None)):
             raise TypeError("loader must implement load")
-        for index, (registered_kind, _registered) in enumerate(self._loaders):
-            if registered_kind == kind:
-                self._loaders[index] = (kind, loader)
-                return loader
-        self._loaders.append((kind, loader))
+        self._loaders[kind] = loader
         return loader
 
     async def freeze(self) -> "tuple[CapabilityContribution[AppT], ...]":
         """Freeze direct registrations and a metadata-stable Store snapshot."""
         contributions = list(tuple(self._contributions))
-        loaders = tuple(loader for _kind, loader in self._loaders)
+        loaders = tuple(self._loaders.values())
         store = self._store
         if store is not None:
             if not store.ready:
