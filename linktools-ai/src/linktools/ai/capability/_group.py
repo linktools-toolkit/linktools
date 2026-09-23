@@ -637,6 +637,15 @@ class CapabilityGroup(Generic[AppT]):
                     for item in loaded
                 ):
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                for item in loaded:
+                    if item.kind != "skill":
+                        continue
+                    skill = cast(SkillDefinition, item.value)
+                    if (
+                        skill.source_ref is not None
+                        and skill.source_ref.source_id != self._id
+                    ):
+                        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                 contributions.extend(loaded)
             await context.verify()
         elif loaders:
