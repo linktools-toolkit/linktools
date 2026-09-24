@@ -227,30 +227,24 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         result["execution_policy"] = _execution_policy_semantic(
             execution_policy
         )
-    resource_root = contract.get("resource_root")
-    has_resource_versions = "resource_versions" in contract
-    resource_versions = contract.get("resource_versions")
-    frozen_args = contract.get("frozen_args")
-    raw_args = contract.get("args")
-    if not has_resource_versions:
-        if frozen_args is not None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        args = raw_args
-    else:
-        if (
-            not isinstance(resource_versions, list)
-            or raw_args is not None
-            or not isinstance(frozen_args, list)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        args = frozen_args
+    args = contract.get("args")
     if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result["args"] = args
+
+    resource_root = contract.get("resource_root")
+    has_resource_versions = "resource_versions" in contract
+    resource_versions = contract.get("resource_versions")
+    if has_resource_versions and not isinstance(resource_versions, list):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     if resource_root is None:
         if has_resource_versions:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if contract.get("resource_semantic_digest") is not None:
+        if (
+            contract.get("resource_source_id") is not None
+            or contract.get("resource_semantic_digest") is not None
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
     if not isinstance(resource_root, Mapping):
@@ -277,7 +271,6 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result["resource_semantic_digest"] = digest
     return result
-
 
 def _execution_policy_semantic(value: JsonValue) -> "dict[str, JsonValue]":
     if not isinstance(value, Mapping):
