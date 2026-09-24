@@ -560,6 +560,20 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
     await store.initialize()
     try:
         key = AssetKey("skill", "review/scripts/run.bin")
+        expected_digest = canonical_sha256(
+            {
+                "version": 1,
+                "kind": "skill-resource-semantics",
+                "sandbox_materialize": True,
+                "files": [
+                    {
+                        "path": "scripts/run.bin",
+                        "sha256": "a" * 64,
+                        "executable_bits": 0o111,
+                    }
+                ],
+            }
+        )
         original = SkillSourceRef("application", "review").with_versions(
             (
                 SkillResourceVersion(
@@ -574,7 +588,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
                     0o111,
                 ),
             ),
-            "f" * 64,
+            expected_digest,
             sandbox_materialize=True,
         )
 
@@ -645,20 +659,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
             await digest(not_materialized)
         with pytest.raises(AIError):
             await digest(changed)
-        assert first == canonical_sha256(
-            {
-                "version": 1,
-                "kind": "skill-resource-semantics",
-                "sandbox_materialize": True,
-                "files": [
-                    {
-                        "path": "scripts/run.bin",
-                        "sha256": "a" * 64,
-                        "executable_bits": 0o111,
-                    }
-                ],
-            }
-        )
+        assert first == expected_digest
     finally:
         await store.close()
 
