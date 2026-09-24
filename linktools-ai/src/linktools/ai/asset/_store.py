@@ -383,6 +383,7 @@ class AssetStore:
                     info.revision,
                     info.etag,
                     info.size,
+                    info.metadata,
                 )
             )
         return tuple(result)
