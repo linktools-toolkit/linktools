@@ -1021,7 +1021,7 @@ def _validate_business_tool_name(value: str) -> None:
     if (
         not isinstance(value, str)
         or _TOOL_NAME.fullmatch(value) is None
-        or value.startswith("linktools.")
+        or value.startswith(("linktools.", "mcp__"))
     ):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if parse_mcp_tool_selector(value) is not None:
