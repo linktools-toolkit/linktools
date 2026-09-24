@@ -66,7 +66,7 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
-class _FrozenMCPResources:
+class _MCPResourceBinding:
     versions: "tuple[AssetVersionRef, ...] | None"
     source_id: "str | None"
     resource_semantic_digest: str | None
@@ -267,34 +267,34 @@ def _raise_primary_after_cleanup(
         raise primary_error from typed_cleanup_error
 
 
-def validate_frozen_mcp_policy(
-    resources: Mapping[str, _FrozenMCPResources],
+def validate_mcp_binding_policy(
+    resources: Mapping[str, _MCPResourceBinding],
     workspace: Workspace | None,
 ) -> None:
     current_policy = _current_execution_policy(workspace)
     if any(
-        dict(frozen.execution_policy) != dict(current_policy)
-        for frozen in resources.values()
+        dict(binding.execution_policy) != dict(current_policy)
+        for binding in resources.values()
     ):
         raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
 
 
 async def prepare_mcp_resource_projections(
     servers: Sequence[MCPServerSpec],
-    resources: Mapping[str, _FrozenMCPResources],
+    resources: Mapping[str, _MCPResourceBinding],
     *,
     asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
 ) -> dict[str, _MCPResourceProjection]:
-    """Verify and materialize each selected server's frozen Asset versions."""
+    """Verify and materialize each selected server's bound Asset versions."""
     projections: dict[str, _MCPResourceProjection] = {}
     try:
         for server in servers:
-            frozen = resources.get(server.id)
-            if frozen is None:
+            binding = resources.get(server.id)
+            if binding is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if server.resource_root is None:
-                if frozen.versions is not None or frozen.resource_semantic_digest is not None:
+                if binding.versions is not None or binding.resource_semantic_digest is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if any(argument.startswith("resource:") for argument in server.args):
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -305,21 +305,21 @@ async def prepare_mcp_resource_projections(
                     None,
                 )
                 continue
-            if frozen.source_id is None:
+            if binding.source_id is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            reader = asset_readers.get(frozen.source_id)
+            reader = asset_readers.get(binding.source_id)
             if reader is None:
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
                     safe_details={
                         "kind": "mcp_asset_source",
-                        "source_id": frozen.source_id,
+                        "source_id": binding.source_id,
                         "server_id": server.id,
                     },
                 )
             directory = await _materialize_resource_versions(
                 server,
-                frozen,
+                binding,
                 reader,
             )
             try:
@@ -365,7 +365,7 @@ async def materialize_mcp_capabilities(
     workspace: Workspace | None,
     sandbox_session: object | None,
     host_cwd: "str | None",
-    frozen_resources: Mapping[str, _FrozenMCPResources],
+    resource_bindings: Mapping[str, _MCPResourceBinding],
     projections: Mapping[str, _MCPResourceProjection],
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "_ToolMetricContext | None",
@@ -392,11 +392,11 @@ async def materialize_mcp_capabilities(
         for server in servers:
             if server.id not in policy:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            frozen = frozen_resources.get(server.id)
+            binding = resource_bindings.get(server.id)
             projection = projections.get(server.id)
-            if frozen is None or projection is None:
+            if binding is None or projection is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if dict(frozen.execution_policy) != dict(current_policy):
+            if dict(binding.execution_policy) != dict(current_policy):
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
             if workspace is None:
@@ -461,10 +461,10 @@ async def materialize_mcp_capabilities(
 
 async def _materialize_resource_versions(
     server: MCPServerSpec,
-    frozen: _FrozenMCPResources,
+    binding: _MCPResourceBinding,
     asset_reader: AssetStoreReader,
 ) -> "tempfile.TemporaryDirectory[str]":
-    if frozen.versions is None or frozen.resource_semantic_digest is None:
+    if binding.versions is None or binding.resource_semantic_digest is None:
         raise AIError(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,
             safe_details={"kind": "mcp_resource", "server_id": server.id},
@@ -473,7 +473,7 @@ async def _materialize_resource_versions(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     prefix = f"{server.resource_root.id}/"
     values: dict[str, AssetVersionRef] = {}
-    for version in frozen.versions:
+    for version in binding.versions:
         if (
             version.key.kind != server.resource_root.kind
             or not version.key.id.startswith(prefix)
@@ -495,7 +495,7 @@ async def _materialize_resource_versions(
             ],
         }
     )
-    if actual_digest != frozen.resource_semantic_digest:
+    if actual_digest != binding.resource_semantic_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for argument in server.args:
         if argument.startswith("resource:"):
