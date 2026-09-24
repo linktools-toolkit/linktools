@@ -103,7 +103,7 @@ async def compose_runtime_components(
     metrics: "Metrics | None" = None,
     limits: "PromptLimits | None" = None,
 ) -> _RuntimeComponents:
-    """Freeze declarations and build Runtime-private services."""
+    """Snapshot declarations and build Runtime-private services."""
     resolved_namespace = validate_persistence_namespace(namespace)
     if not isinstance(state, RuntimeState):
         raise TypeError("state must be RuntimeState")
@@ -146,12 +146,12 @@ async def compose_runtime_components(
     initialized = False
     ownership_transferred = False
     try:
-        frozen: list[CapabilityContribution[object]] = []
+        candidates: list[CapabilityContribution[object]] = []
         asset_sources: dict[str, AssetStoreReader] = {}
         mcp_assets: dict[str, tuple[str, AssetStoreReader]] = {}
         for group in groups:
             values = group.contributions
-            frozen.extend(values)
+            candidates.extend(values)
             reader = group.asset_reader
             resource_mcp = tuple(
                 candidate
@@ -174,7 +174,7 @@ async def compose_runtime_components(
                 asset_sources[group.group_id] = reader
                 for candidate in resource_mcp:
                     mcp_assets[candidate.id] = (group.group_id, reader)
-        _validate_candidate_uniqueness(frozen)
+        _validate_candidate_uniqueness(candidates)
         skill_sources = SkillSourceRegistry(
             tuple(
                 AssetSkillResourceSource(group.group_id, reader)
@@ -184,18 +184,18 @@ async def compose_runtime_components(
         )
         task_handlers = tuple(
             cast("TaskNodeHandler[object]", candidate.value)
-            for candidate in frozen
+            for candidate in candidates
             if candidate.kind == "task"
         )
         task_expanders = tuple(
             cast(TaskExpander, candidate.value)
-            for candidate in frozen
+            for candidate in candidates
             if candidate.kind == "task_expander"
         )
 
         agents = {
             candidate.id: cast(AgentSpec, candidate.value)
-            for candidate in frozen
+            for candidate in candidates
             if candidate.kind == "agent"
         }
         resolver = models.snapshot()
@@ -211,7 +211,7 @@ async def compose_runtime_components(
             model_resolver=resolver,
             candidates=tuple(
                 candidate
-                for candidate in frozen
+                for candidate in candidates
                 if candidate.kind not in {"agent", "task", "task_expander"}
             ),
             agents=agents,
