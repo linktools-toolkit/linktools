@@ -1652,53 +1652,6 @@ def _iter_agent_binding_object_refs(
     snapshot: AgentBindingSnapshot,
     domain: RuntimeDomain,
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
-    for pin in snapshot.selected:
-        if pin.kind == "mcp":
-            try:
-                _server, resource_snapshot = MCPServerSpecCodec().from_frozen_payload(
-                    pin.contract
-                )
-            except AIError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if resource_snapshot is not None:
-                if resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                yield domain, resource_snapshot
-            continue
-        if pin.kind != "skill":
-            continue
-        source = pin.contract.get("source")
-        if source is None:
-            continue
-        if not isinstance(source, Mapping):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw = source.get("snapshot")
-        if raw is None:
-            continue
-        required = {"store_id", "key", "digest", "size"}
-        if not isinstance(raw, Mapping) or not required.issubset(raw):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        store_id = raw["store_id"]
-        key = raw["key"]
-        digest = raw["digest"]
-        size = raw["size"]
-        if (
-            store_id != RUNTIME_OBJECT_STORE_ID
-            or not isinstance(key, str)
-            or not key
-            or not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-            or isinstance(size, bool)
-            or not isinstance(size, int)
-            or size < 0
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        try:
-            reference = ObjectRef(store_id, key, digest, size)
-        except ValueError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        yield domain, reference
     for child in snapshot.subagent_bindings:
         yield from _iter_agent_binding_object_refs(child, domain)
 
