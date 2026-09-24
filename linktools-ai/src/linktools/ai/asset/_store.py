@@ -85,7 +85,6 @@ class AssetCacheAdapter:
         return ":".join(
             (
                 "asset",
-                info.root_digest,
                 key.kind,
                 key.id,
                 str(info.revision.value),
@@ -592,7 +591,6 @@ async def _put_snapshot_object(
 def _snapshot_entry(info: AssetInfo, content_key: str) -> dict[str, JsonValue]:
     return {
         "key": {"kind": info.key.kind, "id": info.key.id},
-        "source": {"root_digest": info.root_digest},
         "entry_revision": info.revision.value,
         "store_revision": info.store_revision.value,
         "etag": info.etag,
@@ -954,12 +952,10 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
     if not isinstance(raw, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     key_payload = raw.get("key")
-    source = raw.get("source")
     content = raw.get("content")
     try:
         if (
             not isinstance(key_payload, Mapping)
-            or not isinstance(source, Mapping)
             or not isinstance(content, Mapping)
         ):
             raise ValueError
@@ -973,7 +969,6 @@ def _decode_snapshot_entry(raw: object) -> tuple[AssetInfo, str]:
             etag=etag,
             size=size,
             status=StorageEntryStatus(str(raw["status"])),
-            root_digest=str(source["root_digest"]),
             modified_at=datetime.fromisoformat(str(raw["modified_at"])),
             metadata=cast(Mapping[str, JsonValue], raw.get("metadata", {})),
         )

@@ -62,7 +62,7 @@ _ASSET_INFO_VERSION = 1
 _ASSET_INFO_FIELDS = frozenset(
     {
         "kind", "id", "revision", "store_revision", "etag", "size", "status",
-        "root_digest", "modified_at", "metadata", "content",
+        "modified_at", "metadata", "content",
     }
 )
 
@@ -788,8 +788,6 @@ class SqlAssetBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if int(row["entry_revision"]) != info.revision.value:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if info.root_digest != self._root.digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             store_revision = int(info.store_revision.value)
             if store_revision < 1 or store_revision > head:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -821,7 +819,6 @@ def _info_data(info: AssetInfo) -> dict[str, JsonValue]:
             "etag": info.etag,
             "size": info.size,
             "status": info.status.value,
-            "root_digest": info.root_digest,
             "modified_at": info.modified_at.isoformat(),
             "metadata": dict(info.metadata),
             "content": None if info.content is None else info.content.to_json(),
@@ -882,7 +879,6 @@ def _info_from_data(data: Mapping[str, object]) -> AssetInfo:
             _asset_text(value["etag"]),
             _asset_int(value["size"], minimum=0),
             StorageEntryStatus(_asset_text(value["status"])),
-            _asset_text(value["root_digest"]),
             _asset_datetime(value["modified_at"]),
             dict(metadata),
             None if content is None else StoredPayload.from_json(content),
@@ -917,7 +913,6 @@ def _next_info(
         hashlib.sha256(value).hexdigest(),
         len(value),
         status,
-        root.digest,
         datetime.now(timezone.utc),
         change.metadata,
     )

@@ -387,7 +387,6 @@ class DirectoryAssetBackend:
             entry.digest,
             entry.size,
             StorageEntryStatus.NORMAL,
-            self._root.digest,
             entry.modified_at,
         )
 

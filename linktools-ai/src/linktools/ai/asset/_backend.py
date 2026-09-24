@@ -368,7 +368,6 @@ class InMemoryAssetBackend:
             _etag(value),
             len(value),
             status,
-            self._root.digest,
             datetime.now(timezone.utc),
             normalize_storage_metadata(metadata),
         )
@@ -432,7 +431,6 @@ def _decode_entry(raw: object, root: AssetRoot) -> "tuple[AssetInfo, bytes]":
             str(raw["etag"]),
             int(raw["size"]),
             StorageEntryStatus(str(raw["status"])),
-            root.digest,
             datetime.fromisoformat(str(raw["modified_at"])),
             normalize_storage_metadata(raw.get("metadata")),
         )

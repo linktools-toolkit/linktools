@@ -152,7 +152,6 @@ class AssetInfo:
     etag: str
     size: int
     status: StorageEntryStatus
-    root_digest: str
     modified_at: datetime
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
     content: "StoredPayload | None" = None
@@ -160,7 +159,6 @@ class AssetInfo:
     def __post_init__(self) -> None:
         if (
             self.size < 0
-            or not self.root_digest
             or not isinstance(self.status, StorageEntryStatus)
             or len(self.etag) != 64
             or any(character not in "0123456789abcdef" for character in self.etag)

@@ -576,7 +576,6 @@ def test_sql_asset_info_v1_rejects_future_and_coerced_versions() -> None:
         "a" * 64,
         0,
         StorageEntryStatus.NORMAL,
-        "root",
         datetime(2026, 1, 1, tzinfo=timezone.utc),
     )
     payload = asset_sql._info_data(info)
