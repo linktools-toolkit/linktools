@@ -780,7 +780,6 @@ class CapabilityGroup(Generic[AppT]):
                     info.key,
                     info.etag,
                     info.size,
-                    info.metadata,
                 )
                 for info in metadata
             )
@@ -794,7 +793,6 @@ class CapabilityGroup(Generic[AppT]):
                         info.revision,
                         info.etag,
                         info.size,
-                        info.metadata,
                     )
                     for info in metadata
                 },
