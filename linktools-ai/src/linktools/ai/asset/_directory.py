@@ -22,6 +22,7 @@ from ..storage import (
     StorageEntryRevision,
     StorageEntryStatus,
     StorageRevision,
+    VersionSummary,
     read_bytes,
 )
 from ._domain import AssetInfo, AssetKey, AssetRoot
@@ -257,6 +258,38 @@ class DirectoryAssetBackend:
         async with self._lock:
             entry = await self._cached_entry(key, path, signature, modified)
             return self._info(entry, self._revision)
+
+    async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
+        """Expose the current directory file as its only readable version."""
+        info = await self.stat(key)
+        if info is None:
+            return ()
+        return (
+            VersionSummary(
+                info.revision,
+                info.etag,
+                info.size,
+                info.modified_at,
+                info.status,
+                info.metadata,
+            ),
+        )
+
+    async def get_at_revision(
+        self,
+        key: AssetKey,
+        entry_revision: StorageEntryRevision,
+    ) -> "bytes | None":
+        """Read the current directory file; directory sources ignore revisions."""
+        if not isinstance(entry_revision, StorageEntryRevision):
+            raise TypeError("entry_revision must be StorageEntryRevision")
+        return await self.get(key)
+
+    async def get_at_version(self, key: AssetKey, version: int) -> "bytes | None":
+        """Read the current directory file; directory sources ignore versions."""
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise ValueError("version must be positive")
+        return await self.get(key)
 
     def _scan(self) -> "tuple[_DirectoryEntry, ...]":
         if not self._directory.is_dir():
