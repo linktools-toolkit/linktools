@@ -138,7 +138,7 @@ class _ModelRegistrySnapshot:
         binding = self._bindings.get(route_id)
         if binding is None:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
-        if dict(binding.semantic_payload) != dict(payload):
+        if dict(binding.contract) != dict(payload):
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         return binding
 
@@ -175,8 +175,8 @@ class _ModelAliasBinding:
         return self._target.vision
 
     @property
-    def semantic_payload(self) -> Mapping[str, JsonValue]:
-        return self._target.semantic_payload
+    def contract(self) -> Mapping[str, JsonValue]:
+        return self._target.contract
 
     @property
     def model_digest(self) -> str:

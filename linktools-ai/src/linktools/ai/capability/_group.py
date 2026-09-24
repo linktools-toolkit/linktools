@@ -655,7 +655,7 @@ class CapabilityGroup(Generic[AppT]):
         ):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         self._contributions.append(
-            _SemanticContribution(
+            _ContractContribution(
                 "task",
                 identity,
                 registered,
@@ -679,7 +679,7 @@ class CapabilityGroup(Generic[AppT]):
         ):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         self._contributions.append(
-            _SemanticContribution(
+            _ContractContribution(
                 "task_expander",
                 identity,
                 expander,
@@ -1098,14 +1098,14 @@ def _validate_business_tool_name(value: str) -> None:
 
 def _capability_registration_id(
     value: AbstractCapability[object],
-    semantic_id: str | None = None,
+    explicit_id: str | None = None,
 ) -> str:
     capability_id = value.id
     if capability_id is None:
-        if value.defer_loading or semantic_id is None:
+        if value.defer_loading or explicit_id is None:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        capability_id = semantic_id
-    elif semantic_id is not None and semantic_id != capability_id:
+        capability_id = explicit_id
+    elif explicit_id is not None and explicit_id != capability_id:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if not isinstance(capability_id, str) or not capability_id.strip():
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)

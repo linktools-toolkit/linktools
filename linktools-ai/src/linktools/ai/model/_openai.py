@@ -76,7 +76,7 @@ class _OpenAIModelBinding:
         return f"openai:{self.model}"
 
     @property
-    def semantic_payload(self) -> "dict[str, JsonValue]":
+    def contract(self) -> "dict[str, JsonValue]":
         settings: dict[str, JsonValue] = {}
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
@@ -89,7 +89,7 @@ class _OpenAIModelBinding:
 
     @property
     def model_digest(self) -> str:
-        return canonical_sha256({"contract": "model-v1", **self.semantic_payload})
+        return canonical_sha256({"contract": "model-v1", **self.contract})
 
     def materialize(self) -> Model:
         connection = _resolved_connection(self)

@@ -226,14 +226,20 @@ class AgentCompiler:
                 value = SkillDefinition.from_contract(
                     cast("Mapping[str, object]", pin.contract)
                 )
-                candidate = CapabilityContribution("skill", pin.id, value)
+                candidate = CapabilityContribution.from_declaration(value)
+                if candidate.id != pin.id or candidate.revision != pin.revision:
+                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
             elif pin.kind == "mcp":
                 candidate = CapabilityContribution.from_mcp_contract(
                     pin.contract,
                 )
             else:
                 current = self._by_identity.get((pin.kind, pin.id))
-                if current is None or current.revision != pin.revision:
+                if (
+                    current is None
+                    or current.revision != pin.revision
+                    or current.contract != dict(pin.contract)
+                ):
                     raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
                 candidate = current
             selected[pin.kind].append(candidate)
@@ -410,7 +416,7 @@ class AgentCompiler:
         selected_skill_ids = {candidate.id for candidate in selected_skills}
         if any(skill_id not in selected_skill_ids for skill_id in spec.preload_skills):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        semantic = tuple(
+        selected = tuple(
             (
                 *sorted(
                     (*selected_tools, *selected_skills, *selected_mcp),
@@ -425,7 +431,7 @@ class AgentCompiler:
             "model_digest": model.model_digest,
             "selected": [
                 {"kind": item.kind, "id": item.id, "revision": item.revision}
-                for item in semantic
+                for item in selected
             ],
             "subagents": [
                 {"kind": "agent", "id": agent_id, "revision": self._agents[agent_id].revision}

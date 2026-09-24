@@ -299,7 +299,7 @@ class AgentBinding:
             or not isinstance(self.snapshot, AgentBindingSnapshot)
             or AgentSpecCodec().to_payload(self.definition.spec)
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
-            or dict(self.definition.model.semantic_payload)
+            or dict(self.definition.model.contract)
             != dict(self.snapshot.base_model)
             or _definition_selected_pins(self.definition) != self.snapshot.selected
             or self.definition.selected_subagents != self.snapshot.subagent_ids
