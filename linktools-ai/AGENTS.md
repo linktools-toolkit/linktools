@@ -36,6 +36,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 ### Persistence and concurrency
 
 - A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
+- Asset history belongs to AssetStore. Durable Runtime bindings may persist Asset version references and semantic digests, but must not copy Asset resource bytes into Runtime ObjectStore merely to freeze execution dependencies.
 - Caller cancellation does not determine durable truth. Resolve commit/readback state before reporting an unknown outcome.
 - Filesystem coordination uses `filelock`. Database concurrency must avoid pessimistic locking.
 
