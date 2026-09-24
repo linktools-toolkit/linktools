@@ -19,14 +19,14 @@ from ._group import (
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
-    FrozenSkillResourceSource,
+    AssetVersionSkillResourceSource,
     LocalSkillResourceSource,
     SkillLocation,
     SkillResourceSource,
     SkillResourceVersion,
     SkillResourceView,
     SkillSourceRef,
-    VersionedSkillResourceSource,
+    ResolvableSkillResourceSource,
     SkillSourceRegistry,
 )
 from ._subagent import SubagentCapability, SubagentDelegate
@@ -66,7 +66,7 @@ __all__ = [
     "CapabilityLoadEntry",
     "CapabilityLoader",
     "AssetSkillResourceSource",
-    "FrozenSkillResourceSource",
+    "AssetVersionSkillResourceSource",
     "SkillCapability",
     "SubagentCapability",
     "LocalSkillResourceSource",
@@ -83,7 +83,7 @@ __all__ = [
     "SkillResourceVersion",
     "SkillResourceView",
     "SkillSourceRef",
-    "VersionedSkillResourceSource",
+    "ResolvableSkillResourceSource",
     "SkillSourceRegistry",
     "SubagentDelegate",
     "TaskExpander",
