@@ -361,8 +361,8 @@ class MCPServerSpecCodec:
         return self.to_payload(value)
 
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
-        value, resource_snapshot = self._decode_payload(raw, frozen=False)
-        if resource_snapshot is not None:
+        value, resource_versions = self._decode_payload(raw, frozen=False)
+        if resource_versions is not None:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return value
 
