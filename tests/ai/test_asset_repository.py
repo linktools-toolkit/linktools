@@ -42,7 +42,7 @@ async def _store() -> AssetStore:
 
 
 @pytest.mark.asyncio
-async def test_builtin_loader_freezes_agent_skill_and_mcp_declarations() -> None:
+async def test_builtin_loader_snapshots_agent_skill_and_mcp_declarations() -> None:
     store = await _store()
     agent = AgentSpec("agent", model="model")
     skill = SkillSpec("skill", "instructions")
@@ -176,7 +176,7 @@ class _CapturingLoader:
 
 
 @pytest.mark.asyncio
-async def test_custom_loader_receives_frozen_metadata_and_reads_explicit_keys_only() -> None:
+async def test_custom_loader_receives_snapshot_metadata_and_reads_explicit_keys_only() -> None:
     store = await _store()
     await store.put(AssetKey("custom", "a"), b"a")
     await store.put(AssetKey("custom", "b"), b"b")
@@ -294,7 +294,7 @@ class _OutsideSnapshotLoader:
 
 
 @pytest.mark.asyncio
-async def test_custom_loader_cannot_read_key_outside_frozen_metadata() -> None:
+async def test_custom_loader_cannot_read_key_outside_snapshot_metadata() -> None:
     store = await _store()
     await store.put(AssetKey("custom", "a"), b"a")
     group = CapabilityGroup("workspace", assets=store)
@@ -361,7 +361,7 @@ class _RaceStore(AssetStore):
 
 
 @pytest.mark.asyncio
-async def test_freeze_rejects_assets_added_during_declaration_loading() -> None:
+async def test_snapshot_rejects_assets_added_during_declaration_loading() -> None:
     backend = InMemoryAssetBackend()
     store = _RaceStore(backend)
     await store.initialize()
