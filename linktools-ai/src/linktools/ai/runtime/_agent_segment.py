@@ -122,7 +122,6 @@ class _AgentSegmentInput:
     event_sink: Callable[[LiveDelta | DurableBoundary], Awaitable[None]]
     usage_sink: Callable[[UsageMetrics], None]
     tool_operations: ToolOperationBridge | None
-    background_tasks: set[asyncio.Task[object]]
     replace_history_system_prompt: bool
     repository_instructions: RepositoryInstructions | None
     repository_instruction_boundary: RepositoryInstructionBoundary | None
@@ -186,7 +185,6 @@ class _AgentSegmentRunner:
             event_sink=segment.event_sink,
             usage_sink=segment.usage_sink,
             tool_operations=segment.tool_operations,
-            background_tasks=segment.background_tasks,
             replace_history_system_prompt=segment.replace_history_system_prompt,
             repository_instructions=segment.repository_instructions,
             repository_instruction_boundary=segment.repository_instruction_boundary,

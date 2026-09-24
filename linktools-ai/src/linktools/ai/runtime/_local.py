@@ -2938,7 +2938,6 @@ class LocalExecutionBackend:
                             execution_id, usage
                         ),
                         tool_operations=tool_operations,
-                        background_tasks=execution_tasks,
                         replace_history_system_prompt=(
                             session_history_start and not exact_recovery_context
                         ),

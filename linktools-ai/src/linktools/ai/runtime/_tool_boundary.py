@@ -126,7 +126,6 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         tool_operations: ToolOperationBridge | None = None,
         tool_metrics: _ToolMetricContext | None = None,
         repository_boundary: RepositoryInstructionBoundary | None = None,
-        background_tasks: set[asyncio.Task[object]] | None = None,
     ) -> None:
         if not isinstance(id, str) or not id:
             raise ValueError("toolset id must be non-empty")
@@ -139,9 +138,6 @@ class RuntimeToolBoundaryToolset(AbstractToolset[AgentContext[object]]):
         self._tool_operations = tool_operations
         self._tool_metrics = tool_metrics
         self._repository_boundary = repository_boundary
-        self._background_tasks = (
-            background_tasks if background_tasks is not None else set()
-        )
         self._raw_tools: dict[
             str,
             tuple[

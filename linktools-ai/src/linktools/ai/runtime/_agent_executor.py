@@ -234,9 +234,6 @@ class _RunScope:
     event_sink: EventSink | None = None
     usage_sink: UsageSink | None = None
     tool_operations: ToolOperationBridge | None = None
-    background_tasks: set[asyncio.Task[object]] = field(
-        default_factory=set, compare=False
-    )
     replace_history_system_prompt: bool = False
     context_target_tokens: int | None = None
     repository_instructions: RepositoryInstructions | None = None
@@ -1000,7 +997,6 @@ async def _materialize_agent(
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
                 repository_boundary=repository_boundary,
-                background_tasks=scope.background_tasks,
             )
         )
     if definition.mcp_servers:
@@ -1015,7 +1011,6 @@ async def _materialize_agent(
                 projections=scope.mcp_resource_projections,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
-                background_tasks=scope.background_tasks,
             )
         )
     if business_tools:
@@ -1028,7 +1023,6 @@ async def _materialize_agent(
                 id="linktools.business",
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
-                background_tasks=scope.background_tasks,
             ),
         )
     model_observation = RuntimeModelObservationCapability(

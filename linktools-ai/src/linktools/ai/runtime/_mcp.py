@@ -4,7 +4,7 @@
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, NoReturn, cast
 
@@ -60,6 +60,21 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
     metadata = tool_semantic_metadata(base=base)
     metadata.update(_MCP_TOOL_METADATA)
     return metadata
+
+
+def _mcp_resource_semantic_digest(
+    files: Iterable[tuple[str, str]],
+) -> str:
+    return canonical_sha256(
+        {
+            "version": 1,
+            "kind": "mcp-resource-semantics",
+            "files": [
+                {"path": path, "sha256": digest}
+                for path, digest in sorted(files)
+            ],
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +248,7 @@ def validate_mcp_binding_policy(
     resources: Mapping[str, _MCPResourceBinding],
     sandbox: Sandbox | None,
 ) -> None:
-    current_policy = _current_execution_policy(sandbox)
+    current_policy = _mcp_execution_policy(sandbox)
     if any(
         dict(binding.execution_policy) != dict(current_policy)
         for binding in resources.values()
@@ -326,7 +341,6 @@ async def materialize_mcp_capabilities(
     projections: Mapping[str, _MCPResourceProjection],
     tool_operations: "ToolOperationBridge | None",
     tool_metrics: "_ToolMetricContext | None",
-    background_tasks: set[asyncio.Task[object]],
 ) -> tuple[AbstractCapability[AgentContext[object]], ...]:
     """Materialize only compiler-selected stdio MCP servers."""
     from fastmcp import Client
@@ -334,7 +348,7 @@ async def materialize_mcp_capabilities(
     policy, required = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
-    current_policy = _current_execution_policy(sandbox)
+    current_policy = _mcp_execution_policy(sandbox)
     if sandbox is not None and not isinstance(
         sandbox_session,
         StdioSandboxSession,
@@ -393,7 +407,6 @@ async def materialize_mcp_capabilities(
                 descriptor=descriptor,
                 tool_operations=tool_operations,
                 tool_metrics=tool_metrics,
-                background_tasks=background_tasks,
             )
             values.append(
                 _MCPRuntimeCapability(
@@ -441,15 +454,9 @@ def _bound_resource_versions(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values[relative] = version
     validate_resource_tree(values)
-    actual_digest = canonical_sha256(
-        {
-            "version": 1,
-            "kind": "mcp-resource-semantics",
-            "files": [
-                {"path": relative, "sha256": values[relative].etag}
-                for relative in sorted(values)
-            ],
-        }
+    actual_digest = _mcp_resource_semantic_digest(
+        (relative, values[relative].etag)
+        for relative in values
     )
     if actual_digest != binding.resource_semantic_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -514,7 +521,7 @@ def _model_tool_name(server_id: str, tool_name: str) -> str:
     return f"mcp__{server_token}__{tool_token}"
 
 
-def _current_execution_policy(
+def _mcp_execution_policy(
     sandbox: Sandbox | None,
 ) -> Mapping[str, JsonValue]:
     if sandbox is None:

@@ -63,7 +63,6 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
             projections={},
             tool_operations=None,
             tool_metrics=None,
-            background_tasks=set(),
         )
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
@@ -82,7 +81,6 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
             projections={},
             tool_operations=None,
             tool_metrics=None,
-            background_tasks=set(),
         )
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
@@ -106,7 +104,6 @@ async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> Non
             projections={},
             tool_operations=None,
             tool_metrics=None,
-            background_tasks=set(),
         )
 
     assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE

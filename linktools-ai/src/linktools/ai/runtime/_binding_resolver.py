@@ -19,10 +19,10 @@ from ..capability import (
     validate_resource_path,
     validate_resource_tree,
 )
-from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
-from ..workspace import Sandbox, StdioSandbox
+from ..workspace import Sandbox
+from ._mcp import _mcp_execution_policy, _mcp_resource_semantic_digest
 
 
 class _RuntimeBindingResolver:
@@ -151,16 +151,6 @@ class _RuntimeBindingResolver:
         return replace(snapshot, selected=tuple(selected))
 
 
-def _mcp_execution_policy(
-    sandbox: Sandbox | None,
-) -> "Mapping[str, JsonValue]":
-    if sandbox is None:
-        return {"version": 1, "boundary": "host-stdio"}
-    if not isinstance(sandbox, StdioSandbox):
-        raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-    return sandbox.stdio_execution_policy()
-
-
 __all__ = ["_RuntimeBindingResolver"]
 
 
@@ -189,19 +179,8 @@ async def _resolve_mcp_resource_versions(
     for (info, _relative), version in zip(selected_infos, versions, strict=True):
         if not version.matches_info(info):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-    resource_files = [
-        {
-            "path": relative,
-            "sha256": info.etag,
-        }
+    resource_semantic_digest = _mcp_resource_semantic_digest(
+        (relative, info.etag)
         for info, relative in selected_infos
-    ]
-    resource_files.sort(key=lambda item: cast(str, item["path"]))
-    resource_semantic_digest = canonical_sha256(
-        {
-            "version": 1,
-            "kind": "mcp-resource-semantics",
-            "files": resource_files,
-        }
     )
     return tuple(versions), resource_semantic_digest
