@@ -10,6 +10,7 @@ from ._correlation import (
 )
 from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
+    RUNTIME_OBJECT_STORE_ID,
     canonical_identity_digest,
     canonical_sha256,
     deterministic_id,
@@ -127,6 +128,7 @@ __all__ = [
     "RedactedValue",
     "RedactionClass",
     "RedactionPolicy",
+    "RUNTIME_OBJECT_STORE_ID",
     "ResourceKind",
     "ResourceRef",
     "CorrelationData",
