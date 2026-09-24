@@ -39,7 +39,7 @@ from linktools.ai.asset import (
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime._binding_freeze import _resolve_mcp_resource_versions
+from linktools.ai.runtime._binding_resolver import _resolve_mcp_resource_versions
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
