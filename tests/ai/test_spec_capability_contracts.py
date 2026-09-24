@@ -507,6 +507,22 @@ def test_durable_spec_readers_ignore_additive_fields() -> None:
     assert mcp_codec.from_frozen_payload(frozen_payload) == (server, None)
 
 
+def test_mcp_frozen_resource_contract_rejects_missing_versions() -> None:
+    codec = MCPServerSpecCodec()
+    server = MCPServerSpec(
+        "mcp",
+        "server",
+        ("resource:script.py",),
+        AssetKey("mcp", "server"),
+    )
+    payload = codec.to_payload(server)
+    payload["execution_policy"] = {"version": 1, "boundary": "host-stdio"}
+
+    with pytest.raises(AIError) as error:
+        codec.from_frozen_payload(payload)
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
     codec = MCPServerSpecCodec()
     server = MCPServerSpec(
