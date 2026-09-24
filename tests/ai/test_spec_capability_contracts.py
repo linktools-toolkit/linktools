@@ -787,6 +787,7 @@ async def test_mcp_resource_versions_reject_unmaterializable_tree(
                     MCPServerSpec("server", "python", (), root),
                     _FrozenMCPResources(
                         versions,
+                        "application",
                         "a" * 64,
                         {"version": 1, "boundary": "host-stdio"},
                     ),
@@ -827,6 +828,7 @@ async def test_mcp_resource_versions_materialize_deleted_current_assets() -> Non
             server,
             _FrozenMCPResources(
                 versions,
+                "application",
                 digest,
                 {"version": 1, "boundary": "host-stdio"},
             ),
