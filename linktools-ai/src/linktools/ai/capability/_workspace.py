@@ -43,8 +43,8 @@ class ToolDeclaration:
     metadata: Mapping[str, object]
 
     def __post_init__(self) -> None:
-        frozen = _immutable_tool_metadata(self.metadata)
-        object.__setattr__(self, "metadata", MappingProxyType(frozen))
+        immutable_metadata = _immutable_tool_metadata(self.metadata)
+        object.__setattr__(self, "metadata", MappingProxyType(immutable_metadata))
 
 
 def _immutable_tool_metadata(
