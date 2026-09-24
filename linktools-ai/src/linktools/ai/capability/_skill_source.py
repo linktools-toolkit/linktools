@@ -268,13 +268,13 @@ class AssetSkillResourceSource:
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             _validate_resource_mode(mode)
             versions.append(SkillResourceVersion(relative, ref, mode))
-        frozen = tuple(sorted(versions, key=lambda item: item.path))
+        resolved_versions = tuple(sorted(versions, key=lambda item: item.path))
         digest = _skill_resource_semantic_digest(
-            frozen,
+            resolved_versions,
             sandbox_materialize=local is not None,
         )
         return SkillSourceRef(self._id, logical_root).with_asset_versions(
-            frozen,
+            resolved_versions,
             digest,
             sandbox_materialize=local is not None,
         )
