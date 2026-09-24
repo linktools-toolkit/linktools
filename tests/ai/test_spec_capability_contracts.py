@@ -271,8 +271,7 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
     definition = SkillDefinition(
         SkillSpec("review", "instructions"),
         SkillSourceRef("application", "review").with_asset_versions(
-            (SkillResourceVersion("guide.md", asset),),
-            "b" * 64,
+            (SkillResourceVersion("guide.md", asset, 0o111),),
         ),
     )
 
@@ -282,6 +281,7 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
     versions = source["resource_versions"]
     assert isinstance(versions, list)
     assert versions[0]["asset"] == asset.to_payload()
+    assert versions[0]["executable_bits"] == 0o111
 
     restored = SkillDefinition.from_contract(contract)
     assert restored == definition
@@ -312,7 +312,6 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                             "executable_bits": 0,
                         }
                     ],
-                    "resource_digest": "b" * 64,
                 },
             }
         )
@@ -321,16 +320,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
 
 def test_asset_version_skill_source_rejects_mismatched_source_ref() -> None:
     store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
-    ref = SkillSourceRef("other", "review").with_asset_versions(
-        (),
-        canonical_sha256(
-            {
-                "version": 1,
-                "kind": "skill-resource-v1",
-                "files": [],
-            }
-        ),
-    )
+    ref = SkillSourceRef("other", "review").with_asset_versions(())
     with pytest.raises(AIError) as error:
         AssetVersionSkillResourceSource(
             "application",
@@ -601,14 +591,12 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
         server,
         (first_ref,),
         resource_source_id="group-a",
-        resource_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
     second = codec.to_execution_payload(
         server,
         (second_ref,),
         resource_source_id="group-b",
-        resource_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
 
@@ -626,106 +614,7 @@ def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None:
-    backend = InMemoryAssetBackend()
-    store = AssetStore(StorageOverlay(backend, writer=backend))
-    await store.initialize()
-    try:
-        key = AssetKey("skill", "review/scripts/run.bin")
-        expected_digest = canonical_sha256(
-            {
-                "version": 1,
-                "kind": "skill-resource-v1",
-                "files": [
-                    {
-                        "path": "scripts/run.bin",
-                        "sha256": "a" * 64,
-                        "executable_bits": 0o111,
-                    }
-                ],
-            }
-        )
-        original = SkillSourceRef("application", "review").with_asset_versions(
-            (
-                SkillResourceVersion(
-                    "scripts/run.bin",
-                    AssetVersionRef(
-                        key,
-                        "source-a",
-                        StorageEntryRevision(1),
-                        "a" * 64,
-                        1,
-                    ),
-                    0o111,
-                ),
-            ),
-            expected_digest,
-        )
-
-        async def digest(ref: SkillSourceRef) -> str:
-            source = AssetVersionSkillResourceSource(
-                "application",
-                {"review": ref},
-                store,
-            )
-            return await source.resource_digest("review")
-
-        first = await digest(original)
-        relocated = SkillSourceRef("application", "review").with_asset_versions(
-            (
-                SkillResourceVersion(
-                    "scripts/run.bin",
-                    AssetVersionRef(
-                        key,
-                        "source-b",
-                        StorageEntryRevision(9),
-                        "a" * 64,
-                        99,
-                    ),
-                    0o111,
-                ),
-            ),
-            first,
-        )
-        non_executable = SkillSourceRef("application", "review").with_asset_versions(
-            (
-                SkillResourceVersion(
-                    "scripts/run.bin",
-                    relocated.resource_versions[0].asset,
-                    0,
-                ),
-            ),
-            "0" * 64,
-        )
-        changed = SkillSourceRef("application", "review").with_asset_versions(
-            (
-                SkillResourceVersion(
-                    "scripts/run.bin",
-                    AssetVersionRef(
-                        key,
-                        "source-a",
-                        StorageEntryRevision(2),
-                        "b" * 64,
-                        1,
-                    ),
-                    0o111,
-                ),
-            ),
-            "0" * 64,
-        )
-
-        assert first == await digest(relocated)
-        with pytest.raises(AIError):
-            await digest(non_executable)
-        with pytest.raises(AIError):
-            await digest(changed)
-        assert first == expected_digest
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_mcp_resource_digest_is_stable_and_includes_binary_files() -> None:
+async def test_mcp_resource_resolution_is_stable_and_includes_binary_files() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
@@ -734,49 +623,32 @@ async def test_mcp_resource_digest_is_stable_and_includes_binary_files() -> None
     try:
         await store.put(AssetKey("mcp", "server/data.bin"), binary)
         await store.put(AssetKey("mcp", "server/nested/guide.md"), b"guide")
-        first_versions, first_digest = await _resolve_mcp_resource_versions(
+        first_versions = await _resolve_mcp_resource_versions(
             store,
             root,
             (),
         )
         await store.put(AssetKey("agent", "unrelated"), b"unrelated")
-        second_versions, second_digest = await _resolve_mcp_resource_versions(
+        second_versions = await _resolve_mcp_resource_versions(
             store,
             root,
             (),
         )
 
         assert first_versions == second_versions
-        assert first_digest == second_digest
-        assert first_digest == canonical_sha256(
-            {
-                "version": 1,
-                "kind": "mcp-resource-v1",
-                "files": [
-                    {
-                        "path": "data.bin",
-                        "sha256": hashlib.sha256(binary).hexdigest(),
-                    },
-                    {
-                        "path": "nested/guide.md",
-                        "sha256": hashlib.sha256(b"guide").hexdigest(),
-                    },
-                ],
-            }
-        )
-        empty_versions, empty_digest = await _resolve_mcp_resource_versions(
+        assert {
+            item.key.id: item.etag
+            for item in first_versions
+        } == {
+            "server/data.bin": hashlib.sha256(binary).hexdigest(),
+            "server/nested/guide.md": hashlib.sha256(b"guide").hexdigest(),
+        }
+        empty_versions = await _resolve_mcp_resource_versions(
             store,
             AssetKey("mcp", "empty"),
             (),
         )
         assert empty_versions == ()
-        assert empty_digest == canonical_sha256(
-            {
-                "version": 1,
-                "kind": "mcp-resource-v1",
-                "files": [],
-            }
-        )
     finally:
         await store.close()
 
@@ -826,7 +698,7 @@ async def test_mcp_resource_resolution_excludes_declaration_files() -> None:
         await store.put(declaration, b"declaration")
         await store.put(resource, b"resource")
 
-        versions, _digest = await _resolve_mcp_resource_versions(store, root, ())
+        versions = await _resolve_mcp_resource_versions(store, root, ())
 
         assert tuple(item.key for item in versions) == (resource,)
     finally:
@@ -871,7 +743,6 @@ async def test_mcp_resource_versions_reject_invalid_tree(
                     _MCPResourceBinding(
                         versions,
                         "application",
-                        "a" * 64,
                         {"version": 1, "boundary": "host-stdio"},
                     ),
                 )
@@ -888,7 +759,6 @@ async def test_mcp_resource_prefix_is_literal_without_resource_root() -> None:
         ("resource:literal-value",),
     )
     binding = _MCPResourceBinding(
-        None,
         None,
         None,
         {"version": 1, "boundary": "host-stdio"},
@@ -916,7 +786,7 @@ async def test_mcp_resource_path_requires_local_asset_files() -> None:
         root = AssetKey("mcp", "server/assets")
         await store.put(resource, b"print('versioned')\n")
         await store.put(helper, b"VALUE = 42\n")
-        versions, digest = await _resolve_mcp_resource_versions(
+        versions = await _resolve_mcp_resource_versions(
             store,
             root,
             ("resource:script.py",),
@@ -934,7 +804,6 @@ async def test_mcp_resource_path_requires_local_asset_files() -> None:
                     server.id: _MCPResourceBinding(
                         versions,
                         "application",
-                        digest,
                         {"version": 1, "boundary": "host-stdio"},
                     )
                 },
@@ -971,13 +840,12 @@ async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> No
         server = MCPServerSpec(
             "server", "python", ("resource:script.py",), resource_root
         )
-        versions, digest = await _resolve_mcp_resource_versions(
+        versions = await _resolve_mcp_resource_versions(
             store, resource_root, server.args
         )
         binding = _MCPResourceBinding(
             versions,
             "application",
-            digest,
             {"version": 1, "boundary": "host-stdio"},
         )
         host = await prepare_mcp_resource_projections(
