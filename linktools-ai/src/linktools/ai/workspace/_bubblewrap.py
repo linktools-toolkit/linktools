@@ -1586,7 +1586,7 @@ def _prepare_hidden_paths(
                     raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             else:
                 if not create_missing:
-                    break
+                    raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
                 _prepare_directory(current)
     return paths
 
