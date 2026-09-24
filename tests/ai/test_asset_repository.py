@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Store-backed CapabilityGroup discovery and freeze contract checks."""
+"""Store-backed CapabilityGroup discovery and snapshot contract checks."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -51,21 +51,21 @@ async def test_builtin_loader_freezes_agent_skill_and_mcp_declarations() -> None
     await store.put(AssetKey("skill", "skill"), SkillSpecCodec().encode(skill))
     await store.put(AssetKey("mcp", "server"), MCPServerSpecCodec().encode(mcp))
 
-    frozen = await CapabilityGroup("workspace", assets=store).snapshot()
+    snapshot = await CapabilityGroup("workspace", assets=store).snapshot()
 
-    assert [(item.kind, item.id) for item in frozen.contributions] == [
+    assert [(item.kind, item.id) for item in snapshot.contributions] == [
         ("agent", "agent"),
         ("mcp", "server"),
         ("skill", "skill"),
     ]
-    assert [item.value for item in frozen.contributions] == [
+    assert [item.value for item in snapshot.contributions] == [
         agent,
         mcp,
         SkillDefinition(skill),
     ]
     assert all(
         "semantic_revision" not in item.semantic_contract
-        for item in frozen.contributions
+        for item in snapshot.contributions
     )
 
 
@@ -431,9 +431,9 @@ async def test_builtin_loader_batches_declaration_body_reads() -> None:
         SkillSpecCodec().encode(SkillSpec("skill", "instructions")),
     )
 
-    frozen = await CapabilityGroup("workspace", assets=store).snapshot()
+    snapshot = await CapabilityGroup("workspace", assets=store).snapshot()
 
-    assert [item.id for item in frozen.contributions] == [
+    assert [item.id for item in snapshot.contributions] == [
         "agent",
         "server",
         "skill",
