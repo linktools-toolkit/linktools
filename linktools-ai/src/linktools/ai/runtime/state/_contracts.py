@@ -1041,7 +1041,7 @@ class ToolOperationRecord:
 class EvaluationRecord:
     evaluation_id: str
     execution_id: str
-    dataset_digest: str
+    dataset_id: str
     status: EvaluationStatus
     revision: int
     created_at: datetime

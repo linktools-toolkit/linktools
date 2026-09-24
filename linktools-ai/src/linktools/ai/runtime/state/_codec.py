@@ -280,7 +280,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "conversation_history_segment": ("owner_history_id", "through_local_message_count"),
         "context_projection": ("items",),
         "error_diagnostics": ("exception_type", "exception_message", "cause_digest"),
-        "evaluation_record": ("evaluation_id", "execution_id", "dataset_digest", "status", "revision", "created_at", "updated_at"),
+        "evaluation_record": ("evaluation_id", "execution_id", "dataset_id", "status", "revision", "created_at", "updated_at"),
         "execution_event": ("execution_id", "sequence", "event_type", "payload"),
         "execution_history_head": ("execution_id", "state", "revision", "seal_digest"),
         "execution_history_seal": ("execution_id", "run_heads", "execution_event_high_water"),

@@ -111,7 +111,7 @@ class DefaultEvaluationService:
             {
                 "action": "evaluation.run",
                 "principal": principal_identity_payload(request.principal),
-                "dataset_digest": request.dataset_digest,
+                "dataset_id": request.dataset_id,
                 "memory_scope": request.memory_scope,
                 "binding_digest": binding_digest,
             }
@@ -161,7 +161,7 @@ class DefaultEvaluationService:
                 execution = await self._execution.start(
                     binding_digest,
                     ExecutionRequest(
-                        user_prompt=f"evaluation:{request.dataset_digest}",
+                        user_prompt=f"evaluation:{request.dataset_id}",
                         principal=request.principal,
                         idempotency_key=f"evaluation:{request.idempotency_key}",
                         memory_scope=request.memory_scope,
@@ -175,7 +175,7 @@ class DefaultEvaluationService:
                     EvaluationRecord(
                         evaluation_id,
                         execution.execution_id,
-                        request.dataset_digest,
+                        request.dataset_id,
                         EvaluationStatus.PENDING,
                         0,
                         now,
@@ -286,7 +286,7 @@ class DefaultEvaluationService:
             ),
         )
         if (
-            baseline.dataset_digest != candidate.dataset_digest
+            baseline.dataset_id != candidate.dataset_id
             or baseline_execution.binding_digest
             != candidate_execution.binding_digest
         ):
@@ -333,7 +333,7 @@ class DefaultEvaluationService:
         return await self._execution.start(
             source.binding_digest,
             ExecutionRequest(
-                user_prompt=f"evaluation:{record.dataset_digest}",
+                user_prompt=f"evaluation:{record.dataset_id}",
                 principal=request.principal,
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
