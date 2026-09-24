@@ -397,17 +397,15 @@ class AssetStore:
         for ref in refs:
             if not isinstance(ref, AssetVersionRef):
                 raise TypeError("refs must contain AssetVersionRef values")
-            backend = next(
-                (
-                    candidate
-                    for candidate in self._storage.backends
-                    if isinstance(candidate, AssetBackend)
-                    and candidate.root.digest == ref.source_id
-                ),
-                None,
+            matches = tuple(
+                candidate
+                for candidate in self._storage.backends
+                if isinstance(candidate, AssetBackend)
+                and candidate.root.digest == ref.source_id
             )
-            if backend is None:
+            if len(matches) != 1:
                 raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+            backend = matches[0]
             if not isinstance(backend, VersionedStorage):
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             value = await backend.get_at_revision(ref.key, ref.revision)
