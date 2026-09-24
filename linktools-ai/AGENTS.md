@@ -18,6 +18,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Capture a CapabilityGroup declaration snapshot once and reuse it for host
   inspection and Runtime composition. Bind cross-source reads to the captured
   revision or an immutable reference.
+- Resource immutability belongs to AssetStore/AssetVersionRef. Skill and MCP contracts may carry Asset version references plus their own execution semantics, but must not define a separate frozen lifecycle or duplicate Asset ownership.
 - Keep visibility, execution authorization, and OS isolation as separate
   boundaries. A successful close for a restricted child process requires
   proof that its owned process tree is quiescent.
