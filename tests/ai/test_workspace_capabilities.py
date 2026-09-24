@@ -10,6 +10,7 @@ import pytest
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.asset import AssetStore, DirectoryAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.capability import (
+    CapabilityContribution,
     CapabilityGroup,
     ToolCallFailed,
     tool_class_from_metadata,
@@ -18,7 +19,13 @@ from linktools.ai.capability import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.spec import AgentSpec, AgentSpecCodec
+from linktools.ai.spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    MCPServerSpec,
+    mcp_server_selector,
+    mcp_tool_selector,
+)
 from linktools.ai.storage import StorageOverlay
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -325,6 +332,28 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
         agents={"agent": empty},
     )
     assert empty_compiler.compile(empty).selected_tools == ()
+
+
+def test_global_tool_wildcard_preserves_exact_mcp_requirement() -> None:
+    server = MCPServerSpec("server", "python")
+    exact = mcp_tool_selector(server.id, "required")
+    spec = AgentSpec(
+        "agent",
+        allow_tools=("*", exact),
+        allow_skills=(),
+        allow_subagents=(),
+        allow_capabilities=(),
+    )
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(CapabilityContribution.from_declaration(server),),
+        agents={"agent": spec},
+    )
+
+    definition = compiler.compile(spec)
+
+    assert mcp_server_selector(server.id) in definition.mcp_selector_policy
+    assert exact in definition.mcp_selector_policy
 
 
 @pytest.mark.asyncio
