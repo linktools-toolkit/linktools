@@ -22,7 +22,7 @@ from ..capability import (
     validate_resource_tree,
 )
 from ..asset import AssetKey, AssetStoreReader
-from ..core import JsonValue, canonical_sha256
+from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
 from ..storage import ObjectRef, ObjectStore, StorageRevision
@@ -147,8 +147,8 @@ class _RuntimeBindingFreezer:
             if frozen_policy is not None and dict(frozen_policy) != current_policy:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             if resource_snapshot is not None:
-                if resource_snapshot.store_id != self._objects.store_id:
-                    raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+                if resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if frozen_policy is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 selected.append(pin)
@@ -165,13 +165,19 @@ class _RuntimeBindingFreezer:
                             "server_id": server.id,
                         },
                     )
-                reference, resource_semantic_digest = (
+                physical_reference, resource_semantic_digest = (
                     await _snapshot_mcp_resources(
                         store,
                         server.resource_root,
                         server.args,
                         object_store=self._objects,
                     )
+                )
+                reference = ObjectRef(
+                    RUNTIME_OBJECT_STORE_ID,
+                    physical_reference.key,
+                    physical_reference.digest,
+                    physical_reference.size,
                 )
             elif any(argument.startswith("resource:") for argument in server.args):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -204,7 +210,12 @@ class _RuntimeBindingFreezer:
                 cast("Mapping[str, object]", pin.contract)
             )
             source_ref = skill.source_ref
-            if source_ref is None or source_ref.snapshot is not None:
+            if source_ref is None:
+                selected.append(pin)
+                continue
+            if source_ref.snapshot is not None:
+                if source_ref.snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 selected.append(pin)
                 continue
             source = self._skill_sources.resolve(source_ref.source_id)
@@ -237,9 +248,18 @@ class _RuntimeBindingFreezer:
             resource_semantic_digest = await frozen_source.semantic_digest(
                 source_ref.root
             )
+            runtime_reference = ObjectRef(
+                RUNTIME_OBJECT_STORE_ID,
+                reference.key,
+                reference.digest,
+                reference.size,
+            )
             frozen_skill = SkillDefinition(
                 skill.spec,
-                source_ref.with_snapshot(reference, resource_semantic_digest),
+                source_ref.with_snapshot(
+                    runtime_reference,
+                    resource_semantic_digest,
+                ),
             )
             selected.append(
                 SemanticPin(
