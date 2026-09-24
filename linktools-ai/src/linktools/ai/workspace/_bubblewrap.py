@@ -241,6 +241,7 @@ class _BubblewrapSandboxSession:
         self._stop_lock = asyncio.Lock()
         self._stdio_lock = asyncio.Lock()
         self._stdio_processes: set[_BubblewrapStdioProcess] = set()
+        self._host_operations: set[asyncio.Task[bytes]] = set()
         self._close_task: asyncio.Task[None] | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -303,14 +304,28 @@ class _BubblewrapSandboxSession:
         if root is None:
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
         normalized = normalize_workspace_input_path(path)
-        return await asyncio.to_thread(
-            _read_workspace_bytes,
-            root,
-            normalized,
-            read_policy=self._read_policy,
-            hidden_paths=self._hidden_paths,
-            max_bytes=max_bytes,
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                _read_workspace_bytes,
+                root,
+                normalized,
+                read_policy=self._read_policy,
+                hidden_paths=self._hidden_paths,
+                max_bytes=max_bytes,
+            ),
+            name="bubblewrap-sandbox-read-bytes",
         )
+        self._host_operations.add(task)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            try:
+                await asyncio.shield(task)
+            except BaseException as operation_error:
+                raise cancellation from operation_error
+            raise cancellation
+        finally:
+            self._host_operations.discard(task)
 
     async def open_stdio_process(
         self,
@@ -727,6 +742,7 @@ class _BubblewrapSandboxSession:
 
     async def _close_impl(self) -> None:
         try:
+            await self._wait_host_operations()
             async with self._stdio_lock:
                 stdio_processes = tuple(self._stdio_processes)
             results = await asyncio.gather(
@@ -773,6 +789,21 @@ class _BubblewrapSandboxSession:
             if isinstance(error, AIError):
                 raise
             raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
+
+    async def _wait_host_operations(self) -> None:
+        current = asyncio.current_task()
+        while True:
+            operations = tuple(
+                task
+                for task in self._host_operations
+                if task is not current and not task.done()
+            )
+            if not operations:
+                return
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in operations),
+                return_exceptions=True,
+            )
 
     async def _stop_background_tasks(self) -> None:
         current = asyncio.current_task()

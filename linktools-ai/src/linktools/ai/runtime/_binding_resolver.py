@@ -13,12 +13,12 @@ from ..agent import (
     AgentCompiler,
     SemanticPin,
 )
+from ..asset import AssetKey, AssetStoreReader, AssetVersionRef
 from ..capability import (
     mcp_resource_path,
     validate_resource_path,
     validate_resource_tree,
 )
-from ..asset import AssetKey, AssetStoreReader, AssetVersionRef
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec

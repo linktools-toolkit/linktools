@@ -20,6 +20,7 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
   revision or an immutable reference.
 - Resource immutability belongs to AssetStore/AssetVersionRef. Skill and MCP contracts may carry Asset version references plus their own execution semantics, but must not define a separate frozen lifecycle or duplicate Asset ownership.
 - AssetKey.id is an opaque logical identity. Only the owning path adapter or capability contract may interpret it hierarchically; Workspace paths and host filesystem paths must not become Asset identity.
+- Workspace tool/input paths are canonical Workspace-relative POSIX strings. Workspace.root plus host and sandbox guest paths are physical deployment details and must not become logical path or durable semantic identity.
 - Keep visibility, execution authorization, and OS isolation as separate
   boundaries. A successful close for a restricted child process requires
   proof that its owned process tree is quiescent.
