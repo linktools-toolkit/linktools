@@ -15,7 +15,9 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
+import linktools.ai.agent._compiler as agent_compiler
 import linktools.ai.runtime._mcp as mcp_runtime
+from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
     CapabilityGroup,
     FrozenSkillResourceSource,
@@ -29,6 +31,7 @@ from linktools.ai.capability import (
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.core import canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_freeze import _snapshot_mcp_resources
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
@@ -211,6 +214,32 @@ async def test_mcp_global_wildcard_still_requires_explicit_tool() -> None:
     with pytest.raises(AIError) as error:
         await wrapped.get_tools(_context())
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+def test_mcp_server_token_collision_fails_at_compiler_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = agent_compiler.canonical_sha256
+
+    def collide(value: object) -> str:
+        if isinstance(value, dict) and value.get("kind") == "mcp-server-name":
+            return "a" * 64
+        return original(value)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agent_compiler, "canonical_sha256", collide)
+    first = MCPServerSpec("first", "python")
+    second = MCPServerSpec("second", "python")
+    candidates = (
+        CapabilityContribution.from_declaration(first),
+        CapabilityContribution.from_declaration(second),
+    )
+    with pytest.raises(AIError) as error:
+        AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+            candidates=candidates,
+            agents={"agent": AgentSpec("agent")},
+        )
+    assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
 @pytest.mark.asyncio
