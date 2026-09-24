@@ -36,7 +36,7 @@ from ..storage import (
     VersionSummary,
 )
 from ..storage import ObjectRef, ObjectStore, read_object
-from ._domain import AssetInfo, AssetKey, AssetVersionRef
+from ._domain import AssetBackend, AssetInfo, AssetKey, AssetVersionRef
 
 _logger = environ.get_logger("ai.asset.store")
 _SNAPSHOT_VERSION = 1
