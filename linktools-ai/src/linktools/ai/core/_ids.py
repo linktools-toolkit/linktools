@@ -15,6 +15,9 @@ from ._validation import (
 from ._value import Principal
 
 
+RUNTIME_OBJECT_STORE_ID = "runtime"
+
+
 def canonical_sha256(value: JsonValue) -> str:
     """Return the SHA-256 digest of a canonical JSON value."""
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
@@ -68,6 +71,7 @@ def principal_identity_payload(principal: Principal) -> dict[str, str]:
 
 
 __all__ = [
+    "RUNTIME_OBJECT_STORE_ID",
     "canonical_identity_digest",
     "canonical_sha256",
     "deterministic_id",
