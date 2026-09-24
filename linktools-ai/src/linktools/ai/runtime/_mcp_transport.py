@@ -14,6 +14,9 @@ from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
 from ..errors import AIError, ErrorCode
+_MAX_MCP_MESSAGE_BYTES = 16 * 1024 * 1024
+
+
 from ..workspace import (
     SandboxResource,
     SandboxResourcePath,
@@ -124,6 +127,8 @@ class _SandboxMCPTransport(ClientTransport):
                         separator = pending.find(b"\n")
                         if separator < 0:
                             break
+                        if separator > _MAX_MCP_MESSAGE_BYTES:
+                            raise AIError(ErrorCode.MCP_RESPONSE_TOO_LARGE)
                         frame = bytes(pending[:separator])
                         del pending[: separator + 1]
                         if not frame:
@@ -133,6 +138,8 @@ class _SandboxMCPTransport(ClientTransport):
                         except (TypeError, ValueError) as error:
                             raise _invalid_protocol() from error
                         await output.send(SessionMessage(message))
+                    if len(pending) > _MAX_MCP_MESSAGE_BYTES:
+                        raise AIError(ErrorCode.MCP_RESPONSE_TOO_LARGE)
             except anyio.ClosedResourceError:
                 return
 
