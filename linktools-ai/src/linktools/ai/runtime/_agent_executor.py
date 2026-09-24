@@ -107,7 +107,6 @@ from ..core import (
     ExecutionEventType,
     ExecutionMode,
     JsonValue,
-    RUNTIME_OBJECT_STORE_ID,
     PromptLimits,
     ThinkingValue,
     ToolOperationStatus,
@@ -118,7 +117,6 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import MCPServerSpecCodec
-from ..storage import ObjectRef, ObjectStore
 from ..workspace import LocalSandbox, SandboxResource, SandboxSession, Workspace
 
 if TYPE_CHECKING:
@@ -264,13 +262,13 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
-        mcp_resource_store: ObjectStore | None = None,
+        mcp_assets: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
-        self._mcp_resource_store = mcp_resource_store
+        self._mcp_assets = dict(mcp_assets or {})
         self._metrics = metrics
 
     async def execute(self, scope: _RunScope) -> AgentExecutionOutcome:
@@ -458,7 +456,7 @@ class AgentExecutor:
         )
         workspace = scope.workspace
         temporary_resources: tuple[TemporaryDirectory[str], ...] = ()
-        mcp_frozen_resources = _mcp_resource_snapshots(scope.binding)
+        mcp_frozen_resources = _mcp_frozen_resources(scope.binding)
         if workspace is None:
             skill_resources: tuple[SandboxResource, ...] = ()
             resource_keys: Mapping[str, "str | None"] = {
@@ -476,7 +474,7 @@ class AgentExecutor:
             mcp_projections = await prepare_mcp_resource_projections(
                 scope.binding.definition.mcp_servers,
                 mcp_frozen_resources,
-                object_store=self._mcp_resource_store,
+                asset_readers=self._mcp_assets,
                 sandboxed=workspace is not None,
             )
         except BaseException:
@@ -718,7 +716,7 @@ async def _close_mcp_resources(
         raise primary_error from cleanup_error
 
 
-def _mcp_resource_snapshots(
+def _mcp_frozen_resources(
     binding: AgentBinding,
 ) -> dict[str, _FrozenMCPResources]:
     codec = MCPServerSpecCodec()
@@ -726,10 +724,10 @@ def _mcp_resource_snapshots(
     for pin in binding.snapshot.selected:
         if pin.kind != "mcp":
             continue
-        server, reference = codec.from_frozen_payload(pin.contract)
-        if server.resource_root is not None and reference is None:
+        server, versions = codec.from_frozen_payload(pin.contract)
+        if server.resource_root is not None and versions is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if server.resource_root is None and reference is not None:
+        if server.resource_root is None and versions is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if server.id in result:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -740,7 +738,7 @@ def _mcp_resource_snapshots(
         if digest is not None and not isinstance(digest, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result[server.id] = _FrozenMCPResources(
-            reference,
+            versions,
             digest,
             cast(Mapping[str, JsonValue], policy),
         )
