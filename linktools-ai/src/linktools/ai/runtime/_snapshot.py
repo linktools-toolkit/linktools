@@ -1217,6 +1217,8 @@ async def _read_manifest(
 ) -> Mapping[str, object]:
     if not isinstance(limits, SnapshotLimits):
         raise TypeError("limits must be SnapshotLimits")
+    if ref.store_id != object_store.store_id:
+        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
     if ref.size > limits.max_bytes:
         raise AIError(ErrorCode.SNAPSHOT_UNSUPPORTED)
     payload = await read_object(
