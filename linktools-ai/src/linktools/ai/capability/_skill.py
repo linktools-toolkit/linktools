@@ -10,7 +10,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..core import JsonValue
+from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef
 from ..spec import SkillSpec
@@ -108,8 +108,7 @@ class SkillDefinition:
                 digest = snapshot["digest"]
                 size = snapshot["size"]
                 if (
-                    not isinstance(store_id, str)
-                    or not store_id
+                    store_id != RUNTIME_OBJECT_STORE_ID
                     or not isinstance(key, str)
                     or not key
                     or not isinstance(digest, str)
