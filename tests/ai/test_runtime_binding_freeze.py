@@ -172,6 +172,13 @@ def _skill_snapshot(child: AgentBindingSnapshot):
     return skill.source_ref.snapshot
 
 
+def _physical_ref(store: InMemoryObjectStore | object, ref: ObjectRef) -> ObjectRef:
+    store_id = getattr(store, "store_id")
+    assert isinstance(store_id, str)
+    assert ref.store_id == "runtime"
+    return ObjectRef(store_id, ref.key, ref.digest, ref.size)
+
+
 @pytest.mark.asyncio
 async def test_binding_freeze_captures_only_direct_child_resources(
     tmp_path: Path,
@@ -187,7 +194,7 @@ async def test_binding_freeze_captures_only_direct_child_resources(
     fixture.resource.write_text("changed", encoding="utf-8")
     source = FrozenSkillResourceSource(
         "application",
-        {"child-skill": snapshot},
+        {"child-skill": _physical_ref(fixture.objects, snapshot)},
         fixture.objects,
     )
     assert await source.read("child-skill", "guide.txt") == b"original"
@@ -469,7 +476,12 @@ async def test_runtime_state_snapshot_restores_frozen_skill_objects(
         skill_ref = _skill_snapshot(child)
         source = FrozenSkillResourceSource(
             "application",
-            {"child-skill": skill_ref},
+            {
+                "child-skill": _physical_ref(
+                    state.object_store(RuntimeDomain.EXECUTION),
+                    skill_ref,
+                )
+            },
             state.object_store(RuntimeDomain.EXECUTION),
         )
         assert await source.read("child-skill", "guide.txt") == b"original"
@@ -514,7 +526,12 @@ async def test_runtime_state_snapshot_restores_frozen_skill_objects(
         skill_ref = _skill_snapshot(child)
         source = FrozenSkillResourceSource(
             "application",
-            {"child-skill": skill_ref},
+            {
+                "child-skill": _physical_ref(
+                    restored.object_store(RuntimeDomain.EXECUTION),
+                    skill_ref,
+                )
+            },
             restored.object_store(RuntimeDomain.EXECUTION),
         )
         assert await source.read("child-skill", "guide.txt") == b"original"
