@@ -181,19 +181,22 @@ consistent local package tree. The declaration filename is loader-defined; it
 does not need to be `SKILL.md`. This allows Skill scripts to be invoked by
 absolute path without letting a single file symlink redefine the package root.
 If an overlay mixes resource origins, the Skill is exposed as virtual instead
-of claiming a partial local tree. Durable executions pin immutable Asset version references for Skill resources
-and read those exact historical versions when needed. A filesystem path is only
-materialized temporarily at the sandbox boundary; Runtime does not copy Skill
-resource bytes into its ObjectStore.
+of claiming a partial local tree. Durable executions pin Asset version references for Skill resources and read
+them through AssetStore when needed. AssetStore verifies the frozen digest and
+size before the bytes are used; a source that can no longer reproduce the
+frozen content fails integrity instead of silently using changed content. A
+filesystem path is only materialized temporarily at the sandbox boundary;
+Runtime does not copy Skill resource bytes into its ObjectStore.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
-value starts with `resource:` then name files below that root. Runtime resolves the selected resource files to immutable Asset version
-references, rejects absolute paths, traversal, and missing files, and reads
-those exact historical versions when materializing the temporary MCP process
-directory. Asset updates after the CapabilityGroup freeze do not alter that
-frozen declaration set; a later CapabilityGroup freeze sees the newer Asset
-versions. Runtime does not persist a second copy of MCP resource bytes.
+value starts with `resource:` then name files below that root. Runtime resolves the selected resource files to Asset version references,
+rejects absolute paths, traversal, and missing files, and reads those refs
+through AssetStore when materializing the temporary MCP process directory.
+Digest and size are verified before use. Asset updates after the
+CapabilityGroup freeze do not alter that frozen declaration set; a later
+CapabilityGroup freeze sees the newer Asset versions. Runtime does not persist
+a second copy of MCP resource bytes.
 Without `resource_root`, existing argument strings keep their original
 meaning.
 
