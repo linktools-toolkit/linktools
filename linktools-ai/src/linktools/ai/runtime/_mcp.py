@@ -3,7 +3,6 @@
 """Materialize compiler-selected stdio MCP as Runtime capabilities."""
 
 import asyncio
-import hashlib
 import json
 import os
 import tempfile
@@ -29,15 +28,14 @@ from ..capability import (
     validate_resource_path,
     validate_resource_tree,
 )
-from ..asset import AssetStore
-from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue, canonical_sha256
+from ..asset import AssetStoreReader, AssetVersionRef
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
     MCPServerSpec,
     mcp_tool_selector,
     parse_mcp_tool_selector,
 )
-from ..storage import ObjectRef, ObjectStore
 from ..workspace import (
     SandboxResource,
     SandboxResourcePath,
@@ -69,7 +67,7 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
 
 @dataclass(frozen=True, slots=True)
 class _FrozenMCPResources:
-    snapshot: ObjectRef | None
+    versions: "tuple[AssetVersionRef, ...] | None"
     resource_semantic_digest: str | None
     execution_policy: Mapping[str, JsonValue]
 
@@ -284,10 +282,10 @@ async def prepare_mcp_resource_projections(
     servers: Sequence[MCPServerSpec],
     resources: Mapping[str, _FrozenMCPResources],
     *,
-    object_store: ObjectStore | None,
+    asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
 ) -> dict[str, _MCPResourceProjection]:
-    """Verify and materialize each selected server's frozen resource tree."""
+    """Verify and materialize each selected server's frozen Asset versions."""
     projections: dict[str, _MCPResourceProjection] = {}
     try:
         for server in servers:
@@ -295,7 +293,7 @@ async def prepare_mcp_resource_projections(
             if frozen is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if server.resource_root is None:
-                if frozen.snapshot is not None or frozen.resource_semantic_digest is not None:
+                if frozen.versions is not None or frozen.resource_semantic_digest is not None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if any(argument.startswith("resource:") for argument in server.args):
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -306,12 +304,16 @@ async def prepare_mcp_resource_projections(
                     None,
                 )
                 continue
-            if object_store is None:
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            directory = await _materialize_resource_snapshot(
+            reader = asset_readers.get(server.id)
+            if reader is None:
+                raise AIError(
+                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                    safe_details={"kind": "mcp_resource_store", "server_id": server.id},
+                )
+            directory = await _materialize_resource_versions(
                 server,
                 frozen,
-                object_store,
+                reader,
             )
             try:
                 arguments: list[str | SandboxResourcePath] = []
@@ -450,85 +452,64 @@ async def materialize_mcp_capabilities(
     return tuple(values)
 
 
-async def _materialize_resource_snapshot(
+async def _materialize_resource_versions(
     server: MCPServerSpec,
     frozen: _FrozenMCPResources,
-    resource_objects: ObjectStore,
+    asset_reader: AssetStoreReader,
 ) -> "tempfile.TemporaryDirectory[str]":
-    if frozen.snapshot is None or frozen.resource_semantic_digest is None:
+    if frozen.versions is None or frozen.resource_semantic_digest is None:
         raise AIError(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,
             safe_details={"kind": "mcp_resource", "server_id": server.id},
         )
-    if frozen.snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
+    if server.resource_root is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    physical_reference = ObjectRef(
-        resource_objects.store_id,
-        frozen.snapshot.key,
-        frozen.snapshot.digest,
-        frozen.snapshot.size,
-    )
-    snapshot = AssetStore.from_snapshot(
-        physical_reference,
-        object_store=resource_objects,
-    )
-    await snapshot.initialize()
-    directory = tempfile.TemporaryDirectory(
-        prefix="linktools-mcp-",
-    )
-    try:
-        infos = await snapshot.metadata_snapshot()
-        prefix = f"{server.resource_root.id}/"
-        values = {
-            info.key.id[len(prefix) :]: info
-            for info in infos
-            if info.key.kind == server.resource_root.kind
-            and info.key.id.startswith(prefix)
+    prefix = f"{server.resource_root.id}/"
+    values: dict[str, AssetVersionRef] = {}
+    for version in frozen.versions:
+        if (
+            version.key.kind != server.resource_root.kind
+            or not version.key.id.startswith(prefix)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        relative = version.key.id[len(prefix) :]
+        validate_resource_path(relative)
+        if relative in values:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        values[relative] = version
+    validate_resource_tree(values)
+    actual_digest = canonical_sha256(
+        {
+            "version": 1,
+            "kind": "mcp-resource-semantics",
+            "files": [
+                {"path": relative, "sha256": values[relative].etag}
+                for relative in sorted(values)
+            ],
         }
-        validate_resource_tree(values)
-        files: list[dict[str, str]] = []
-        for relative, info in values.items():
+    )
+    if actual_digest != frozen.resource_semantic_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    for argument in server.args:
+        if argument.startswith("resource:"):
+            relative = argument[len("resource:") :]
+            if relative not in values:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    versions = tuple(values[relative] for relative in sorted(values))
+    bodies = await asset_reader.read_versions(versions)
+    directory = tempfile.TemporaryDirectory(prefix="linktools-mcp-")
+    try:
+        for relative, body in zip(sorted(values), bodies, strict=True):
             target = _resource_target(directory.name, relative)
             target.parent.mkdir(parents=True, exist_ok=True)
-            body = await snapshot.get(info.key)
-            if body is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if len(body) != info.size or hashlib.sha256(body).hexdigest() != info.etag:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             target.write_bytes(body)
-            files.append({"path": relative, "sha256": info.etag})
-        files.sort(key=lambda item: item["path"])
-        actual_digest = canonical_sha256(
-            {
-                "version": 1,
-                "kind": "mcp-resource-semantics",
-                "files": files,
-            }
-        )
-        if actual_digest != frozen.resource_semantic_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for argument in server.args:
-            if argument.startswith("resource:"):
-                relative = argument[len("resource:") :]
-                if relative not in values:
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        await snapshot.close()
         return directory
     except BaseException as primary_error:
-        cleanup_error: BaseException | None = None
         try:
             await _cleanup_resource_directory(directory)
-        except BaseException as error:
-            cleanup_error = error
-        try:
-            await snapshot.close()
-        except BaseException as error:
-            if cleanup_error is None:
-                cleanup_error = error
-        if cleanup_error is not None:
+        except BaseException as cleanup_error:
             _raise_primary_after_cleanup(primary_error, cleanup_error)
         raise
-
 
 def _resource_target(root: str, relative: str) -> Path:
     validate_resource_path(relative)
