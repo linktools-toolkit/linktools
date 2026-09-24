@@ -17,7 +17,13 @@ from pydantic_ai import Tool
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 
-from ..asset import AssetInfo, AssetKey, AssetStore, AssetStoreReader
+from ..asset import (
+    AssetInfo,
+    AssetKey,
+    AssetStore,
+    AssetStoreReader,
+    AssetVersionRef,
+)
 from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
@@ -279,6 +285,7 @@ class _SemanticContribution(CapabilityContribution[AppT]):
 class _CapabilityAssetReader:
     _store: AssetStore = field(repr=False, compare=False)
     _revision: StorageRevision
+    _versions: Mapping[AssetKey, AssetVersionRef] = field(repr=False, compare=False)
 
     async def _verify(self) -> None:
         if await self._store.current_revision() != self._revision:
@@ -317,6 +324,24 @@ class _CapabilityAssetReader:
         values = await self._store.metadata_snapshot()
         await self._verify()
         return values
+
+    async def resolve_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[AssetVersionRef, ...]":
+        result: list[AssetVersionRef] = []
+        for key in keys:
+            ref = self._versions.get(key)
+            if ref is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            result.append(ref)
+        return tuple(result)
+
+    async def read_versions(
+        self,
+        refs: Sequence[AssetVersionRef],
+    ) -> "tuple[bytes, ...]":
+        return await self._store.read_versions(refs)
 
     async def snapshot(
         self,
@@ -810,7 +835,20 @@ class CapabilityGroup(Generic[AppT]):
             self._workspace,
             None
             if store is None
-            else _CapabilityAssetReader(store, cast(StorageRevision, source_revision)),
+            else _CapabilityAssetReader(
+                store,
+                cast(StorageRevision, source_revision),
+                {
+                    info.key: AssetVersionRef(
+                        info.key,
+                        info.root_digest,
+                        info.revision,
+                        info.etag,
+                        info.size,
+                    )
+                    for info in metadata
+                },
+            ),
         )
         _logger.info(
             "capability group frozen: group=%s contributions=%d source_revision=%s",
