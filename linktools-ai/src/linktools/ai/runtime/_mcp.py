@@ -308,7 +308,7 @@ async def prepare_mcp_resource_projections(
             if reader is None:
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={"kind": "mcp_resource_store", "server_id": server.id},
+                    safe_details={"kind": "mcp_asset_source", "server_id": server.id},
                 )
             directory = await _materialize_resource_versions(
                 server,
