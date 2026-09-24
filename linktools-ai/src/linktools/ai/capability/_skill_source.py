@@ -14,7 +14,6 @@ from typing import Literal, Protocol, cast, runtime_checkable
 from ..asset import AssetInfo, AssetKey, AssetStoreReader, AssetVersionRef
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
-    JsonValue,
     canonical_json_bytes,
     validate_logical_id,
 )
