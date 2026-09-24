@@ -31,7 +31,7 @@ from ._output import bind_output, restore_output
 
 
 class AgentCompiler:
-    """Own the single Agent-level selection boundary for a frozen candidate set."""
+    """Own the single Agent-level selection boundary for a snapshotted candidate set."""
 
     def __init__(
         self,
@@ -82,7 +82,7 @@ class AgentCompiler:
             self._mcp_by_id[candidate.id] = candidate
 
     def compile(self, spec: AgentSpec) -> AgentDefinition:
-        """Compile one current declaration from the frozen candidate universe."""
+        """Compile one current declaration from the snapshotted candidate universe."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
         model = self._models.resolve(spec.model)
