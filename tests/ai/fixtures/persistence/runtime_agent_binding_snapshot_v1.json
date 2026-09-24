@@ -2,6 +2,7 @@
   "agent_spec": {
     "version": 1,
     "id": "runtime-persistence-v1",
+    "revision": 1,
     "model": "default",
     "system_prompt": "",
     "instructions": [],

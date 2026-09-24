@@ -51,6 +51,8 @@ _MCP_AUTHOR_FIELDS = frozenset(
 _SKILL_AUTHOR_FIELDS = frozenset(
     {"version", "revision", "id", "content", "description", "metadata"}
 )
+
+
 class SpecCodec(Protocol[SpecT]):
     def encode(self, value: SpecT) -> bytes: ...
     def decode(self, data: bytes) -> SpecT: ...
