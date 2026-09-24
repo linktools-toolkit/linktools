@@ -1668,38 +1668,6 @@ def iter_runtime_object_dependencies(
     if not isinstance(manifest, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    if reference.key.startswith("v1/skill-source-snapshot/"):
-        if (
-            manifest.get("kind") != "skill-source-snapshot"
-            or manifest.get("format_version") != 1
-            or not isinstance(manifest.get("resources"), list)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for item in cast(list[object], manifest["resources"]):
-            if not isinstance(item, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            content = item.get("content")
-            if not isinstance(content, Mapping) or set(content) != {
-                "key",
-                "digest",
-                "size",
-            }:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            size = content["size"]
-            if isinstance(size, bool) or not isinstance(size, int):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                nested = ObjectRef(
-                    reference.store_id,
-                    cast(str, content["key"]),
-                    cast(str, content["digest"]),
-                    size,
-                )
-            except (TypeError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            yield default_domain, nested
-        return
-
     if reference.key.startswith("v1/asset-snapshot/"):
         if (
             manifest.get("kind") != "asset-snapshot"
