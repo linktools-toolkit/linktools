@@ -390,7 +390,7 @@ async def _verify_resource_semantics(
     source_ref: SkillSourceRef,
     source: object,
 ) -> None:
-    if source_ref.snapshot is None:
+    if not source_ref.frozen:
         return
     if (
         not isinstance(source, FrozenSkillResourceSource)
