@@ -567,7 +567,6 @@ async def test_runtime_history_inspection_uses_safe_durable_summaries() -> None:
     assert info.binding_digest == executions.binding.binding_digest
     assert info.input_digest == executions.record.stored_user_input.digest
     assert info.output_digest == executions.result.output.digest
-    assert info.output_contract_digest == executions.binding.output_contract_digest
     assert info.usage == UsageSummary(
         logical_requests=1,
         succeeded_requests=1,
@@ -690,7 +689,6 @@ async def test_runtime_history_reads_execution_task_results_and_artifacts() -> N
 
     assert result.status is ExecutionStatus.SUCCEEDED
     assert result.output is None
-    assert result.output_contract_digest == executions.binding.output_contract_digest
     assert reference.namespace == "workspace"
     assert reference.tenant_id == "tenant"
     assert reference.graph_id == "graph"

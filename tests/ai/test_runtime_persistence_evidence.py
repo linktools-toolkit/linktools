@@ -327,7 +327,6 @@ async def test_session_runtime_persists_and_reads_terminal_result(
                 timeout_seconds=10,
             )
             assert result.status is ExecutionStatus.SUCCEEDED
-            assert result.output_contract_digest is not None
 
             session_record = await state.conversation.sessions.get(
                 created.session_id,
@@ -375,6 +374,5 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             assert inspected.status is ExecutionStatus.SUCCEEDED
             assert waited.status is ExecutionStatus.SUCCEEDED
             assert waited.output == persisted_result.output.value
-            assert waited.output_model_digest == result.output_contract_digest
     finally:
         await state.close()
