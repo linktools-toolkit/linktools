@@ -80,9 +80,18 @@ class AssetVersionRef:
 
     @classmethod
     def from_payload(cls, value: object) -> "AssetVersionRef":
-        if not isinstance(value, Mapping):
+        if not isinstance(value, Mapping) or set(value) != {
+            "version",
+            "kind",
+            "id",
+            "source_id",
+            "revision",
+            "etag",
+            "size",
+        }:
             raise ValueError("asset version payload is invalid")
-        if value.get("version") != 1:
+        version = value.get("version")
+        if isinstance(version, bool) or version != 1:
             raise ValueError("asset version payload version is unsupported")
         kind = value.get("kind")
         identity = value.get("id")
