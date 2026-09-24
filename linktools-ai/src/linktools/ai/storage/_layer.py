@@ -24,8 +24,8 @@ class StorageLayer(Generic[KeyT, ValueT, InfoT]):
     refresh: LayerRefreshPolicy = LayerRefreshPolicy.STATIC
 
     def __post_init__(self) -> None:
-        if not self.id.strip():
-            raise ValueError("layer id must not be empty")
+        if not self.id.strip() or self.id == "primary":
+            raise ValueError("layer id must be non-empty and must not be 'primary'")
 
 
 __all__ = ["LayerRefreshPolicy", "StorageLayer"]
