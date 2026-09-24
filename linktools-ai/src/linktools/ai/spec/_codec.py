@@ -4,15 +4,14 @@
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Literal, Protocol, TypeVar, cast
 
 import yaml
 
-from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue, normalize_json_value
+from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ..asset import AssetKey
-from ..storage import ObjectRef
+from ..asset import AssetKey, AssetVersionRef
 from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, normalize_thinking
 
 SpecT = TypeVar("SpecT")
@@ -331,7 +330,7 @@ class MCPServerSpecCodec:
     def to_frozen_payload(
         self,
         value: MCPServerSpec,
-        resource_snapshot: ObjectRef | None,
+        resource_versions: "Sequence[AssetVersionRef] | None",
         *,
         resource_semantic_digest: "str | None" = None,
         execution_policy: "Mapping[str, JsonValue] | None" = None,
@@ -342,18 +341,19 @@ class MCPServerSpecCodec:
                 execution_policy
             )
         if value.resource_root is None:
-            if resource_snapshot is not None or resource_semantic_digest is not None:
+            if resource_versions is not None or resource_semantic_digest is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
-        if (
-            not isinstance(resource_snapshot, ObjectRef)
-            or resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID
+        if resource_versions is None or any(
+            not isinstance(item, AssetVersionRef) for item in resource_versions
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _require_digest(resource_semantic_digest)
         payload["args"] = None
         payload["frozen_args"] = list(value.args)
-        payload["resource_snapshot"] = _object_ref_payload(resource_snapshot)
+        payload["resource_versions"] = [
+            item.to_payload() for item in resource_versions
+        ]
         payload["resource_semantic_digest"] = resource_semantic_digest
         return payload
 
@@ -414,7 +414,7 @@ class MCPServerSpecCodec:
     def from_frozen_payload(
         self,
         raw: Mapping[str, object],
-    ) -> "tuple[MCPServerSpec, ObjectRef | None]":
+    ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
         return self._decode_payload(raw, frozen=True)
 
     def _decode_payload(
@@ -422,10 +422,10 @@ class MCPServerSpecCodec:
         raw: Mapping[str, object],
         *,
         frozen: bool,
-    ) -> "tuple[MCPServerSpec, ObjectRef | None]":
+    ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
         _require_v1(raw)
         if not frozen and (
-            "resource_snapshot" in raw
+            "resource_versions" in raw
             or "frozen_args" in raw
             or "resource_semantic_digest" in raw
             or "execution_policy" in raw
@@ -437,18 +437,27 @@ class MCPServerSpecCodec:
         identity = raw.get("id")
         command = raw.get("command")
         resource_root = _decode_asset_key(raw.get("resource_root"))
-        raw_snapshot = raw.get("resource_snapshot") if frozen else None
-        resource_snapshot = (
-            _decode_object_ref(raw_snapshot) if raw_snapshot is not None else None
-        )
-        if (
-            resource_snapshot is not None
-            and resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        resource_versions: tuple[AssetVersionRef, ...] | None = None
+        raw_versions = raw.get("resource_versions") if frozen else None
+        if raw_versions is not None:
+            if not isinstance(raw_versions, list):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            try:
+                parsed = tuple(
+                    AssetVersionRef.from_payload(item)
+                    for item in raw_versions
+                )
+            except (TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            keys = tuple(item.key for item in parsed)
+            if len(keys) != len(set(keys)):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            resource_versions = tuple(
+                sorted(parsed, key=lambda item: (item.key.kind, item.key.id))
+            )
         if frozen and "execution_policy" in raw:
             _execution_policy_payload(raw["execution_policy"])
-        if resource_snapshot is None:
+        if resource_versions is None:
             if frozen and "resource_semantic_digest" in raw:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if frozen and "frozen_args" in raw:
@@ -474,7 +483,7 @@ class MCPServerSpecCodec:
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
-        return value, resource_snapshot
+        return value, resource_versions
 
     def encode(self, value: MCPServerSpec) -> bytes:
         return _encode(cast("dict[str, object]", self.to_wire_payload(value)))
@@ -485,15 +494,6 @@ class MCPServerSpecCodec:
 
 def _encode(value: "dict[str, object]") -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-
-
-def _object_ref_payload(value: ObjectRef) -> dict[str, JsonValue]:
-    return {
-        "store_id": value.store_id,
-        "key": value.key,
-        "digest": value.digest,
-        "size": value.size,
-    }
 
 
 def _execution_policy_payload(value: object) -> dict[str, JsonValue]:
@@ -547,34 +547,6 @@ def _decode_asset_key(value: object) -> AssetKey | None:
         return AssetKey(kind, identity)
     except ValueError as error:
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource root is invalid") from error
-
-
-def _decode_object_ref(value: object) -> ObjectRef | None:
-    if value is None:
-        return None
-    if not isinstance(value, Mapping) or set(value) != {
-        "store_id",
-        "key",
-        "digest",
-        "size",
-    }:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid")
-    store_id = value.get("store_id")
-    key = value.get("key")
-    digest = value.get("digest")
-    size = value.get("size")
-    if (
-        not isinstance(store_id, str)
-        or not isinstance(key, str)
-        or not isinstance(digest, str)
-        or isinstance(size, bool)
-        or not isinstance(size, int)
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid")
-    try:
-        return ObjectRef(store_id, key, digest, size)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP resource snapshot is invalid") from error
 
 
 def _decode(data: bytes) -> "dict[str, object]":
