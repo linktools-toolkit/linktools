@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability groups freeze runtime candidate definitions before execution."""
+"""Capability groups snapshot runtime candidate definitions before execution."""
 
 import functools
 import hashlib
@@ -242,10 +242,10 @@ class CapabilityContribution(Generic[AppT]):
         cls,
         contract: Mapping[str, JsonValue],
     ) -> "CapabilityContribution[object]":
-        """Restore an MCP contribution from its already frozen semantic contract."""
+        """Restore an MCP contribution from its execution-bound semantic contract."""
         if not isinstance(contract, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value, _resource_versions = MCPServerSpecCodec().from_frozen_payload(
+        value, _resource_versions = MCPServerSpecCodec().from_execution_payload(
             cast("Mapping[str, object]", contract)
         )
         return _SemanticContribution(
@@ -389,7 +389,7 @@ class CapabilityGroupSnapshot(Generic[AppT]):
 
 @dataclass(frozen=True, slots=True)
 class CapabilityLoadEntry:
-    """Declaration-relevant metadata captured at the start of a group freeze."""
+    """Declaration-relevant metadata captured at the start of a group snapshot."""
 
     key: AssetKey
     etag: str
@@ -516,7 +516,7 @@ class CapabilityLoader(Protocol[AppT]):
 
 
 class CapabilityGroup(Generic[AppT]):
-    """Register and freeze one named set of runtime candidate definitions."""
+    """Register and snapshot one named set of runtime candidate definitions."""
 
     def __init__(
         self,
@@ -745,8 +745,8 @@ class CapabilityGroup(Generic[AppT]):
         self._loaders[kind] = loader
         return loader
 
-    async def freeze(self) -> "CapabilityGroupSnapshot[AppT]":
-        """Freeze direct registrations and declarations at one source revision."""
+    async def snapshot(self) -> "CapabilityGroupSnapshot[AppT]":
+        """Capture direct registrations and declarations at one source revision."""
         contributions = list(tuple(self._contributions))
         loaders = tuple(self._loaders.items())
         store = self._store
@@ -801,15 +801,15 @@ class CapabilityGroup(Generic[AppT]):
                     skill = cast(SkillDefinition, item.value)
                     if skill.source_ref is not None and (
                         skill.source_ref.source_id != self._id
-                        or skill.source_ref.frozen
+                        or skill.source_ref.resource_semantic_digest is not None
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     if skill.source_ref is not None:
-                        frozen_ref = await AssetSkillResourceSource(
+                        resolved_ref = await AssetSkillResourceSource(
                             self._id,
                             asset_reader,
-                        ).freeze(skill.source_ref.root)
-                        skill = SkillDefinition(skill.spec, frozen_ref)
+                        ).resolve(skill.source_ref.root)
+                        skill = SkillDefinition(skill.spec, resolved_ref)
                         item = cast(
                             "CapabilityContribution[AppT]",
                             CapabilityContribution.from_declaration(skill),
@@ -821,31 +821,31 @@ class CapabilityGroup(Generic[AppT]):
                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         elif loaders:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        frozen = tuple(_freeze_contribution(item) for item in contributions)
-        _validate_unique(frozen)
-        generic = [item for item in frozen if item.kind == "capability"]
+        snapshot_items = tuple(_snapshot_contribution(item) for item in contributions)
+        _validate_unique(snapshot_items)
+        generic = [item for item in snapshot_items if item.kind == "capability"]
         declarations = sorted(
-            (item for item in frozen if item.kind != "capability"),
+            (item for item in snapshot_items if item.kind != "capability"),
             key=lambda item: (item.kind, item.id, item.fingerprint),
         )
-        frozen_contributions = tuple((*declarations, *generic))
+        snapshot_contributions = tuple((*declarations, *generic))
         snapshot = CapabilityGroupSnapshot(
             self._id,
-            frozen_contributions,
+            snapshot_contributions,
             source_revision,
             self._workspace,
             None if store is None else asset_reader,
         )
         _logger.info(
-            "capability group frozen: group=%s contributions=%d source_revision=%s",
+            "capability group snapshotted: group=%s contributions=%d source_revision=%s",
             self._id,
-            len(frozen_contributions),
+            len(snapshot_contributions),
             None if source_revision is None else source_revision.value,
         )
         return snapshot
 
 
-def _freeze_contribution(
+def _snapshot_contribution(
     value: CapabilityContribution[AppT],
 ) -> CapabilityContribution[AppT]:
     if isinstance(value, _SemanticContribution):
