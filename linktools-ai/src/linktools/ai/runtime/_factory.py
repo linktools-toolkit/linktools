@@ -522,7 +522,6 @@ async def _build_local_components(
         binding_resolver = _RuntimeBindingResolver(
             catalog,
             compiler,
-            skill_sources,
             workspace=workspace,
             mcp_assets=mcp_assets,
         )
