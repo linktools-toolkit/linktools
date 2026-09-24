@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import cast
 
 from ..agent import AgentBindingSnapshot, AgentCompiler
+from ..capability import SkillSourceRef
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
@@ -99,7 +100,7 @@ class TaskCapabilitySnapshotStore:
             snapshot.binding_digest: snapshot
             for snapshot in node_bindings
         }
-        skill_snapshots: dict[tuple[str, str], ObjectRef] = {}
+        skill_snapshots: dict[tuple[str, str], SkillSourceRef] = {}
         roots: dict[str, AgentBindingSnapshot] = {}
         if any(node.expander is not None for node in graph.nodes):
             for agent_id in self._binding_freezer.root_ids:
