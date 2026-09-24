@@ -25,7 +25,7 @@ async def test_same_snapshot_concurrent_restore_publishes_one_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryObjectStore("snapshot")
-    state_ref = ObjectRef("snapshot", "state", "a" * 64, 0)
+    state_ref = ObjectRef("runtime", "state", "a" * 64, 0)
     snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
     manifest = {
         "kind": "runtime-snapshot",
@@ -129,7 +129,7 @@ async def test_collect_temporary_skips_active_restore_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryObjectStore("snapshot")
-    state_ref = ObjectRef("snapshot", "state", "a" * 64, 0)
+    state_ref = ObjectRef("runtime", "state", "a" * 64, 0)
     snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
     manifest = {
         "kind": "runtime-snapshot",
@@ -208,7 +208,7 @@ async def test_current_pointer_commit_unknown_keeps_published_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = InMemoryObjectStore("snapshot")
-    state_ref = ObjectRef("snapshot", "state", "a" * 64, 0)
+    state_ref = ObjectRef("runtime", "state", "a" * 64, 0)
     snapshot_ref = ObjectRef("snapshot", "snapshot", "b" * 64, 0)
     manifest = {
         "kind": "runtime-snapshot",
