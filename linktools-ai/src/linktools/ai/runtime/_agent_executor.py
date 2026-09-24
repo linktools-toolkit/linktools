@@ -486,6 +486,8 @@ class AgentExecutor:
         except BaseException:
             await _cleanup_skill_resources(temporary_resources)
             raise
+
+        session: SandboxSession | None = None
         primary_error: BaseException | None = None
         try:
             if (
@@ -520,66 +522,51 @@ class AgentExecutor:
                     ),
                     run_usage=run_usage,
                     usage_limits=usage_limits,
+                    skill_sources=skill_sources,
                 )
-            sandbox = workspace.sandbox
-            backend = sandbox if sandbox is not None else LocalSandbox()
+            backend = (
+                workspace.sandbox
+                if workspace.sandbox is not None
+                else LocalSandbox()
+            )
             if scope.binding.definition.mcp_servers:
                 validate_frozen_mcp_policy(mcp_frozen_resources, workspace)
             session = await backend.open(
                 root=workspace.root,
                 resources=skill_resources,
             )
-            try:
-                resource_paths = {
-                    skill_id: None
-                    if resource_id is None
-                    else session.resource_path(resource_id)
-                    for skill_id, resource_id in resource_keys.items()
-                }
-                _logger.debug(
-                    "workspace sandbox opened for agent run: "
-                    "step=%s tools=%s resources=%s",
-                    scope.step_run_id,
-                    selected,
-                    tuple(resource_paths),
-                )
-                result = await self._execute(
-                    replace(
-                        scope,
-                        sandbox_session=session,
-                        skill_resource_paths=resource_paths,
-                        mcp_frozen_resources=mcp_frozen_resources,
-                        mcp_resource_projections=mcp_projections,
-                    ),
-                    run_usage=run_usage,
-                    usage_limits=usage_limits,
-                    skill_sources=skill_sources,
-                )
-            except BaseException as primary_error:
-                try:
-                    await _close_sandbox_session(session)
-                except asyncio.CancelledError as cleanup_cancel:
-                    if cleanup_cancel.__cause__ is not None:
-                        raise primary_error from cleanup_cancel.__cause__
-                    raise primary_error
-                except AIError as cleanup_error:
-                    _logger.warning(
-                        "workspace sandbox cleanup failed after agent error: "
-                        "step=%s code=%s exception_type=%s",
-                        scope.step_run_id,
-                        cleanup_error.code.value,
-                        type(cleanup_error).__name__,
-                    )
-                    raise primary_error from cleanup_error
-                raise
-            await _close_sandbox_session(session)
-            return result
+            resource_paths = {
+                skill_id: None
+                if resource_id is None
+                else session.resource_path(resource_id)
+                for skill_id, resource_id in resource_keys.items()
+            }
+            _logger.debug(
+                "workspace sandbox opened for agent run: "
+                "step=%s tools=%s resources=%s",
+                scope.step_run_id,
+                selected,
+                tuple(resource_paths),
+            )
+            return await self._execute(
+                replace(
+                    scope,
+                    sandbox_session=session,
+                    skill_resource_paths=resource_paths,
+                    mcp_frozen_resources=mcp_frozen_resources,
+                    mcp_resource_projections=mcp_projections,
+                ),
+                run_usage=run_usage,
+                usage_limits=usage_limits,
+                skill_sources=skill_sources,
+            )
         except BaseException as error:
             primary_error = error
             raise
         finally:
             await _cleanup_agent_run_resources(
                 mcp_projections,
+                session,
                 temporary_resources,
                 primary_error,
             )
@@ -853,18 +840,34 @@ async def _cleanup_skill_resources(
 
 async def _cleanup_agent_run_resources(
     projections: Mapping[str, _MCPResourceProjection],
+    session: "SandboxSession | None",
     temporary_resources: tuple[TemporaryDirectory[str], ...],
     primary_error: BaseException | None,
 ) -> None:
-    try:
+    cleanup_error: BaseException | None = None
+    actions: list[Callable[[], Awaitable[None]]] = [
+        lambda: close_mcp_projections(projections),
+    ]
+    if session is not None:
+        actions.append(lambda: _close_sandbox_session(session))
+    actions.append(lambda: _cleanup_skill_resources(temporary_resources))
+    for action in actions:
         try:
-            await close_mcp_projections(projections)
-        finally:
-            await _cleanup_skill_resources(temporary_resources)
-    except BaseException as cleanup_error:
-        if primary_error is not None and cleanup_error is not primary_error:
-            raise primary_error from cleanup_error
-        raise
+            await action()
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+            else:
+                _logger.warning(
+                    "secondary agent resource cleanup failed: "
+                    "exception_type=%s",
+                    type(error).__name__,
+                )
+    if cleanup_error is None:
+        return
+    if primary_error is not None and cleanup_error is not primary_error:
+        raise primary_error from cleanup_error
+    raise cleanup_error
 
 
 def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
