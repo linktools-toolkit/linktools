@@ -1647,14 +1647,6 @@ def _iter_enveloped_runtime_object_refs(
     yield from _iter_runtime_object_refs(payload, default_domain, codec)
 
 
-def _iter_agent_binding_object_refs(
-    snapshot: AgentBindingSnapshot,
-    domain: RuntimeDomain,
-) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
-    for child in snapshot.subagent_bindings:
-        yield from _iter_agent_binding_object_refs(child, domain)
-
-
 def iter_runtime_object_dependencies(
     reference: ObjectRef,
     payload: bytes,
@@ -1710,11 +1702,7 @@ def iter_runtime_object_dependencies(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for values in (manifest["roots"], manifest["bindings"]):
             for raw in cast("Mapping[object, object]", values).values():
-                snapshot = AgentBindingSnapshot.from_payload(raw)
-                yield from _iter_agent_binding_object_refs(
-                    snapshot,
-                    RuntimeDomain.EXECUTION,
-                )
+                AgentBindingSnapshot.from_payload(raw)
         return
 
     return
@@ -1737,7 +1725,6 @@ def _iter_runtime_object_refs(
         yield from _iter_runtime_object_refs(value.payload, source_domain, codec)
         return
     if isinstance(value, AgentBindingSnapshot):
-        yield from _iter_agent_binding_object_refs(value, domain)
         return
     if isinstance(value, Mapping):
         dataclass_name = value.get("$dataclass")
@@ -1777,7 +1764,6 @@ def _iter_runtime_object_refs(
                     )
                     if not isinstance(binding, AgentBindingSnapshot):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    yield from _iter_agent_binding_object_refs(binding, domain)
                     continue
                 yield from _iter_runtime_object_refs(item, domain, codec)
             return
