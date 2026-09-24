@@ -96,10 +96,12 @@ class _MCPModelToolset(WrapperToolset[object]):
         wrapped: AbstractToolset[object],
         server_id: str,
         allowed_tools: frozenset[str] | None,
+        required_tools: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__(wrapped)
         self._server_id = server_id
         self._allowed_tools = allowed_tools
+        self._required_tools = required_tools
         self._published: dict[str, str] = {}
 
     async def get_tools(
@@ -110,9 +112,11 @@ class _MCPModelToolset(WrapperToolset[object]):
         upstream_names = tuple(tool.tool_def.name for tool in tools.values())
         if len(upstream_names) != len(set(upstream_names)):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-        if self._allowed_tools is not None and not self._allowed_tools.issubset(
-            upstream_names
-        ):
+        available = frozenset(upstream_names)
+        if (
+            self._allowed_tools is not None
+            and not self._allowed_tools.issubset(available)
+        ) or not self._required_tools.issubset(available):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         result: dict[str, ToolsetTool[object]] = {}
         for tool in tools.values():
@@ -361,7 +365,7 @@ async def materialize_mcp_capabilities(
     """Materialize only compiler-selected stdio MCP servers."""
     from fastmcp import Client
     from fastmcp.client.transports import StdioTransport
-    policy = _selector_policy(selectors)
+    policy, required = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
     current_policy = _current_execution_policy(workspace)
@@ -409,6 +413,7 @@ async def materialize_mcp_capabilities(
                 cast("AbstractToolset[object]", toolset),
                 server.id,
                 allowed,
+                required.get(server.id, frozenset()),
             )
             boundary = RuntimeToolBoundaryToolset(
                 (
@@ -529,27 +534,35 @@ def _resource_target(root: str, relative: str) -> Path:
 
 def _selector_policy(
     selectors: Sequence[str],
-) -> "dict[str, frozenset[str] | None]":
+) -> "tuple[dict[str, frozenset[str] | None], dict[str, frozenset[str]]]":
     result: dict[str, set[str] | None] = {}
+    required: dict[str, set[str]] = {}
     for selector in selectors:
         parsed = parse_mcp_tool_selector(selector)
         if parsed is None:
             continue
-        namespace, tool = parsed
+        server_id, tool = parsed
         if tool is None:
-            result[namespace] = None
+            result[server_id] = None
             continue
-        current = result.get(namespace)
-        if current is None and namespace in result:
+        required.setdefault(server_id, set()).add(tool)
+        current = result.get(server_id)
+        if current is None and server_id in result:
             continue
         if current is None:
             current = set()
-            result[namespace] = current
+            result[server_id] = current
         current.add(tool)
-    return {
-        server_id: None if tools is None else frozenset(tools)
-        for server_id, tools in result.items()
-    }
+    return (
+        {
+            server_id: None if tools is None else frozenset(tools)
+            for server_id, tools in result.items()
+        },
+        {
+            server_id: frozenset(tools)
+            for server_id, tools in required.items()
+        },
+    )
 
 
 def _model_tool_name(server_id: str, tool_name: str) -> str:
