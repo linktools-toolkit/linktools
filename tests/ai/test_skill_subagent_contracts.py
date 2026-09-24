@@ -68,6 +68,7 @@ def test_v1_skill_wire_and_semantic_pin_round_trip() -> None:
     assert SkillDefinition.from_semantic_contract(pin.contract).semantic_contract == {
         "version": 1,
         "id": "legacy",
+        "revision": 1,
         "content": "legacy instructions",
     }
 
@@ -89,6 +90,7 @@ def test_v1_binding_restores_from_current_semantic_snapshot() -> None:
     assert restored.snapshot.subagents[0].to_payload() == {
         "kind": "agent",
         "id": "child",
+        "revision": 1,
     }
     assert restored.snapshot.to_payload() == payload
 
@@ -153,6 +155,7 @@ def test_skill_and_agent_use_v1_declaration_contracts() -> None:
     assert SkillSpecCodec().to_payload(skill) == {
         "version": 1,
         "id": "review",
+        "revision": 1,
         "content": "instructions",
         "description": "Review changes",
     }
@@ -261,7 +264,20 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
     )
     assert (
         SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
-        != SemanticPin("skill", changed_body.id, changed_body.semantic_contract).fingerprint
+        == SemanticPin("skill", changed_body.id, changed_body.semantic_contract).fingerprint
+    )
+    revised_body = SkillDefinition(
+        SkillSpec(
+            changed_body.spec.id,
+            changed_body.spec.content,
+            changed_body.spec.description,
+            changed_body.spec.metadata,
+            revision=2,
+        )
+    )
+    assert (
+        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
+        != SemanticPin("skill", revised_body.id, revised_body.semantic_contract).fingerprint
     )
 
     capability = SkillCapability(
@@ -275,6 +291,35 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
     assert "author: Mei" not in instructions
     root = await capability.load_skill(definition.id)
     assert root["instructions"] == definition.model_content
+
+
+def test_skill_markdown_maps_reserved_revision_metadata() -> None:
+    content = (
+        "---\nname: review\nmetadata:\n"
+        "  linktools-revision: 3\n"
+        "  author: Mei\n"
+        "description: Review changes\n---\n\nReview.\n"
+    )
+    codec = SkillMarkdownSpecCodec()
+    skill = codec.decode(content.encode("utf-8"))
+
+    assert skill.revision == 3
+    assert dict(skill.metadata) == {"author": "Mei"}
+    assert codec.encode(skill) == content.encode("utf-8")
+    definition = SkillDefinition(skill)
+    baseline = SkillDefinition(
+        SkillSpec(
+            skill.id,
+            skill.content,
+            skill.description,
+            skill.metadata,
+            revision=2,
+        )
+    )
+    assert (
+        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
+        != SemanticPin("skill", baseline.id, baseline.semantic_contract).fingerprint
+    )
 
 
 def test_skill_flow_frontmatter_metadata_does_not_change_identity() -> None:

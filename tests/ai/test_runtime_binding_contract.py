@@ -194,9 +194,9 @@ def test_skill_asset_version_locator_is_not_semantic_identity() -> None:
     assert restored == first
 
 
-def test_skill_asset_content_digest_changes_semantic_identity() -> None:
+def test_skill_asset_content_change_requires_revision_bump() -> None:
     first = _versioned_skill(source_id="source", revision=1, size=1)
-    second = SkillDefinition(
+    changed = SkillDefinition(
         first.spec,
         first.source_ref.with_asset_versions(
             (
@@ -214,10 +214,23 @@ def test_skill_asset_content_digest_changes_semantic_identity() -> None:
             "d" * 64,
         ),
     )
-
-    assert SemanticPin("skill", "review", first.semantic_contract).fingerprint != (
-        SemanticPin("skill", "review", second.semantic_contract).fingerprint
+    revised = SkillDefinition(
+        SkillSpec(
+            first.spec.id,
+            first.spec.content,
+            first.spec.description,
+            first.spec.metadata,
+            revision=2,
+        ),
+        changed.source_ref,
     )
+
+    first_pin = SemanticPin("skill", "review", first.semantic_contract)
+    changed_pin = SemanticPin("skill", "review", changed.semantic_contract)
+    revised_pin = SemanticPin("skill", "review", revised.semantic_contract)
+    assert first.semantic_contract != changed.semantic_contract
+    assert first_pin.fingerprint == changed_pin.fingerprint
+    assert first_pin.fingerprint != revised_pin.fingerprint
 
 
 @pytest.mark.parametrize(
@@ -289,15 +302,20 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
     ) == ()
 
 
-def test_agent_declaration_identity_keeps_model_selector() -> None:
+def test_agent_declaration_identity_uses_explicit_revision() -> None:
     first = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model="first")
+        AgentSpec("agent", model="first", revision=1)
     )
-    second = CapabilityContribution.from_declaration(
-        AgentSpec("agent", model="second")
+    changed = CapabilityContribution.from_declaration(
+        AgentSpec("agent", model="second", revision=1)
+    )
+    revised = CapabilityContribution.from_declaration(
+        AgentSpec("agent", model="second", revision=2)
     )
 
-    assert first.fingerprint != second.fingerprint
+    assert first.semantic_contract != changed.semantic_contract
+    assert first.fingerprint == changed.fingerprint
+    assert first.fingerprint != revised.fingerprint
 
 
 def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:

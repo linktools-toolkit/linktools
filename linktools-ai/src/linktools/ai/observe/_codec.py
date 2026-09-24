@@ -47,18 +47,13 @@ def _definition_payload(definition: MetricDefinition) -> dict[str, object]:
     return payload
 
 
-def _definition_semantic_payload(definition: MetricDefinition) -> dict[str, object]:
-    payload = _definition_payload(definition)
-    payload.pop("description", None)
-    payload["query_fields"] = sorted(definition.query_fields)
-    return payload
-
-
 def definition_semantic_digest(definition: MetricDefinition) -> str:
     return canonical_sha256(
         {
-            "version": 1,
-            "definition": _definition_semantic_payload(definition),
+            "contract": "semantic-ref-v1",
+            "kind": "metric",
+            "id": definition.name,
+            "revision": definition.revision,
         }
     )
 

@@ -63,6 +63,7 @@ class SemanticPin:
         if version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         object.__setattr__(self, "contract", contract)
+        capability_identity_payload(self.kind, self.id, contract)
 
     @property
     def fingerprint(self) -> str:

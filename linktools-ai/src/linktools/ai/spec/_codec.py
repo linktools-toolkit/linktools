@@ -42,13 +42,14 @@ _AGENT_AUTHOR_FIELDS = frozenset(
         "preload_skills",
         "system_prompt",
         "version",
+        "revision",
     }
 )
 _MCP_AUTHOR_FIELDS = frozenset(
-    {"version", "id", "command", "args", "resource_root"}
+    {"version", "revision", "id", "command", "args", "resource_root"}
 )
 _SKILL_AUTHOR_FIELDS = frozenset(
-    {"version", "id", "content", "description", "metadata"}
+    {"version", "revision", "id", "content", "description", "metadata"}
 )
 class SpecCodec(Protocol[SpecT]):
     def encode(self, value: SpecT) -> bytes: ...
@@ -63,6 +64,7 @@ class AgentSpecCodec:
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
+            "revision": value.revision,
             "model": value.model,
             "system_prompt": value.system_prompt,
             "instructions": list(value.instructions),
@@ -100,6 +102,7 @@ class AgentSpecCodec:
         _require_v1(raw)
         _require_usage_limit_fields(raw.get("usage_limits"))
         identity = raw.get("id")
+        revision = _semantic_revision(raw)
         model = raw.get("model", "default")
         system_prompt = raw.get("system_prompt", "")
         instructions = raw.get("instructions", [])
@@ -168,6 +171,7 @@ class AgentSpecCodec:
                 description=cast("str | None", description),
                 preload_skills=tuple(cast("list[str]", preload_skills)),
                 metadata=cast("Mapping[str, JsonValue]", metadata),
+                revision=revision,
             )
         except AIError as error:
             if error.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_VERSION_UNSUPPORTED}:
@@ -180,8 +184,10 @@ class AgentSpecCodec:
         """Strictly decode one canonical authoring payload."""
         _require_author_fields(raw, _AGENT_AUTHOR_FIELDS)
         _require_usage_limit_fields(raw.get("usage_limits"))
-        if "version" not in raw:
-            raw = {**raw, "version": _VERSION}
+        if "version" not in raw or "revision" not in raw:
+            raw = dict(raw)
+            raw.setdefault("version", _VERSION)
+            raw.setdefault("revision", 1)
         return self.from_payload(raw)
 
     def decode_author_mapping(self, data: bytes) -> dict[str, object]:
@@ -203,6 +209,7 @@ class SkillSpecCodec:
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
+            "revision": value.revision,
             "content": SkillMarkdownSpecCodec().model_content(value.content),
         }
         if value.description is not None:
@@ -215,6 +222,7 @@ class SkillSpecCodec:
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
+            "revision": value.revision,
             "content": value.content,
         }
         if value.description is not None:
@@ -226,6 +234,7 @@ class SkillSpecCodec:
     def from_payload(self, raw: Mapping[str, object]) -> SkillSpec:
         _require_v1(raw)
         identity = raw.get("id")
+        revision = _semantic_revision(raw)
         content = raw.get("content")
         if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
@@ -241,6 +250,7 @@ class SkillSpecCodec:
                 content,
                 cast("str | None", description),
                 cast("Mapping[str, JsonValue]", metadata),
+                revision=revision,
             )
         except (TypeError, ValueError, UnicodeError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
@@ -248,6 +258,8 @@ class SkillSpecCodec:
     def from_author_payload(self, raw: Mapping[str, object]) -> SkillSpec:
         """Decode one strict flat Skill declaration."""
         _require_author_fields(raw, _SKILL_AUTHOR_FIELDS)
+        if "revision" not in raw:
+            raw = {**raw, "revision": 1}
         return self.from_payload(raw)
 
     def decode_author(self, data: bytes) -> SkillSpec:
@@ -316,10 +328,13 @@ class SkillMarkdownSpecCodec:
             if isinstance(error, AIError):
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+        metadata = dict(cast("Mapping[str, object]", frontmatter.get("metadata", {})))
+        revision = metadata.pop("linktools-revision", 1)
         if (
             frontmatter["name"] != value.id
             or frontmatter["description"] != value.description
-            or frontmatter.get("metadata", {}) != dict(value.metadata)
+            or metadata != dict(value.metadata)
+            or revision != value.revision
         ):
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
         try:
@@ -331,11 +346,16 @@ class SkillMarkdownSpecCodec:
         try:
             content = data.decode("utf-8")
             frontmatter = _parse_skill_markdown(content)
+            metadata = dict(
+                cast("Mapping[str, JsonValue]", frontmatter.get("metadata", {}))
+            )
+            revision = metadata.pop("linktools-revision", 1)
             return SkillSpec(
                 cast(str, frontmatter["name"]),
                 content,
                 cast(str, frontmatter["description"]),
-                cast("Mapping[str, JsonValue]", frontmatter.get("metadata", {})),
+                metadata,
+                revision=cast(int, revision),
             )
         except AIError:
             raise
@@ -355,6 +375,7 @@ class SkillMarkdownSpecAdapter:
             value.content,
             value.description,
             value.metadata,
+            revision=value.revision,
         )
 
     def to_storage(self, logical_id: str, value: SkillSpec) -> SkillSpec:
@@ -365,6 +386,7 @@ class SkillMarkdownSpecAdapter:
             value.content,
             value.description,
             value.metadata,
+            revision=value.revision,
         )
 
 
@@ -387,6 +409,7 @@ class MCPServerSpecCodec:
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
+            "revision": value.revision,
             "command": value.command,
             "args": list(value.args),
         }
@@ -467,6 +490,8 @@ class MCPServerSpecCodec:
             else decode_author_yaml_mapping(data)
         )
         _require_author_fields(raw, _MCP_AUTHOR_FIELDS)
+        if "revision" not in raw:
+            raw = {**raw, "revision": 1}
         version = raw.get("version")
         if (
             isinstance(version, bool)
@@ -521,6 +546,7 @@ class MCPServerSpecCodec:
                 "MCP execution resource fields are Runtime-owned",
             )
         identity = raw.get("id")
+        revision = _semantic_revision(raw)
         command = raw.get("command")
         resource_root = _decode_asset_key(raw.get("resource_root"))
         resource_versions: tuple[AssetVersionRef, ...] | None = None
@@ -573,6 +599,7 @@ class MCPServerSpecCodec:
                 command,
                 tuple(cast("list[str]", args)),
                 resource_root,
+                revision=revision,
             )
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server spec is invalid") from error
@@ -739,6 +766,16 @@ def _require_v1(raw: Mapping[str, object]) -> None:
     _require_version(raw, {1})
 
 
+def _semantic_revision(raw: Mapping[str, object]) -> int:
+    value = raw.get("revision", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AIError(
+            ErrorCode.OUTPUT_CONTRACT_INVALID,
+            "revision must be a positive integer",
+        )
+    return value
+
+
 def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
     if value is None:
         return None
@@ -801,7 +838,10 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
     if "metadata" in frontmatter:
         metadata = frontmatter["metadata"]
-        if not isinstance(metadata, Mapping) or "linktools-revision" in metadata:
+        if not isinstance(metadata, Mapping):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        revision = metadata.get("linktools-revision", 1)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         try:
             normalized = normalize_json_value(dict(metadata))

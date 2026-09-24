@@ -24,6 +24,7 @@ _AGENT_FIELDS = frozenset(
         "output_retries",
         "planning",
         "preload_skills",
+        "revision",
         "thinking",
         "tool_retries",
         "usage_limits",

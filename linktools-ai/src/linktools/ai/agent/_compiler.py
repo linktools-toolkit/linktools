@@ -21,7 +21,6 @@ from ..spec import (
     AgentSpecCodec,
     SubagentRef,
     bound_agent_spec_identity_payload,
-    capability_identity_payload,
     mcp_server_selector,
     parse_mcp_tool_selector,
 )
@@ -119,6 +118,7 @@ class AgentCompiler:
                 "agent",
                 agent_id,
                 self._agents[agent_id].description,
+                revision=self._agents[agent_id].revision,
             )
             for agent_id in definition.selected_subagents
         )
@@ -234,16 +234,6 @@ class AgentCompiler:
             else:
                 current = self._by_identity.get((pin.kind, pin.id))
                 if current is None or current.fingerprint != pin.fingerprint:
-                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-                if capability_identity_payload(
-                    current.kind,
-                    current.id,
-                    current.semantic_contract,
-                ) != capability_identity_payload(
-                    pin.kind,
-                    pin.id,
-                    pin.contract,
-                ):
                     raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
                 candidate = current
             selected[pin.kind].append(candidate)

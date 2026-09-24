@@ -151,7 +151,7 @@ async def test_identical_capability_semantics_have_stable_fingerprint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_public_semantic_config_changes_capability_fingerprint() -> None:
+async def test_public_semantic_config_does_not_replace_revision_identity() -> None:
     strict = CapabilityGroup[None]("strict")
     strict.capability(_Capability(), revision=1, semantic_config={"mode": "strict"})
     relaxed = CapabilityGroup[None]("relaxed")
@@ -160,7 +160,8 @@ async def test_public_semantic_config_changes_capability_fingerprint() -> None:
     strict_candidate = (await strict.snapshot()).contributions[0]
     relaxed_candidate = (await relaxed.snapshot()).contributions[0]
 
-    assert strict_candidate.fingerprint != relaxed_candidate.fingerprint
+    assert strict_candidate.semantic_contract != relaxed_candidate.semantic_contract
+    assert strict_candidate.fingerprint == relaxed_candidate.fingerprint
 
 
 def test_opaque_contribution_factory_rejects_canonical_declarations() -> None:

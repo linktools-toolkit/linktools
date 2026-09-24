@@ -188,15 +188,14 @@ class CapabilityContribution(Generic[AppT]):
         identity: str,
         value: "Tool[AgentContext[AppT]] | AbstractCapability[AgentContext[AppT]]",
         *,
-        revision: "int | None" = None,
+        revision: int = 1,
         semantic_id: "str | None" = None,
         semantic_config: "Mapping[str, JsonValue] | None" = None,
     ) -> "CapabilityContribution[AppT]":
         """Create an opaque Python Tool or Capability from its public semantic inputs."""
         if kind not in {"tool", "capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if revision is not None:
-            _validate_revision(revision)
+        _validate_revision(revision)
         contract = contribution_semantic_contract(
             kind,
             identity,
@@ -726,6 +725,7 @@ class CapabilityGroup(Generic[AppT]):
         self,
         name: str,
         *,
+        revision: int = 1,
         model: str = "default",
         system_prompt: str = "",
         instructions: "str | Sequence[str]" = (),
@@ -742,6 +742,7 @@ class CapabilityGroup(Generic[AppT]):
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AgentSpec:
         """Register one declarative Agent before Runtime.open()."""
+        _validate_revision(revision)
         values = (instructions,) if isinstance(instructions, str) else tuple(instructions)
         spec = AgentSpec(
             id=name,
@@ -759,6 +760,7 @@ class CapabilityGroup(Generic[AppT]):
             output_retries=output_retries,
             description=description,
             metadata={} if metadata is None else metadata,
+            revision=revision,
         )
         self._contributions.append(CapabilityContribution.from_declaration(spec))
         return spec
@@ -994,8 +996,7 @@ def contribution_semantic_contract(
             contract["defer_loading"] = True
         if definition.include_return_schema is not None:
             contract["include_return_schema"] = definition.include_return_schema
-        if semantic_revision is not None:
-            contract["semantic_revision"] = semantic_revision
+        contract["revision"] = semantic_revision or 1
         return contract
     if kind == "agent" and isinstance(value, AgentSpec):
         return AgentSpecCodec().to_payload(value)

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Metric definition semantic identity across persistence."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,32 @@ def test_definition_description_is_nonsemantic_and_v1_optional() -> None:
         expected_namespace="definition-description",
     )
     assert decoded.description is None
+
+
+def test_definition_identity_is_name_and_revision_only() -> None:
+    first = MetricDefinition(
+        name="business.revision",
+        revision=1,
+        observation_kind="business.revision.sample",
+        source=MetricSource.measurement("value"),
+        metric_type=MetricType.GAUGE,
+        unit="1",
+        default_aggregation=MetricAggregation.MEAN,
+    )
+    changed = MetricDefinition(
+        name=first.name,
+        revision=first.revision,
+        observation_kind="other.sample",
+        source=MetricSource.measurement("other"),
+        metric_type=MetricType.COUNTER,
+        unit="items",
+        default_aggregation=MetricAggregation.SUM,
+    )
+
+    assert definition_semantic_digest(first) == definition_semantic_digest(changed)
+    assert definition_semantic_digest(first) != definition_semantic_digest(
+        replace(changed, revision=2)
+    )
 
 
 @pytest.mark.asyncio

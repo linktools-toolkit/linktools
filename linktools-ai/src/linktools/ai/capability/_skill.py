@@ -52,6 +52,7 @@ class SkillDefinition:
         contract: dict[str, JsonValue] = {
             "version": 1,
             "id": self.spec.id,
+            "revision": self.spec.revision,
             "content": self.spec.content,
         }
         if self.spec.description is not None:
@@ -86,11 +87,19 @@ class SkillDefinition:
         if version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         identity = contract.get("id")
+        revision = contract.get("revision", 1)
         content = contract.get("content")
         description = contract.get("description")
         metadata = contract.get("metadata", {})
         source = contract.get("source")
-        if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
+        if (
+            not isinstance(identity, str)
+            or not identity.strip()
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 1
+            or not isinstance(content, str)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if description is not None and not isinstance(description, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -161,7 +170,13 @@ class SkillDefinition:
         else:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            specification = SkillSpec(identity, content, description, metadata)
+            specification = SkillSpec(
+                identity,
+                content,
+                description,
+                metadata,
+                revision=revision,
+            )
         except (TypeError, ValueError, UnicodeError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return cls(specification, source_ref)

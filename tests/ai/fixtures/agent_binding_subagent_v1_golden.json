@@ -2,6 +2,7 @@
   "agent_spec": {
     "version": 1,
     "id": "parent",
+    "revision": 1,
     "model": "default",
     "system_prompt": "",
     "instructions": [],
@@ -33,7 +34,8 @@
   "subagents": [
     {
       "kind": "agent",
-      "id": "child"
+      "id": "child",
+      "revision": 1
     }
   ],
   "output_mode": "text",

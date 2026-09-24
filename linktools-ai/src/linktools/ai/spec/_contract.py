@@ -211,9 +211,11 @@ class AgentSpec:
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
+        _validate_semantic_revision(self.revision)
         if not isinstance(self.model, str) or not self.model.strip():
             raise ValueError("agent model must be a non-empty string")
         if not isinstance(self.system_prompt, str):
@@ -274,9 +276,11 @@ class SkillSpec:
     content: str
     description: "str | None" = None
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
+        _validate_semantic_revision(self.revision)
         if not isinstance(self.content, str):
             raise TypeError("skill content must be a string")
         if self.description is not None and (
@@ -284,6 +288,12 @@ class SkillSpec:
         ):
             raise ValueError("skill description must contain 1..1024 characters")
         object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
+
+
+def _validate_semantic_revision(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("semantic revision must be a positive integer")
+    return value
 
 
 def _validated_metadata(value: object) -> Mapping[str, JsonValue]:
@@ -304,12 +314,14 @@ class SubagentRef:
     kind: Literal["agent"]
     id: str
     description: "str | None" = None
+    revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.kind != "agent":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             validate_logical_id(self.id)
+            _validate_semantic_revision(self.revision)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if self.description is not None and (
@@ -318,7 +330,11 @@ class SubagentRef:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def to_payload(self) -> "dict[str, object]":
-        payload: dict[str, object] = {"kind": "agent", "id": self.id}
+        payload: dict[str, object] = {
+            "kind": "agent",
+            "id": self.id,
+            "revision": self.revision,
+        }
         if self.description is not None:
             payload["description"] = self.description
         return payload
@@ -333,9 +349,20 @@ class SubagentRef:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         identity = value.get("id")
         description = value.get("description")
+        revision = value.get("revision", 1)
         if description is not None and not isinstance(description, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return cls("agent", identity, description)
+        try:
+            return cls(
+                "agent",
+                cast(str, identity),
+                description,
+                revision=cast(int, revision),
+            )
+        except (TypeError, ValueError, AIError) as error:
+            if isinstance(error, AIError):
+                raise
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,8 +371,10 @@ class MCPServerSpec:
     command: str
     args: "tuple[str, ...]" = ()
     resource_root: "AssetKey | None" = None
+    revision: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
+        _validate_semantic_revision(self.revision)
         if not isinstance(self.id, str) or not self.id.strip():
             raise ValueError("MCP server id must be non-empty")
         if not isinstance(self.command, str) or not self.command.strip():
