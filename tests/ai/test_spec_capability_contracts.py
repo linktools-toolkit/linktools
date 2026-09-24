@@ -21,7 +21,7 @@ from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
     CapabilityContribution,
     CapabilityGroup,
-    FrozenSkillResourceSource,
+    AssetVersionSkillResourceSource,
     SkillCapability,
     SkillResourceVersion,
     SkillDefinition,
@@ -43,7 +43,7 @@ from linktools.ai.runtime._binding_freeze import _resolve_mcp_resource_versions
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
-    _FrozenMCPResources,
+    _MCPResourceBinding,
     _materialize_resource_versions,
 )
 from linktools.ai.runtime._tool_boundary import (
@@ -264,7 +264,7 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
     )
     definition = SkillDefinition(
         SkillSpec("review", "instructions"),
-        SkillSourceRef("application", "review").with_versions(
+        SkillSourceRef("application", "review").with_asset_versions(
             (SkillResourceVersion("guide.md", asset),),
             "b" * 64,
             sandbox_materialize=False,
@@ -315,9 +315,9 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_frozen_skill_source_rejects_mismatched_source_ref() -> None:
+def test_asset_version_skill_source_rejects_mismatched_source_ref() -> None:
     store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
-    ref = SkillSourceRef("other", "review").with_versions(
+    ref = SkillSourceRef("other", "review").with_asset_versions(
         (),
         canonical_sha256(
             {
@@ -330,7 +330,7 @@ def test_frozen_skill_source_rejects_mismatched_source_ref() -> None:
         sandbox_materialize=False,
     )
     with pytest.raises(AIError) as error:
-        FrozenSkillResourceSource(
+        AssetVersionSkillResourceSource(
             "application",
             {"review": ref},
             store,
@@ -392,7 +392,7 @@ def test_business_tool_rejects_reserved_mcp_transport_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_business_tool_semantics_are_frozen_in_tool_metadata() -> None:
+async def test_business_tool_semantics_are_captured_in_tool_metadata() -> None:
     async def business_tool(
         _ctx: RunContext[None],
         value: str,
@@ -405,7 +405,7 @@ async def test_business_tool_semantics_are_frozen_in_tool_metadata() -> None:
         effect="replay_safe",
         plan_safe=True,
     )
-    candidate = (await group.freeze()).contributions[0]
+    candidate = (await group.snapshot()).contributions[0]
     assert tool.tool_def.metadata == {
         "linktools.ai.effect": "replay_safe",
         "linktools.ai.plan_safe": True,
@@ -498,16 +498,16 @@ def test_durable_spec_readers_ignore_additive_fields() -> None:
     mcp_payload["future_note"] = {"category": "display"}
     assert mcp_codec.from_payload(mcp_payload) == server
 
-    frozen_payload = mcp_codec.to_frozen_payload(
+    execution_payload = mcp_codec.to_execution_payload(
         server,
         None,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
-    frozen_payload["future_note"] = {"category": "display"}
-    assert mcp_codec.from_frozen_payload(frozen_payload) == (server, None)
+    execution_payload["future_note"] = {"category": "display"}
+    assert mcp_codec.from_execution_payload(execution_payload) == (server, None)
 
 
-def test_mcp_frozen_resource_contract_rejects_missing_versions() -> None:
+def test_mcp_execution_resource_contract_rejects_missing_versions() -> None:
     codec = MCPServerSpecCodec()
     server = MCPServerSpec(
         "mcp",
@@ -519,7 +519,7 @@ def test_mcp_frozen_resource_contract_rejects_missing_versions() -> None:
     payload["execution_policy"] = {"version": 1, "boundary": "host-stdio"}
 
     with pytest.raises(AIError) as error:
-        codec.from_frozen_payload(payload)
+        codec.from_execution_payload(payload)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
@@ -547,14 +547,14 @@ def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
         2,
     )
 
-    first = codec.to_frozen_payload(
+    first = codec.to_execution_payload(
         server,
         (first_ref,),
         resource_source_id="group-a",
         resource_semantic_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
-    second = codec.to_frozen_payload(
+    second = codec.to_execution_payload(
         server,
         (second_ref,),
         resource_source_id="group-b",
@@ -563,9 +563,9 @@ def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
     )
 
     assert first["args"] is None
-    assert first["frozen_args"] == ["resource:script.py"]
+    assert first["args"] == ["resource:script.py"]
     assert first["resource_source_id"] == "group-a"
-    restored, versions = codec.from_frozen_payload(first)
+    restored, versions = codec.from_execution_payload(first)
     assert restored == server
     assert versions == (first_ref,)
     assert capability_identity_payload("mcp", server.id, first) == (
@@ -597,7 +597,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
                 ],
             }
         )
-        original = SkillSourceRef("application", "review").with_versions(
+        original = SkillSourceRef("application", "review").with_asset_versions(
             (
                 SkillResourceVersion(
                     "scripts/run.bin",
@@ -616,7 +616,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
         )
 
         async def digest(ref: SkillSourceRef) -> str:
-            source = FrozenSkillResourceSource(
+            source = AssetVersionSkillResourceSource(
                 "application",
                 {"review": ref},
                 store,
@@ -624,7 +624,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
             return await source.semantic_digest("review")
 
         first = await digest(original)
-        relocated = SkillSourceRef("application", "review").with_versions(
+        relocated = SkillSourceRef("application", "review").with_asset_versions(
             (
                 SkillResourceVersion(
                     "scripts/run.bin",
@@ -641,7 +641,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
             first,
             sandbox_materialize=True,
         )
-        non_executable = SkillSourceRef("application", "review").with_versions(
+        non_executable = SkillSourceRef("application", "review").with_asset_versions(
             (
                 SkillResourceVersion(
                     "scripts/run.bin",
@@ -652,12 +652,12 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
             "0" * 64,
             sandbox_materialize=True,
         )
-        not_materialized = SkillSourceRef("application", "review").with_versions(
+        not_materialized = SkillSourceRef("application", "review").with_asset_versions(
             relocated.resource_versions,
             "0" * 64,
             sandbox_materialize=False,
         )
-        changed = SkillSourceRef("application", "review").with_versions(
+        changed = SkillSourceRef("application", "review").with_asset_versions(
             (
                 SkillResourceVersion(
                     "scripts/run.bin",
@@ -801,7 +801,7 @@ async def test_mcp_resource_versions_reject_unmaterializable_tree(
                 versions = await store.resolve_versions(keys)
                 await _materialize_resource_versions(
                     MCPServerSpec("server", "python", (), root),
-                    _FrozenMCPResources(
+                    _MCPResourceBinding(
                         versions,
                         "application",
                         "a" * 64,
@@ -842,7 +842,7 @@ async def test_mcp_resource_versions_materialize_deleted_current_assets() -> Non
         )
         directory = await _materialize_resource_versions(
             server,
-            _FrozenMCPResources(
+            _MCPResourceBinding(
                 versions,
                 "application",
                 digest,
