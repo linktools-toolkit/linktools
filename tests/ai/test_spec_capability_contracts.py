@@ -5,7 +5,7 @@
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -36,7 +36,7 @@ from linktools.ai.asset import (
     AssetVersionRef,
     InMemoryAssetBackend,
 )
-from linktools.ai.core import canonical_json_bytes, canonical_sha256
+from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime._binding_freeze import _resolve_mcp_resource_versions
@@ -69,11 +69,8 @@ from linktools.ai.spec import (
     parse_mcp_tool_selector,
 )
 from linktools.ai.storage import (
-    InMemoryObjectStore,
-    ObjectRef,
     StorageEntryRevision,
     StorageOverlay,
-    StorageRevision,
 )
 
 
@@ -94,23 +91,6 @@ def _expected_mcp_tool_name(server_id: str, tool_name: str) -> str:
         }
     )[:24]
     return f"mcp__{server_token}__{tool_token}"
-
-
-async def _put_object(
-    store: InMemoryObjectStore,
-    key: str,
-    value: bytes,
-) -> ObjectRef:
-    async def chunks() -> AsyncIterator[bytes]:
-        yield value
-
-    stat = await store.put(
-        key,
-        chunks(),
-        expected_size=len(value),
-        expected_digest=hashlib.sha256(value).hexdigest(),
-    )
-    return ObjectRef(store.store_id, stat.key, stat.digest, stat.size)
 
 
 def test_skill_wildcard_allows_preload_outside_explicit_requirements() -> None:
