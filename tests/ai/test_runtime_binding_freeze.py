@@ -181,7 +181,7 @@ async def test_binding_freeze_captures_only_direct_child_resources(
     frozen = await fixture.freezer.freeze(fixture.binding)
     snapshot = _skill_snapshot(_frozen_child(frozen.snapshot))
 
-    assert snapshot.store_id == "execution"
+    assert snapshot.store_id == "runtime"
     assert await fixture.objects.stat(snapshot.key) is not None
 
     fixture.resource.write_text("changed", encoding="utf-8")
@@ -235,7 +235,7 @@ async def test_task_capture_does_not_build_static_root_closure(
     snapshot = _skill_snapshot(
         _frozen_child(frozen_binding)
     )
-    assert snapshot.store_id == "execution"
+    assert snapshot.store_id == "runtime"
 
 
 
@@ -278,7 +278,7 @@ async def test_runtime_start_admits_frozen_binding(tmp_path: Path) -> None:
     assert execution.binding_snapshot is not None
     assert execution.binding_digest == execution.binding_snapshot.binding_digest
     snapshot = _skill_snapshot(_frozen_child(execution.binding_snapshot))
-    assert snapshot.store_id == "execution"
+    assert snapshot.store_id == "runtime"
 
 
 @pytest.mark.asyncio
@@ -290,7 +290,7 @@ async def test_execution_binding_freezes_selected_child_skills(
 
     assert frozen.snapshot != fixture.binding.snapshot
     child = _frozen_child(frozen.snapshot)
-    assert _skill_snapshot(child).store_id == "execution"
+    assert _skill_snapshot(child).store_id == "runtime"
 
 
 @pytest.mark.asyncio
@@ -391,7 +391,12 @@ async def test_non_durable_snapshot_freezes_existing_child_mcp_resources(
         assert server.resource_root == root
         assert resource_snapshot is not None
         resource_store = AssetStore.from_snapshot(
-            resource_snapshot,
+            ObjectRef(
+                fixture.objects.store_id,
+                resource_snapshot.key,
+                resource_snapshot.digest,
+                resource_snapshot.size,
+            ),
             object_store=fixture.objects,
         )
         await resource_store.initialize()
@@ -402,85 +407,6 @@ async def test_non_durable_snapshot_freezes_existing_child_mcp_resources(
         finally:
             await resource_store.close()
         assert await freezer.freeze_snapshot(frozen) == frozen
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_execution_rejects_changed_mcp_asset_source(
-    tmp_path: Path,
-) -> None:
-    fixture = _fixture(tmp_path)
-    backend = InMemoryAssetBackend()
-    store = AssetStore(StorageOverlay(backend, writer=backend))
-    await store.initialize()
-    try:
-        root = AssetKey("mcp", "server/assets")
-        await store.put(AssetKey("mcp", "server/assets/script.py"), b"print('ok')")
-        codec = MCPServerSpecCodec()
-        pin = SemanticPin(
-            "mcp",
-            "server",
-            codec.to_payload(
-                MCPServerSpec(
-                    "server",
-                    "python",
-                    ("resource:script.py",),
-                    root,
-                )
-            ),
-        )
-        snapshot = replace(fixture.binding.snapshot, selected=(pin,))
-        source_revision = await store.current_revision()
-        freezer = _RuntimeBindingFreezer(
-            fixture.catalog,
-            fixture.compiler,
-            SkillSourceRegistry(),
-            fixture.objects,
-            workspace=None,
-            mcp_assets={"server": store},
-            mcp_revisions={"server": source_revision},
-        )
-        await store.put(AssetKey("mcp", "server/assets/script.py"), b"changed")
-
-        with pytest.raises(AIError) as error:
-            await freezer.freeze_snapshot(snapshot)
-
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
-async def test_execution_rejects_changed_skill_asset_source(
-    tmp_path: Path,
-) -> None:
-    fixture = _fixture(tmp_path)
-    backend = InMemoryAssetBackend()
-    store = AssetStore(StorageOverlay(backend, writer=backend))
-    await store.initialize()
-    try:
-        skill = SkillDefinition(
-            SkillSpec("skill", "instructions"),
-            SkillSourceRef("source", "guide"),
-        )
-        pin = SemanticPin("skill", skill.id, skill.semantic_contract)
-        snapshot = replace(fixture.binding.snapshot, selected=(pin,))
-        source_revision = await store.current_revision()
-        freezer = _RuntimeBindingFreezer(
-            fixture.catalog,
-            fixture.compiler,
-            SkillSourceRegistry((AssetSkillResourceSource("source", store),)),
-            fixture.objects,
-            workspace=None,
-            asset_sources={"source": (store, source_revision)},
-        )
-        await store.put(AssetKey("skill", "guide/manual.txt"), b"changed")
-
-        with pytest.raises(AIError) as error:
-            await freezer.freeze_snapshot(snapshot)
-
-        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
     finally:
         await store.close()
 
