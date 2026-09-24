@@ -22,7 +22,7 @@ The main ownership rules are:
 - `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
 - `Workspace` owns paths, policy, and sandbox configuration when installed through `CapabilityGroup(..., workspace=...)`; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
-- `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one immutable `AssetStore` snapshot.
+- `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
 - `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the frozen Runtime candidate set.
 - `Runtime` is the composition root and owns the service graph.
