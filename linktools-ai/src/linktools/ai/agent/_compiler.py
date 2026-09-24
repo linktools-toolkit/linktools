@@ -158,7 +158,7 @@ class AgentCompiler:
             agent_spec=AgentSpecCodec().from_payload(
                 AgentSpecCodec().to_payload(definition.spec)
             ),
-            base_model=dict(definition.model.semantic_payload),
+            base_model=dict(definition.model.contract),
             selected=tuple(_pin(candidate) for candidate in _selected_candidates(definition)),
             subagents=tuple(subagents),
             output_mode=output_binding.mode,

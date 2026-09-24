@@ -155,7 +155,6 @@ def binding_digest_payload(
 
 def _ref_payload(kind: str, identity: str, revision: int) -> "dict[str, JsonValue]":
     return {
-        "contract": "semantic-ref-v1",
         "kind": kind,
         "id": identity,
         "revision": revision,

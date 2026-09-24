@@ -23,7 +23,7 @@ from ..asset import (
     AssetStoreReader,
     AssetVersionRef,
 )
-from ..core import ImmutableJsonMapping, JsonValue, canonical_sha256
+from ..core import ImmutableJsonMapping, JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import (
     AgentSpec,
@@ -172,6 +172,7 @@ class CapabilityContribution(Generic[AppT]):
             expander_id, expander_version = _expander_identity(expander)
             if self.id != f"{expander_id}@{expander_version}":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
     @property
     def revision(self) -> int:
         value = capability_ref_payload(self.kind, self.id, self.contract)["revision"]
@@ -189,7 +190,7 @@ class CapabilityContribution(Generic[AppT]):
         revision: int = 1,
         config: "Mapping[str, JsonValue] | None" = None,
     ) -> "CapabilityContribution[AppT]":
-        """Create an opaque Python Tool or Capability from its public semantic inputs."""
+        """Create an opaque Python Tool or Capability from its declared inputs."""
         if kind not in {"tool", "capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         _validate_revision(revision)
@@ -212,7 +213,7 @@ class CapabilityContribution(Generic[AppT]):
         cls,
         value: AgentSpec | SkillDefinition | MCPServerSpec,
     ) -> "CapabilityContribution[object]":
-        """Create a declaration contribution from its public semantic value."""
+        """Create a contribution from a durable declaration."""
         if isinstance(value, AgentSpec):
             kind: Literal["agent", "skill", "mcp"] = "agent"
         elif isinstance(value, SkillDefinition):
@@ -234,7 +235,7 @@ class CapabilityContribution(Generic[AppT]):
         cls,
         contract: Mapping[str, JsonValue],
     ) -> "CapabilityContribution[object]":
-        """Restore an MCP contribution from its execution-bound semantic contract."""
+        """Restore an MCP contribution from its execution-bound contract."""
         if not isinstance(contract, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         value, _resource_versions = MCPServerSpecCodec().from_execution_payload(
