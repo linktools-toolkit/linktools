@@ -330,14 +330,11 @@ class _CapabilityAssetReader:
             and expected_revision != self._revision
         ):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        await self._verify()
-        reference = await self._store.snapshot(
+        return await self._store.snapshot(
             keys,
             object_store=object_store,
             expected_revision=self._revision,
         )
-        await self._verify()
-        return reference
 
 
 @dataclass(frozen=True, slots=True)
