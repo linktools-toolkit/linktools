@@ -30,7 +30,6 @@ class _CompositionModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    model_digest = "a" * 64
     contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "test",

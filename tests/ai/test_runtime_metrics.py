@@ -44,7 +44,6 @@ class _TextModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    model_digest = "d" * 64
     contract: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
     def materialize(self) -> TestModel:
