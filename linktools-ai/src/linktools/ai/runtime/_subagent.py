@@ -237,7 +237,7 @@ class SubagentDispatcher:
         )
         try:
             return await self._execution.start_subagent(
-                child_binding.digest,
+                child_binding.binding_digest,
                 request,
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,

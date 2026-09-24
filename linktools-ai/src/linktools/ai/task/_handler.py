@@ -91,7 +91,7 @@ class TaskBindingSnapshot:
         )
 
     @property
-    def output_fingerprint(self) -> str:
+    def output_contract_digest(self) -> str:
         return canonical_sha256(
             {
                 "contract": "task-output-v1",

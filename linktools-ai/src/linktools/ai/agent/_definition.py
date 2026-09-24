@@ -18,7 +18,7 @@ def _is_digest(value: object) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class AgentDefinition:
-    digest: str
+    definition_digest: str
     spec: AgentSpec
     model: ModelBinding
     selected_tools: "tuple[CapabilityContribution[object], ...]"
@@ -30,7 +30,7 @@ class AgentDefinition:
     mcp_selector_policy: "tuple[str, ...]"
 
     def __post_init__(self) -> None:
-        if not _is_digest(self.digest) or not isinstance(self.spec, AgentSpec):
+        if not _is_digest(self.definition_digest) or not isinstance(self.spec, AgentSpec):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         groups = (
             ("tool", self.selected_tools),

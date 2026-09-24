@@ -1094,7 +1094,7 @@ async def _materialize_agent(
 def _bound_tool_metadata(
     candidate: "CapabilityContribution[object]",
 ) -> Mapping[str, object]:
-    contract = candidate.semantic_contract
+    contract = candidate.contract
     metadata = contract.get("metadata")
     if not isinstance(metadata, Mapping):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)

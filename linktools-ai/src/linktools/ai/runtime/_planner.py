@@ -1530,7 +1530,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     ) -> TaskNode:
         if definition is None:
             definition = self._root_definition(agent_digest)
-        elif definition.digest != agent_digest:
+        elif definition.definition_digest != agent_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if planning is not None and not isinstance(planning, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1673,7 +1673,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 safe_details={"kind": "agent", "agent_id": agent_id},
             ) from error
         return self.build_agent_task(
-            definition.digest,
+            definition.definition_digest,
             node_id,
             user_prompt,
             dependencies=dependencies,
@@ -2005,7 +2005,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     def _root_definition(self, agent_digest: str) -> AgentDefinition:
         for agent_id in self._catalog.root_ids:
             definition = self._catalog.root_definition(agent_id)
-            if definition.digest == agent_digest:
+            if definition.definition_digest == agent_digest:
                 return definition
         raise AIError(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,

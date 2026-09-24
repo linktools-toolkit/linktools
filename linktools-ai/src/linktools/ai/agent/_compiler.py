@@ -20,11 +20,11 @@ from ..spec import (
     AgentSpec,
     AgentSpecCodec,
     SubagentRef,
-    bound_agent_spec_identity_payload,
+    agent_ref_payload,
     mcp_server_selector,
     parse_mcp_tool_selector,
 )
-from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
+from ._binding import AgentBinding, AgentBindingSnapshot, CapabilityPin
 from ._definition import AgentDefinition
 from ._output import bind_output, restore_output
 
@@ -159,7 +159,7 @@ class AgentCompiler:
                 AgentSpecCodec().to_payload(definition.spec)
             ),
             base_model=dict(definition.model.semantic_payload),
-            selected=tuple(_pin(candidate) for candidate in _semantic_candidates(definition)),
+            selected=tuple(_pin(candidate) for candidate in _selected_candidates(definition)),
             subagents=tuple(subagents),
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
@@ -213,7 +213,7 @@ class AgentCompiler:
 
     def _restore_selected(
         self,
-        pins: Sequence[SemanticPin],
+        pins: Sequence[CapabilityPin],
     ) -> "dict[str, tuple[CapabilityContribution[object], ...]]":
         selected: dict[str, list[CapabilityContribution[object]]] = {
             "tool": [],
@@ -223,17 +223,17 @@ class AgentCompiler:
         }
         for pin in pins:
             if pin.kind == "skill":
-                value = SkillDefinition.from_semantic_contract(
+                value = SkillDefinition.from_contract(
                     cast("Mapping[str, object]", pin.contract)
                 )
-                candidate = CapabilityContribution("skill", pin.id, pin.fingerprint, value)
+                candidate = CapabilityContribution("skill", pin.id, value)
             elif pin.kind == "mcp":
                 candidate = CapabilityContribution.from_mcp_contract(
                     pin.contract,
                 )
             else:
                 current = self._by_identity.get((pin.kind, pin.id))
-                if current is None or current.fingerprint != pin.fingerprint:
+                if current is None or current.revision != pin.revision:
                     raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
                 candidate = current
             selected[pin.kind].append(candidate)
@@ -421,20 +421,20 @@ class AgentCompiler:
         )
         identity: dict[str, JsonValue] = {
             "contract": "agent-definition-v1",
-            "agent": bound_agent_spec_identity_payload(AgentSpecCodec().to_payload(spec)),
-            "model_fingerprint": model.fingerprint,
+            "agent": agent_ref_payload(AgentSpecCodec().to_payload(spec)),
+            "model_digest": model.model_digest,
             "selected": [
-                {"kind": item.kind, "id": item.id, "fingerprint": item.fingerprint}
+                {"kind": item.kind, "id": item.id, "revision": item.revision}
                 for item in semantic
             ],
             "subagents": [
-                {"kind": "agent", "id": agent_id}
+                {"kind": "agent", "id": agent_id, "revision": self._agents[agent_id].revision}
                 for agent_id in sorted(set(selected_subagents))
             ],
         }
-        digest = canonical_sha256(identity)
+        definition_digest = canonical_sha256(identity)
         return AgentDefinition(
-            digest=digest,
+            definition_digest=definition_digest,
             spec=spec,
             model=model,
             selected_tools=tuple(sorted(selected_tools, key=lambda item: item.id)),
@@ -447,7 +447,7 @@ class AgentCompiler:
         )
 
 
-def _semantic_candidates(
+def _selected_candidates(
     definition: AgentDefinition,
 ) -> "tuple[CapabilityContribution[object], ...]":
     return tuple(
@@ -465,15 +465,12 @@ def _semantic_candidates(
     )
 
 
-def _pin(candidate: CapabilityContribution[object]) -> SemanticPin:
-    pin = SemanticPin(
+def _pin(candidate: CapabilityContribution[object]) -> CapabilityPin:
+    return CapabilityPin(
         cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
         candidate.id,
-        candidate.semantic_contract,
+        candidate.contract,
     )
-    if pin.fingerprint != candidate.fingerprint:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return pin
 
 
 def _workspace_selector_classes(

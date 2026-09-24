@@ -48,7 +48,7 @@ class SkillDefinition:
         return SkillMarkdownSpecCodec().model_content(self.spec.content)
 
     @property
-    def semantic_contract(self) -> "dict[str, JsonValue]":
+    def contract(self) -> "dict[str, JsonValue]":
         contract: dict[str, JsonValue] = {
             "version": 1,
             "id": self.spec.id,
@@ -64,7 +64,7 @@ class SkillDefinition:
                 "source_id": self.source_ref.source_id,
                 "root": self.source_ref.root,
             }
-            if self.source_ref.resource_semantic_digest is not None:
+            if self.source_ref.resource_digest is not None:
                 source["resource_versions"] = [
                     {
                         "path": item.path,
@@ -73,14 +73,14 @@ class SkillDefinition:
                     }
                     for item in self.source_ref.resource_versions
                 ]
-                source["resource_semantic_digest"] = (
-                    self.source_ref.resource_semantic_digest
+                source["resource_digest"] = (
+                    self.source_ref.resource_digest
                 )
             contract["source"] = source
         return contract
 
     @classmethod
-    def from_semantic_contract(cls, contract: Mapping[str, object]) -> "SkillDefinition":
+    def from_contract(cls, contract: Mapping[str, object]) -> "SkillDefinition":
         version = contract.get("version")
         if not isinstance(version, int) or isinstance(version, bool) or version < 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -110,16 +110,16 @@ class SkillDefinition:
             source_id = source.get("source_id")
             root = source.get("root")
             raw_versions = source.get("resource_versions")
-            resource_semantic_digest = source.get("resource_semantic_digest")
+            resource_digest = source.get("resource_digest")
             versions: tuple[SkillResourceVersion, ...] = ()
             if raw_versions is not None:
                 if (
                     not isinstance(raw_versions, list)
-                    or not isinstance(resource_semantic_digest, str)
-                    or len(resource_semantic_digest) != 64
+                    or not isinstance(resource_digest, str)
+                    or len(resource_digest) != 64
                     or any(
                         character not in "0123456789abcdef"
-                        for character in resource_semantic_digest
+                        for character in resource_digest
                     )
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -147,14 +147,14 @@ class SkillDefinition:
                 except (TypeError, ValueError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 versions = tuple(sorted(parsed, key=lambda item: item.path))
-            elif resource_semantic_digest is not None:
+            elif resource_digest is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if resource_semantic_digest is not None and (
-                not isinstance(resource_semantic_digest, str)
-                or len(resource_semantic_digest) != 64
+            if resource_digest is not None and (
+                not isinstance(resource_digest, str)
+                or len(resource_digest) != 64
                 or any(
                     character not in "0123456789abcdef"
-                    for character in resource_semantic_digest
+                    for character in resource_digest
                 )
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -163,7 +163,7 @@ class SkillDefinition:
                     source_id,
                     root,
                     versions,
-                    resource_semantic_digest,
+                    resource_digest,
                 )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -415,16 +415,16 @@ async def _verify_resource_semantics(
     source_ref: SkillSourceRef,
     source: object,
 ) -> None:
-    if source_ref.resource_semantic_digest is None:
+    if source_ref.resource_digest is None:
         return
     if (
         not isinstance(source, AssetVersionSkillResourceSource)
-        or source_ref.resource_semantic_digest is None
+        or source_ref.resource_digest is None
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if (
         await source.semantic_digest(source_ref.root)
-        != source_ref.resource_semantic_digest
+        != source_ref.resource_digest
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

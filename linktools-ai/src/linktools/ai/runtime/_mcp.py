@@ -62,7 +62,7 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
     return metadata
 
 
-def _mcp_resource_semantic_digest(
+def _mcp_resource_digest(
     files: Iterable[tuple[str, str]],
 ) -> str:
     return canonical_sha256(
@@ -81,7 +81,7 @@ def _mcp_resource_semantic_digest(
 class _MCPResourceBinding:
     versions: "tuple[AssetVersionRef, ...] | None"
     source_id: "str | None"
-    resource_semantic_digest: str | None
+    resource_digest: str | None
     execution_policy: Mapping[str, JsonValue]
 
 
@@ -272,7 +272,7 @@ async def prepare_mcp_resource_projections(
         if server.resource_root is None:
             if (
                 binding.versions is not None
-                or binding.resource_semantic_digest is not None
+                or binding.resource_digest is not None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             projections[server.id] = _MCPResourceProjection(
@@ -433,7 +433,7 @@ def _bound_resource_versions(
     server: MCPServerSpec,
     binding: _MCPResourceBinding,
 ) -> "dict[str, AssetVersionRef]":
-    if binding.versions is None or binding.resource_semantic_digest is None:
+    if binding.versions is None or binding.resource_digest is None:
         raise AIError(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,
             safe_details={"kind": "mcp_resource", "server_id": server.id},
@@ -454,11 +454,11 @@ def _bound_resource_versions(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         values[relative] = version
     validate_resource_tree(values)
-    actual_digest = _mcp_resource_semantic_digest(
+    actual_digest = _mcp_resource_digest(
         (relative, values[relative].etag)
         for relative in values
     )
-    if actual_digest != binding.resource_semantic_digest:
+    if actual_digest != binding.resource_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for argument in server.args:
         if argument.startswith("resource:"):

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Stable semantic references for named behavior and Agent bindings."""
+"""Stable references for named behavior and digest inputs for Agent bindings."""
 
 from collections.abc import Mapping
 from typing import cast
@@ -14,27 +14,18 @@ _CONTRIBUTION_KINDS = frozenset(
 )
 
 
-def agent_spec_identity_payload(
+def agent_ref_payload(
     contract: Mapping[str, JsonValue],
 ) -> "dict[str, JsonValue]":
-    """Return the stable named identity for one Agent declaration."""
     _require_format_v1(contract)
-    return _semantic_ref("agent", _text(contract.get("id")), _revision(contract))
+    return _ref_payload("agent", _text(contract.get("id")), _revision(contract))
 
 
-def bound_agent_spec_identity_payload(
-    contract: Mapping[str, JsonValue],
-) -> "dict[str, JsonValue]":
-    """Return the stable named Agent identity after route resolution."""
-    return agent_spec_identity_payload(contract)
-
-
-def capability_identity_payload(
+def capability_ref_payload(
     kind: str,
     identity: str,
     contract: Mapping[str, JsonValue],
 ) -> "dict[str, JsonValue]":
-    """Return the stable named identity for one capability contribution."""
     if kind not in _CONTRIBUTION_KINDS or not isinstance(identity, str) or not identity:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not isinstance(contract, Mapping):
@@ -43,31 +34,35 @@ def capability_identity_payload(
     if kind in {"agent", "skill", "mcp"}:
         if contract.get("id") != identity:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return _semantic_ref(kind, identity, _revision(contract))
+        return _ref_payload(kind, identity, _revision(contract))
     if kind in {"tool", "capability"}:
-        return _semantic_ref(kind, identity, _revision(contract))
+        return _ref_payload(kind, identity, _revision(contract))
     if kind == "task":
-        semantic_id = _text(contract.get("task_type"))
+        ref_id = _text(contract.get("task_type"))
         revision = _positive_int(contract.get("task_version"))
-        if identity != f"{semantic_id}@{revision}":
+        if identity != f"{ref_id}@{revision}":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return _semantic_ref(kind, semantic_id, revision)
-    semantic_id = _text(contract.get("expander_id"))
+        return _ref_payload(kind, ref_id, revision)
+    ref_id = _text(contract.get("expander_id"))
     revision = _positive_int(contract.get("expander_version"))
-    if identity != f"{semantic_id}@{revision}":
+    if identity != f"{ref_id}@{revision}":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return _semantic_ref(kind, semantic_id, revision)
+    return _ref_payload(kind, ref_id, revision)
 
 
-def binding_identity_payload(
+def binding_digest_payload(
     payload: Mapping[str, JsonValue],
 ) -> "dict[str, JsonValue]":
-    """Return the ref-based identity projection for an Agent binding snapshot."""
     if not isinstance(payload, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     required = {
-        "version", "agent_spec", "base_model", "selected",
-        "subagents", "output_mode", "output_schema",
+        "version",
+        "agent_spec",
+        "base_model",
+        "selected",
+        "subagents",
+        "output_mode",
+        "output_schema",
     }
     if not required.issubset(payload):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -85,11 +80,17 @@ def binding_identity_payload(
         kind = value.get("kind")
         identity = value.get("id")
         contract = value.get("contract")
-        if not isinstance(kind, str) or not isinstance(identity, str) or not isinstance(contract, Mapping):
+        if (
+            not isinstance(kind, str)
+            or not isinstance(identity, str)
+            or not isinstance(contract, Mapping)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         selected_refs.append(
-            capability_identity_payload(
-                kind, identity, cast(Mapping[str, JsonValue], contract)
+            capability_ref_payload(
+                kind,
+                identity,
+                cast(Mapping[str, JsonValue], contract),
             )
         )
 
@@ -99,7 +100,7 @@ def binding_identity_payload(
         if value.get("kind") != "agent":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         subagent_refs.append(
-            _semantic_ref(
+            _ref_payload(
                 "agent",
                 _text(value.get("id")),
                 _positive_int(value.get("revision", 1)),
@@ -108,17 +109,22 @@ def binding_identity_payload(
 
     output_mode = payload["output_mode"]
     output_schema = payload["output_schema"]
-    if output_mode not in {"text", "structured"} or not isinstance(output_schema, Mapping):
+    if output_mode not in {"text", "structured"} or not isinstance(
+        output_schema, Mapping
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     result: dict[str, JsonValue] = {
         "contract": "agent-binding-v1",
-        "agent": agent_spec_identity_payload(agent_spec),
+        "agent": agent_ref_payload(agent_spec),
         "model": dict(base_model),
         "selected": selected_refs,
         "subagents": subagent_refs,
         "output": {
             "mode": output_mode,
-            "schema": canonicalize_json_schema(cast(Mapping[str, JsonValue], output_schema)),
+            "schema": canonicalize_json_schema(
+                cast(Mapping[str, JsonValue], output_schema)
+            ),
         },
     }
     children = payload.get("subagent_bindings")
@@ -129,20 +135,25 @@ def binding_identity_payload(
         for child in children:
             child_payload = _mapping(child)
             child_spec = _mapping(child_payload.get("agent_spec"))
-            child_refs.append({
-                "agent": agent_spec_identity_payload(child_spec),
-                "binding_digest": canonical_sha256(binding_identity_payload(child_payload)),
-            })
+            child_refs.append(
+                {
+                    "agent": agent_ref_payload(child_spec),
+                    "binding_digest": canonical_sha256(
+                        binding_digest_payload(child_payload)
+                    ),
+                }
+            )
         child_refs.sort(
             key=lambda value: cast(
-                str, cast(Mapping[str, JsonValue], value["agent"])["id"]
+                str,
+                cast(Mapping[str, JsonValue], value["agent"])["id"],
             )
         )
         result["subagent_bindings"] = child_refs
     return result
 
 
-def _semantic_ref(kind: str, identity: str, revision: int) -> "dict[str, JsonValue]":
+def _ref_payload(kind: str, identity: str, revision: int) -> "dict[str, JsonValue]":
     return {
         "contract": "semantic-ref-v1",
         "kind": kind,
@@ -182,8 +193,7 @@ def _mapping(value: object) -> "dict[str, JsonValue]":
 
 
 __all__ = [
-    "agent_spec_identity_payload",
-    "bound_agent_spec_identity_payload",
-    "binding_identity_payload",
-    "capability_identity_payload",
+    "agent_ref_payload",
+    "binding_digest_payload",
+    "capability_ref_payload",
 ]

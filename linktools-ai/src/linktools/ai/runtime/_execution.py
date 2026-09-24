@@ -561,7 +561,7 @@ class DefaultExecutionService:
         if snapshot.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         binding = self._compiler.restore(snapshot)
-        if binding.digest != binding_digest or binding.snapshot != snapshot:
+        if binding.binding_digest != binding_digest or binding.snapshot != snapshot:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 
@@ -572,7 +572,7 @@ class DefaultExecutionService:
         request: ExecutionRequest,
     ) -> None:
         if (
-            execution.binding_digest != binding.digest
+            execution.binding_digest != binding.binding_digest
             or execution.planning is not request.planning
             or execution.thinking is not request.thinking
         ):
@@ -2508,9 +2508,9 @@ class DefaultExecutionService:
                 execution.status,
                 output,
                 (
-                    task_binding.output_fingerprint
+                    task_binding.output_contract_digest
                     if task_binding is not None
-                    else binding.output_fingerprint
+                    else binding.output_contract_digest
                 ),
                 result.usage,
                 error_code,
@@ -2645,7 +2645,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
-        if binding.digest != binding_digest:
+        if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         retry_request = ExecutionRequest(
             user_prompt=request.user_prompt,
@@ -2687,7 +2687,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         binding_digest = previous.binding_digest
         binding = self._binding(binding_digest, previous.binding)
-        if binding.digest != binding_digest:
+        if binding.binding_digest != binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         fork_request = ExecutionRequest(
             user_prompt=request.user_prompt,

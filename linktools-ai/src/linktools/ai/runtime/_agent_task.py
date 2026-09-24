@@ -178,7 +178,7 @@ class _AgentTaskNodeHandler:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         if resolved_mode != "run":
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if binding.snapshot != snapshot or binding.digest != snapshot.binding_digest:
+        if binding.snapshot != snapshot or binding.binding_digest != snapshot.binding_digest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_agent_id(binding.definition.spec.id)
         if isinstance(base_user_prompt, str):
@@ -534,7 +534,7 @@ class _AgentTaskNodeHandler:
                 "version": 1,
                 "graph_id": graph_id,
                 "node_id": node.node_id,
-                "binding_digest": binding.digest,
+                "binding_digest": binding.binding_digest,
                 "input": node.input,
                 "dependencies": _dependency_identity_payload(
                     node,
@@ -556,7 +556,7 @@ class _AgentTaskNodeHandler:
             files=tuple(cast(list[str], normalized["files"])),
         )
         return (
-            binding.digest,
+            binding.binding_digest,
             request,
             binding.definition.spec.id,
             cast("str | None", normalized["session_id"]),

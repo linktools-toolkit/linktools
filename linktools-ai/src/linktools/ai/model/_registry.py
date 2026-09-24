@@ -179,8 +179,8 @@ class _ModelAliasBinding:
         return self._target.semantic_payload
 
     @property
-    def fingerprint(self) -> str:
-        return self._target.fingerprint
+    def model_digest(self) -> str:
+        return self._target.model_digest
 
     def materialize(self) -> Model:
         return self._target.materialize()

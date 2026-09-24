@@ -367,7 +367,7 @@ class LocalExecutionBackend:
             if self._restore_binding is None
             else self._restore_binding(execution.binding)
         )
-        if binding.digest != execution.binding_digest:
+        if binding.binding_digest != execution.binding_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return binding
 

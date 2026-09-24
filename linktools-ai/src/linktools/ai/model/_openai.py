@@ -88,7 +88,7 @@ class _OpenAIModelBinding:
         }
 
     @property
-    def fingerprint(self) -> str:
+    def model_digest(self) -> str:
         return canonical_sha256({"contract": "model-v1", **self.semantic_payload})
 
     def materialize(self) -> Model:

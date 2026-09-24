@@ -39,7 +39,7 @@ class SkillSourceRef:
     source_id: str
     root: str
     resource_versions: tuple[SkillResourceVersion, ...] = ()
-    resource_semantic_digest: "str | None" = None
+    resource_digest: "str | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not self.source_id.strip():
@@ -54,22 +54,22 @@ class SkillSourceRef:
         ordered = tuple(sorted(versions, key=lambda item: item.path))
         if ordered != versions or len({item.path for item in versions}) != len(versions):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.resource_semantic_digest is None:
+        if self.resource_digest is None:
             if versions:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        elif not _valid_digest(self.resource_semantic_digest):
+        elif not _valid_digest(self.resource_digest):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     def with_asset_versions(
         self,
         resource_versions: Sequence[SkillResourceVersion],
-        resource_semantic_digest: str,
+        resource_digest: str,
     ) -> "SkillSourceRef":
         return SkillSourceRef(
             self.source_id,
             self.root,
             tuple(sorted(resource_versions, key=lambda item: item.path)),
-            resource_semantic_digest,
+            resource_digest,
         )
 
 
@@ -254,7 +254,7 @@ class AssetSkillResourceSource:
             _validate_resource_mode(mode)
             versions.append(SkillResourceVersion(relative, ref, mode))
         resolved_versions = tuple(sorted(versions, key=lambda item: item.path))
-        digest = _skill_resource_semantic_digest(resolved_versions)
+        digest = _skill_resource_digest(resolved_versions)
         return SkillSourceRef(self._id, logical_root).with_asset_versions(
             resolved_versions,
             digest,
@@ -358,7 +358,7 @@ def _validate_resource_mode(mode: object) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _skill_resource_semantic_digest(
+def _skill_resource_digest(
     resources: Sequence[SkillResourceVersion],
 ) -> str:
     return hashlib.sha256(
@@ -399,7 +399,7 @@ class AssetVersionSkillResourceSource:
                 not isinstance(ref, SkillSourceRef)
                 or ref.source_id != source_id
                 or ref.root != logical_root
-                or ref.resource_semantic_digest is None
+                or ref.resource_digest is None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             normalized[logical_root] = ref
@@ -430,10 +430,10 @@ class AssetVersionSkillResourceSource:
             tuple(item.path for item in binding.resource_versions),
         )
 
-    async def semantic_digest(self, root: str) -> str:
+    async def resource_digest(self, root: str) -> str:
         binding = self._root(root)
-        actual = _skill_resource_semantic_digest(binding.resource_versions)
-        if actual != binding.resource_semantic_digest:
+        actual = _skill_resource_digest(binding.resource_versions)
+        if actual != binding.resource_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return actual
 

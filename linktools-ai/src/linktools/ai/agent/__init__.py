@@ -3,7 +3,7 @@
 """Static Agent definition, compilation, binding, and output contracts."""
 
 from ..spec import SubagentRef
-from ._binding import AgentBinding, AgentBindingSnapshot, SemanticPin
+from ._binding import AgentBinding, AgentBindingSnapshot, CapabilityPin
 from ._catalog import AgentCatalog
 from ._compiler import AgentCompiler
 from ._definition import AgentDefinition
@@ -25,7 +25,7 @@ __all__ = [
     "AssistantTextOutput",
     "OutputBinding",
     "OutputMode",
-    "SemanticPin",
+    "CapabilityPin",
     "SubagentRef",
     "bind_output",
     "canonicalize_output_schema_v1",

@@ -443,7 +443,7 @@ class Runtime(Generic[AppT]):
         self._ensure_open()
         if definition is None:
             return self._catalog.definition(agent_digest)
-        if definition.digest != agent_digest:
+        if definition.definition_digest != agent_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return definition
 
@@ -509,7 +509,7 @@ class Runtime(Generic[AppT]):
         )
         if session_id is None:
             handle = await self.execution.start(
-                binding.digest,
+                binding.binding_digest,
                 request,
                 binding_snapshot=binding.snapshot,
             )
@@ -530,7 +530,7 @@ class Runtime(Generic[AppT]):
             )
             handle = await self.session.resume(
                 definition.spec.id,
-                binding.digest,
+                binding.binding_digest,
                 session_id,
                 resume_request,
                 binding_snapshot=binding.snapshot,
@@ -742,7 +742,7 @@ class Runtime(Generic[AppT]):
             )
         )
         return await self.evaluation.start(
-            binding.digest,
+            binding.binding_digest,
             request,
             binding_snapshot=binding.snapshot,
         )

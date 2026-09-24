@@ -34,7 +34,7 @@ from ..spec import (
     ThinkingValue,
     canonicalize_json_schema,
     canonicalize_pydantic_model_schema,
-    capability_identity_payload,
+    capability_ref_payload,
     parse_mcp_tool_selector,
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
@@ -63,7 +63,7 @@ ContributionKind = Literal[
     "task",
     "task_expander",
 ]
-ContributionSemanticValue: TypeAlias = (
+ContributionValue: TypeAlias = (
     Tool
     | AgentSpec
     | SkillDefinition
@@ -112,7 +112,6 @@ class _RegisteredTaskHandler(Generic[AppT]):
 class CapabilityContribution(Generic[AppT]):
     kind: ContributionKind
     id: str
-    fingerprint: str
     value: (
         "Tool[AgentContext[AppT]] | AgentSpec | SkillDefinition | MCPServerSpec | "
         "AbstractCapability[AgentContext[AppT]] | TaskNodeHandler[AppT] | TaskExpander"
@@ -131,7 +130,6 @@ class CapabilityContribution(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if not isinstance(self.id, str) or not self.id.strip():
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        _validate_fingerprint(self.fingerprint)
         if self.kind == "tool" and not isinstance(self.value, Tool):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "agent" and not isinstance(self.value, AgentSpec):
@@ -174,12 +172,12 @@ class CapabilityContribution(Generic[AppT]):
             expander_id, expander_version = _expander_identity(expander)
             if self.id != f"{expander_id}@{expander_version}":
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.fingerprint != capability_fingerprint(
-            self.kind,
-            self.id,
-            self.semantic_contract,
-        ):
-            raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
+    @property
+    def revision(self) -> int:
+        value = capability_ref_payload(self.kind, self.id, self.contract)["revision"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        return value
 
     @classmethod
     def from_opaque(
@@ -189,25 +187,22 @@ class CapabilityContribution(Generic[AppT]):
         value: "Tool[AgentContext[AppT]] | AbstractCapability[AgentContext[AppT]]",
         *,
         revision: int = 1,
-        semantic_id: "str | None" = None,
-        semantic_config: "Mapping[str, JsonValue] | None" = None,
+        config: "Mapping[str, JsonValue] | None" = None,
     ) -> "CapabilityContribution[AppT]":
         """Create an opaque Python Tool or Capability from its public semantic inputs."""
         if kind not in {"tool", "capability"}:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         _validate_revision(revision)
-        contract = contribution_semantic_contract(
+        contract = contribution_contract(
             kind,
             identity,
             value,
             revision=revision,
-            semantic_id=semantic_id,
-            semantic_config=semantic_config,
+            config=config,
         )
-        return _SemanticContribution(
+        return _ContractContribution(
             kind,
             identity,
-            capability_fingerprint(kind, identity, contract),
             value,
             contract,
         )
@@ -226,11 +221,10 @@ class CapabilityContribution(Generic[AppT]):
             kind = "mcp"
         else:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        contract = contribution_semantic_contract(kind, value.id, value)
-        return _SemanticContribution(
+        contract = contribution_contract(kind, value.id, value)
+        return _ContractContribution(
             kind,
             value.id,
-            capability_fingerprint(kind, value.id, contract),
             value,
             contract,
         )
@@ -246,17 +240,16 @@ class CapabilityContribution(Generic[AppT]):
         value, _resource_versions = MCPServerSpecCodec().from_execution_payload(
             cast("Mapping[str, object]", contract)
         )
-        return _SemanticContribution(
+        return _ContractContribution(
             "mcp",
             value.id,
-            capability_fingerprint("mcp", value.id, contract),
             value,
             contract,
         )
 
     @property
-    def semantic_contract(self) -> "dict[str, JsonValue]":
-        return contribution_semantic_contract(
+    def contract(self) -> "dict[str, JsonValue]":
+        return contribution_contract(
             self.kind,
             self.id,
             self.value,
@@ -264,7 +257,7 @@ class CapabilityContribution(Generic[AppT]):
 
 
 @dataclass(frozen=True, slots=True)
-class _SemanticContribution(CapabilityContribution[AppT]):
+class _ContractContribution(CapabilityContribution[AppT]):
     _contract: Mapping[str, JsonValue] = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -276,7 +269,7 @@ class _SemanticContribution(CapabilityContribution[AppT]):
         CapabilityContribution.__post_init__(self)
 
     @property
-    def semantic_contract(self) -> "dict[str, JsonValue]":
+    def contract(self) -> "dict[str, JsonValue]":
         return dict(self._contract)
 
 
@@ -665,7 +658,6 @@ class CapabilityGroup(Generic[AppT]):
             _SemanticContribution(
                 "task",
                 identity,
-                capability_fingerprint("task", identity, contract),
                 registered,
                 contract,
             )
@@ -690,7 +682,6 @@ class CapabilityGroup(Generic[AppT]):
             _SemanticContribution(
                 "task_expander",
                 identity,
-                capability_fingerprint("task_expander", identity, contract),
                 expander,
                 contract,
             )
@@ -701,13 +692,13 @@ class CapabilityGroup(Generic[AppT]):
         self,
         capability: "AbstractCapability[AgentContext[AppT]]",
         *,
-        semantic_id: "str | None" = None,
+        id: "str | None" = None,
         revision: int = 1,
-        semantic_config: "Mapping[str, JsonValue] | None" = None,
+        config: "Mapping[str, JsonValue] | None" = None,
     ) -> "AbstractCapability[AgentContext[AppT]]":
         """Register one always-selected Pydantic runtime behavior capability."""
         _validate_revision(revision)
-        capability_id = _capability_registration_id(capability, semantic_id)
+        capability_id = _capability_registration_id(capability, id)
         _validate_external_capability_id(capability_id)
         self._contributions.append(
             CapabilityContribution.from_opaque(
@@ -715,8 +706,7 @@ class CapabilityGroup(Generic[AppT]):
                 capability_id,
                 capability,
                 revision=revision,
-                semantic_id=capability_id,
-                semantic_config=semantic_config,
+                config=config,
             )
         )
         return capability
@@ -845,7 +835,7 @@ class CapabilityGroup(Generic[AppT]):
                     skill = cast(SkillDefinition, item.value)
                     if skill.source_ref is not None and (
                         skill.source_ref.source_id != self._id
-                        or skill.source_ref.resource_semantic_digest is not None
+                        or skill.source_ref.resource_digest is not None
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     if skill.source_ref is not None:
@@ -877,7 +867,7 @@ class CapabilityGroup(Generic[AppT]):
         generic = [item for item in snapshot_items if item.kind == "capability"]
         declarations = sorted(
             (item for item in snapshot_items if item.kind != "capability"),
-            key=lambda item: (item.kind, item.id, item.fingerprint),
+            key=lambda item: (item.kind, item.id),
         )
         snapshot_contributions = tuple((*declarations, *generic))
         snapshot = CapabilityGroupSnapshot(
@@ -900,14 +890,13 @@ class CapabilityGroup(Generic[AppT]):
 def _snapshot_contribution(
     value: CapabilityContribution[AppT],
 ) -> CapabilityContribution[AppT]:
-    if isinstance(value, _SemanticContribution):
+    if isinstance(value, _ContractContribution):
         return value
-    return _SemanticContribution(
+    return _ContractContribution(
         value.kind,
         value.id,
-        value.fingerprint,
         value.value,
-        value.semantic_contract,
+        value.contract,
     )
 
 
@@ -958,16 +947,15 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
     return Tool(invoke, takes_ctx=True, name=name)
 
 
-def contribution_semantic_contract(
+def contribution_contract(
     kind: ContributionKind,
     identity: str,
-    value: ContributionSemanticValue,
+    value: ContributionValue,
     *,
     revision: "int | None" = None,
-    semantic_id: "str | None" = None,
-    semantic_config: "Mapping[str, JsonValue] | None" = None,
+    config: "Mapping[str, JsonValue] | None" = None,
 ) -> "dict[str, JsonValue]":
-    if semantic_config is not None and kind != "capability":
+    if config is not None and kind != "capability":
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     if kind == "tool" and isinstance(value, Tool):
         definition = value.tool_def
@@ -1001,7 +989,7 @@ def contribution_semantic_contract(
     if kind == "agent" and isinstance(value, AgentSpec):
         return AgentSpecCodec().to_payload(value)
     if kind == "skill" and isinstance(value, SkillDefinition):
-        return value.semantic_contract
+        return value.contract
     if kind == "mcp" and isinstance(value, MCPServerSpec):
         return MCPServerSpecCodec().to_payload(value)
     if kind == "capability" and isinstance(value, AbstractCapability):
@@ -1011,9 +999,9 @@ def contribution_semantic_contract(
             "defer_loading": value.defer_loading,
             "config": {},
         }
-        if semantic_config is not None:
+        if config is not None:
             try:
-                contract["config"] = dict(ImmutableJsonMapping(semantic_config))
+                contract["config"] = dict(ImmutableJsonMapping(config))
             except (TypeError, ValueError) as error:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
         return contract
@@ -1038,16 +1026,6 @@ def contribution_semantic_contract(
             "expander_version": expander_version,
         }
     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
-def capability_fingerprint(
-    kind: ContributionKind,
-    identity: str,
-    semantic_contract: Mapping[str, JsonValue],
-) -> str:
-    return canonical_sha256(
-        capability_identity_payload(kind, identity, semantic_contract)
-    )
 
 
 def _task_identity(handler: object) -> tuple[str, int]:
@@ -1152,15 +1130,6 @@ def _validate_revision(value: int) -> None:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
-def _validate_fingerprint(value: str) -> None:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
-
-
 def _validate_unique(values: Sequence[CapabilityContribution[object]]) -> None:
     seen: set[tuple[str, str]] = set()
     for value in values:
@@ -1176,6 +1145,5 @@ __all__ = [
     "CapabilityLoadContext",
     "CapabilityLoadEntry",
     "CapabilityLoader",
-    "capability_fingerprint",
-    "contribution_semantic_contract",
+    "contribution_contract",
 ]

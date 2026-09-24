@@ -202,7 +202,7 @@ class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
     output: JsonValue | None
-    output_fingerprint: "str | None"
+    output_contract_digest: "str | None"
     usage: UsageMetrics
     error_code: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
@@ -222,7 +222,7 @@ class ExecutionResult:
                 or self.error_diagnostics is not None
             ):
                 raise ValueError("successful execution result cannot carry an error")
-            if not _is_digest(self.output_fingerprint):
+            if not _is_digest(self.output_contract_digest):
                 raise ValueError("successful execution result requires output contract")
             return
         if self.status is ExecutionStatus.CANCELLED:
@@ -249,7 +249,7 @@ class ExecutionResult:
 
 
 def _has_output_contract(result: ExecutionResult) -> bool:
-    return result.output is not None or result.output_fingerprint is not None
+    return result.output is not None or result.output_contract_digest is not None
 
 
 def _is_digest(value: object) -> bool:

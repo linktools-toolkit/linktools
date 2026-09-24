@@ -66,7 +66,7 @@ class OutputBinding:
         return cast("dict[str, JsonValue]", value)
 
     @property
-    def fingerprint(self) -> str:
+    def contract_digest(self) -> str:
         return canonical_sha256(
             {
                 "contract": "output-v1",

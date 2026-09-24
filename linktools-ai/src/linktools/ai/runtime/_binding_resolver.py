@@ -11,7 +11,7 @@ from ..agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
-    SemanticPin,
+    CapabilityPin,
 )
 from ..asset import AssetKey, AssetStoreReader, AssetVersionRef
 from ..capability import (
@@ -22,7 +22,7 @@ from ..capability import (
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
 from ..workspace import Sandbox
-from ._mcp import _mcp_execution_policy, _mcp_resource_semantic_digest
+from ._mcp import _mcp_execution_policy, _mcp_resource_digest
 
 
 class _RuntimeBindingResolver:
@@ -93,7 +93,7 @@ class _RuntimeBindingResolver:
         snapshot: AgentBindingSnapshot,
     ) -> AgentBindingSnapshot:
         execution_policy: "Mapping[str, JsonValue] | None" = None
-        selected: list[SemanticPin] = []
+        selected: list[CapabilityPin] = []
         for pin in snapshot.selected:
             if pin.kind != "mcp":
                 selected.append(pin)
@@ -116,7 +116,7 @@ class _RuntimeBindingResolver:
                 selected.append(pin)
                 continue
             resource_source_id = None
-            resource_semantic_digest = None
+            resource_digest = None
             if server.resource_root is not None:
                 asset_source = self._mcp_assets.get(server.id)
                 if asset_source is None:
@@ -128,7 +128,7 @@ class _RuntimeBindingResolver:
                         },
                     )
                 resource_source_id, store = asset_source
-                resource_versions, resource_semantic_digest = (
+                resource_versions, resource_digest = (
                     await _resolve_mcp_resource_versions(
                         store,
                         server.resource_root,
@@ -136,14 +136,14 @@ class _RuntimeBindingResolver:
                     )
                 )
             selected.append(
-                SemanticPin(
+                CapabilityPin(
                     "mcp",
                     pin.id,
                     codec.to_execution_payload(
                         server,
                         resource_versions,
                         resource_source_id=resource_source_id,
-                        resource_semantic_digest=resource_semantic_digest,
+                        resource_digest=resource_digest,
                         execution_policy=execution_policy,
                     ),
                 )
@@ -179,8 +179,8 @@ async def _resolve_mcp_resource_versions(
     for (info, _relative), version in zip(selected_infos, versions, strict=True):
         if not version.matches_info(info):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-    resource_semantic_digest = _mcp_resource_semantic_digest(
+    resource_digest = _mcp_resource_digest(
         (relative, info.etag)
         for info, relative in selected_infos
     )
-    return tuple(versions), resource_semantic_digest
+    return tuple(versions), resource_digest

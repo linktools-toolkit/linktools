@@ -106,7 +106,7 @@ class ExecutionInfo:
     terminal_at: datetime | None = None
     binding_digest: str | None = None
     input_digest: str | None = None
-    output_fingerprint: str | None = None
+    output_contract_digest: str | None = None
     output_digest: str | None = None
     usage: UsageSummary | None = None
 
@@ -212,7 +212,7 @@ def _project_execution_info(
         terminal_at=None if result is None else result.created_at,
         binding_digest=record.binding_digest,
         input_digest=record.stored_user_input.digest,
-        output_fingerprint=_output_fingerprint(record),
+        output_contract_digest=_output_contract_digest(record),
         output_digest=(
             None
             if result is None or result.output is None
@@ -334,7 +334,7 @@ class RuntimeHistory:
             record.execution_id,
             record.status,
             output,
-            _output_fingerprint(record),
+            _output_contract_digest(record),
             stored.usage,
         )
 
@@ -1155,10 +1155,10 @@ def _log_secondary_cleanup(phase: str, error: BaseException) -> None:
     )
 
 
-def _output_fingerprint(record: ExecutionRecord) -> str:
+def _output_contract_digest(record: ExecutionRecord) -> str:
     binding = record.binding
     if isinstance(binding, TaskBindingSnapshot):
-        return binding.output_fingerprint
+        return binding.output_contract_digest
     if isinstance(binding, AgentBindingSnapshot):
         return restore_output(binding.output_mode, binding.output_schema).fingerprint
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

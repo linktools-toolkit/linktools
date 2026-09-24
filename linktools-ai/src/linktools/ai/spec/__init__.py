@@ -27,10 +27,9 @@ from ._contract import (
 )
 from ..core import validate_logical_id
 from ._identity import (
-    agent_spec_identity_payload,
-    bound_agent_spec_identity_payload,
-    binding_identity_payload,
-    capability_identity_payload,
+    agent_ref_payload,
+    binding_digest_payload,
+    capability_ref_payload,
 )
 from ._schema import canonicalize_json_schema, canonicalize_pydantic_model_schema
 
@@ -39,13 +38,12 @@ __all__ = [
     "AgentSpecCodec",
     "AgentMarkdownSpecCodec",
     "AgentUsageLimits",
-    "agent_spec_identity_payload",
-    "bound_agent_spec_identity_payload",
-    "binding_identity_payload",
+    "agent_ref_payload",
+    "binding_digest_payload",
     "canonicalize_json_schema",
     "canonicalize_pydantic_model_schema",
     "validate_logical_id",
-    "capability_identity_payload",
+    "capability_ref_payload",
     "MCPServerSpec",
     "MCPServerSpecCodec",
     "SkillMarkdownSpecAdapter",

@@ -428,7 +428,7 @@ class MCPServerSpecCodec:
         resource_versions: "Sequence[AssetVersionRef] | None",
         *,
         resource_source_id: "str | None" = None,
-        resource_semantic_digest: "str | None" = None,
+        resource_digest: "str | None" = None,
         execution_policy: "Mapping[str, JsonValue] | None" = None,
     ) -> "dict[str, JsonValue]":
         """Return the MCP contract stored in an execution binding."""
@@ -441,7 +441,7 @@ class MCPServerSpecCodec:
             if (
                 resource_versions is not None
                 or resource_source_id is not None
-                or resource_semantic_digest is not None
+                or resource_digest is not None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
@@ -459,12 +459,12 @@ class MCPServerSpecCodec:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not isinstance(resource_source_id, str) or not resource_source_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _require_digest(resource_semantic_digest)
+        _require_digest(resource_digest)
         payload["resource_versions"] = [
             item.to_payload() for item in versions
         ]
         payload["resource_source_id"] = resource_source_id
-        payload["resource_semantic_digest"] = resource_semantic_digest
+        payload["resource_digest"] = resource_digest
         return payload
 
     def to_wire_payload(self, value: MCPServerSpec) -> "dict[str, JsonValue]":
@@ -540,7 +540,7 @@ class MCPServerSpecCodec:
         if not execution and (
             "resource_versions" in raw
             or "resource_source_id" in raw
-            or "resource_semantic_digest" in raw
+            or "resource_digest" in raw
             or "execution_policy" in raw
         ):
             raise AIError(
@@ -576,7 +576,7 @@ class MCPServerSpecCodec:
         resource_source_id = raw.get("resource_source_id") if execution else None
         if resource_versions is None:
             if execution and (
-                "resource_semantic_digest" in raw
+                "resource_digest" in raw
                 or "resource_source_id" in raw
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -587,7 +587,7 @@ class MCPServerSpecCodec:
                 or not resource_source_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _require_digest(raw.get("resource_semantic_digest"))
+            _require_digest(raw.get("resource_digest"))
         args = raw.get("args", [])
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")

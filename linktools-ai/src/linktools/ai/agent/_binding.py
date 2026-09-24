@@ -12,8 +12,8 @@ from ..spec import (
     AgentSpec,
     AgentSpecCodec,
     SubagentRef,
-    binding_identity_payload,
-    capability_identity_payload,
+    binding_digest_payload,
+    capability_ref_payload,
 )
 from ._output import OutputBinding, OutputMode
 
@@ -37,7 +37,7 @@ _BINDING_FIELDS = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class SemanticPin:
+class CapabilityPin:
     kind: Literal["tool", "skill", "mcp", "capability"]
     id: str
     contract: Mapping[str, JsonValue]
@@ -63,17 +63,14 @@ class SemanticPin:
         if version != 1:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
         object.__setattr__(self, "contract", contract)
-        capability_identity_payload(self.kind, self.id, contract)
+        capability_ref_payload(self.kind, self.id, contract)
 
     @property
-    def fingerprint(self) -> str:
-        return canonical_sha256(
-            capability_identity_payload(
-                self.kind,
-                self.id,
-                self.contract,
-            )
-        )
+    def revision(self) -> int:
+        value = capability_ref_payload(self.kind, self.id, self.contract)["revision"]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
 
     def to_payload(self) -> "dict[str, JsonValue]":
         return {
@@ -83,7 +80,7 @@ class SemanticPin:
         }
 
     @classmethod
-    def from_payload(cls, value: object) -> "SemanticPin":
+    def from_payload(cls, value: object) -> "CapabilityPin":
         if not isinstance(value, Mapping) or not _PIN_FIELDS.issubset(value):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         kind = value["kind"]
@@ -108,7 +105,7 @@ class AgentBindingSnapshot:
 
     agent_spec: AgentSpec
     base_model: Mapping[str, JsonValue]
-    selected: "tuple[SemanticPin, ...]"
+    selected: "tuple[CapabilityPin, ...]"
     subagents: "tuple[SubagentRef, ...]"
     output_mode: OutputMode
     output_schema: Mapping[str, JsonValue]
@@ -185,7 +182,7 @@ class AgentBindingSnapshot:
         object.__setattr__(
             self,
             "_binding_digest",
-            canonical_sha256(binding_identity_payload(self.to_payload())),
+            canonical_sha256(binding_digest_payload(self.to_payload())),
         )
 
     @property
@@ -273,7 +270,7 @@ class AgentBindingSnapshot:
             return cls(
                 agent_spec=agent_spec,
                 base_model=_normalize_mapping(value["base_model"]),
-                selected=tuple(SemanticPin.from_payload(item) for item in selected),
+                selected=tuple(CapabilityPin.from_payload(item) for item in selected),
                 subagents=tuple(SubagentRef.from_payload(item) for item in subagents),
                 output_mode=cast(OutputMode, mode),
                 output_schema=_normalize_mapping(value["output_schema"]),
@@ -304,10 +301,7 @@ class AgentBinding:
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
             or dict(self.definition.model.semantic_payload)
             != dict(self.snapshot.base_model)
-            or tuple(
-                item.fingerprint for item in _definition_selected_pins(self.definition)
-            )
-            != tuple(item.fingerprint for item in self.snapshot.selected)
+            or _definition_selected_pins(self.definition) != self.snapshot.selected
             or self.definition.selected_subagents != self.snapshot.subagent_ids
             or self.output_binding.mode != self.snapshot.output_mode
             or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
@@ -315,7 +309,7 @@ class AgentBinding:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @property
-    def digest(self) -> str:
+    def binding_digest(self) -> str:
         return self.snapshot.binding_digest
 
     @property
@@ -323,13 +317,13 @@ class AgentBinding:
         return self.output_binding.runtime_output_type
 
     @property
-    def output_fingerprint(self) -> str:
-        return self.output_binding.fingerprint
+    def output_contract_digest(self) -> str:
+        return self.output_binding.contract_digest
 
 
 def _definition_selected_pins(
     definition: "AgentDefinition",
-) -> "tuple[SemanticPin, ...]":
+) -> "tuple[CapabilityPin, ...]":
     candidates = (
         *sorted(
             (
@@ -342,10 +336,10 @@ def _definition_selected_pins(
         *definition.selected_capabilities,
     )
     return tuple(
-        SemanticPin(
+        CapabilityPin(
             cast(Literal["tool", "skill", "mcp", "capability"], candidate.kind),
             candidate.id,
-            candidate.semantic_contract,
+            candidate.contract,
         )
         for candidate in candidates
     )
@@ -377,4 +371,4 @@ def _require_mapping(value: object) -> "dict[str, object]":
     return dict(value)
 
 
-__all__ = ["AgentBinding", "AgentBindingSnapshot", "SemanticPin", "SubagentRef"]
+__all__ = ["AgentBinding", "AgentBindingSnapshot", "CapabilityPin", "SubagentRef"]
