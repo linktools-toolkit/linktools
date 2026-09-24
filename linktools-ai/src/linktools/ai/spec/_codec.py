@@ -353,13 +353,21 @@ class MCPServerSpecCodec:
             not isinstance(item, AssetVersionRef) for item in resource_versions
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        versions = tuple(
+            sorted(
+                resource_versions,
+                key=lambda item: (item.key.kind, item.key.id),
+            )
+        )
+        if len({item.key for item in versions}) != len(versions):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not isinstance(resource_source_id, str) or not resource_source_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _require_digest(resource_semantic_digest)
         payload["args"] = None
         payload["frozen_args"] = list(value.args)
         payload["resource_versions"] = [
-            item.to_payload() for item in resource_versions
+            item.to_payload() for item in versions
         ]
         payload["resource_source_id"] = resource_source_id
         payload["resource_semantic_digest"] = resource_semantic_digest
