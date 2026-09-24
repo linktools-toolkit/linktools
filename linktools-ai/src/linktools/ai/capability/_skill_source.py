@@ -4,7 +4,6 @@
 
 import asyncio
 import hashlib
-import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -20,7 +19,6 @@ from ..core import (
     validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,10 +148,6 @@ class LocalSkillResourceSource:
         relative = _normalize_resource_path(path)
         return await asyncio.to_thread(self._read_sync, logical_root, relative)
 
-    async def current_revision(self, root: str) -> StorageRevision:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        return await _skill_source_revision(self, logical_root)
-
     async def resource_mode(self, root: str, path: str) -> int:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         relative = _normalize_resource_path(path)
@@ -167,21 +161,6 @@ class LocalSkillResourceSource:
             return (await asyncio.to_thread(resolved.stat)).st_mode & 0o111
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
-    async def snapshot(
-        self,
-        root: str,
-        *,
-        expected_revision: StorageRevision,
-        object_store: ObjectStore,
-    ) -> ObjectRef:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        return await _snapshot_skill_source(
-            self,
-            logical_root,
-            expected_revision=expected_revision,
-            object_store=object_store,
-        )
 
     def _inspect_sync(self, root: str) -> SkillResourceView:
         package = self._package_path(root)
@@ -265,13 +244,22 @@ class AssetSkillResourceSource:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         return bytes(value)
 
-    async def current_revision(self, root: str) -> StorageRevision:
+    @property
+    def asset_reader(self) -> AssetStoreReader:
+        return self._store
+
+    async def freeze(self, root: str) -> SkillSourceRef:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         assets = await self._asset_infos(logical_root)
         resources = self._resource_infos(assets)
         local = await self._local_resources(logical_root, assets)
-        entries: list[dict[str, JsonValue]] = []
-        for relative, info in resources:
+        refs = await self._store.resolve_versions(
+            tuple(info.key for _relative, info in resources)
+        )
+        versions: list[SkillResourceVersion] = []
+        for (relative, info), ref in zip(resources, refs, strict=True):
+            if ref.key != info.key or ref.etag != info.etag or ref.size != info.size:
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
             mode = 0
             if local is not None:
                 try:
@@ -281,16 +269,15 @@ class AssetSkillResourceSource:
                 except OSError as error:
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             _validate_resource_mode(mode)
-            entries.append(
-                {
-                    "path": relative,
-                    "digest": info.etag,
-                    "size": info.size,
-                    "mode": mode,
-                }
-            )
-        return _skill_revision(
-            entries,
+            versions.append(SkillResourceVersion(relative, ref, mode))
+        frozen = tuple(sorted(versions, key=lambda item: item.path))
+        digest = _skill_resource_semantic_digest(
+            frozen,
+            sandbox_materialize=local is not None,
+        )
+        return SkillSourceRef(self._id, logical_root).with_versions(
+            frozen,
+            digest,
             sandbox_materialize=local is not None,
         )
 
@@ -343,36 +330,6 @@ class AssetSkillResourceSource:
             tuple(cast(Path, path) for path in paths),
         )
 
-    async def resource_mode(self, root: str, path: str) -> int:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        relative = _normalize_resource_path(path)
-        local = (
-            await self._store.local_paths(
-                (AssetKey("skill", f"{logical_root}/{relative}"),)
-            )
-        )[0]
-        if local is None:
-            return 0
-        try:
-            return (await asyncio.to_thread(local.stat)).st_mode & 0o111
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
-    async def snapshot(
-        self,
-        root: str,
-        *,
-        expected_revision: StorageRevision,
-        object_store: ObjectStore,
-    ) -> ObjectRef:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        return await _snapshot_skill_source(
-            self,
-            logical_root,
-            expected_revision=expected_revision,
-            object_store=object_store,
-        )
-
 
 def _resolve_local_skill_package(
     relatives: Sequence[str],
@@ -412,54 +369,6 @@ def _resolve_local_skill_package(
     return package, local
 
 
-async def _skill_source_revision(
-    source: SnapshotSkillResourceSource,
-    root: str,
-) -> StorageRevision:
-    view = await source.inspect(root)
-    if not isinstance(view, SkillResourceView):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    entries: list[dict[str, JsonValue]] = []
-    for relative in view.resources:
-        value = await source.read(root, relative)
-        mode = (
-            await source.resource_mode(root, relative)
-            if view.location.kind == "local"
-            else 0
-        )
-        _validate_resource_mode(mode)
-        entries.append(
-            {
-                "path": relative,
-                "digest": hashlib.sha256(value).hexdigest(),
-                "size": len(value),
-                "mode": mode,
-            }
-        )
-    return _skill_revision(
-        entries,
-        sandbox_materialize=view.location.kind == "local",
-    )
-
-
-def _skill_revision(
-    entries: Sequence[Mapping[str, JsonValue]],
-    *,
-    sandbox_materialize: bool,
-) -> StorageRevision:
-    return StorageRevision(
-        hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "version": 1,
-                    "sandbox_materialize": sandbox_materialize,
-                    "resources": list(entries),
-                }
-            )
-        ).hexdigest()
-    )
-
-
 def _validate_resource_mode(mode: object) -> None:
     if (
         isinstance(mode, bool)
@@ -470,353 +379,110 @@ def _validate_resource_mode(mode: object) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-async def _snapshot_skill_source(
-    source: SnapshotSkillResourceSource,
-    root: str,
+def _skill_resource_semantic_digest(
+    resources: Sequence[SkillResourceVersion],
     *,
-    expected_revision: StorageRevision,
-    object_store: ObjectStore,
-) -> ObjectRef:
-    if not isinstance(expected_revision, StorageRevision):
-        raise TypeError("expected_revision must be StorageRevision")
-    view = await source.inspect(root)
-    if not isinstance(view, SkillResourceView):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-    states: list[dict[str, JsonValue]] = []
-    entries: list[dict[str, JsonValue]] = []
-    for relative in view.resources:
-        value = await source.read(root, relative)
-        mode = (
-            await source.resource_mode(root, relative)
-            if view.location.kind == "local"
-            else 0
-        )
-        _validate_resource_mode(mode)
-        digest = hashlib.sha256(value).hexdigest()
-        size = len(value)
-        state: dict[str, JsonValue] = {
-            "path": relative,
-            "digest": digest,
-            "size": size,
-            "mode": mode,
-        }
-        states.append(state)
-        key = f"v1/skill-source-content/{digest}"
-        await _put_skill_snapshot_object(
-            object_store,
-            key,
-            value,
-            digest=digest,
-        )
-        entries.append(
+    sandbox_materialize: bool,
+) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
             {
-                "path": relative,
-                "mode": mode,
-                "content": {
-                    "key": key,
-                    "digest": digest,
-                    "size": size,
-                },
+                "version": 1,
+                "kind": "skill-resource-semantics",
+                "sandbox_materialize": sandbox_materialize,
+                "files": [
+                    {
+                        "path": item.path,
+                        "sha256": item.asset.etag,
+                        "executable_bits": item.executable_bits,
+                    }
+                    for item in resources
+                ],
             }
         )
-    captured_revision = _skill_revision(
-        states,
-        sandbox_materialize=view.location.kind == "local",
-    )
-    if captured_revision != expected_revision:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-    if await source.current_revision(root) != expected_revision:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-    manifest: dict[str, JsonValue] = {
-        "kind": "skill-source-snapshot",
-        "format_version": 1,
-        "source_id": source.id,
-        "root": root,
-        "revision": expected_revision.value,
-        "sandbox_materialize": view.location.kind == "local",
-        "resources": entries,
-    }
-    payload = canonical_json_bytes(manifest)
-    digest = hashlib.sha256(payload).hexdigest()
-    key = f"v1/skill-source-snapshot/{digest}"
-    await _put_skill_snapshot_object(
-        object_store,
-        key,
-        payload,
-        digest=digest,
-    )
-    return ObjectRef(object_store.store_id, key, digest, len(payload))
-
-
-async def _put_skill_snapshot_object(
-    object_store: ObjectStore,
-    key: str,
-    value: bytes,
-    *,
-    digest: str,
-) -> None:
-    current = await object_store.stat(key)
-    if current is not None:
-        if current.digest != digest or current.size != len(value):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        await read_object(
-            object_store,
-            key,
-            expected_digest=digest,
-            expected_size=len(value),
-        )
-        return
-
-    async def chunks():
-        yield value
-
-    await object_store.put(
-        key,
-        chunks(),
-        expected_size=len(value),
-        expected_digest=digest,
-    )
+    ).hexdigest()
 
 
 class FrozenSkillResourceSource:
-    """Read one or more immutable Skill resource roots from snapshot objects."""
+    """Read frozen Skill resources from immutable Asset versions."""
 
     def __init__(
         self,
         source_id: str,
-        snapshots: Mapping[str, ObjectRef],
-        object_store: ObjectStore,
+        roots: Mapping[str, SkillSourceRef],
+        asset_reader: AssetStoreReader,
     ) -> None:
         if not isinstance(source_id, str) or not source_id.strip():
             raise ValueError("skill source id must be non-empty")
-        roots = {
-            _normalize_relative_path(root, field_name="skill root"): ref
-            for root, ref in snapshots.items()
-        }
-        if not roots or any(not isinstance(ref, ObjectRef) for ref in roots.values()):
-            raise ValueError("skill snapshots must contain ObjectRef values")
-        if any(ref.store_id != object_store.store_id for ref in roots.values()):
-            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        if not isinstance(asset_reader, AssetStoreReader):
+            raise TypeError("asset_reader must provide AssetStoreReader operations")
+        normalized: dict[str, SkillSourceRef] = {}
+        for root, ref in roots.items():
+            logical_root = _normalize_relative_path(root, field_name="skill root")
+            if (
+                not isinstance(ref, SkillSourceRef)
+                or ref.source_id != source_id
+                or ref.root != logical_root
+                or not ref.frozen
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            normalized[logical_root] = ref
+        if not normalized:
+            raise ValueError("frozen skill roots must not be empty")
         self._id = source_id
-        self._snapshots = MappingProxyType(dict(sorted(roots.items())))
-        self._object_store = object_store
-        self._manifests: dict[str, Mapping[str, object]] = {}
-        self._semantic_digests: dict[str, str] = {}
+        self._roots = MappingProxyType(dict(sorted(normalized.items())))
+        self._asset_reader = asset_reader
 
     @property
     def id(self) -> str:
         return self._id
 
-    async def inspect(self, root: str) -> SkillResourceView:
+    def _root(self, root: str) -> SkillSourceRef:
         logical_root = _normalize_relative_path(root, field_name="skill root")
-        manifest = await self._manifest(logical_root)
-        entries = manifest["resources"]
-        assert isinstance(entries, list)
-        resources = tuple(
-            cast(str, entry["path"])
-            for entry in entries
-            if isinstance(entry, Mapping)
-        )
-        if len(resources) != len(entries):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            return self._roots[logical_root]
+        except KeyError as error:
+            raise AIError(
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                safe_details={"source_id": self._id, "root": logical_root},
+            ) from error
+
+    async def inspect(self, root: str) -> SkillResourceView:
+        frozen = self._root(root)
         return SkillResourceView(
-            SkillLocation(
-                "virtual",
-                f"{self._id}/skills/{logical_root}",
-            ),
-            resources,
+            SkillLocation("virtual", f"{self._id}/skills/{frozen.root}"),
+            tuple(item.path for item in frozen.resource_versions),
         )
 
     async def sandbox_materialize(self, root: str) -> bool:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        manifest = await self._manifest(logical_root)
-        return bool(manifest.get("sandbox_materialize", False))
+        return self._root(root).sandbox_materialize
 
     async def semantic_digest(self, root: str) -> str:
-        """Return the behavior digest for one validated resource snapshot."""
-        logical_root = _normalize_relative_path(root, field_name="skill root")
-        cached = self._semantic_digests.get(logical_root)
-        if cached is not None:
-            return cached
-        manifest = await self._manifest(logical_root)
-        materialize = manifest.get("sandbox_materialize")
-        entries = manifest.get("resources")
-        if not isinstance(materialize, bool) or not isinstance(entries, list):
+        frozen = self._root(root)
+        actual = _skill_resource_semantic_digest(
+            frozen.resource_versions,
+            sandbox_materialize=frozen.sandbox_materialize,
+        )
+        if actual != frozen.resource_semantic_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        files: list[JsonValue] = []
-        for raw in entries:
-            if not isinstance(raw, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            path = raw.get("path")
-            mode = raw.get("mode", 0)
-            content = raw.get("content")
-            if not isinstance(path, str) or not isinstance(content, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            digest = content.get("digest")
-            if not _valid_digest(digest):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if (
-                isinstance(mode, bool)
-                or not isinstance(mode, int)
-                or mode < 0
-                or mode > 0o111
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            files.append(
-                {
-                    "path": path,
-                    "sha256": digest,
-                    "executable_bits": mode & 0o111,
-                }
-            )
-        semantic_digest = hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "version": 1,
-                    "kind": "skill-resource-semantics",
-                    "sandbox_materialize": materialize,
-                    "files": files,
-                }
-            )
-        ).hexdigest()
-        self._semantic_digests[logical_root] = semantic_digest
-        return semantic_digest
+        return actual
 
     async def resource_mode(self, root: str, path: str) -> int:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
+        frozen = self._root(root)
         relative = _normalize_resource_path(path)
-        manifest = await self._manifest(logical_root)
-        entries = manifest["resources"]
-        assert isinstance(entries, list)
-        for raw in entries:
-            if isinstance(raw, Mapping) and raw.get("path") == relative:
-                mode = raw.get("mode", 0)
-                if (
-                    isinstance(mode, bool)
-                    or not isinstance(mode, int)
-                    or mode < 0
-                    or mode > 0o111
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return mode
+        for item in frozen.resource_versions:
+            if item.path == relative:
+                return item.executable_bits
         raise AIError(ErrorCode.ASSET_NOT_FOUND)
 
     async def read(self, root: str, path: str) -> bytes:
-        logical_root = _normalize_relative_path(root, field_name="skill root")
+        frozen = self._root(root)
         relative = _normalize_resource_path(path)
-        manifest = await self._manifest(logical_root)
-        entries = manifest["resources"]
-        assert isinstance(entries, list)
-        for raw in entries:
-            if not isinstance(raw, Mapping) or raw.get("path") != relative:
+        for item in frozen.resource_versions:
+            if item.path != relative:
                 continue
-            content = raw.get("content")
-            if not isinstance(content, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                key = content["key"]
-                digest = content["digest"]
-                size = content["size"]
-            except KeyError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if (
-                not isinstance(key, str)
-                or not key
-                or not isinstance(digest, str)
-                or len(digest) != 64
-                or any(character not in "0123456789abcdef" for character in digest)
-                or isinstance(size, bool)
-                or not isinstance(size, int)
-                or size < 0
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return await read_object(
-                self._object_store,
-                key,
-                expected_digest=digest,
-                expected_size=size,
-            )
+            return (await self._asset_reader.read_versions((item.asset,)))[0]
         raise AIError(ErrorCode.ASSET_NOT_FOUND)
-
-    async def _manifest(self, root: str) -> Mapping[str, object]:
-        cached = self._manifests.get(root)
-        if cached is not None:
-            return cached
-        ref = self._snapshots.get(root)
-        if ref is None:
-            raise AIError(
-                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-                safe_details={
-                    "source_id": self._id,
-                    "root": root,
-                },
-            )
-        payload = await read_object(
-            self._object_store,
-            ref.key,
-            expected_digest=ref.digest,
-            expected_size=ref.size,
-        )
-        try:
-            manifest = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if (
-            not isinstance(manifest, Mapping)
-            or manifest.get("kind") != "skill-source-snapshot"
-            or manifest.get("format_version") != 1
-            or manifest.get("source_id") != self._id
-            or manifest.get("root") != root
-            or not isinstance(manifest.get("revision"), str)
-            or not isinstance(manifest.get("sandbox_materialize", False), bool)
-            or not isinstance(manifest.get("resources"), list)
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        seen: set[str] = set()
-        previous: str | None = None
-        for raw in cast(list[object], manifest["resources"]):
-            if not isinstance(raw, Mapping):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            relative = raw.get("path")
-            content = raw.get("content")
-            mode = raw.get("mode", 0)
-            if (
-                not isinstance(relative, str)
-                or not isinstance(content, Mapping)
-                or isinstance(mode, bool)
-                or not isinstance(mode, int)
-                or mode < 0
-                or mode > 0o111
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            relative = _normalize_resource_path(relative)
-            if relative in seen or (
-                previous is not None and relative < previous
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                key = content["key"]
-                digest = content["digest"]
-                size = content["size"]
-            except KeyError as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if (
-                not isinstance(key, str)
-                or not key
-                or not isinstance(digest, str)
-                or len(digest) != 64
-                or any(ch not in "0123456789abcdef" for ch in digest)
-                or isinstance(size, bool)
-                or not isinstance(size, int)
-                or size < 0
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            seen.add(relative)
-            previous = relative
-        frozen = MappingProxyType(dict(manifest))
-        self._manifests[root] = frozen
-        return frozen
 
 
 class SkillSourceRegistry:
@@ -934,7 +600,8 @@ __all__ = [
     "LocalSkillResourceSource",
     "SkillLocation",
     "SkillResourceSource",
-    "SnapshotSkillResourceSource",
+    "SkillResourceVersion",
+    "VersionedSkillResourceSource",
     "SkillResourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
