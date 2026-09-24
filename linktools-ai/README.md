@@ -182,9 +182,9 @@ does not need to be `SKILL.md`. This allows Skill scripts to be invoked by
 absolute path without letting a single file symlink redefine the package root.
 If an overlay mixes resource origins, the Skill is exposed as virtual instead
 of claiming a partial local tree. Durable executions pin Asset version references for Skill resources and read
-them through AssetStore when needed. AssetStore verifies the frozen digest and
+them through AssetStore when needed. AssetStore verifies the bound version digest and
 size before the bytes are used; a source that can no longer reproduce the
-frozen content fails integrity instead of silently using changed content. A
+bound version content fails integrity instead of silently using changed content. A
 filesystem path is only materialized temporarily at the sandbox boundary;
 Runtime does not copy Skill resource bytes into its ObjectStore.
 
@@ -468,8 +468,7 @@ async with Runtime.open(
     ...
 ```
 
-Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only State handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only State, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeState snapshots include Runtime-owned objects only. Frozen Skill and MCP
-resources remain Asset-owned and are persisted as Asset version references in
+Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only State handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only State, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeState snapshots include Runtime-owned objects only. Skill and MCP resource bytes remain Asset-owned and are persisted as Asset version references in
 binding metadata; portable RuntimeState restore therefore requires the
 corresponding Asset history to remain available through the AssetStore supplied
 when the Runtime is reopened.
