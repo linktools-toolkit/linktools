@@ -14,18 +14,17 @@ from ..agent import (
     SemanticPin,
 )
 from ..capability import (
-    FrozenSkillResourceSource,
     SkillDefinition,
+    SkillSourceRef,
     SkillSourceRegistry,
-    SnapshotSkillResourceSource,
+    VersionedSkillResourceSource,
     validate_resource_path,
     validate_resource_tree,
 )
 from ..asset import AssetKey, AssetStoreReader
-from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue, canonical_sha256
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
-from ..storage import ObjectRef, ObjectStore, StorageRevision
 from ..workspace import StdioSandbox, Workspace
 
 
@@ -37,7 +36,6 @@ class _RuntimeBindingFreezer:
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         skill_sources: SkillSourceRegistry,
-        object_store: ObjectStore,
         *,
         workspace: Workspace | None,
         mcp_assets: "Mapping[str, AssetStoreReader] | None" = None,
@@ -51,7 +49,6 @@ class _RuntimeBindingFreezer:
         self._catalog = catalog
         self._compiler = compiler
         self._skill_sources = skill_sources
-        self._objects = object_store
         self._workspace = workspace
         self._mcp_assets = dict(mcp_assets or {})
 
@@ -72,7 +69,7 @@ class _RuntimeBindingFreezer:
         self,
         agent_id: str,
         *,
-        skill_snapshots: "dict[tuple[str, str], ObjectRef] | None" = None,
+        skill_snapshots: "dict[tuple[str, str], SkillSourceRef] | None" = None,
     ) -> AgentBindingSnapshot:
         """Freeze one Agent as a root execution target and its direct children."""
         definition = self._catalog.root_definition(agent_id)
@@ -85,7 +82,7 @@ class _RuntimeBindingFreezer:
         self,
         snapshot: AgentBindingSnapshot,
         *,
-        skill_snapshots: "dict[tuple[str, str], ObjectRef] | None" = None,
+        skill_snapshots: "dict[tuple[str, str], SkillSourceRef] | None" = None,
     ) -> AgentBindingSnapshot:
         """Freeze Skill resources and direct child bindings for one snapshot."""
         if not isinstance(snapshot, AgentBindingSnapshot):
@@ -115,7 +112,7 @@ class _RuntimeBindingFreezer:
         self,
         agent_id: str,
         *,
-        skill_snapshots: "dict[tuple[str, str], ObjectRef]",
+        skill_snapshots: "dict[tuple[str, str], SkillSourceRef]",
     ) -> AgentBindingSnapshot:
         definition = self._catalog.root_definition(agent_id)
         snapshot = self._compiler.bind_subagent(definition).snapshot
@@ -199,7 +196,7 @@ class _RuntimeBindingFreezer:
         self,
         snapshot: AgentBindingSnapshot,
         *,
-        skill_snapshots: "dict[tuple[str, str], ObjectRef]",
+        skill_snapshots: "dict[tuple[str, str], SkillSourceRef]",
     ) -> AgentBindingSnapshot:
         selected: list[SemanticPin] = []
         for pin in snapshot.selected:
@@ -213,54 +210,31 @@ class _RuntimeBindingFreezer:
             if source_ref is None:
                 selected.append(pin)
                 continue
-            if source_ref.snapshot is not None:
-                if source_ref.snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if source_ref.frozen:
                 selected.append(pin)
                 continue
             source = self._skill_sources.resolve(source_ref.source_id)
-            if not isinstance(source, SnapshotSkillResourceSource):
+            if not isinstance(source, VersionedSkillResourceSource):
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
                     safe_details={
-                        "kind": "skill_snapshot",
+                        "kind": "skill_version_source",
                         "skill_id": skill.id,
                         "source_id": source_ref.source_id,
                     },
                 )
             source_key = (source_ref.source_id, source_ref.root)
-            reference = skill_snapshots.get(source_key)
-            if reference is None:
-                revision = await source.current_revision(source_ref.root)
-                if not isinstance(revision, StorageRevision):
+            frozen_ref = skill_snapshots.get(source_key)
+            if frozen_ref is None:
+                frozen_ref = await source.freeze(source_ref.root)
+                if (
+                    frozen_ref.source_id != source_ref.source_id
+                    or frozen_ref.root != source_ref.root
+                    or not frozen_ref.frozen
+                ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                reference = await source.snapshot(
-                    source_ref.root,
-                    expected_revision=revision,
-                    object_store=self._objects,
-                )
-                skill_snapshots[source_key] = reference
-            frozen_source = FrozenSkillResourceSource(
-                source_ref.source_id,
-                {source_ref.root: reference},
-                self._objects,
-            )
-            resource_semantic_digest = await frozen_source.semantic_digest(
-                source_ref.root
-            )
-            runtime_reference = ObjectRef(
-                RUNTIME_OBJECT_STORE_ID,
-                reference.key,
-                reference.digest,
-                reference.size,
-            )
-            frozen_skill = SkillDefinition(
-                skill.spec,
-                source_ref.with_snapshot(
-                    runtime_reference,
-                    resource_semantic_digest,
-                ),
-            )
+                skill_snapshots[source_key] = frozen_ref
+            frozen_skill = SkillDefinition(skill.spec, frozen_ref)
             selected.append(
                 SemanticPin(
                     "skill",
