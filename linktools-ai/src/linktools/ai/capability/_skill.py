@@ -58,7 +58,7 @@ class SkillDefinition:
             }
             if self.source_ref.snapshot is not None:
                 source["snapshot"] = {
-                    "store_id": self.source_ref.snapshot.store_id,
+                    "store_id": "runtime",
                     "key": self.source_ref.snapshot.key,
                     "digest": self.source_ref.snapshot.digest,
                     "size": self.source_ref.snapshot.size,
