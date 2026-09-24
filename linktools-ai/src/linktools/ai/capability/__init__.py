@@ -26,7 +26,6 @@ from ._skill_source import (
     SkillResourceVersion,
     SkillResourceView,
     SkillSourceRef,
-    ResolvableSkillResourceSource,
     SkillSourceRegistry,
 )
 from ._subagent import SubagentCapability, SubagentDelegate
@@ -83,7 +82,6 @@ __all__ = [
     "SkillResourceVersion",
     "SkillResourceView",
     "SkillSourceRef",
-    "ResolvableSkillResourceSource",
     "SkillSourceRegistry",
     "SubagentDelegate",
     "TaskExpander",
