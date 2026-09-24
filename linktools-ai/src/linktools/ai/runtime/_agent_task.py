@@ -828,14 +828,14 @@ def _dependency_identity_payload(
         result.append(
             {
                 "node_id": dependency_id,
-                **state.semantic_payload,
+                **state.to_payload(),
             }
         )
     return result
 
 
 def _dependency_state_payload(state: TaskDependencyState) -> dict[str, JsonValue]:
-    return state.semantic_payload
+    return state.to_payload()
 
 
 def _canonical_json(value: object) -> str:

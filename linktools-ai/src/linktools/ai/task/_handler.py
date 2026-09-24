@@ -156,8 +156,7 @@ class TaskDependencyState:
         ):
             raise ValueError("task dependency error digest is invalid")
 
-    @property
-    def semantic_payload(self) -> "dict[str, JsonValue]":
+    def to_payload(self) -> "dict[str, JsonValue]":
         value: dict[str, JsonValue] = {"status": self.status.value}
         if self.status is TaskStatus.SUCCEEDED:
             value["result_digest"] = self.result_digest

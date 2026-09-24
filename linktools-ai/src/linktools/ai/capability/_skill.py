@@ -423,7 +423,7 @@ async def _verify_resource_semantics(
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if (
-        await source.semantic_digest(source_ref.root)
+        await source.resource_digest(source_ref.root)
         != source_ref.resource_digest
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

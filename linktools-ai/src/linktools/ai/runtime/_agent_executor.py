@@ -360,7 +360,7 @@ class AgentExecutor:
             source_ref = skill.source_ref
             if source_ref is None:
                 continue
-            if source_ref.resource_semantic_digest is None:
+            if source_ref.resource_digest is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if source_ref.source_id not in self._asset_sources:
                 raise AIError(
@@ -621,7 +621,7 @@ class AgentExecutor:
             "agent execution started: agent=%s definition=%s step=%s "
             "mode=%s planning=%s thinking=%s selected_tools=%s",
             definition.spec.id,
-            definition.digest,
+            definition.definition_digest,
             scope.step_run_id,
             scope.mode,
             scope.planning,
@@ -737,7 +737,7 @@ def _mcp_resource_bindings(
         policy = pin.contract.get("execution_policy")
         if not isinstance(policy, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        digest = pin.contract.get("resource_semantic_digest")
+        digest = pin.contract.get("resource_digest")
         if digest is not None and not isinstance(digest, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result[server.id] = _MCPResourceBinding(

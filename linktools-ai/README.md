@@ -119,7 +119,7 @@ async with Runtime.open(
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
 
-Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, generic Capability, Task, and TaskExpander do not maintain a second fingerprint/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
+Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, generic Capability, Task, and TaskExpander do not maintain a second hash/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 

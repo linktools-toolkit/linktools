@@ -1160,7 +1160,7 @@ def _output_contract_digest(record: ExecutionRecord) -> str:
     if isinstance(binding, TaskBindingSnapshot):
         return binding.output_contract_digest
     if isinstance(binding, AgentBindingSnapshot):
-        return restore_output(binding.output_mode, binding.output_schema).fingerprint
+        return restore_output(binding.output_mode, binding.output_schema).contract_digest
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
