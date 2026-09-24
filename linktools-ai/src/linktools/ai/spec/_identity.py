@@ -40,12 +40,12 @@ def capability_ref_payload(
     if kind == "task":
         ref_id = _text(contract.get("task_type"))
         revision = _positive_int(contract.get("task_version"))
-        if identity != f"{ref_id}@{revision}":
+        if identity != ref_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return _ref_payload(kind, ref_id, revision)
     ref_id = _text(contract.get("expander_id"))
     revision = _positive_int(contract.get("expander_version"))
-    if identity != f"{ref_id}@{revision}":
+    if identity != ref_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return _ref_payload(kind, ref_id, revision)
 

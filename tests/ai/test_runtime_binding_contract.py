@@ -181,7 +181,7 @@ def _versioned_skill(
     )
 
 
-def test_skill_asset_version_locator_is_not_semantic_identity() -> None:
+def test_skill_asset_version_locator_is_not_named_identity() -> None:
     first = _versioned_skill(source_id="source-a", revision=1, size=1)
     second = _versioned_skill(source_id="source-b", revision=9, size=99)
 
@@ -407,7 +407,7 @@ def test_current_binding_snapshot_has_minimal_wire_shape() -> None:
         "output_mode",
         "output_schema",
     }
-    assert snapshot.binding_digest == snapshot.binding_digest
+    assert len(snapshot.binding_digest) == 64
 
 
 def test_custom_output_materializes_from_durable_json_schema() -> None:

@@ -165,12 +165,12 @@ class CapabilityContribution(Generic[AppT]):
         if self.kind == "task":
             handler = cast("TaskNodeHandler[object]", self.value)
             task_type, task_version = _task_identity(handler)
-            if self.id != f"{task_type}@{task_version}":
+            if self.id != task_type:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.kind == "task_expander":
             expander = cast(TaskExpander, self.value)
             expander_id, expander_version = _expander_identity(expander)
-            if self.id != f"{expander_id}@{expander_version}":
+            if self.id != expander_id:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     @property
@@ -641,7 +641,7 @@ class CapabilityGroup(Generic[AppT]):
             reconcile,
         )
         task_type, task_version = _task_identity(registered)
-        identity = f"{task_type}@{task_version}"
+        identity = task_type
         contract: dict[str, JsonValue] = {
             "version": 1,
             "task_type": task_type,
@@ -651,7 +651,9 @@ class CapabilityGroup(Generic[AppT]):
             "reconcile": registered.reconcile is not None,
         }
         if any(
-            value.kind == "task" and value.id == identity
+            value.kind == "task"
+            and value.id == identity
+            and value.revision == task_version
             for value in self._contributions
         ):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -668,14 +670,16 @@ class CapabilityGroup(Generic[AppT]):
     def task_expander(self, expander: TaskExpander) -> TaskExpanderRef:
         """Register one pure application-owned TaskGraph expander version."""
         expander_id, expander_version = _expander_identity(expander)
-        identity = f"{expander_id}@{expander_version}"
+        identity = expander_id
         contract: dict[str, JsonValue] = {
             "version": 1,
             "expander_id": expander_id,
             "expander_version": expander_version,
         }
         if any(
-            value.kind == "task_expander" and value.id == identity
+            value.kind == "task_expander"
+            and value.id == identity
+            and value.revision == expander_version
             for value in self._contributions
         ):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
@@ -868,7 +872,7 @@ class CapabilityGroup(Generic[AppT]):
         generic = [item for item in snapshot_items if item.kind == "capability"]
         declarations = sorted(
             (item for item in snapshot_items if item.kind != "capability"),
-            key=lambda item: (item.kind, item.id),
+            key=lambda item: (item.kind, item.id, item.revision),
         )
         snapshot_contributions = tuple((*declarations, *generic))
         snapshot = CapabilityGroupSnapshot(
@@ -1008,7 +1012,7 @@ def contribution_contract(
         return contract
     if kind == "task" and isinstance(value, TaskNodeHandler):
         task_type, task_version = _task_identity(value)
-        if identity != f"{task_type}@{task_version}":
+        if identity != task_type:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return {
             "version": 1,
@@ -1019,7 +1023,7 @@ def contribution_contract(
         }
     if kind == "task_expander" and isinstance(value, TaskExpander):
         expander_id, expander_version = _expander_identity(value)
-        if identity != f"{expander_id}@{expander_version}":
+        if identity != expander_id:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return {
             "version": 1,
@@ -1132,9 +1136,9 @@ def _validate_revision(value: int) -> None:
 
 
 def _validate_unique(values: Sequence[CapabilityContribution[object]]) -> None:
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, int]] = set()
     for value in values:
-        identity = (value.kind, value.id)
+        identity = (value.kind, value.id, value.revision)
         if identity in seen:
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         seen.add(identity)

@@ -470,9 +470,13 @@ async def test_task_handler_versions_are_exact_and_reserved_namespace_is_closed(
     group.task(v2, effect="none")
     snapshot = await group.snapshot()
 
-    assert {(item.kind, item.id) for item in snapshot.contributions} == {
-        ("task", "example.echo@1"),
-        ("task", "example.echo@2"),
+    assert {
+        (item.kind, item.id, item.revision)
+        for item in snapshot.contributions
+        if item.kind == "task"
+    } == {
+        ("task", "example.echo", 1),
+        ("task", "example.echo", 2),
     }
     with pytest.raises(AIError) as duplicate:
         group.task(TaskFunction[None]("example.echo", 1, _echo_task))
