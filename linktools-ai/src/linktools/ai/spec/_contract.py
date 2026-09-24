@@ -110,8 +110,6 @@ def canonical_selectors(
         elif raw.startswith("mcp__") or ("*" in raw and not workspace_selector):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, f"{field_name} contains an invalid selector")
         selectors.add(selector)
-    if has_all:
-        return ("*",)
     if mcp:
         wildcard_servers = {
             parsed[0]
@@ -128,7 +126,8 @@ def canonical_selectors(
                 or parsed[1] is None
             )
         }
-    return tuple(sorted(selectors))
+    ordered = tuple(sorted(selectors))
+    return ("*", *ordered) if has_all else ordered
 
 
 def _encode_selector_component(value: str) -> str:
