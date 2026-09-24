@@ -781,7 +781,7 @@ async def test_mcp_resource_freeze_rejects_selected_asset_version_race() -> None
 @pytest.mark.parametrize(
     "paths", (("a/./b.py",), ("a//b.py",), ("../escape.py",), ("lib", "lib/helper.py"))
 )
-@pytest.mark.parametrize("boundary", ("freeze", "materialization"))
+@pytest.mark.parametrize("boundary", ("resolution", "materialization"))
 async def test_mcp_resource_versions_reject_unmaterializable_tree(
     paths: tuple[str, ...],
     boundary: str,
@@ -795,7 +795,7 @@ async def test_mcp_resource_versions_reject_unmaterializable_tree(
         for key in keys:
             await store.put(key, b"data")
         with pytest.raises(AIError) as raised:
-            if boundary == "freeze":
+            if boundary == "resolution":
                 await _resolve_mcp_resource_versions(store, root, ())
             else:
                 versions = await store.resolve_versions(keys)
@@ -824,7 +824,7 @@ async def test_mcp_resource_versions_materialize_deleted_current_assets() -> Non
         resource = AssetKey("mcp", "server/assets/script.py")
         helper = AssetKey("mcp", "server/assets/lib/helper.py")
         root = AssetKey("mcp", "server/assets")
-        await store.put(resource, b"print('frozen')\n")
+        await store.put(resource, b"print('versioned')\n")
         await store.put(helper, b"VALUE = 42\n")
         versions, digest = await _resolve_mcp_resource_versions(
             store,
@@ -852,7 +852,7 @@ async def test_mcp_resource_versions_materialize_deleted_current_assets() -> Non
         )
 
         assert (Path(directory.name) / "script.py").read_bytes() == (
-            b"print('frozen')\n"
+            b"print('versioned')\n"
         )
         assert (Path(directory.name) / "lib/helper.py").read_bytes() == b"VALUE = 42\n"
     finally:
