@@ -65,6 +65,37 @@ def _request(graph: TaskGraph) -> TaskGraphRequest:
     )
 
 
+def test_task_graph_topology_is_lexical_and_input_order_independent() -> None:
+    first = TaskGraph(
+        "first",
+        (
+            TaskNode("join", dependencies=("a", "b")),
+            TaskNode("z"),
+            TaskNode("b"),
+            TaskNode("a"),
+            TaskNode("tail", dependencies=("join",)),
+        ),
+    )
+    second = TaskGraph(
+        "second",
+        (
+            TaskNode("a"),
+            TaskNode("tail", dependencies=("join",)),
+            TaskNode("b"),
+            TaskNode("z"),
+            TaskNode("join", dependencies=("a", "b")),
+        ),
+    )
+
+    assert first.topological_order() == second.topological_order() == (
+        "a",
+        "b",
+        "join",
+        "tail",
+        "z",
+    )
+
+
 @pytest.mark.asyncio
 async def test_task_admission_starts_contiguous_durable_event_history() -> None:
     state = RuntimeState.in_memory()
