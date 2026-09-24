@@ -247,7 +247,7 @@ class _PinnedSkillVersionLoader:
             CapabilityContribution.from_declaration(
                 SkillDefinition(
                     SkillSpec("review", "review"),
-                    SkillSourceRef(context.group_id, "review").with_versions(
+                    SkillSourceRef(context.group_id, "review").with_asset_versions(
                         (
                             SkillResourceVersion(
                                 "guide.md",
