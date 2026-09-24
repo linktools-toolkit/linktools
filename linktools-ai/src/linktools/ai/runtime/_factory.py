@@ -33,7 +33,7 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..observe import Metrics
 from ..spec import AgentSpec, MCPServerSpec
-from ..storage import ObjectStore, PayloadPolicy, StorageRevision
+from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
     LocalRepositoryInstructionResolver,
@@ -148,17 +148,10 @@ async def compose_runtime_components(
     try:
         frozen: list[CapabilityContribution[object]] = []
         mcp_assets: dict[str, AssetStoreReader] = {}
-        mcp_revisions: dict[str, StorageRevision] = {}
-        asset_sources: dict[str, tuple[AssetStoreReader, StorageRevision]] = {}
         for group in groups:
             values = group.contributions
             frozen.extend(values)
             reader = group.asset_reader
-            source_revision = group.source_revision
-            if reader is not None:
-                if not isinstance(source_revision, StorageRevision):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                asset_sources[group.group_id] = (reader, source_revision)
             resource_mcp = tuple(
                 candidate
                 for candidate in values
@@ -179,7 +172,6 @@ async def compose_runtime_components(
             if reader is not None:
                 for candidate in resource_mcp:
                     mcp_assets[candidate.id] = reader
-                    mcp_revisions[candidate.id] = source_revision
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -294,8 +286,6 @@ async def compose_runtime_components(
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
             mcp_assets=mcp_assets,
-            asset_sources=asset_sources,
-            mcp_revisions=mcp_revisions,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
             object_key_factory=object_key_factory,
@@ -483,8 +473,6 @@ async def _build_local_components(
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
     mcp_assets: Mapping[str, AssetStoreReader],
-    asset_sources: Mapping[str, tuple[AssetStoreReader, StorageRevision]],
-    mcp_revisions: Mapping[str, StorageRevision],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
@@ -534,8 +522,6 @@ async def _build_local_components(
             state.object_store(RuntimeDomain.EXECUTION),
             workspace=workspace,
             mcp_assets=mcp_assets,
-            asset_sources=asset_sources,
-            mcp_revisions=mcp_revisions,
         )
         execution = DefaultExecutionService(
             state.execution,
