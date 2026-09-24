@@ -190,7 +190,7 @@ async def test_workspace_store_loads_kind_scoped_declarations(tmp_path) -> None:
     store = AssetStore(StorageOverlay(source))
     await store.initialize()
 
-    frozen = await CapabilityGroup("workspace", assets=store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).snapshot()
 
     assert [(item.kind, item.id) for item in frozen.contributions] == [
         ("agent", "default"),
