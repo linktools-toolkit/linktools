@@ -181,18 +181,19 @@ consistent local package tree. The declaration filename is loader-defined; it
 does not need to be `SKILL.md`. This allows Skill scripts to be invoked by
 absolute path without letting a single file symlink redefine the package root.
 If an overlay mixes resource origins, the Skill is exposed as virtual instead
-of claiming a partial local tree. Durable executions continue to use frozen
-Skill resource snapshots and materialize them into the execution sandbox when
-a filesystem path is required.
+of claiming a partial local tree. Durable executions pin immutable Asset version references for Skill resources
+and read those exact historical versions when needed. A filesystem path is only
+materialized temporarily at the sandbox boundary; Runtime does not copy Skill
+resource bytes into its ObjectStore.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
-value starts with `resource:` then name files below that root. Runtime freezes
-and verifies the selected AssetStore tree against the GroupSnapshot revision,
-rejects absolute paths, traversal, and missing files, and materializes the
-frozen files for the MCP process. After the source changes, new executions
-that need those resources fail with `SNAPSHOT_CONFLICT`; existing executions
-keep using their frozen bytes.
+value starts with `resource:` then name files below that root. Runtime resolves the selected resource files to immutable Asset version
+references, rejects absolute paths, traversal, and missing files, and reads
+those exact historical versions when materializing the temporary MCP process
+directory. Asset updates after the CapabilityGroup freeze do not alter that
+frozen declaration set; a later CapabilityGroup freeze sees the newer Asset
+versions. Runtime does not persist a second copy of MCP resource bytes.
 Without `resource_root`, existing argument strings keep their original
 meaning.
 
@@ -464,7 +465,11 @@ async with Runtime.open(
     ...
 ```
 
-Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only State handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only State, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. Asset-backed MCP resource snapshots and frozen Workspace inputs remain reachable through the same RuntimeState object-reference traversal and restore closure.
+Built-in Runtime state supports in-memory, filesystem, SQLite, and SQL composition used by the Runtime persistence layer. State domains keep their existing ownership, transaction, recovery, and retention rules; `Runtime.open()` consumes the state object instead of exposing duplicate storage-root arguments. Offline export requires a caller-owned `SnapshotExclusiveGuard` that quiesces related writers and object cleanup; a read-only State handle alone is not that boundary. The supported archive flow is: quiesce writers and object cleanup, export through a read-only State, restore into an empty staging root, verify required history and object references, then let the application publish that staging root. `restore_snapshot()` restores data but is not itself an atomic publication primitive. RuntimeState snapshots include Runtime-owned objects only. Frozen Skill and MCP
+resources remain Asset-owned and are persisted as Asset version references in
+binding metadata; portable RuntimeState restore therefore requires the
+corresponding Asset history to remain available through the AssetStore supplied
+when the Runtime is reopened.
 
 SQLite-backed Runtime state supports the built-in durable TaskGraph scheduler without a SQLite-specific launcher or an external lock. Normal internal Task optimistic-CAS races are reread and converged by the Task domain. Durable ToolOperation terminal persistence is also lease-aware: a same-lease heartbeat racing terminal persistence is reconciled without replaying the tool effect. Genuine ownership, fence, idempotency, tool-result, effect-unknown, integrity, and storage errors remain observable. A newly created local path-backed SQLite state initializes its own Runtime and `ai_objects` schema; an existing SQLite database is only validated and is never implicitly migrated or repaired. When `object_store` is omitted, durable SQLite Runtime objects are stored in the same database through the built-in `ai_objects` and `ai_object_chunks` tables. An explicitly supplied ObjectStore remains available when object payloads should live outside SQLite. External SQL backends still require explicit schema provisioning/migration. Process workers must initialize their own Runtime and SQL engine inside the worker process; initialized Runtime, engine, session, or connection objects must not be reused after `fork()`.
 
@@ -480,7 +485,8 @@ request context projection; it never rewrites the raw transcript.
 
 Workspace has no independent persistent identity. `Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Runtime.open()` / `RuntimeState`.
 
-Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime state consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the frozen execution inputs and Skill resource snapshots. A separate `Runtime.restore()` migration step is not required.
+Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime state consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the frozen execution inputs and
+Asset-version-pinned Skill resources. A separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics
 
