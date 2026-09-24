@@ -102,6 +102,16 @@ async def _put_object(
     return ObjectRef(store.store_id, stat.key, stat.digest, stat.size)
 
 
+def test_skill_wildcard_allows_preload_outside_explicit_requirements() -> None:
+    spec = AgentSpec(
+        "agent",
+        allow_skills=("*", "required"),
+        preload_skills=("preloaded",),
+    )
+    assert spec.allow_skills == ("*", "required")
+    assert spec.preload_skills == ("preloaded",)
+
+
 def test_mcp_selectors_round_trip_logical_names() -> None:
     server_id = "审计/security"
     tool_name = "scan:files/%*__v2"
