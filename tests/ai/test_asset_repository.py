@@ -10,6 +10,7 @@ from linktools.ai.asset import (
     AssetKey,
     AssetStore,
     AssetStoreReader,
+    AssetVersionRef,
     InMemoryAssetBackend,
 )
 from linktools.ai.capability import (
@@ -17,6 +18,7 @@ from linktools.ai.capability import (
     CapabilityGroup,
     CapabilityLoadContext,
     SkillDefinition,
+    SkillResourceVersion,
     SkillSourceRef,
 )
 from linktools.ai.capability._group import (
@@ -25,7 +27,11 @@ from linktools.ai.capability._group import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec, SkillSpec, SkillSpecCodec
-from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StorageOverlay
+from linktools.ai.storage import (
+    InMemoryObjectStore,
+    StorageEntryRevision,
+    StorageOverlay,
+)
 
 
 async def _store() -> AssetStore:
@@ -82,6 +88,25 @@ async def test_group_snapshot_exposes_only_read_only_asset_access() -> None:
     with pytest.raises(AIError) as error:
         await reader.get(key)
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_asset_version_ref_reads_exact_historical_content() -> None:
+    store = await _store()
+    key = AssetKey("custom", "file")
+    try:
+        await store.put(key, b"first")
+        first = (await store.resolve_versions((key,)))[0]
+        await store.put(key, b"second")
+        second = (await store.resolve_versions((key,)))[0]
+
+        assert first != second
+        assert await store.read_versions((first, second)) == (
+            b"first",
+            b"second",
+        )
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -210,7 +235,7 @@ async def test_custom_loader_cannot_bind_skill_resources_to_another_group() -> N
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
-class _PinnedSkillSnapshotLoader:
+class _PinnedSkillVersionLoader:
     async def load(
         self,
         context: CapabilityLoadContext,
@@ -219,10 +244,21 @@ class _PinnedSkillSnapshotLoader:
             CapabilityContribution.from_declaration(
                 SkillDefinition(
                     SkillSpec("review", "review"),
-                    SkillSourceRef(
-                        context.group_id,
-                        "review",
-                        ObjectRef("runtime", "snapshot", "0" * 64, 1),
+                    SkillSourceRef(context.group_id, "review").with_versions(
+                        (
+                            SkillResourceVersion(
+                                "guide.md",
+                                AssetVersionRef(
+                                    AssetKey("skill", "review/guide.md"),
+                                    "source",
+                                    StorageEntryRevision(1),
+                                    "0" * 64,
+                                    1,
+                                ),
+                            ),
+                        ),
+                        "1" * 64,
+                        sandbox_materialize=False,
                     ),
                 )
             ),
@@ -230,10 +266,10 @@ class _PinnedSkillSnapshotLoader:
 
 
 @pytest.mark.asyncio
-async def test_custom_loader_cannot_prebind_skill_snapshot() -> None:
+async def test_custom_loader_cannot_prebind_skill_versions() -> None:
     store = await _store()
     group = CapabilityGroup("application", assets=store)
-    group.loader("skill", _PinnedSkillSnapshotLoader())
+    group.loader("skill", _PinnedSkillVersionLoader())
 
     with pytest.raises(AIError) as error:
         await group.freeze()
