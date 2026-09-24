@@ -367,7 +367,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         resolver = _RuntimeBindingResolver(
             fixture.catalog,
             fixture.compiler,
-                workspace=None,
+            workspace=None,
             mcp_assets={"server": ("application", store)},
         )
         await store.put(resource, b"print('updated')")
