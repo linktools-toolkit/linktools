@@ -37,7 +37,7 @@ from ..storage import (
     VersionedStorage,
 )
 from ..storage import ObjectRef, ObjectStore, read_object
-from ._domain import AssetBackend, AssetInfo, AssetKey, AssetVersionRef
+from ._domain import AssetInfo, AssetKey, AssetVersionRef
 
 _logger = environ.get_logger("ai.asset.store")
 _SNAPSHOT_VERSION = 1
@@ -389,9 +389,7 @@ class AssetStore:
             if location is None or location.info.status is not StorageEntryStatus.NORMAL:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             backend = location.backend
-            if not isinstance(backend, AssetBackend) or not isinstance(
-                backend, VersionedStorage
-            ):
+            if not isinstance(backend, VersionedStorage):
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             info = location.info
             result.append(
@@ -426,8 +424,6 @@ class AssetStore:
                 if len(matches) != 1:
                     raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
                 backend = matches[0]
-            if not isinstance(backend, AssetBackend):
-                raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
             if not isinstance(backend, VersionedStorage):
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             value = await backend.get_at_revision(ref.key, ref.revision)
