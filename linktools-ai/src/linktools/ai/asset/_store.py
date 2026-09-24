@@ -456,6 +456,8 @@ class AssetStore:
         """Create a read-only AssetStore backed only by a snapshot manifest."""
         if not isinstance(ref, ObjectRef):
             raise TypeError("asset snapshot reference is invalid")
+        if ref.store_id != object_store.store_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         return cast(
             "AssetStore",
             _SnapshotAssetStore(ref, object_store),
