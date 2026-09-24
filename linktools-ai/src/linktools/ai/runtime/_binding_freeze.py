@@ -38,7 +38,7 @@ class _RuntimeBindingFreezer:
         skill_sources: SkillSourceRegistry,
         *,
         workspace: Workspace | None,
-        mcp_assets: "Mapping[str, AssetStoreReader] | None" = None,
+        mcp_assets: "Mapping[str, tuple[str, AssetStoreReader]] | None" = None,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -149,10 +149,11 @@ class _RuntimeBindingFreezer:
                 selected.append(pin)
                 continue
             frozen_versions = None
+            resource_source_id = None
             resource_semantic_digest = None
             if server.resource_root is not None:
-                store = self._mcp_assets.get(server.id)
-                if store is None:
+                asset_source = self._mcp_assets.get(server.id)
+                if asset_source is None:
                     raise AIError(
                         ErrorCode.CAPABILITY_REQUIRED_MISSING,
                         safe_details={
@@ -160,6 +161,7 @@ class _RuntimeBindingFreezer:
                             "server_id": server.id,
                         },
                     )
+                resource_source_id, store = asset_source
                 frozen_versions, resource_semantic_digest = (
                     await _resolve_mcp_resource_versions(
                         store,
@@ -176,6 +178,7 @@ class _RuntimeBindingFreezer:
                     codec.to_frozen_payload(
                         server,
                         frozen_versions,
+                        resource_source_id=resource_source_id,
                         resource_semantic_digest=resource_semantic_digest,
                         execution_policy=execution_policy,
                     ),
