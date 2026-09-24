@@ -289,15 +289,34 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
 
     workspace = Workspace.load(tmp_path)
     snapshot = await CapabilityGroup("workspace", workspace=workspace).freeze()
-    spec = AgentSpec("agent", allow_tools=("new_tool",))
-    compiler = AgentCompiler(
-        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
-        candidates=snapshot.contributions,
-        agents={"agent": spec},
-    )
-    with pytest.raises(AIError) as error:
-        compiler.compile(spec)
-    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    for selectors in (("new_tool",), ("*", "new_tool")):
+        spec = AgentSpec("agent", allow_tools=selectors)
+        compiler = AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+            candidates=snapshot.contributions,
+            agents={"agent": spec},
+        )
+        with pytest.raises(AIError) as error:
+            compiler.compile(spec)
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+    for field in ("allow_skills", "allow_subagents", "allow_capabilities"):
+        kwargs = {
+            "allow_tools": (),
+            "allow_skills": (),
+            "allow_subagents": (),
+            "allow_capabilities": (),
+            field: ("*", "missing"),
+        }
+        spec = AgentSpec("agent", **kwargs)
+        compiler = AgentCompiler(
+            model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+            candidates=(),
+            agents={"agent": spec},
+        )
+        with pytest.raises(AIError) as error:
+            compiler.compile(spec)
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     empty = AgentSpec("agent", allow_tools=())
     empty_compiler = AgentCompiler(
