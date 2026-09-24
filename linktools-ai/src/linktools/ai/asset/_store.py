@@ -34,9 +34,10 @@ from ..storage import (
     StorageOwnedInfo,
     StorageWriteState,
     VersionSummary,
+    VersionedStorage,
 )
 from ..storage import ObjectRef, ObjectStore, read_object
-from ._domain import AssetInfo, AssetKey
+from ._domain import AssetBackend, AssetInfo, AssetKey, AssetVersionRef
 
 _logger = environ.get_logger("ai.asset.store")
 _SNAPSHOT_VERSION = 1
@@ -66,6 +67,16 @@ class AssetStoreReader(Protocol):
     ) -> "tuple[Path | None, ...]": ...
 
     async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]": ...
+
+    async def resolve_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[AssetVersionRef, ...]": ...
+
+    async def read_versions(
+        self,
+        refs: Sequence[AssetVersionRef],
+    ) -> "tuple[bytes, ...]": ...
 
     async def snapshot(
         self,
@@ -346,6 +357,67 @@ class AssetStore:
                 key=lambda info: (info.key.kind, info.key.id),
             )
         )
+
+    async def resolve_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> "tuple[AssetVersionRef, ...]":
+        """Resolve current effective Assets to immutable version references."""
+        self._ensure_ready()
+        requested = tuple(keys)
+        locations = await self._storage.locate_many(requested)
+        result: list[AssetVersionRef] = []
+        for key, location in zip(requested, locations, strict=True):
+            if location is None or location.info.status is not StorageEntryStatus.NORMAL:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            backend = location.backend
+            if not isinstance(backend, AssetBackend) or not isinstance(
+                backend, VersionedStorage
+            ):
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            info = location.info
+            result.append(
+                AssetVersionRef(
+                    key,
+                    info.root_digest,
+                    info.revision,
+                    info.etag,
+                    info.size,
+                )
+            )
+        return tuple(result)
+
+    async def read_versions(
+        self,
+        refs: Sequence[AssetVersionRef],
+    ) -> "tuple[bytes, ...]":
+        """Read exact historical Asset versions and verify their integrity."""
+        self._ensure_ready()
+        values: list[bytes] = []
+        for ref in refs:
+            if not isinstance(ref, AssetVersionRef):
+                raise TypeError("refs must contain AssetVersionRef values")
+            backend = next(
+                (
+                    candidate
+                    for candidate in self._storage.backends
+                    if isinstance(candidate, AssetBackend)
+                    and candidate.root.digest == ref.source_id
+                ),
+                None,
+            )
+            if backend is None:
+                raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+            if not isinstance(backend, VersionedStorage):
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            value = await backend.get_at_revision(ref.key, ref.revision)
+            if value is None:
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            data = bytes(value)
+            if len(data) != ref.size or hashlib.sha256(data).hexdigest() != ref.etag:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            values.append(data)
+        return tuple(values)
 
     async def list_info_with_owners(
         self,
