@@ -23,22 +23,28 @@ from linktools.ai.capability import (
     CapabilityGroup,
     FrozenSkillResourceSource,
     SkillCapability,
+    SkillResourceVersion,
     SkillDefinition,
     SkillSourceRef,
     SkillSourceRegistry,
     tool_semantic_metadata,
     validate_tool_semantic_metadata,
 )
-from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
+from linktools.ai.asset import (
+    AssetKey,
+    AssetStore,
+    AssetVersionRef,
+    InMemoryAssetBackend,
+)
 from linktools.ai.core import canonical_json_bytes, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime._binding_freeze import _snapshot_mcp_resources
+from linktools.ai.runtime._binding_freeze import _resolve_mcp_resource_versions
 from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
     _FrozenMCPResources,
-    _materialize_resource_snapshot,
+    _materialize_resource_versions,
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -65,6 +71,7 @@ from linktools.ai.spec import (
 from linktools.ai.storage import (
     InMemoryObjectStore,
     ObjectRef,
+    StorageEntryRevision,
     StorageOverlay,
     StorageRevision,
 )
@@ -496,7 +503,7 @@ def test_durable_spec_readers_ignore_additive_fields() -> None:
     assert mcp_codec.from_frozen_payload(frozen_payload) == (server, None)
 
 
-def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() -> None:
+def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
     codec = MCPServerSpecCodec()
     server = MCPServerSpec(
         "mcp",
@@ -504,30 +511,40 @@ def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() ->
         ("resource:script.py",),
         AssetKey("mcp", "server"),
     )
-    declaration = codec.to_payload(server)
-    assert declaration["version"] == 1
-    assert codec.from_payload(declaration) == server
+    key = AssetKey("mcp", "server/script.py")
+    first_ref = AssetVersionRef(
+        key,
+        "source-a",
+        StorageEntryRevision(1),
+        "a" * 64,
+        1,
+    )
+    second_ref = AssetVersionRef(
+        key,
+        "source-b",
+        StorageEntryRevision(9),
+        "a" * 64,
+        2,
+    )
 
     first = codec.to_frozen_payload(
         server,
-        ObjectRef("runtime", "v1/asset-snapshot/one", "a" * 64, 1),
+        (first_ref,),
         resource_semantic_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
     second = codec.to_frozen_payload(
         server,
-        ObjectRef("runtime", "v1/asset-snapshot/two", "a" * 64, 2),
+        (second_ref,),
         resource_semantic_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
-    assert first["version"] == 1
+
     assert first["args"] is None
     assert first["frozen_args"] == ["resource:script.py"]
-    restored, reference = codec.from_frozen_payload(first)
+    restored, versions = codec.from_frozen_payload(first)
     assert restored == server
-    assert reference == ObjectRef(
-        "runtime", "v1/asset-snapshot/one", "a" * 64, 1
-    )
+    assert versions == (first_ref,)
     assert capability_identity_payload("mcp", server.id, first) == (
         capability_identity_payload("mcp", server.id, second)
     )
@@ -535,125 +552,115 @@ def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() ->
         codec.from_payload(first)
     assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
 
-    with pytest.raises(AIError) as wrong_owner:
-        codec.to_frozen_payload(
-            server,
-            ObjectRef("other", "v1/asset-snapshot/two", "a" * 64, 1),
-            resource_semantic_digest="d" * 64,
-            execution_policy={"version": 1, "boundary": "host-stdio"},
-        )
-    assert wrong_owner.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
 
 @pytest.mark.asyncio
-async def test_skill_resource_digest_tracks_behavior_not_manifest_metadata() -> None:
-    objects = InMemoryObjectStore("runtime")
-    content = b"\x00\xffbinary"
-    content_digest = hashlib.sha256(content).hexdigest()
-    await _put_object(objects, "resources/script", content)
-
-    def manifest(
-        *,
-        revision: str,
-        mode: int = 0o111,
-        sandbox_materialize: bool = True,
-        body: bytes = content,
-        content_key: str = "resources/script",
-        extra: bool = False,
-    ) -> dict[str, object]:
-        resource_digest = hashlib.sha256(body).hexdigest()
-        payload: dict[str, object] = {
-            "kind": "skill-source-snapshot",
-            "format_version": 1,
-            "source_id": "application",
-            "root": "review",
-            "revision": revision,
-            "sandbox_materialize": sandbox_materialize,
-            "resources": [
-                {
-                    "path": "scripts/run.bin",
-                    "mode": mode,
-                    "content": {
-                        "key": content_key,
-                        "digest": resource_digest,
-                        "size": len(body),
-                    },
-                }
-            ],
-        }
-        if extra:
-            payload["storage_metadata"] = {"writer": "fixture"}
-        return payload
-
-    original = await _put_object(
-        objects,
-        "manifests/original",
-        canonical_json_bytes(manifest(revision="revision-1")),
-    )
-    revised = await _put_object(
-        objects,
-        "manifests/revised",
-        canonical_json_bytes(
-            manifest(revision="revision-2", extra=True)
-        ),
-    )
-    non_executable = await _put_object(
-        objects,
-        "manifests/non-executable",
-        canonical_json_bytes(
-            manifest(revision="revision-2", mode=0)
-        ),
-    )
-    not_materialized = await _put_object(
-        objects,
-        "manifests/not-materialized",
-        canonical_json_bytes(
-            manifest(
-                revision="revision-2",
-                sandbox_materialize=False,
-            )
-        ),
-    )
-    await _put_object(objects, "resources/changed", b"changed")
-    changed = await _put_object(
-        objects,
-        "manifests/changed",
-        canonical_json_bytes(
-            manifest(
-                revision="revision-2",
-                body=b"changed",
-                content_key="resources/changed",
-            )
-        ),
-    )
-
-    async def digest(reference: ObjectRef) -> str:
-        source = FrozenSkillResourceSource(
-            "application",
-            {"review": reference},
-            objects,
+async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        key = AssetKey("skill", "review/scripts/run.bin")
+        original = SkillSourceRef("application", "review").with_versions(
+            (
+                SkillResourceVersion(
+                    "scripts/run.bin",
+                    AssetVersionRef(
+                        key,
+                        "source-a",
+                        StorageEntryRevision(1),
+                        "a" * 64,
+                        1,
+                    ),
+                    0o111,
+                ),
+            ),
+            "f" * 64,
+            sandbox_materialize=True,
         )
-        return await source.semantic_digest("review")
 
-    first = await digest(original)
-    assert first == await digest(revised)
-    assert first != await digest(non_executable)
-    assert first != await digest(not_materialized)
-    assert first != await digest(changed)
-    assert first == canonical_sha256(
-        {
-            "version": 1,
-            "kind": "skill-resource-semantics",
-            "sandbox_materialize": True,
-            "files": [
-                {
-                    "path": "scripts/run.bin",
-                    "sha256": content_digest,
-                    "executable_bits": 0o111,
-                }
-            ],
-        }
-    )
+        async def digest(ref: SkillSourceRef) -> str:
+            source = FrozenSkillResourceSource(
+                "application",
+                {"review": ref},
+                store,
+            )
+            return await source.semantic_digest("review")
+
+        first = await digest(original)
+        relocated = SkillSourceRef("application", "review").with_versions(
+            (
+                SkillResourceVersion(
+                    "scripts/run.bin",
+                    AssetVersionRef(
+                        key,
+                        "source-b",
+                        StorageEntryRevision(9),
+                        "a" * 64,
+                        99,
+                    ),
+                    0o111,
+                ),
+            ),
+            first,
+            sandbox_materialize=True,
+        )
+        non_executable = SkillSourceRef("application", "review").with_versions(
+            (
+                SkillResourceVersion(
+                    "scripts/run.bin",
+                    relocated.resource_versions[0].asset,
+                    0,
+                ),
+            ),
+            "0" * 64,
+            sandbox_materialize=True,
+        )
+        not_materialized = SkillSourceRef("application", "review").with_versions(
+            relocated.resource_versions,
+            "0" * 64,
+            sandbox_materialize=False,
+        )
+        changed = SkillSourceRef("application", "review").with_versions(
+            (
+                SkillResourceVersion(
+                    "scripts/run.bin",
+                    AssetVersionRef(
+                        key,
+                        "source-a",
+                        StorageEntryRevision(2),
+                        "b" * 64,
+                        1,
+                    ),
+                    0o111,
+                ),
+            ),
+            "0" * 64,
+            sandbox_materialize=True,
+        )
+
+        assert first == await digest(relocated)
+        with pytest.raises(AIError):
+            await digest(non_executable)
+        with pytest.raises(AIError):
+            await digest(not_materialized)
+        with pytest.raises(AIError):
+            await digest(changed)
+        assert first == canonical_sha256(
+            {
+                "version": 1,
+                "kind": "skill-resource-semantics",
+                "sandbox_materialize": True,
+                "files": [
+                    {
+                        "path": "scripts/run.bin",
+                        "sha256": "a" * 64,
+                        "executable_bits": 0o111,
+                    }
+                ],
+            }
+        )
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
@@ -661,27 +668,24 @@ async def test_mcp_resource_digest_is_stable_and_includes_binary_files() -> None
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    objects = InMemoryObjectStore("runtime")
     root = AssetKey("mcp", "server")
     binary = b"\x00\xffresource"
     try:
         await store.put(AssetKey("mcp", "server/data.bin"), binary)
         await store.put(AssetKey("mcp", "server/nested/guide.md"), b"guide")
-        first_ref, first_digest = await _snapshot_mcp_resources(
+        first_versions, first_digest = await _resolve_mcp_resource_versions(
             store,
             root,
             (),
-            object_store=objects,
         )
         await store.put(AssetKey("agent", "unrelated"), b"unrelated")
-        second_ref, second_digest = await _snapshot_mcp_resources(
+        second_versions, second_digest = await _resolve_mcp_resource_versions(
             store,
             root,
             (),
-            object_store=objects,
         )
 
-        assert first_ref != second_ref
+        assert first_versions == second_versions
         assert first_digest == second_digest
         assert first_digest == canonical_sha256(
             {
@@ -699,12 +703,12 @@ async def test_mcp_resource_digest_is_stable_and_includes_binary_files() -> None
                 ],
             }
         )
-        _, empty_digest = await _snapshot_mcp_resources(
+        empty_versions, empty_digest = await _resolve_mcp_resource_versions(
             store,
             AssetKey("mcp", "empty"),
             (),
-            object_store=objects,
         )
+        assert empty_versions == ()
         assert empty_digest == canonical_sha256(
             {
                 "version": 1,
@@ -721,36 +725,28 @@ class _RacingMCPAssetStore(AssetStore):
         super().__init__(StorageOverlay(backend, writer=backend))
         self._raced = False
 
-    async def snapshot(
+    async def resolve_versions(
         self,
         keys: Sequence[AssetKey],
-        *,
-        object_store: InMemoryObjectStore,
-        expected_revision: StorageRevision | None = None,
-    ) -> ObjectRef:
+    ) -> tuple[AssetVersionRef, ...]:
         if not self._raced:
             self._raced = True
-            await self.put(AssetKey("mcp", "unrelated"), b"changed")
-        return await super().snapshot(
-            keys,
-            object_store=object_store,
-            expected_revision=expected_revision,
-        )
+            await self.put(keys[0], b"changed")
+        return await super().resolve_versions(keys)
 
 
 @pytest.mark.asyncio
-async def test_mcp_resource_freeze_rejects_a_source_revision_race() -> None:
+async def test_mcp_resource_freeze_rejects_selected_asset_version_race() -> None:
     backend = InMemoryAssetBackend()
     store = _RacingMCPAssetStore(backend)
     await store.initialize()
-    await store.put(AssetKey("mcp", "server/tool.py"), b"print('ok')")
+    await store.put(AssetKey("mcp", "server/tool.py"), b"original")
     try:
         with pytest.raises(AIError) as error:
-            await _snapshot_mcp_resources(
+            await _resolve_mcp_resource_versions(
                 store,
                 AssetKey("mcp", "server"),
                 (),
-                object_store=InMemoryObjectStore("runtime"),
             )
         assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
     finally:
@@ -761,8 +757,8 @@ async def test_mcp_resource_freeze_rejects_a_source_revision_race() -> None:
 @pytest.mark.parametrize(
     "paths", (("a/./b.py",), ("a//b.py",), ("../escape.py",), ("lib", "lib/helper.py"))
 )
-@pytest.mark.parametrize("boundary", ("snapshot", "materialization"))
-async def test_mcp_resource_snapshot_rejects_unmaterializable_tree(
+@pytest.mark.parametrize("boundary", ("freeze", "materialization"))
+async def test_mcp_resource_versions_reject_unmaterializable_tree(
     paths: tuple[str, ...],
     boundary: str,
 ) -> None:
@@ -770,29 +766,23 @@ async def test_mcp_resource_snapshot_rejects_unmaterializable_tree(
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     try:
-        objects = InMemoryObjectStore("runtime")
         root = AssetKey("mcp", "server/assets")
         keys = tuple(AssetKey("mcp", f"server/assets/{path}") for path in paths)
         for key in keys:
             await store.put(key, b"data")
-        reference = (
-            await store.snapshot(keys, object_store=objects)
-            if boundary == "materialization"
-            else None
-        )
-        digest = "a" * 64
         with pytest.raises(AIError) as raised:
-            if boundary == "snapshot":
-                await _snapshot_mcp_resources(store, root, (), object_store=objects)
+            if boundary == "freeze":
+                await _resolve_mcp_resource_versions(store, root, ())
             else:
-                await _materialize_resource_snapshot(
+                versions = await store.resolve_versions(keys)
+                await _materialize_resource_versions(
                     MCPServerSpec("server", "python", (), root),
                     _FrozenMCPResources(
-                        reference,
-                        digest,
+                        versions,
+                        "a" * 64,
                         {"version": 1, "boundary": "host-stdio"},
                     ),
-                    objects,
+                    store,
                 )
         assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
@@ -800,23 +790,21 @@ async def test_mcp_resource_snapshot_rejects_unmaterializable_tree(
 
 
 @pytest.mark.asyncio
-async def test_mcp_resource_snapshot_materializes_deleted_source_bytes() -> None:
+async def test_mcp_resource_versions_materialize_deleted_current_assets() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
-    objects = InMemoryObjectStore("runtime")
     await store.initialize()
     directory = None
     try:
         resource = AssetKey("mcp", "server/assets/script.py")
+        helper = AssetKey("mcp", "server/assets/lib/helper.py")
         root = AssetKey("mcp", "server/assets")
         await store.put(resource, b"print('frozen')\n")
-        helper = AssetKey("mcp", "server/assets/lib/helper.py")
         await store.put(helper, b"VALUE = 42\n")
-        reference, digest = await _snapshot_mcp_resources(
+        versions, digest = await _resolve_mcp_resource_versions(
             store,
             root,
             ("resource:script.py",),
-            object_store=objects,
         )
         await store.delete(resource)
         await store.delete(helper)
@@ -827,14 +815,14 @@ async def test_mcp_resource_snapshot_materializes_deleted_source_bytes() -> None
             ("resource:script.py",),
             root,
         )
-        directory = await _materialize_resource_snapshot(
+        directory = await _materialize_resource_versions(
             server,
             _FrozenMCPResources(
-                reference,
+                versions,
                 digest,
                 {"version": 1, "boundary": "host-stdio"},
             ),
-            objects,
+            store,
         )
 
         assert (Path(directory.name) / "script.py").read_bytes() == (
