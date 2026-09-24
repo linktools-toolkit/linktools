@@ -13,7 +13,7 @@ from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
-    SemanticPin,
+    CapabilityPin,
 )
 from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
@@ -155,9 +155,9 @@ def _resolved_child(snapshot: AgentBindingSnapshot) -> AgentBindingSnapshot:
 
 def _skill_ref(child: AgentBindingSnapshot) -> SkillSourceRef:
     pin = next(item for item in child.selected if item.kind == "skill")
-    skill = SkillDefinition.from_semantic_contract(pin.contract)
+    skill = SkillDefinition.from_contract(pin.contract)
     assert skill.source_ref is not None
-    assert skill.source_ref.resource_semantic_digest is not None
+    assert skill.source_ref.resource_versions
     return skill.source_ref
 
 
@@ -226,9 +226,9 @@ async def test_task_capture_does_not_build_static_root_closure() -> None:
         capability_snapshot = await snapshots.capture(admission, graph)
 
         assert capability_snapshot.roots == {}
-        resolved_binding = capability_snapshot.bindings[fixture.binding.digest]
-        assert resolved_binding.binding_digest != fixture.binding.digest
-        assert _skill_ref(_resolved_child(resolved_binding)).resource_semantic_digest is not None
+        resolved_binding = capability_snapshot.bindings[fixture.binding.binding_digest]
+        assert resolved_binding.binding_digest != fixture.binding.binding_digest
+        assert _skill_ref(_resolved_child(resolved_binding)).resource_versions
     finally:
         await fixture.assets.close()
 
@@ -256,7 +256,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
         )
 
         started = await runtime._start_for_agent(
-            fixture.catalog.root_definition("parent").digest,
+            fixture.catalog.root_definition("parent").definition_digest,
             "prompt",
             files=(),
             output=None,
@@ -272,7 +272,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
         assert started.execution_id == "execution"
         assert execution.binding_snapshot is not None
         assert execution.binding_digest == execution.binding_snapshot.binding_digest
-        assert _skill_ref(_resolved_child(execution.binding_snapshot)).resource_semantic_digest is not None
+        assert _skill_ref(_resolved_child(execution.binding_snapshot)).resource_versions
     finally:
         await fixture.assets.close()
 
@@ -284,7 +284,7 @@ async def test_execution_binding_uses_selected_child_asset_versions() -> None:
         resolved = await fixture.resolver.resolve(fixture.binding)
 
         assert resolved.snapshot != fixture.binding.snapshot
-        assert _skill_ref(_resolved_child(resolved.snapshot)).resource_semantic_digest is not None
+        assert _skill_ref(_resolved_child(resolved.snapshot)).resource_versions
     finally:
         await fixture.assets.close()
 
@@ -388,7 +388,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         resource = AssetKey("mcp", "server/assets/script.py")
         await store.put(resource, b"print('ok')")
         codec = MCPServerSpecCodec()
-        pin = SemanticPin(
+        pin = CapabilityPin(
             "mcp",
             "server",
             codec.to_payload(
@@ -562,7 +562,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         await capabilities.capture(admission, graph)
         await state.task.admissions.admit(admission, graph)
         loaded = await capabilities.load(admission)
-        binding = loaded.bindings[fixture.binding.digest]
+        binding = loaded.bindings[fixture.binding.binding_digest]
         resolved_ref = _skill_ref(_resolved_child(binding))
     finally:
         await state.close()
@@ -604,7 +604,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
             agent_task_type="linktools.ai.agent",
         )
         loaded = await restored_capabilities.load(admission)
-        binding = loaded.bindings[fixture.binding.digest]
+        binding = loaded.bindings[fixture.binding.binding_digest]
         restored_ref = _skill_ref(_resolved_child(binding))
         assert restored_ref == resolved_ref
         assert await _read_skill(fixture, restored_ref) == b"original"
