@@ -229,11 +229,7 @@ class AgentCompiler:
                 )
                 candidate = CapabilityContribution("skill", pin.id, pin.fingerprint, value)
             elif pin.kind == "mcp":
-                value, _resource_snapshot = MCPServerSpecCodec().from_frozen_payload(
-                    cast("Mapping[str, object]", pin.contract)
-                )
                 candidate = CapabilityContribution.from_mcp_contract(
-                    value,
                     pin.contract,
                 )
             else:
