@@ -118,14 +118,6 @@ class SkillResourceSource(Protocol):
     async def read(self, root: str, path: str) -> bytes: ...
 
 
-@runtime_checkable
-class ResolvableSkillResourceSource(SkillResourceSource, Protocol):
-    @property
-    def asset_reader(self) -> AssetStoreReader: ...
-
-    async def resolve(self, root: str) -> SkillSourceRef: ...
-
-
 class LocalSkillResourceSource:
     def __init__(self, source_id: str, root: "str | Path") -> None:
         if not isinstance(source_id, str) or not source_id.strip():
@@ -599,7 +591,6 @@ __all__ = [
     "SkillLocation",
     "SkillResourceSource",
     "SkillResourceVersion",
-    "ResolvableSkillResourceSource",
     "SkillResourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
