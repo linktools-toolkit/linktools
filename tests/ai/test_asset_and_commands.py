@@ -165,6 +165,12 @@ def test_filesystem_asset_store_recovers_history_after_restart(tmp_path: Path) -
     asyncio.run(run())
 
 
+def test_storage_layer_reserves_primary_identity() -> None:
+    backend = InMemoryAssetBackend(AssetRoot("memory", "fallback", "fallback"))
+    with pytest.raises(ValueError):
+        StorageLayer("primary", backend)
+
+
 def test_asset_store_reads_effective_layer_owner() -> None:
     async def run() -> None:
         primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
