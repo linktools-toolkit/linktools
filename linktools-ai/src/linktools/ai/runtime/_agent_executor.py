@@ -104,6 +104,7 @@ from ..core import (
     ExecutionEventType,
     ExecutionMode,
     JsonValue,
+    RUNTIME_OBJECT_STORE_ID,
     PromptLimits,
     ThinkingValue,
     ToolOperationStatus,
@@ -360,15 +361,23 @@ class AgentExecutor:
             source_ref = skill.source_ref
             if source_ref is None or source_ref.snapshot is None:
                 continue
+            if source_ref.snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if self._skill_snapshot_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            physical_reference = ObjectRef(
+                self._skill_snapshot_store.store_id,
+                source_ref.snapshot.key,
+                source_ref.snapshot.digest,
+                source_ref.snapshot.size,
+            )
             roots = grouped.setdefault(source_ref.source_id, {})
             existing = roots.get(source_ref.root)
-            if existing is not None and existing != source_ref.snapshot:
+            if existing is not None and existing != physical_reference:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            roots[source_ref.root] = source_ref.snapshot
+            roots[source_ref.root] = physical_reference
         if not grouped:
             return self._skill_sources
-        if self._skill_snapshot_store is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         frozen = tuple(
             FrozenSkillResourceSource(
                 source_id,
