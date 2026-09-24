@@ -78,14 +78,6 @@ class AssetStoreReader(Protocol):
         refs: Sequence[AssetVersionRef],
     ) -> "tuple[bytes, ...]": ...
 
-    async def snapshot(
-        self,
-        keys: Sequence[AssetKey],
-        *,
-        object_store: ObjectStore,
-        expected_revision: "StorageRevision | None" = None,
-    ) -> ObjectRef: ...
-
 
 class AssetCacheAdapter:
     """Cache raw Asset file bytes using immutable metadata."""
