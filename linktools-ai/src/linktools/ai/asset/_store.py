@@ -68,6 +68,8 @@ class AssetStoreReader(Protocol):
 
     async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]": ...
 
+    async def version_snapshot(self) -> "tuple[AssetVersionRef, ...]": ...
+
     async def resolve_versions(
         self,
         keys: Sequence[AssetKey],
@@ -350,6 +352,30 @@ class AssetStore:
             )
         )
 
+    async def version_snapshot(self) -> "tuple[AssetVersionRef, ...]":
+        """Return current effective Asset version references in key order."""
+        self._ensure_ready()
+        infos = await self.metadata_snapshot()
+        locations = await self._storage.locate_many(tuple(info.key for info in infos))
+        refs: list[AssetVersionRef] = []
+        for info, location in zip(infos, locations, strict=True):
+            if (
+                location is None
+                or location.info != info
+                or location.info.status is not StorageEntryStatus.NORMAL
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            refs.append(
+                AssetVersionRef(
+                    info.key,
+                    location.layer,
+                    info.revision,
+                    info.etag,
+                    info.size,
+                )
+            )
+        return tuple(refs)
+
     async def resolve_versions(
         self,
         keys: Sequence[AssetKey],
@@ -371,7 +397,7 @@ class AssetStore:
             result.append(
                 AssetVersionRef(
                     key,
-                    info.root_digest,
+                    location.layer,
                     info.revision,
                     info.etag,
                     info.size,
@@ -389,15 +415,19 @@ class AssetStore:
         for ref in refs:
             if not isinstance(ref, AssetVersionRef):
                 raise TypeError("refs must contain AssetVersionRef values")
-            matches = tuple(
-                candidate
-                for candidate in self._storage.backends
-                if isinstance(candidate, AssetBackend)
-                and candidate.root.digest == ref.source_id
-            )
-            if len(matches) != 1:
+            if ref.source_id == "primary":
+                backend = self._storage.primary
+            else:
+                matches = tuple(
+                    layer.backend
+                    for layer in self._storage.layers
+                    if layer.id == ref.source_id
+                )
+                if len(matches) != 1:
+                    raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+                backend = matches[0]
+            if not isinstance(backend, AssetBackend):
                 raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
-            backend = matches[0]
             if not isinstance(backend, VersionedStorage):
                 raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
             value = await backend.get_at_revision(ref.key, ref.revision)
