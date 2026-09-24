@@ -743,6 +743,59 @@ class _SnapshotAssetStore(AssetStore):
             )
         )
 
+    async def local_paths(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> tuple[Path | None, ...]:
+        self._ensure_ready()
+        return tuple(None for _key in keys)
+
+    async def resolve_versions(
+        self,
+        keys: Sequence[AssetKey],
+    ) -> tuple[AssetVersionRef, ...]:
+        self._ensure_ready()
+        result: list[AssetVersionRef] = []
+        for key in keys:
+            info = self._entries.get(key)
+            if info is None or info.status is not StorageEntryStatus.NORMAL:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            result.append(
+                AssetVersionRef(
+                    key,
+                    "snapshot",
+                    info.revision,
+                    info.etag,
+                    info.size,
+                )
+            )
+        return tuple(result)
+
+    async def read_versions(
+        self,
+        refs: Sequence[AssetVersionRef],
+    ) -> tuple[bytes, ...]:
+        self._ensure_ready()
+        values: list[bytes] = []
+        for ref in refs:
+            if not isinstance(ref, AssetVersionRef):
+                raise TypeError("refs must contain AssetVersionRef values")
+            if ref.source_id != "snapshot":
+                raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+            info = self._entries.get(ref.key)
+            if (
+                info is None
+                or info.revision != ref.revision
+                or info.etag != ref.etag
+                or info.size != ref.size
+            ):
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            value = await self.get(ref.key)
+            if value is None:
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            values.append(value)
+        return tuple(values)
+
     async def list_info_with_owners(
         self,
         *,
