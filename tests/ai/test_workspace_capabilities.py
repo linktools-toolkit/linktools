@@ -202,6 +202,15 @@ def _semantic_contract(tool: object) -> dict[str, object]:
     }
 
 
+def test_workspace_constructor_normalizes_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    workspace = Workspace(Path("project"), {})
+    assert workspace.root == (tmp_path / "project").resolve()
+
+
 def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)

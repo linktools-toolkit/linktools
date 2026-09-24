@@ -15,6 +15,32 @@ from linktools.ai.workspace import (
 from linktools.ai.workspace import _bubblewrap
 
 
+@pytest.mark.asyncio
+async def test_session_workspace_paths_match_logical_contract(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed"
+    allowed.mkdir()
+    (allowed / "evidence.bin").write_bytes(b"evidence")
+    hidden = workspace / ".linktools"
+    hidden.mkdir()
+    (hidden / "secret.bin").write_bytes(b"secret")
+
+    session = object.__new__(_bubblewrap._BubblewrapSandboxSession)
+    session._state = "OPEN"
+    session._workspace_root = workspace
+    session._read_policy = ReadOnlySandboxPolicy(("allowed/**",))
+    session._hidden_paths = (".linktools",)
+
+    assert await session.canonicalize_path("./allowed//evidence.bin") == (
+        "allowed/evidence.bin"
+    )
+    assert await session.read_bytes("allowed/evidence.bin") == b"evidence"
+    with pytest.raises(AIError) as hidden_error:
+        await session.read_bytes(".linktools/secret.bin")
+    assert hidden_error.value.code is ErrorCode.AUTHORIZATION_DENIED
+
+
 @pytest.mark.parametrize(
     ("read_policy", "workspace_access"),
     (

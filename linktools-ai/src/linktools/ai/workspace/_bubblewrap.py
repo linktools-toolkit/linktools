@@ -31,6 +31,7 @@ from ._sandbox import (
     SandboxSession,
     SandboxStdioProcess,
     StdioSandbox,
+    normalize_workspace_input_path,
 )
 from ._paths import (
     validate_workspace_path,
@@ -279,6 +280,37 @@ class _BubblewrapSandboxSession:
         if resource_id not in self._resource_ids:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return self._resources.get(resource_id)
+
+    async def canonicalize_path(self, path: str) -> str:
+        """Normalize one logical Workspace path without applying operation policy."""
+        self._ensure_open_sync()
+        return normalize_workspace_input_path(path)
+
+    async def read_bytes(
+        self,
+        path: str,
+        *,
+        max_bytes: int | None = None,
+    ) -> bytes:
+        self._ensure_open_sync()
+        if max_bytes is not None and (
+            not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or max_bytes < 0
+        ):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        root = self._workspace_root
+        if root is None:
+            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+        normalized = normalize_workspace_input_path(path)
+        return await asyncio.to_thread(
+            _read_workspace_bytes,
+            root,
+            normalized,
+            read_policy=self._read_policy,
+            hidden_paths=self._hidden_paths,
+            max_bytes=max_bytes,
+        )
 
     async def open_stdio_process(
         self,
@@ -896,6 +928,63 @@ def _validate_resources(
 def _resource_guest_path(resource_id: str) -> str:
     digest = hashlib.sha256(resource_id.encode("utf-8")).hexdigest()[:24]
     return f"/skills/r{digest}"
+
+
+def _read_workspace_bytes(
+    root: Path,
+    path: str,
+    *,
+    read_policy: ReadOnlySandboxPolicy | None,
+    hidden_paths: tuple[str, ...],
+    max_bytes: int | None,
+) -> bytes:
+    if path == "." or _hidden_path_covers(hidden_paths, path):
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    if read_policy is not None:
+        try:
+            if not read_policy.allows(path):
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        except ValueError as error:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+    parts = PurePosixPath(path).parts
+    candidate = root.joinpath(*parts)
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    try:
+        if candidate.is_symlink() and read_policy is not None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        resolved = candidate.resolve(strict=True)
+    except AIError:
+        raise
+    except FileNotFoundError as error:
+        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+    except (OSError, RuntimeError) as error:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+    if not _inside(root, resolved):
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    relative = resolved.relative_to(root).as_posix()
+    if _hidden_path_covers(hidden_paths, relative):
+        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+    try:
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if max_bytes is None:
+            return resolved.read_bytes()
+        with resolved.open("rb") as stream:
+            value = stream.read(max_bytes + 1)
+        if len(value) > max_bytes:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return value
+    except AIError:
+        raise
+    except FileNotFoundError as error:
+        raise AIError(ErrorCode.STORAGE_NOT_FOUND) from error
+    except OSError as error:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
 
 def _stdio_execution_policy(

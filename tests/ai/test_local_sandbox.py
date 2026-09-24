@@ -23,6 +23,21 @@ from linktools.ai.workspace import (
 pytestmark = pytest.mark.asyncio
 
 
+async def test_canonicalize_path_does_not_apply_read_authorization(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "allowed").mkdir()
+    (tmp_path / "allowed" / "visible.py").write_text("ok", encoding="utf-8")
+    session = await LocalSandbox(
+        read_policy=ReadOnlySandboxPolicy(("allowed/*.py",))
+    ).open(root=tmp_path)
+    try:
+        assert await session.canonicalize_path("allowed") == "allowed"
+        assert "visible.py" in await session.list_directory("allowed")
+    finally:
+        await session.close()
+
+
 async def test_file_info_does_not_authorize_a_file_as_a_directory(tmp_path: Path) -> None:
     (tmp_path / "secret").write_text("private contents", encoding="utf-8")
     policy = ReadOnlySandboxPolicy(("secret/allowed.txt",))

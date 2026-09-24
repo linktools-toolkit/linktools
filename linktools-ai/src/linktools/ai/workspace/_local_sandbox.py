@@ -192,12 +192,9 @@ class _LocalSandboxSession:
         return frozenset(values)
 
     async def canonicalize_path(self, path: str) -> str:
+        """Normalize one logical Workspace path without applying operation policy."""
         def operation() -> str:
-            _target, display, _resource_key = self._read_target(
-                path,
-                allow_missing=True,
-            )
-            return display
+            return _normalize_path(path)
 
         return await self._run_sync(operation)
 

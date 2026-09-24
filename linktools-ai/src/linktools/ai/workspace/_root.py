@@ -146,6 +146,15 @@ class Workspace:
     policy: WorkspacePolicy = field(default_factory=WorkspacePolicy)
     sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.root, Path):
+            raise TypeError("workspace root must be a Path")
+        try:
+            root = self.root.expanduser().resolve()
+        except (OSError, RuntimeError) as error:
+            raise ValueError("workspace root is invalid") from error
+        object.__setattr__(self, "root", root)
+
     @property
     def storage_root(self) -> Path:
         return workspace_storage_root(self.root)
