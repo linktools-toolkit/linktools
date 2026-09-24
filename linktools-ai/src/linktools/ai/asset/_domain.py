@@ -6,7 +6,7 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, cast, runtime_checkable
 
 from ..core import JsonValue, validate_asset_kind
 from ..errors import AIError
@@ -49,6 +49,7 @@ class AssetVersionRef:
     revision: StorageEntryRevision
     etag: str
     size: int
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, AssetKey):
@@ -57,6 +58,7 @@ class AssetVersionRef:
             raise ValueError("asset version source_id must be non-empty")
         if not isinstance(self.revision, StorageEntryRevision):
             raise TypeError("asset version revision must be StorageEntryRevision")
+        object.__setattr__(self, "metadata", normalize_storage_metadata(self.metadata))
         if (
             not isinstance(self.etag, str)
             or len(self.etag) != 64
@@ -76,6 +78,7 @@ class AssetVersionRef:
             "revision": self.revision.value,
             "etag": self.etag,
             "size": self.size,
+            "metadata": dict(self.metadata),
         }
 
     @classmethod
@@ -90,6 +93,7 @@ class AssetVersionRef:
         revision = value.get("revision")
         etag = value.get("etag")
         size = value.get("size")
+        metadata = value.get("metadata", {})
         if (
             not isinstance(kind, str)
             or not isinstance(identity, str)
@@ -99,6 +103,7 @@ class AssetVersionRef:
             or not isinstance(etag, str)
             or isinstance(size, bool)
             or not isinstance(size, int)
+            or not isinstance(metadata, Mapping)
         ):
             raise ValueError("asset version payload is invalid")
         return cls(
@@ -107,6 +112,7 @@ class AssetVersionRef:
             StorageEntryRevision(revision),
             etag,
             size,
+            normalize_storage_metadata(cast(Mapping[str, JsonValue], metadata)),
         )
 
 
