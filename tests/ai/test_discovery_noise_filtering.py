@@ -337,17 +337,17 @@ async def test_virtual_skill_versions_ignore_unrelated_asset_changes() -> None:
     try:
         await store.put(AssetKey("skill", "review/references/rules.md"), b"rules")
         source = AssetSkillResourceSource("virtual", store)
-        first = await source.freeze("review")
+        first = await source.resolve("review")
 
         await store.put(AssetKey("agent", "unrelated"), b"agent")
         await store.put(AssetKey("skill", "other/reference.md"), b"other")
-        assert await source.freeze("review") == first
+        assert await source.resolve("review") == first
 
         await store.put(
             AssetKey("skill", "review/references/rules.md"),
             b"changed",
         )
-        assert await source.freeze("review") != first
+        assert await source.resolve("review") != first
     finally:
         await store.close()
 
