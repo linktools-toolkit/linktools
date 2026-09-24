@@ -118,13 +118,13 @@ def test_non_failed_execution_result_rejects_diagnostics(
 ) -> None:
     diagnostics = ErrorDiagnostics.from_exception(RuntimeError("boom"))
     output = "ok" if status is ExecutionStatus.SUCCEEDED else None
-    output_fingerprint = "0" * 64 if status is ExecutionStatus.SUCCEEDED else None
+    output_contract_digest = "0" * 64 if status is ExecutionStatus.SUCCEEDED else None
     with pytest.raises(ValueError):
         ExecutionResult(
             "execution",
             status,
             output,
-            output_fingerprint,
+            output_contract_digest,
             UsageMetrics(),
             error_code,
             {},

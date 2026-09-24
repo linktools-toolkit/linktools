@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tool semantic identity uses explicit revision rather than field projection."""
+"""Tool identity is explicit id plus revision."""
 
 import pytest
 from pydantic_ai import Tool
@@ -20,7 +20,7 @@ async def _probe() -> str:
         tool_semantic_metadata(tool_class="business"),
     ),
 )
-def test_tool_contribution_rejects_incomplete_runtime_semantics(
+def test_tool_contribution_rejects_incomplete_runtime_contract(
     metadata: dict[str, object],
 ) -> None:
     tool = Tool(_probe, takes_ctx=False, name="probe", metadata=metadata)
@@ -29,7 +29,7 @@ def test_tool_contribution_rejects_incomplete_runtime_semantics(
     assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
-def test_tool_fingerprint_uses_explicit_revision() -> None:
+def test_tool_revision_defines_named_identity() -> None:
     def sample(value: str) -> str:
         return value
 
@@ -37,9 +37,7 @@ def test_tool_fingerprint_uses_explicit_revision() -> None:
         sample,
         name="sample",
         metadata=tool_semantic_metadata(
-            effect="none",
-            plan_safe=True,
-            tool_class="business",
+            effect="none", plan_safe=True, tool_class="business"
         ),
     )
     changed = Tool(
@@ -48,9 +46,7 @@ def test_tool_fingerprint_uses_explicit_revision() -> None:
         timeout=2.0,
         max_retries=3,
         metadata=tool_semantic_metadata(
-            effect="replay_safe",
-            plan_safe=True,
-            tool_class="business",
+            effect="replay_safe", plan_safe=True, tool_class="business"
         ),
     )
 
@@ -64,30 +60,30 @@ def test_tool_fingerprint_uses_explicit_revision() -> None:
         "tool", "sample", changed, revision=4
     )
 
-    assert first.semantic_contract != same_revision.semantic_contract
-    assert first.fingerprint == same_revision.fingerprint
-    assert first.fingerprint != next_revision.fingerprint
-    assert first.semantic_contract["revision"] == 3
-    assert next_revision.semantic_contract["revision"] == 4
+    assert first.revision == same_revision.revision == 3
+    assert first.contract != same_revision.contract
+    assert next_revision.revision == 4
 
 
-def test_tool_fingerprint_ignores_upstream_metadata_at_same_revision() -> None:
+def test_upstream_metadata_is_contract_data_not_identity() -> None:
     def sample(value: str) -> str:
         return value
 
-    semantic = tool_semantic_metadata(
-        effect="none",
-        plan_safe=True,
-        tool_class="business",
+    metadata = tool_semantic_metadata(
+        effect="none", plan_safe=True, tool_class="business"
     )
-    first = Tool(sample, name="sample", metadata={**semantic, "upstream.trace": "a"})
-    second = Tool(sample, name="sample", metadata={**semantic, "upstream.trace": "b"})
+    first = CapabilityContribution.from_opaque(
+        "tool",
+        "sample",
+        Tool(sample, name="sample", metadata={**metadata, "upstream.trace": "a"}),
+        revision=2,
+    )
+    second = CapabilityContribution.from_opaque(
+        "tool",
+        "sample",
+        Tool(sample, name="sample", metadata={**metadata, "upstream.trace": "b"}),
+        revision=2,
+    )
 
-    assert (
-        CapabilityContribution.from_opaque(
-            "tool", "sample", first, revision=2
-        ).fingerprint
-        == CapabilityContribution.from_opaque(
-            "tool", "sample", second, revision=2
-        ).fingerprint
-    )
+    assert first.revision == second.revision == 2
+    assert first.contract != second.contract

@@ -49,8 +49,8 @@ class _ToolModelBinding:
     provider = "test"
     model_identity = "test:session-tool"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "session-tool",
     }
@@ -79,7 +79,7 @@ class _ToolModels:
     ) -> _ToolModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _ToolModelBinding.semantic_payload
+            or dict(payload) != _ToolModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _ToolModelBinding()

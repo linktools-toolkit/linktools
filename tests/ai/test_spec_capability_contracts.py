@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Declaration, capability semantic, and runtime-leaf contracts."""
+"""Declaration, capability contract, and runtime-leaf contracts."""
 
 import asyncio
 import hashlib
@@ -68,7 +68,7 @@ from linktools.ai.spec import (
     SkillSpec,
     SkillSpecCodec,
     canonical_selectors,
-    capability_identity_payload,
+    capability_ref_payload,
     mcp_server_selector,
     mcp_tool_selector,
     parse_mcp_tool_selector,
@@ -276,20 +276,20 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
         ),
     )
 
-    contract = definition.semantic_contract
+    contract = definition.contract
     source = contract["source"]
     assert isinstance(source, dict)
     versions = source["resource_versions"]
     assert isinstance(versions, list)
     assert versions[0]["asset"] == asset.to_payload()
 
-    restored = SkillDefinition.from_semantic_contract(contract)
+    restored = SkillDefinition.from_contract(contract)
     assert restored == definition
 
 
 def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
     with pytest.raises(AIError) as error:
-        SkillDefinition.from_semantic_contract(
+        SkillDefinition.from_contract(
             {
                 "version": 1,
                 "id": "review",
@@ -312,7 +312,7 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                             "executable_bits": 0,
                         }
                     ],
-                    "resource_semantic_digest": "b" * 64,
+                    "resource_digest": "b" * 64,
                 },
             }
         )
@@ -326,7 +326,7 @@ def test_asset_version_skill_source_rejects_mismatched_source_ref() -> None:
         canonical_sha256(
             {
                 "version": 1,
-                "kind": "skill-resource-semantics",
+                "kind": "skill-resource-v1",
                 "files": [],
             }
         ),
@@ -413,8 +413,8 @@ async def test_business_tool_semantics_are_captured_in_tool_metadata() -> None:
         "linktools.ai.plan_safe": True,
         "linktools.ai.tool_class": "business",
     }
-    assert candidate.semantic_contract["metadata"] == tool.tool_def.metadata
-    assert "config" not in candidate.semantic_contract
+    assert candidate.contract["metadata"] == tool.tool_def.metadata
+    assert "config" not in candidate.contract
 
 
 @pytest.mark.asyncio
@@ -573,7 +573,7 @@ def test_mcp_execution_resource_contract_rejects_missing_versions() -> None:
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
+def test_mcp_resource_versions_are_locator_only_for_named_identity() -> None:
     codec = MCPServerSpecCodec()
     server = MCPServerSpec(
         "mcp",
@@ -601,14 +601,14 @@ def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
         server,
         (first_ref,),
         resource_source_id="group-a",
-        resource_semantic_digest="d" * 64,
+        resource_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
     second = codec.to_execution_payload(
         server,
         (second_ref,),
         resource_source_id="group-b",
-        resource_semantic_digest="d" * 64,
+        resource_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
 
@@ -617,8 +617,8 @@ def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
     restored, versions = codec.from_execution_payload(first)
     assert restored == server
     assert versions == (first_ref,)
-    assert capability_identity_payload("mcp", server.id, first) == (
-        capability_identity_payload("mcp", server.id, second)
+    assert capability_ref_payload("mcp", server.id, first) == (
+        capability_ref_payload("mcp", server.id, second)
     )
     with pytest.raises(AIError) as raised:
         codec.from_payload(first)
@@ -635,7 +635,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
         expected_digest = canonical_sha256(
             {
                 "version": 1,
-                "kind": "skill-resource-semantics",
+                "kind": "skill-resource-v1",
                 "files": [
                     {
                         "path": "scripts/run.bin",
@@ -668,7 +668,7 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
                 {"review": ref},
                 store,
             )
-            return await source.semantic_digest("review")
+            return await source.resource_digest("review")
 
         first = await digest(original)
         relocated = SkillSourceRef("application", "review").with_asset_versions(
@@ -751,7 +751,7 @@ async def test_mcp_resource_digest_is_stable_and_includes_binary_files() -> None
         assert first_digest == canonical_sha256(
             {
                 "version": 1,
-                "kind": "mcp-resource-semantics",
+                "kind": "mcp-resource-v1",
                 "files": [
                     {
                         "path": "data.bin",
@@ -773,7 +773,7 @@ async def test_mcp_resource_digest_is_stable_and_includes_binary_files() -> None
         assert empty_digest == canonical_sha256(
             {
                 "version": 1,
-                "kind": "mcp-resource-semantics",
+                "kind": "mcp-resource-v1",
                 "files": [],
             }
         )

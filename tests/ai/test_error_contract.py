@@ -97,7 +97,7 @@ def test_execution_result_enforces_terminal_error_contract() -> None:
         "a" * 64,
         usage,
     )
-    assert succeeded.output_fingerprint == "a" * 64
+    assert succeeded.output_contract_digest == "a" * 64
     assert succeeded.error_code is None
     assert succeeded.safe_error_details == {}
 

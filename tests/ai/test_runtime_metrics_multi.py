@@ -23,8 +23,8 @@ class _ModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "d" * 64
-    semantic_payload: dict[str, JsonValue] = {"provider": "test", "model": "test"}
+    model_digest = "d" * 64
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
     def materialize(self) -> TestModel:
         return TestModel(custom_output_text="ok")
@@ -47,7 +47,7 @@ class _Models:
     ) -> _ModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _ModelBinding.semantic_payload
+            or dict(payload) != _ModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _ModelBinding()

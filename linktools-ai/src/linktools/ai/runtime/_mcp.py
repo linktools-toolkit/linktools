@@ -68,7 +68,7 @@ def _mcp_resource_digest(
     return canonical_sha256(
         {
             "version": 1,
-            "kind": "mcp-resource-semantics",
+            "kind": "mcp-resource-v1",
             "files": [
                 {"path": path, "sha256": digest}
                 for path, digest in sorted(files)

@@ -209,8 +209,8 @@ class _TaskTestModelBinding:
     provider = "test"
     model_identity = "test:task"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "task",
     }
@@ -236,7 +236,7 @@ class _TaskTestModels:
     ) -> _TaskTestModelBinding:
         if route_id not in {None, "default"}:
             raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _TaskTestModelBinding.semantic_payload:
+        if dict(payload) != _TaskTestModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _TaskTestModelBinding()
 
@@ -314,12 +314,12 @@ def test_task_dependency_state_exposes_only_terminal_semantics() -> None:
         error_code=ErrorCode.REQUEST_FIELD_INVALID.value,
         error_digest="a" * 64,
     )
-    assert failed.semantic_payload == {
+    assert failed.contract == {
         "status": TaskStatus.FAILED.value,
         "error_code": ErrorCode.REQUEST_FIELD_INVALID.value,
         "error_digest": "a" * 64,
     }
-    assert "execution_id" not in failed.semantic_payload
+    assert "execution_id" not in failed.contract
 
 
 

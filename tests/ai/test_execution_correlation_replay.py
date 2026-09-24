@@ -22,7 +22,7 @@ def _replay_values(
         binding=snapshot,
         correlation=execution_correlation,
     )
-    binding = SimpleNamespace(digest="a" * 64, snapshot=snapshot)
+    binding = SimpleNamespace(binding_digest="a" * 64, snapshot=snapshot)
     request = SimpleNamespace(
         planning=False,
         thinking=False,
@@ -31,7 +31,7 @@ def _replay_values(
     return execution, binding, request
 
 
-def test_execution_replay_uses_binding_semantic_identity() -> None:
+def test_execution_replay_uses_binding_digest() -> None:
     durable = AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", description="durable label"),
         base_model={"model_identity": "test:model"},

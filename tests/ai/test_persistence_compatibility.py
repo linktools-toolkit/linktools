@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, SemanticPin, bind_output, restore_output
+from linktools.ai.agent import AgentBindingSnapshot, AgentCompiler, CapabilityPin, bind_output, restore_output
 from linktools.ai.capability import CapabilityGroup, workspace_capabilities
 from linktools.ai.core import (
     EvaluationStatus,
@@ -86,11 +86,11 @@ def test_agent_binding_future_version_is_rejected() -> None:
         AgentBindingSnapshot.from_payload(value)
     assert raised.value.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED
 
-def test_output_binding_round_trips_from_durable_semantics() -> None:
+def test_output_binding_round_trips_from_durable_contract() -> None:
     binding = bind_output()
     restored = restore_output(binding.mode, binding.schema_definition)
     assert restored == binding
-    assert restored.fingerprint == binding.fingerprint
+    assert restored.contract_digest == binding.contract_digest
 
 
 def _model_message_values() -> tuple[ModelRequest, ...]:
@@ -254,10 +254,10 @@ def test_generic_v1_envelope_round_trips_current_shape() -> None:
 
 def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
     contribution = _workspace_tool_contributions(Workspace.load(tmp_path))[0]
-    pin = SemanticPin(
+    pin = CapabilityPin(
         "tool",
         contribution.id,
-        contribution.semantic_contract,
+        contribution.contract,
     )
     payload = pin.to_payload()
     assert set(payload) == {"kind", "id", "contract"}
@@ -287,7 +287,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
     )
     binding = compiler.bind(compiler.compile(spec))
     baseline = {
-        contribution.id: contribution.semantic_contract
+        contribution.id: contribution.contract
         for contribution in candidates
     }
     assert len(binding.snapshot.selected) == 1

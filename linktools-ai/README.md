@@ -119,7 +119,7 @@ async with Runtime.open(
     result = await runtime.agent("audit").run("inspect ticket SEC-123")
 ```
 
-Named behavior uses an explicit semantic revision. Agent, Tool, Skill, MCP, generic Capability, Task, and TaskExpander identities are stable `(kind, id, revision)` references; changing execution behavior requires bumping the revision. Full declarations and execution-bound contracts are still persisted for exact restore and validation, but fields such as schemas, resource locators, execution policy, or optional `semantic_config` do not independently redefine the named identity. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
+Named behavior identity is exactly `(kind, id, revision)`. Agent, Tool, Skill, MCP, generic Capability, Task, and TaskExpander do not maintain a second fingerprint/digest identity. Full declarations and execution-bound contracts are still persisted for exact restore and same-revision drift validation. `CapabilityGroup.tool()` and `CapabilityGroup.capability()` default to revision `1`; Agent/Skill/MCP declarations also carry revision `1` unless explicitly changed. Generic Pydantic capabilities retain their native Pydantic AI behavior, and LinkTools revalidates final output against the durable `OutputBinding`.
 
 Generic capabilities are trusted host-Python extensions. LinkTools preserves their native hooks and does not sandbox or deny their file, network, or process access; only LinkTools-owned workspace, opaque-effect, and deferred-resolution boundaries provide those controls.
 
@@ -130,7 +130,7 @@ MCP owners declare their own effect, class, path, and context semantics. Plan
 filtering, sandbox selection, leaf effect handling, and compaction consume
 these declarations instead of inferring behavior from Tool names.
 
-`CapabilityGroup.agent()` creates an `AgentSpec`; declarations themselves use the single v1 wire contract and do not expose a per-declaration revision field.
+`CapabilityGroup.agent()` creates an `AgentSpec`; the declaration carries its explicit positive `revision` in the single v1 wire contract.
 
 ## 3. Workspace and declaration assets
 
@@ -152,7 +152,7 @@ Asset backends retain historical versions; `DirectoryAssetBackend` is a
 read-only view of local files and ignores the requested revision by default.
 For that backend, `AssetStore` verifies the current bytes against the captured
 size and digest, so changed or missing content cannot satisfy a version read.
-Declaration format versions and semantic fingerprints are separate from Asset
+Declaration format versions and named revisions are separate from Asset
 byte versions.
 
 Repository rules use the `rule` Asset kind and Markdown keys such as
@@ -190,7 +190,7 @@ explicit Agent fields take precedence.
 declarations, may include a `metadata` map for extra data such as `author` or
 `version`. Values may be any JSON value, including nested maps and arrays.
 Metadata is retained in Agent and Skill specs and their spec wire payloads,
-but does not affect semantic fingerprints. Skill metadata is omitted from the
+but does not affect named revisions. Skill metadata is omitted from the
 instructions shown to the model.
 
 `CapabilityGroup.snapshot()` returns a `CapabilityGroupSnapshot`. Pass that
@@ -238,7 +238,7 @@ Workspace filesystem and shell tool effects run through the public `Sandbox` / `
 When a Workspace is present and no Sandbox is configured, LinkTools uses its
 built-in local adapter. Without either, MCP stdio runs on the host and Skill
 locations remain virtual. LinkTools owns the stable model-visible workspace
-tool signatures, descriptions, metadata, and durable semantic pins.
+tool signatures, descriptions, metadata, and durable capability pins.
 
 A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a sandboxed MCP server. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Without a Workspace, the Sandbox uses the host current directory captured when Runtime opens as its execution root.
 
@@ -341,15 +341,15 @@ result = await agent.run(
 
 The exact durable binding stores:
 
-- the v1 `AgentSpec` semantic payload;
-- the resolved model semantic payload;
-- the selected semantic pins, including bound Skill Asset version references when Execution state is durable;
+- the v1 `AgentSpec` contract;
+- the resolved model contract;
+- the selected capability pins, including bound Skill Asset version references when Execution state is durable;
 - selected Subagent ids and their direct execution bindings;
 - `output_mode`;
 - the canonical output JSON Schema;
 - one `binding_digest`.
 
-The snapshot does not persist Python output import paths, duplicate output schema ids/revisions/fingerprints, or a second binding fingerprint. `ExecutionResult` exposes the derived `output_fingerprint` together with the terminal output.
+The snapshot does not persist Python output import paths or duplicate identity hashes. `ExecutionResult` exposes the derived `output_contract_digest` together with the terminal output.
 
 ## 6. Sessions and executions
 
@@ -379,7 +379,7 @@ use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
 to `tool_retries=10`, and output correction defaults to `output_retries=3`.
 
 OpenAI model declarations accept explicit `vision=True` or `vision=False`
-(`False` by default). The value is part of the model semantic fingerprint. A
+(`False` by default). The value is part of the model model digest. A
 model with `vision=False` rejects recognizable image content at the final
 request boundary before provider calls or transport retries; PDF, text, and
 other non-image attachments continue through the existing provider contract.

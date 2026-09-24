@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from linktools import ai
-from linktools.ai.agent import AgentBindingSnapshot, SemanticPin
+from linktools.ai.agent import AgentBindingSnapshot, CapabilityPin
 from linktools.ai.runtime import (
     Agent,
     ExecutionHandle,
@@ -37,7 +37,7 @@ def test_runtime_bound_agent_does_not_expose_compile_or_registration() -> None:
     assert "define" not in Agent.__dict__
 
 
-def test_agent_binding_snapshot_persists_only_semantic_inputs() -> None:
+def test_agent_binding_snapshot_persists_binding_inputs() -> None:
     snapshot = AgentBindingSnapshot(
         agent_spec=AgentSpec("agent", model="model"),
         base_model={"version": 1, "id": "model"},
@@ -62,8 +62,8 @@ def test_agent_binding_snapshot_persists_only_semantic_inputs() -> None:
     assert len(snapshot.binding_digest) == 64
 
 
-def test_semantic_pin_persists_contract_once() -> None:
-    pin = SemanticPin(
+def test_capability_pin_persists_contract_once() -> None:
+    pin = CapabilityPin(
         "capability",
         "guardrail",
         {
@@ -85,12 +85,12 @@ def test_semantic_pin_persists_contract_once() -> None:
                 "config": {},
             },
     }
-    assert SemanticPin.from_payload(payload) == pin
-    assert len(pin.fingerprint) == 64
+    assert CapabilityPin.from_payload(payload) == pin
+    assert pin.revision == 3
 
-    decoded = SemanticPin.from_payload({**payload, "fingerprint": pin.fingerprint})
+    decoded = CapabilityPin.from_payload({**payload, "future": True})
     assert decoded == pin
-    assert "fingerprint" not in decoded.to_payload()
+    assert "future" not in decoded.to_payload()
 
 
 def test_agent_binding_snapshot_preserves_unknown_fields() -> None:

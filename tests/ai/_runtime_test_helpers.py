@@ -94,8 +94,8 @@ class _RuntimeUsageModelBinding:
     provider = "test"
     model_identity = "test:usage"
     vision = False
-    fingerprint = "u" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "u" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "usage",
     }
@@ -121,7 +121,7 @@ class RuntimeUsageModels:
     ) -> _RuntimeUsageModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _RuntimeUsageModelBinding.semantic_payload
+            or dict(payload) != _RuntimeUsageModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _RuntimeUsageModelBinding()

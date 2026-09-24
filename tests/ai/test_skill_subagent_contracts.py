@@ -11,7 +11,7 @@ from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
-    SemanticPin,
+    CapabilityPin,
 )
 from linktools.ai.capability import (
     SkillCapability,
@@ -48,7 +48,7 @@ def _compiler(agents: dict[str, AgentSpec]) -> AgentCompiler:
     )
 
 
-def test_v1_skill_wire_and_semantic_pin_round_trip() -> None:
+def test_v1_skill_wire_and_capability_pin_round_trip() -> None:
     wire = (
         (_FIXTURES / "skill_spec_v1_golden.json")
         .read_text(encoding="utf-8")
@@ -59,13 +59,13 @@ def test_v1_skill_wire_and_semantic_pin_round_trip() -> None:
     assert decoded == SkillSpec("legacy", "legacy instructions")
     assert SkillSpecCodec().encode(decoded) == wire
 
-    fixture = _load_json("skill_semantic_pin_v1_golden.json")
+    fixture = _load_json("skill_capability_pin_v1_golden.json")
     pin_payload = fixture["pin"]
     assert isinstance(pin_payload, dict)
-    pin = SemanticPin.from_payload(pin_payload)
+    pin = CapabilityPin.from_payload(pin_payload)
     assert pin.contract["version"] == 1
-    assert pin.fingerprint == fixture["fingerprint"]
-    assert SkillDefinition.from_semantic_contract(pin.contract).semantic_contract == {
+    assert pin.revision == fixture["revision"]
+    assert SkillDefinition.from_contract(pin.contract).contract == {
         "version": 1,
         "id": "legacy",
         "revision": 1,
@@ -73,7 +73,7 @@ def test_v1_skill_wire_and_semantic_pin_round_trip() -> None:
     }
 
 
-def test_v1_binding_restores_from_current_semantic_snapshot() -> None:
+def test_v1_binding_restores_from_current_snapshot() -> None:
     payload = _load_json("agent_binding_subagent_v1_golden.json")
     snapshot = AgentBindingSnapshot.from_payload(payload)
     compiler = _compiler(
@@ -85,7 +85,7 @@ def test_v1_binding_restores_from_current_semantic_snapshot() -> None:
 
     restored = compiler.restore(snapshot)
 
-    assert restored.digest == snapshot.binding_digest
+    assert restored.binding_digest == snapshot.binding_digest
     assert restored.snapshot.subagent_ids == ("child",)
     assert restored.snapshot.subagents[0].to_payload() == {
         "kind": "agent",
@@ -165,14 +165,14 @@ def test_skill_and_agent_use_v1_declaration_contracts() -> None:
     described = AgentSpec("agent", description="Worker")
     assert AgentSpecCodec().to_payload(plain) == AgentSpecCodec().to_payload(described)
     assert AgentSpecCodec().to_wire_payload(described)["description"] == "Worker"
-    assert _compiler({"agent": plain}).compile(plain).digest == _compiler(
+    assert _compiler({"agent": plain}).compile(plain).definition_digest == _compiler(
         {"agent": described}
-    ).compile(described).digest
+    ).compile(described).definition_digest
 
 
-def test_future_semantic_pin_version_is_typed_as_unsupported() -> None:
+def test_future_capability_pin_contract_version_is_unsupported() -> None:
     with pytest.raises(AIError) as error:
-        SemanticPin(
+        CapabilityPin(
             "skill",
             "review",
             {
@@ -227,7 +227,7 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
     wire_codec = SkillSpecCodec()
     assert wire_codec.decode(wire_codec.encode(spec)) == spec
     definition = SkillDefinition(spec)
-    assert SkillDefinition.from_semantic_contract(definition.semantic_contract) == definition
+    assert SkillDefinition.from_contract(definition.contract) == definition
 
     changed_metadata = SkillDefinition(
         adapter.to_logical(
@@ -255,16 +255,16 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
     assert "author: Mei" not in definition.model_content
     assert wire_codec.to_payload(spec)["content"] == definition.model_content
     assert (
-        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
-        == SemanticPin("skill", changed_metadata.id, changed_metadata.semantic_contract).fingerprint
+        CapabilityPin("skill", definition.id, definition.contract).revision
+        == CapabilityPin("skill", changed_metadata.id, changed_metadata.contract).revision
     )
     assert (
-        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
-        == SemanticPin("skill", without_metadata.id, without_metadata.semantic_contract).fingerprint
+        CapabilityPin("skill", definition.id, definition.contract).revision
+        == CapabilityPin("skill", without_metadata.id, without_metadata.contract).revision
     )
     assert (
-        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
-        == SemanticPin("skill", changed_body.id, changed_body.semantic_contract).fingerprint
+        CapabilityPin("skill", definition.id, definition.contract).revision
+        == CapabilityPin("skill", changed_body.id, changed_body.contract).revision
     )
     revised_body = SkillDefinition(
         SkillSpec(
@@ -276,8 +276,8 @@ async def test_skill_markdown_metadata_round_trips_without_changing_instructions
         )
     )
     assert (
-        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
-        != SemanticPin("skill", revised_body.id, revised_body.semantic_contract).fingerprint
+        CapabilityPin("skill", definition.id, definition.contract).revision
+        != CapabilityPin("skill", revised_body.id, revised_body.contract).revision
     )
 
     capability = SkillCapability(
@@ -317,8 +317,8 @@ def test_skill_markdown_maps_reserved_revision_metadata() -> None:
         )
     )
     assert (
-        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
-        != SemanticPin("skill", baseline.id, baseline.semantic_contract).fingerprint
+        CapabilityPin("skill", definition.id, definition.contract).revision
+        != CapabilityPin("skill", baseline.id, baseline.contract).revision
     )
 
 
@@ -337,8 +337,8 @@ def test_skill_flow_frontmatter_metadata_does_not_change_identity() -> None:
     )
     assert plain.model_content == annotated.model_content
     assert (
-        SemanticPin("skill", plain.id, plain.semantic_contract).fingerprint
-        == SemanticPin("skill", annotated.id, annotated.semantic_contract).fingerprint
+        CapabilityPin("skill", plain.id, plain.contract).revision
+        == CapabilityPin("skill", annotated.id, annotated.contract).revision
     )
 
 

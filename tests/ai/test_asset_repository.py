@@ -21,10 +21,7 @@ from linktools.ai.capability import (
     SkillResourceVersion,
     SkillSourceRef,
 )
-from linktools.ai.capability._group import (
-    capability_fingerprint,
-    contribution_semantic_contract,
-)
+from linktools.ai.capability._group import contribution_contract
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec, SkillSpec, SkillSpecCodec
 from linktools.ai.storage import (
@@ -64,7 +61,7 @@ async def test_builtin_loader_snapshots_agent_skill_and_mcp_declarations() -> No
         SkillDefinition(skill),
     ]
     assert all(
-        "semantic_revision" not in item.semantic_contract
+        "revision" in item.contract
         for item in snapshot.contributions
     )
 
@@ -316,12 +313,11 @@ class _DuplicateAgentLoader:
     ) -> "Sequence[CapabilityContribution[object]]":
         del context
         spec = AgentSpec("agent", model="other-model")
-        contract = contribution_semantic_contract("agent", spec.id, spec)
+        contract = contribution_contract("agent", spec.id, spec)
         return (
             CapabilityContribution(
                 "agent",
                 spec.id,
-                capability_fingerprint("agent", spec.id, contract),
                 spec,
             ),
         )

@@ -13,7 +13,7 @@ from linktools.ai.agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
-    SemanticPin,
+    CapabilityPin,
 )
 from linktools.ai.agent._output import bind_output
 from linktools.ai.asset import AssetKey, AssetVersionRef
@@ -185,12 +185,12 @@ def test_skill_asset_version_locator_is_not_semantic_identity() -> None:
     first = _versioned_skill(source_id="source-a", revision=1, size=1)
     second = _versioned_skill(source_id="source-b", revision=9, size=99)
 
-    assert first.semantic_contract != second.semantic_contract
-    first_pin = SemanticPin("skill", "review", first.semantic_contract)
-    second_pin = SemanticPin("skill", "review", second.semantic_contract)
-    assert first_pin.fingerprint == second_pin.fingerprint
+    assert first.contract != second.contract
+    first_pin = CapabilityPin("skill", "review", first.contract)
+    second_pin = CapabilityPin("skill", "review", second.contract)
+    assert first_pin.revision == second_pin.revision
 
-    restored = SkillDefinition.from_semantic_contract(first.semantic_contract)
+    restored = SkillDefinition.from_contract(first.contract)
     assert restored == first
 
 
@@ -225,12 +225,12 @@ def test_skill_asset_content_change_requires_revision_bump() -> None:
         changed.source_ref,
     )
 
-    first_pin = SemanticPin("skill", "review", first.semantic_contract)
-    changed_pin = SemanticPin("skill", "review", changed.semantic_contract)
-    revised_pin = SemanticPin("skill", "review", revised.semantic_contract)
-    assert first.semantic_contract != changed.semantic_contract
-    assert first_pin.fingerprint == changed_pin.fingerprint
-    assert first_pin.fingerprint != revised_pin.fingerprint
+    first_pin = CapabilityPin("skill", "review", first.contract)
+    changed_pin = CapabilityPin("skill", "review", changed.contract)
+    revised_pin = CapabilityPin("skill", "review", revised.contract)
+    assert first.contract != changed.contract
+    assert first_pin.revision == changed_pin.revision
+    assert first_pin.revision != revised_pin.revision
 
 
 @pytest.mark.parametrize(
@@ -260,7 +260,7 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
     asset: dict[str, object],
 ) -> None:
     with pytest.raises(AIError) as raised:
-        SkillDefinition.from_semantic_contract(
+        SkillDefinition.from_contract(
             {
                 "version": 1,
                 "id": "review",
@@ -275,7 +275,7 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
                             "executable_bits": 0,
                         }
                     ],
-                    "resource_semantic_digest": "b" * 64,
+                    "resource_digest": "b" * 64,
                 },
             }
         )
@@ -283,14 +283,14 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
 
 
 def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
-    pin = SemanticPin(
+    pin = CapabilityPin(
         "skill",
         "review",
         _versioned_skill(
             source_id="source",
             revision=1,
             size=1,
-        ).semantic_contract,
+        ).contract,
     )
     snapshot = replace(_snapshot(), selected=(pin,))
 
@@ -313,12 +313,12 @@ def test_agent_declaration_identity_uses_explicit_revision() -> None:
         AgentSpec("agent", model="second", revision=2)
     )
 
-    assert first.semantic_contract != changed.semantic_contract
-    assert first.fingerprint == changed.fingerprint
-    assert first.fingerprint != revised.fingerprint
+    assert first.contract != changed.contract
+    assert first.revision == changed.revision
+    assert first.revision != revised.revision
 
 
-def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -> None:
+def test_model_digest_ignores_openai_prefix_and_connection_config() -> None:
     plain = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://first.example/v1",
@@ -330,18 +330,18 @@ def test_model_semantic_identity_ignores_openai_prefix_and_connection_config() -
         api_key="second-key",
     ).snapshot().resolve("default")
 
-    assert dict(plain.semantic_payload) == {
+    assert dict(plain.contract) == {
         "provider": "openai",
         "model_identity": "openai:gpt-test",
         "vision": False,
         "settings": {},
     }
-    assert dict(prefixed.semantic_payload) == dict(plain.semantic_payload)
-    assert plain.fingerprint == prefixed.fingerprint
+    assert dict(prefixed.contract) == dict(plain.contract)
+    assert plain.model_digest == prefixed.model_digest
     assert plain.model_identity == "openai:gpt-test"
 
 
-def test_model_registry_replaces_connection_binding_with_same_semantic_identity() -> None:
+def test_model_registry_replaces_connection_with_same_model_digest() -> None:
     registry = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://first.example/v1",
@@ -359,7 +359,7 @@ def test_model_registry_replaces_connection_binding_with_same_semantic_identity(
     second = registry.snapshot().resolve("default")
 
     assert second is not first
-    assert second.fingerprint == first.fingerprint
+    assert second.model_digest == first.model_digest
     assert first_snapshot.resolve("default") is first
 
 
@@ -383,16 +383,16 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     first = compiler.bind(compiler.compile(AgentSpec("agent", model="first")))
     second = compiler.bind(compiler.compile(AgentSpec("agent", model="second")))
 
-    assert first.definition.digest == second.definition.digest
-    assert first.digest == second.digest
+    assert first.definition.definition_digest == second.definition.definition_digest
+    assert first.binding_digest == second.binding_digest
     assert first.snapshot != second.snapshot
     assert first.definition.model is not second.definition.model
 
     catalog = AgentCatalog({"agent": first.definition})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is second
-    assert catalog.definition(first.definition.digest) is first.definition
-    assert catalog.binding(first.digest) is second
+    assert catalog.definition(first.definition.definition_digest) is first.definition
+    assert catalog.binding(first.binding_digest) is second
 
 
 def test_current_binding_snapshot_has_minimal_wire_shape() -> None:
@@ -434,7 +434,7 @@ def test_python_only_output_validator_is_not_part_of_durable_contract() -> None:
     assert parsed == {"value": 7}
 
 
-def test_restore_accepts_nonsemantic_tool_contract_drift() -> None:
+def test_restore_rejects_tool_contract_drift_without_revision_bump() -> None:
     def sample(value: str) -> str:
         return value
 
@@ -462,8 +462,8 @@ def test_restore_accepts_nonsemantic_tool_contract_drift() -> None:
             metadata={**semantic, "upstream.trace": "second"},
         ),
     )
-    assert first_candidate.semantic_contract != second_candidate.semantic_contract
-    assert first_candidate.fingerprint == second_candidate.fingerprint
+    assert first_candidate.contract != second_candidate.contract
+    assert first_candidate.revision == second_candidate.revision
 
     first_compiler = AgentCompiler(
         model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
@@ -477,10 +477,10 @@ def test_restore_accepts_nonsemantic_tool_contract_drift() -> None:
     )
     original = first_compiler.bind(first_compiler.compile(spec))
 
-    restored = second_compiler.restore(original.snapshot)
+    with pytest.raises(AIError) as raised:
+        second_compiler.restore(original.snapshot)
 
-    assert restored.digest == original.digest
-    assert restored.definition.selected_tools == (second_candidate,)
+    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
 
 
 def test_catalog_reuses_binding_for_nonsemantic_definition_differences() -> None:
@@ -493,7 +493,7 @@ def test_catalog_reuses_binding_for_nonsemantic_definition_differences() -> None
     )
 
     assert first.snapshot == second.snapshot
-    assert first.digest == second.digest
+    assert first.binding_digest == second.binding_digest
 
     catalog = AgentCatalog({"agent": first.definition})
     assert catalog.register_binding(first) is first
@@ -506,14 +506,14 @@ def test_same_json_schema_produces_same_binding_identity() -> None:
     first = compiler.bind(definition, output=_SchemaTwinA)
     second = compiler.bind(definition, output=_SchemaTwinB)
 
-    assert first.digest == second.digest
+    assert first.binding_digest == second.binding_digest
     assert first.snapshot == second.snapshot
     assert first.output_binding.schema_definition == second.output_binding.schema_definition
 
     catalog = AgentCatalog({"agent": definition})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is first
-    assert catalog.binding(first.digest) is first
+    assert catalog.binding(first.binding_digest) is first
 
 
 def test_restored_binding_uses_only_snapshot_semantics() -> None:
@@ -523,7 +523,7 @@ def test_restored_binding_uses_only_snapshot_semantics() -> None:
 
     restored = compiler.restore(current.snapshot)
 
-    assert restored.digest == current.digest
+    assert restored.binding_digest == current.binding_digest
     assert restored.snapshot == current.snapshot
     assert restored.output_binding.schema_definition == current.output_binding.schema_definition
     assert restored.output_type is not _SchemaTwinA
@@ -538,7 +538,7 @@ def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
             SimpleNamespace(
                 kind="tool",
                 id="unexpected-tool",
-                semantic_contract={"version": 1},
+                contract={"version": 1},
             ),
         ),
     )
@@ -561,7 +561,7 @@ def test_binding_preserves_selected_pin_version_error() -> None:
             SimpleNamespace(
                 kind="tool",
                 id="future-tool",
-                semantic_contract={"version": 2},
+                contract={"version": 2},
             ),
         ),
     )

@@ -212,7 +212,7 @@ def test_output_contract_restores_only_mode_and_schema() -> None:
     assert automatic.mode == "structured"
     assert restored.mode == automatic.mode
     assert restored.schema_definition == automatic.schema_definition
-    assert restored.fingerprint == automatic.fingerprint
+    assert restored.contract_digest == automatic.contract_digest
 
     with pytest.raises(AIError) as restore_error:
         restore_output("structured", {"type": "not-a-json-schema-type"})

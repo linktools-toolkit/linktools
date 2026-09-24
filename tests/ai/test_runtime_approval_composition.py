@@ -25,8 +25,8 @@ class _ToolModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "d" * 64
-    semantic_payload: dict[str, JsonValue] = {"provider": "test", "model": "test"}
+    model_digest = "d" * 64
+    contract: dict[str, JsonValue] = {"provider": "test", "model": "test"}
 
     def materialize(self) -> TestModel:
         return TestModel(call_tools=["read_file"])
@@ -47,7 +47,7 @@ class _ToolModels:
         *,
         route_id: str | None = None,
     ) -> _ToolModelBinding:
-        if route_id not in {None, "default"} or dict(payload) != _ToolModelBinding.semantic_payload:
+        if route_id not in {None, "default"} or dict(payload) != _ToolModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _ToolModelBinding()
 

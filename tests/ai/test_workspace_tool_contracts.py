@@ -32,9 +32,9 @@ def _golden_contract() -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_workspace_tool_semantics_match_frozen_golden(tmp_path: Path) -> None:
+def test_workspace_tool_contracts_match_frozen_golden(tmp_path: Path) -> None:
     contributions = _workspace_tool_contributions(Workspace.load(tmp_path))
-    actual = {item.id: item.semantic_contract for item in contributions}
+    actual = {item.id: item.contract for item in contributions}
     assert actual == _golden_contract()
 
 

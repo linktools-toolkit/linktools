@@ -144,8 +144,8 @@ class _PersistenceTestModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "test",
     }
@@ -182,7 +182,7 @@ class _PersistenceTestModels:
     ) -> _PersistenceTestModelBinding:
         if route_id not in {None, "default"}:
             raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _PersistenceTestModelBinding.semantic_payload:
+        if dict(payload) != _PersistenceTestModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _PersistenceTestModelBinding()
 
@@ -327,7 +327,7 @@ async def test_session_runtime_persists_and_reads_terminal_result(
                 timeout_seconds=10,
             )
             assert result.status is ExecutionStatus.SUCCEEDED
-            assert result.output_fingerprint is not None
+            assert result.output_contract_digest is not None
 
             session_record = await state.conversation.sessions.get(
                 created.session_id,
@@ -375,6 +375,6 @@ async def test_session_runtime_persists_and_reads_terminal_result(
             assert inspected.status is ExecutionStatus.SUCCEEDED
             assert waited.status is ExecutionStatus.SUCCEEDED
             assert waited.output == persisted_result.output.value
-            assert waited.output_fingerprint == result.output_fingerprint
+            assert waited.output_model_digest == result.output_contract_digest
     finally:
         await state.close()

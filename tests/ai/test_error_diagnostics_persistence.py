@@ -46,8 +46,8 @@ class _DiagnosticModelBinding:
     route_id = "default"
     provider = "test"
     model_identity = "test:diagnostics"
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "diagnostics",
     }
@@ -73,7 +73,7 @@ class _DiagnosticModels:
     ) -> _DiagnosticModelBinding:
         if route_id not in {None, "default"}:
             raise AssertionError(f"unexpected model route: {route_id}")
-        if dict(payload) != _DiagnosticModelBinding.semantic_payload:
+        if dict(payload) != _DiagnosticModelBinding.contract:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _DiagnosticModelBinding()
 
@@ -81,7 +81,7 @@ class _DiagnosticModels:
 def _binding_snapshot() -> AgentBindingSnapshot:
     return AgentBindingSnapshot(
         agent_spec=AgentSpec("default", model="default"),
-        base_model=dict(_DiagnosticModelBinding.semantic_payload),
+        base_model=dict(_DiagnosticModelBinding.contract),
         selected=(),
         subagents=(),
         output_mode="text",

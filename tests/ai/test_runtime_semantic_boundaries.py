@@ -106,33 +106,33 @@ class _ExplicitSameNameOutput(BaseModel):
         return schema
 
 
-def test_output_fingerprint_ignores_generated_type_titles() -> None:
+def test_output_contract_digest_ignores_generated_type_titles() -> None:
     alpha = bind_output(_GeneratedOutputAlpha)
     beta = bind_output(_GeneratedOutputBeta)
 
-    assert alpha.fingerprint == beta.fingerprint
+    assert alpha.contract_digest == beta.contract_digest
     assert alpha.schema_definition == beta.schema_definition
     assert alpha.schema_definition["properties"]["title"]["type"] == "string"
 
 
-def test_output_fingerprint_ignores_generated_nested_model_titles() -> None:
+def test_output_contract_digest_ignores_generated_nested_model_titles() -> None:
     alpha = bind_output(_GeneratedNestedOutputAlpha)
     beta = bind_output(_GeneratedNestedOutputBeta)
 
-    assert alpha.fingerprint == beta.fingerprint
+    assert alpha.contract_digest == beta.contract_digest
     assert alpha.schema_definition == beta.schema_definition
 
 
-def test_output_fingerprint_preserves_explicit_schema_titles() -> None:
-    assert bind_output(_ExplicitOutputAlpha).fingerprint != bind_output(
+def test_output_contract_digest_preserves_explicit_schema_titles() -> None:
+    assert bind_output(_ExplicitOutputAlpha).contract_digest != bind_output(
         _ExplicitOutputBeta
-    ).fingerprint
+    ).contract_digest
 
 
-def test_output_fingerprint_preserves_explicit_nested_model_titles() -> None:
-    assert bind_output(_ExplicitNestedOutputAlpha).fingerprint != bind_output(
+def test_output_contract_digest_preserves_explicit_nested_model_titles() -> None:
+    assert bind_output(_ExplicitNestedOutputAlpha).contract_digest != bind_output(
         _ExplicitNestedOutputBeta
-    ).fingerprint
+    ).contract_digest
 
 
 def test_output_schema_literal_ref_is_not_treated_as_schema_ref() -> None:

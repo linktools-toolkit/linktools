@@ -30,8 +30,8 @@ class _CompositionModelBinding:
     provider = "test"
     model_identity = "test:test"
     vision = False
-    fingerprint = "a" * 64
-    semantic_payload: dict[str, JsonValue] = {
+    model_digest = "a" * 64
+    contract: dict[str, JsonValue] = {
         "provider": "test",
         "model": "test",
     }
@@ -60,7 +60,7 @@ class _CompositionModels:
     ) -> _CompositionModelBinding:
         if (
             route_id not in {None, "default"}
-            or dict(payload) != _CompositionModelBinding.semantic_payload
+            or dict(payload) != _CompositionModelBinding.contract
         ):
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         return _CompositionModelBinding()

@@ -74,7 +74,7 @@ def _info(
         terminal_at=created_at,
         binding_digest="a" * 64,
         input_digest="b" * 64,
-        output_fingerprint="c" * 64,
+        output_contract_digest="c" * 64,
         output_digest=None if error_code is not None else "d" * 64,
         usage=UsageSummary(),
         error_code=error_code,

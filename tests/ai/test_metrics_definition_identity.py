@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Metric definition semantic identity across persistence."""
+"""Metric definition contract identity across persistence."""
 
 from dataclasses import replace
 from pathlib import Path
@@ -17,7 +17,7 @@ from linktools.ai.observe import (
 from linktools.ai.observe._codec import (
     decode_definition_envelope,
     definition_envelope,
-    definition_semantic_digest,
+    definition_contract_digest,
 )
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -81,7 +81,7 @@ def test_definition_description_is_nonsemantic_and_v1_optional() -> None:
         description="changed description",
     )
 
-    assert definition_semantic_digest(first) == definition_semantic_digest(changed)
+    assert definition_contract_digest(first) == definition_contract_digest(changed)
 
     legacy = definition_envelope(
         "definition-description",
@@ -125,10 +125,10 @@ def test_definition_identity_is_name_and_revision_only() -> None:
         default_aggregation=MetricAggregation.SUM,
     )
 
-    assert definition_semantic_digest(first) == definition_semantic_digest(changed)
-    assert definition_semantic_digest(first) != definition_semantic_digest(
-        replace(changed, revision=2)
-    )
+    assert (first.name, first.revision) == (changed.name, changed.revision)
+    assert definition_contract_digest(first) != definition_contract_digest(changed)
+    revised = replace(changed, revision=2)
+    assert (first.name, first.revision) != (revised.name, revised.revision)
 
 
 @pytest.mark.asyncio

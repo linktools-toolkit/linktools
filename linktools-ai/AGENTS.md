@@ -31,16 +31,16 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 
 - Runtime startup must not implicitly create or migrate database schemas; schema provisioning is an explicit deployment/migration operation. A local SQLite state backend is the explicit exception and may initialize its own local schema when that state store is created or opened.
 - Durable wire formats and semantic identities are explicit LinkTools contracts. Honor published or explicitly committed compatibility obligations. Without such an obligation, remove obsolete pre-release readers, aliases, defaults and migrations while updating current writers, readers and verification together. Do not prebuild compatibility paths for hypothetical versions.
-- Define each semantic or idempotency digest from one explicit minimal projection owned by the contract. Include only inputs needed to distinguish execution meaning, accepted request behavior or safe reuse/recovery. Non-semantic additions and default fields must not change that identity; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
-- Named behavior contracts use a stable logical identity plus a positive semantic revision. Agent, Tool, Skill, MCP, generic Capability, Task, TaskExpander, and named Metric definitions keep their full execution contracts for restore and validation, but their named semantic identity is defined only by kind, logical id, and revision. Any behavior change under the same named contract requires an explicit revision bump. Anonymous value contracts remain content-addressed where appropriate.
-- Separate semantic identity from byte integrity and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter semantic identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
-- Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Identity-affecting data must remain stable once its contract identity is committed, and identity comparisons must use the same projection as the digest.
+- Named behavior identity is the explicit `(kind, id, revision)` reference. Do not hash it into a fingerprint or maintain a second identity representation. Agent, Tool, Skill, MCP, generic Capability, Task, TaskExpander, and named Metric definitions keep full contracts for restore and validation; any behavior change under the same named contract requires an explicit revision bump.
+- Digests are reserved for anonymous/composite values, byte integrity, and request/idempotency contracts. Define each digest from one explicit minimal projection owned by that contract. Non-contract additions and default fields must not change it; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
+- Separate named identity from contract validation, byte integrity, and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter named identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
+- Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Named identity comparisons use the explicit reference directly; digest comparisons use the owning digest projection.
 - Every current writer output must be accepted by its matching reader. Define omitted optional fields in that wire contract, not through changing runtime defaults. Reject corrupt or unsupported durable data with typed errors; never guess, silently repair or reinterpret unknown execution semantics. Verify original stored bytes before adapting decoded values.
 
 ### Persistence and concurrency
 
 - A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
-- Asset history belongs to AssetStore. Durable Runtime bindings may persist Asset version references and semantic digests, but must not copy Asset resource bytes into Runtime ObjectStore merely to pin execution dependencies.
+- Asset history belongs to AssetStore. Durable Runtime bindings may persist Asset version references and resource/content digests, but must not copy Asset resource bytes into Runtime ObjectStore merely to pin execution dependencies.
 - Caller cancellation does not determine durable truth. Resolve commit/readback state before reporting an unknown outcome.
 - Filesystem coordination uses `filelock`. Database concurrency must avoid pessimistic locking.
 
@@ -68,7 +68,7 @@ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ### Verification scope
 
 - Simplifying or consolidating tests must preserve every independent accepted contract and regression obligation. Remove duplicate examples, not distinct backend, concurrency, recovery, external-effect, or failure semantics.
-- Semantic identity changes require paired verification: non-semantic changes must preserve identity, semantic changes must alter it, and current durable writers must round-trip through current readers or current golden fixtures.
+- Named behavior changes require paired verification: unchanged revisions preserve identity, behavior changes require a revision bump, same-revision contract drift is rejected where current definitions are required, and current durable writers round-trip through current readers or current golden fixtures.
 
 ## Guidance
 

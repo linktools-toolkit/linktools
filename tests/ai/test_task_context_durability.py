@@ -57,7 +57,7 @@ def _request(
 
 
 @pytest.mark.asyncio
-async def test_task_admission_correlation_is_durable_but_not_semantic_identity() -> None:
+async def test_task_admission_correlation_is_durable_but_not_request_identity() -> None:
     state = RuntimeState.in_memory()
     await state.initialize(namespace="task-correlation-durable", tenant_id="tenant")
     try:

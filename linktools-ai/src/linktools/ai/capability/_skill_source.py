@@ -365,7 +365,7 @@ def _skill_resource_digest(
         canonical_json_bytes(
             {
                 "version": 1,
-                "kind": "skill-resource-semantics",
+                "kind": "skill-resource-v1",
                 "files": [
                     {
                         "path": item.path,

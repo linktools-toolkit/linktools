@@ -190,7 +190,7 @@ class _SpoofedSandboxCapability(AbstractCapability[object]):
     id = "linktools.workspace-sandbox"
 
 
-def _semantic_contract(tool: object) -> dict[str, object]:
+def _tool_contract(tool: object) -> dict[str, object]:
     definition = tool.tool_def  # type: ignore[attr-defined]
     return {
         "version": 1,
@@ -231,7 +231,7 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "write_file",
     )
     assert all(item.kind == "tool" for item in contributions)
-    assert all(len(item.fingerprint) == 64 for item in contributions)
+    assert all(len(item.revision) == 64 for item in contributions)
     assert tuple(
         tool_class_from_metadata(item.value.tool_def.metadata)
         for item in contributions
@@ -250,8 +250,8 @@ def test_workspace_tool_contributions_are_stable_and_classified(tmp_path: Path) 
         "shell",
         "filesystem.write",
     )
-    assert tuple(item.fingerprint for item in contributions) == tuple(
-        item.fingerprint for item in _workspace_tool_contributions(workspace)
+    assert tuple(item.revision for item in contributions) == tuple(
+        item.revision for item in _workspace_tool_contributions(workspace)
     )
 
 
@@ -419,7 +419,7 @@ async def test_workspace_tool_declarations_do_not_depend_on_sandbox_selection(
     snapshots = [await group.snapshot() for group in groups]
     projected = tuple(
         tuple(
-            (item.id, item.fingerprint, item.semantic_contract)
+            (item.id, item.revision, item.contract)
             for item in snapshot.contributions
         )
         for snapshot in snapshots
@@ -456,11 +456,11 @@ def test_workspace_sandbox_capability_id_is_reserved() -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_path: Path) -> None:
+async def test_workspace_runtime_tool_contracts_match_durable_contributions(tmp_path: Path) -> None:
     sandbox = _RecordingSandbox()
     workspace = Workspace.load(tmp_path)
     contributions = _workspace_tool_contributions(workspace)
-    expected = {item.id: item.semantic_contract for item in contributions}
+    expected = {item.id: item.contract for item in contributions}
     capability = workspace_capabilities(
         workspace,
         (
@@ -483,7 +483,7 @@ async def test_workspace_runtime_tool_semantics_match_durable_contributions(tmp_
     run_toolset = capability.get_toolset()
 
     assert {
-        name: _semantic_contract(tool)
+        name: _tool_contract(tool)
         for name, tool in run_toolset.tools.items()  # type: ignore[attr-defined]
     } == expected
     await run_toolset.__aexit__(None, None, None)

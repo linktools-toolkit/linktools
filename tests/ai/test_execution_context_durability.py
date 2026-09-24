@@ -93,13 +93,13 @@ def test_local_binding_lookup_uses_semantic_digest() -> None:
     backend._catalog = SimpleNamespace(
         binding=lambda digest: SimpleNamespace(
             snapshot=equivalent,
-            digest=digest,
+            binding_digest=digest,
         )
     )
 
     binding = backend._execution_binding(execution)
 
-    assert binding.digest == execution.binding_digest
+    assert binding.binding_digest == execution.binding_digest
     assert binding.snapshot == equivalent
 
 
