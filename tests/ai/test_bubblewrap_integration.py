@@ -712,6 +712,7 @@ async def test_workspace_mcp_stdio_protocol_and_readonly_boundary(
 
     workspace_root = tmp_path / "workspace"
     _prepare_probe_tree(workspace_root, external)
+    (workspace_root / ".linktools").mkdir()
     resource = _create_stdio_server(tmp_path / "mcp-resource")
     sandbox = BubblewrapSandbox(
         runtime_root=runtime_root,
@@ -771,6 +772,7 @@ async def test_workspace_mcp_stdio_empty_and_narrow_read_policies(
     external = tmp_path / "host-secret.txt"
     external.write_text("host-only", encoding="utf-8")
     _prepare_probe_tree(workspace_root, external)
+    (workspace_root / ".linktools").mkdir()
     resource = _create_stdio_server(tmp_path / "mcp-resource")
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
