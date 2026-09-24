@@ -263,7 +263,7 @@ async def test_workspace_selector_expands_registered_tool_declarations(
     tool_classes: set[str],
 ) -> None:
     workspace = Workspace.load(tmp_path)
-    snapshot = await CapabilityGroup("workspace", workspace=workspace).freeze()
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).snapshot()
     spec = AgentSpec(
         "agent",
         allow_tools=selectors,
@@ -295,7 +295,7 @@ async def test_workspace_selector_validation_and_candidate_boundaries(
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
     workspace = Workspace.load(tmp_path)
-    snapshot = await CapabilityGroup("workspace", workspace=workspace).freeze()
+    snapshot = await CapabilityGroup("workspace", workspace=workspace).snapshot()
     for selectors in (("new_tool",), ("*", "new_tool")):
         spec = AgentSpec("agent", allow_tools=selectors)
         compiler = AgentCompiler(
@@ -383,7 +383,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
             "workspace",
             workspace=workspace,
             assets=store,
-        ).freeze()
+        ).snapshot()
     finally:
         await store.close()
 
@@ -624,7 +624,7 @@ async def test_workspace_group_does_not_discover_declarations(
     )
 
     group = CapabilityGroup("workspace", workspace=workspace)
-    frozen = await group.freeze()
+    frozen = await group.snapshot()
 
     assert group.workspace is workspace
     assert frozen
