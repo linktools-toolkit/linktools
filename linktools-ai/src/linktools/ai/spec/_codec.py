@@ -9,7 +9,7 @@ from typing import Literal, Protocol, TypeVar, cast
 
 import yaml
 
-from ..core import JsonValue, normalize_json_value
+from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..asset import AssetKey
 from ..storage import ObjectRef
@@ -345,7 +345,10 @@ class MCPServerSpecCodec:
             if resource_snapshot is not None or resource_semantic_digest is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
-        if not isinstance(resource_snapshot, ObjectRef):
+        if (
+            not isinstance(resource_snapshot, ObjectRef)
+            or resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _require_digest(resource_semantic_digest)
         payload["args"] = None
@@ -438,6 +441,11 @@ class MCPServerSpecCodec:
         resource_snapshot = (
             _decode_object_ref(raw_snapshot) if raw_snapshot is not None else None
         )
+        if (
+            resource_snapshot is not None
+            and resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if frozen and "execution_policy" in raw:
             _execution_policy_payload(raw["execution_policy"])
         if resource_snapshot is None:
