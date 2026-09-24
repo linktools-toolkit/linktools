@@ -105,8 +105,6 @@ class ExecutionInfo:
     started_at: datetime | None = None
     terminal_at: datetime | None = None
     binding_digest: str | None = None
-    input_digest: str | None = None
-    output_digest: str | None = None
     usage: UsageSummary | None = None
 
     def __post_init__(self) -> None:
@@ -210,12 +208,6 @@ def _project_execution_info(
         started_at=record.started_at,
         terminal_at=None if result is None else result.created_at,
         binding_digest=record.binding_digest,
-        input_digest=record.stored_user_input.digest,
-        output_digest=(
-            None
-            if result is None or result.output is None
-            else result.output.digest
-        ),
         usage=usage,
         error_code=record.error_code,
         safe_error_details=record.safe_error_details,
