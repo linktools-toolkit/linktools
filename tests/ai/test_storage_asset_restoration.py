@@ -671,6 +671,9 @@ async def test_asset_snapshot_uses_v1_manifest_and_object_namespace() -> None:
         await restored.initialize()
         try:
             assert await restored.get(key) == b"value"
+            version = (await restored.resolve_versions((key,)))[0]
+            assert version.source_id == "snapshot"
+            assert await restored.read_versions((version,)) == (b"value",)
         finally:
             await restored.close()
     finally:
