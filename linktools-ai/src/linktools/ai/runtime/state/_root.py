@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...core import (
+    RUNTIME_OBJECT_STORE_ID,
     canonical_json_bytes,
     validate_persistence_namespace,
     validate_tenant_id,
@@ -971,7 +972,7 @@ def _normalize_path(value: "str | Path") -> Path:
 
 def _object_ref_payload(ref: ObjectRef) -> dict[str, object]:
     return {
-        "store_id": "runtime",
+        "store_id": RUNTIME_OBJECT_STORE_ID,
         "key": ref.key,
         "digest": ref.digest,
         "size": ref.size,
@@ -987,8 +988,7 @@ def _object_ref_from_payload(value: object) -> ObjectRef:
     digest = value["digest"]
     size = value["size"]
     if (
-        not isinstance(store_id, str)
-        or not store_id
+        store_id != RUNTIME_OBJECT_STORE_ID
         or not isinstance(key, str)
         or not key
         or not isinstance(digest, str)
