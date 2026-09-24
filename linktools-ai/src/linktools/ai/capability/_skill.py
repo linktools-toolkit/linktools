@@ -16,7 +16,7 @@ from ..errors import AIError, ErrorCode
 from ..spec import SkillSpec
 from ._context import AgentContext
 from ._skill_source import (
-    FrozenSkillResourceSource,
+    AssetVersionSkillResourceSource,
     SkillLocation,
     SkillResourceVersion,
     SkillResourceView,
@@ -57,7 +57,7 @@ class SkillDefinition:
                 "source_id": self.source_ref.source_id,
                 "root": self.source_ref.root,
             }
-            if self.source_ref.frozen:
+            if self.source_ref.resource_semantic_digest is not None:
                 source["resource_versions"] = [
                     {
                         "path": item.path,
@@ -397,10 +397,10 @@ async def _verify_resource_semantics(
     source_ref: SkillSourceRef,
     source: object,
 ) -> None:
-    if not source_ref.frozen:
+    if source_ref.resource_semantic_digest is None:
         return
     if (
-        not isinstance(source, FrozenSkillResourceSource)
+        not isinstance(source, AssetVersionSkillResourceSource)
         or source_ref.resource_semantic_digest is None
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
