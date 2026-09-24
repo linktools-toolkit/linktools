@@ -17,7 +17,6 @@ from linktools.ai.asset import (
 )
 from linktools.ai.capability import (
     AssetSkillResourceSource,
-    FrozenSkillResourceSource,
     LocalSkillResourceSource,
     SkillCapability,
     SkillDefinition,
@@ -26,7 +25,7 @@ from linktools.ai.capability import (
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
 from linktools.ai.spec import SkillSpec
-from linktools.ai.storage import InMemoryObjectStore, StorageLayer, StorageOverlay
+from linktools.ai.storage import StorageLayer, StorageOverlay
 from linktools.ai.workspace import LocalRuleCatalog, WorkspacePolicy
 
 
@@ -231,12 +230,7 @@ async def test_directory_asset_skill_preserves_local_path_and_executable_mode(
         assert view.location.kind == "local"
         assert Path(view.location.path) == package.resolve()
         assert view.resources == ("run.sh",)
-        assert await source.resource_mode("review", "run.sh") == 0o111
-
-        before = await source.current_revision("review")
-        os.chmod(script, 0o644)
-        after = await source.current_revision("review")
-        assert after != before
+        assert script.stat().st_mode & 0o111 == 0o111
     finally:
         await store.close()
 
@@ -301,50 +295,6 @@ async def test_directory_asset_skill_with_remapped_paths_is_virtual(
 
 
 @pytest.mark.asyncio
-async def test_directory_asset_skill_snapshot_preserves_materialization_and_mode(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "assets"
-    package = root / "skills" / "review"
-    package.mkdir(parents=True)
-    (package / "SKILL.md").write_text("skill", encoding="utf-8")
-    script = package / "run.sh"
-    script.write_text("#!/bin/sh\n", encoding="utf-8")
-    os.chmod(script, 0o755)
-
-    store = AssetStore(
-        StorageOverlay(
-            DirectoryAssetBackend(
-                str(root),
-                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
-                kinds=("skill",),
-            )
-        )
-    )
-    await store.initialize()
-    try:
-        source = AssetSkillResourceSource("application", store)
-        objects = InMemoryObjectStore("runtime")
-        revision = await source.current_revision("review")
-        snapshot = await source.snapshot(
-            "review",
-            expected_revision=revision,
-            object_store=objects,
-        )
-        frozen = FrozenSkillResourceSource(
-            "application",
-            {"review": snapshot},
-            objects,
-        )
-
-        assert await frozen.sandbox_materialize("review") is True
-        assert await frozen.resource_mode("review", "run.sh") == 0o111
-        assert await frozen.read("review", "run.sh") == b"#!/bin/sh\n"
-    finally:
-        await store.close()
-
-
-@pytest.mark.asyncio
 async def test_asset_skill_uses_virtual_location_when_overlay_mixes_origins(
     tmp_path: Path,
 ) -> None:
@@ -375,37 +325,35 @@ async def test_asset_skill_uses_virtual_location_when_overlay_mixes_origins(
         assert view.location.kind == "virtual"
         assert view.resources == ("run.sh",)
         assert await source.read("review", "run.sh") == b"override"
-        assert await source.resource_mode("review", "run.sh") == 0
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_virtual_skill_revision_ignores_unrelated_asset_changes() -> None:
+async def test_virtual_skill_versions_ignore_unrelated_asset_changes() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
     try:
         await store.put(AssetKey("skill", "review/references/rules.md"), b"rules")
         source = AssetSkillResourceSource("virtual", store)
-        revision = await source.current_revision("review")
+        first = await source.freeze("review")
 
         await store.put(AssetKey("agent", "unrelated"), b"agent")
         await store.put(AssetKey("skill", "other/reference.md"), b"other")
-
-        assert await source.current_revision("review") == revision
+        assert await source.freeze("review") == first
 
         await store.put(
             AssetKey("skill", "review/references/rules.md"),
             b"changed",
         )
-        assert await source.current_revision("review") != revision
+        assert await source.freeze("review") != first
     finally:
         await store.close()
 
 
 @pytest.mark.asyncio
-async def test_local_skill_revision_tracks_executable_mode(tmp_path: Path) -> None:
+async def test_local_skill_source_reports_current_executable_mode(tmp_path: Path) -> None:
     package = tmp_path / "skills" / "review"
     package.mkdir(parents=True)
     script = package / "run.sh"
@@ -413,11 +361,9 @@ async def test_local_skill_revision_tracks_executable_mode(tmp_path: Path) -> No
     os.chmod(script, 0o644)
     source = LocalSkillResourceSource("local", tmp_path / "skills")
 
-    before = await source.current_revision("review")
+    assert await source.resource_mode("review", "run.sh") == 0
     os.chmod(script, 0o755)
-    after = await source.current_revision("review")
-
-    assert after != before
+    assert await source.resource_mode("review", "run.sh") == 0o111
 
 
 @pytest.mark.asyncio
