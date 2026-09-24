@@ -83,11 +83,13 @@ async def test_group_snapshot_exposes_only_read_only_asset_access() -> None:
     assert not hasattr(snapshot, "asset_store")
     assert not hasattr(reader, "put")
     assert await reader.get(key) == b"contents"
+    frozen_version = (await reader.resolve_versions((key,)))[0]
 
     await store.put(key, b"changed")
     with pytest.raises(AIError) as error:
         await reader.get(key)
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    assert await reader.read_versions((frozen_version,)) == (b"contents",)
 
 
 @pytest.mark.asyncio
@@ -101,6 +103,7 @@ async def test_asset_version_ref_reads_exact_historical_content() -> None:
         second = (await store.resolve_versions((key,)))[0]
 
         assert first != second
+        assert first.source_id == second.source_id == "primary"
         assert await store.read_versions((first, second)) == (
             b"first",
             b"second",
