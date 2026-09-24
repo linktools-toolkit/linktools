@@ -21,6 +21,7 @@ from linktools.ai.capability import (
     FrozenSkillResourceSource,
     SkillCapability,
     SkillDefinition,
+    SkillSourceRef,
     SkillSourceRegistry,
     tool_semantic_metadata,
     validate_tool_semantic_metadata,
@@ -128,6 +129,9 @@ def test_mcp_selectors_round_trip_logical_names() -> None:
     assert canonical_selectors(
         (wildcard, selector), field_name="allow_tools", mcp=True
     ) == (wildcard,)
+    assert canonical_selectors(
+        ("*", selector), field_name="allow_tools", mcp=True
+    ) == ("*", selector)
     model_name = _expected_mcp_tool_name(server_id, tool_name)
     assert len(model_name) == 55
     assert model_name.isascii()
@@ -187,6 +191,19 @@ async def test_mcp_model_tool_mapping_calls_the_original_identity() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_global_wildcard_still_requires_explicit_tool() -> None:
+    wrapped = _MCPModelToolset(
+        FunctionToolset([Tool(_business, name="available")]),
+        "server",
+        None,
+        frozenset({"missing"}),
+    )
+    with pytest.raises(AIError) as error:
+        await wrapped.get_tools(_context())
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+@pytest.mark.asyncio
 async def test_mcp_model_tool_collision_fails_before_exposure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -208,6 +225,39 @@ async def test_mcp_model_tool_collision_fails_before_exposure(
     with pytest.raises(AIError) as error:
         await wrapped.get_tools(_context())
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
+
+
+def test_skill_snapshot_contract_preserves_object_store_owner() -> None:
+    reference = ObjectRef("execution", "snapshot", "a" * 64, 1)
+    definition = SkillDefinition(
+        SkillSpec("review", "instructions"),
+        SkillSourceRef(
+            "application",
+            "review",
+            reference,
+            "b" * 64,
+        ),
+    )
+
+    contract = definition.semantic_contract
+    source = contract["source"]
+    assert isinstance(source, dict)
+    snapshot = source["snapshot"]
+    assert isinstance(snapshot, dict)
+    assert snapshot["store_id"] == "execution"
+    restored = SkillDefinition.from_semantic_contract(contract)
+    assert restored.source_ref is not None
+    assert restored.source_ref.snapshot == reference
+
+
+def test_frozen_skill_source_rejects_wrong_object_store_owner() -> None:
+    with pytest.raises(AIError) as error:
+        FrozenSkillResourceSource(
+            "application",
+            {"review": ObjectRef("owner", "snapshot", "a" * 64, 1)},
+            InMemoryObjectStore("other"),
+        )
+    assert error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
 
 
 def test_memory_owner_selects_only_its_declared_tools() -> None:
