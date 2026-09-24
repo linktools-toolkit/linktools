@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Bridge sandbox-owned stdio bytes to the public MCP client session API."""
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
