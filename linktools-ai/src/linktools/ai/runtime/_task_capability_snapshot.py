@@ -100,19 +100,19 @@ class TaskCapabilitySnapshotStore:
             snapshot.binding_digest: snapshot
             for snapshot in node_bindings
         }
-        skill_snapshots: dict[tuple[str, str], SkillSourceRef] = {}
+        skill_versions: dict[tuple[str, str], SkillSourceRef] = {}
         roots: dict[str, AgentBindingSnapshot] = {}
         if any(node.expander is not None for node in graph.nodes):
             for agent_id in self._binding_freezer.root_ids:
                 roots[agent_id] = await self._binding_freezer.freeze_root(
                     agent_id,
-                    skill_snapshots=skill_snapshots,
+                    skill_versions=skill_versions,
                 )
         bindings: dict[str, AgentBindingSnapshot] = {}
         for binding_digest, snapshot in sorted(unique_bindings.items()):
             bindings[binding_digest] = await self._binding_freezer.freeze_snapshot(
                 snapshot,
-                skill_snapshots=skill_snapshots,
+                skill_versions=skill_versions,
             )
 
         manifest: dict[str, JsonValue] = {
