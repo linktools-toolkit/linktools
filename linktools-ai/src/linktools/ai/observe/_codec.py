@@ -58,6 +58,18 @@ def definition_semantic_digest(definition: MetricDefinition) -> str:
     )
 
 
+def definition_contract_digest(definition: MetricDefinition) -> str:
+    payload = _definition_payload(definition)
+    payload.pop("description", None)
+    payload["query_fields"] = sorted(definition.query_fields)
+    return canonical_sha256(
+        {
+            "version": 1,
+            "definition": payload,
+        }
+    )
+
+
 def definition_envelope(
     namespace: str, definition: MetricDefinition
 ) -> dict[str, object]:

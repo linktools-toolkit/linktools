@@ -1034,6 +1034,12 @@ def test_spec_constructors_reject_invalid_values() -> None:
         SkillSpec("skill", 1)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         MCPServerSpec("mcp", "")
+    with pytest.raises(ValueError):
+        AgentSpec("agent", revision=0)
+    with pytest.raises(ValueError):
+        SkillSpec("skill", "content", revision=0)
+    with pytest.raises(ValueError):
+        MCPServerSpec("mcp", "command", revision=0)
 
 
 @pytest.mark.asyncio

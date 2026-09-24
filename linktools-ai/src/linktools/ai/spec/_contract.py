@@ -359,9 +359,7 @@ class SubagentRef:
                 description,
                 revision=cast(int, revision),
             )
-        except (TypeError, ValueError, AIError) as error:
-            if isinstance(error, AIError):
-                raise
+        except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 

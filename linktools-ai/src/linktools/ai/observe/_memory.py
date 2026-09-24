@@ -10,7 +10,7 @@ from datetime import datetime
 from ..core import Page
 from ..errors import AIError, ErrorCode
 from ._codec import (
-    definition_semantic_digest,
+    definition_contract_digest,
     observation_digest,
     observation_payload_digest,
 )
@@ -32,7 +32,7 @@ class InMemoryMetricStore:
         definition: MetricDefinition,
     ) -> MetricDefinition:
         key = (namespace, definition.name, definition.revision)
-        digest = definition_semantic_digest(definition)
+        digest = definition_contract_digest(definition)
         async with self._lock:
             current = self._definitions.get(key)
             if current is None:

@@ -58,7 +58,7 @@ class SpecCodec(Protocol[SpecT]):
 
 class AgentSpecCodec:
     def to_payload(self, value: AgentSpec) -> "dict[str, JsonValue]":
-        """Return the canonical declaration payload used by identity projections."""
+        """Return the canonical resolved Agent declaration payload."""
         if not isinstance(value, AgentSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid")
         payload: dict[str, JsonValue] = {
@@ -203,7 +203,7 @@ class AgentSpecCodec:
 
 class SkillSpecCodec:
     def to_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
-        """Return the canonical semantic v1 payload used by durable identity."""
+        """Return the canonical resolved Skill declaration payload."""
         if not isinstance(value, SkillSpec):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
         payload: dict[str, JsonValue] = {

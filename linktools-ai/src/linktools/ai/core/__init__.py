@@ -11,7 +11,6 @@ from ._correlation import (
 from ._discovery import DEFAULT_DISCOVERY_POLICY
 from ._ids import (
     RUNTIME_OBJECT_STORE_ID,
-    canonical_identity_digest,
     canonical_sha256,
     deterministic_id,
     idempotency_key_digest,
@@ -143,7 +142,6 @@ __all__ = [
     "ToolOperationStatus",
     "WorkspaceFileInput",
     "UsageMetrics",
-    "canonical_identity_digest",
     "canonical_json_bytes",
     "canonical_sha256",
     "canonical_string_tuple",

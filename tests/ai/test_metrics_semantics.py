@@ -248,7 +248,9 @@ async def test_definition_identity_requires_revision_bump_for_semantic_change() 
         default_aggregation=base.default_aggregation,
         query_fields=base.query_fields,
     )
-    assert await metrics.define(changed_same_revision) == first
+    with pytest.raises(AIError) as raised:
+        await metrics.define(changed_same_revision)
+    assert raised.value.code is ErrorCode.STORAGE_CONFLICT
 
     revised = MetricDefinition(
         name=base.name,

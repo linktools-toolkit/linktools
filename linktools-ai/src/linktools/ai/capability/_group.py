@@ -200,7 +200,7 @@ class CapabilityContribution(Generic[AppT]):
             kind,
             identity,
             value,
-            semantic_revision=revision,
+            revision=revision,
             semantic_id=semantic_id,
             semantic_config=semantic_config,
         )
@@ -963,7 +963,7 @@ def contribution_semantic_contract(
     identity: str,
     value: ContributionSemanticValue,
     *,
-    semantic_revision: "int | None" = None,
+    revision: "int | None" = None,
     semantic_id: "str | None" = None,
     semantic_config: "Mapping[str, JsonValue] | None" = None,
 ) -> "dict[str, JsonValue]":
@@ -996,7 +996,7 @@ def contribution_semantic_contract(
             contract["defer_loading"] = True
         if definition.include_return_schema is not None:
             contract["include_return_schema"] = definition.include_return_schema
-        contract["revision"] = semantic_revision or 1
+        contract["revision"] = revision or 1
         return contract
     if kind == "agent" and isinstance(value, AgentSpec):
         return AgentSpecCodec().to_payload(value)
@@ -1007,7 +1007,7 @@ def contribution_semantic_contract(
     if kind == "capability" and isinstance(value, AbstractCapability):
         contract: dict[str, JsonValue] = {
             "version": 1,
-            "revision": semantic_revision or 1,
+            "revision": revision or 1,
             "defer_loading": value.defer_loading,
             "config": {},
         }
