@@ -41,6 +41,76 @@ class AssetKey:
 
 
 @dataclass(frozen=True, slots=True)
+class AssetVersionRef:
+    """Stable reference to one immutable Asset version."""
+
+    key: AssetKey
+    source_id: str
+    revision: StorageEntryRevision
+    etag: str
+    size: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, AssetKey):
+            raise TypeError("asset version key must be AssetKey")
+        if not isinstance(self.source_id, str) or not self.source_id:
+            raise ValueError("asset version source_id must be non-empty")
+        if not isinstance(self.revision, StorageEntryRevision):
+            raise TypeError("asset version revision must be StorageEntryRevision")
+        if (
+            not isinstance(self.etag, str)
+            or len(self.etag) != 64
+            or any(character not in "0123456789abcdef" for character in self.etag)
+            or isinstance(self.size, bool)
+            or not isinstance(self.size, int)
+            or self.size < 0
+        ):
+            raise ValueError("asset version integrity metadata is invalid")
+
+    def to_payload(self) -> dict[str, JsonValue]:
+        return {
+            "version": 1,
+            "kind": self.key.kind,
+            "id": self.key.id,
+            "source_id": self.source_id,
+            "revision": self.revision.value,
+            "etag": self.etag,
+            "size": self.size,
+        }
+
+    @classmethod
+    def from_payload(cls, value: object) -> "AssetVersionRef":
+        if not isinstance(value, Mapping):
+            raise ValueError("asset version payload is invalid")
+        if value.get("version") != 1:
+            raise ValueError("asset version payload version is unsupported")
+        kind = value.get("kind")
+        identity = value.get("id")
+        source_id = value.get("source_id")
+        revision = value.get("revision")
+        etag = value.get("etag")
+        size = value.get("size")
+        if (
+            not isinstance(kind, str)
+            or not isinstance(identity, str)
+            or not isinstance(source_id, str)
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or not isinstance(etag, str)
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+        ):
+            raise ValueError("asset version payload is invalid")
+        return cls(
+            AssetKey(kind, identity),
+            source_id,
+            StorageEntryRevision(revision),
+            etag,
+            size,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AssetRoot:
     scheme: "Literal['file', 'sql', 'memory']"
     locator: str
@@ -106,4 +176,11 @@ class WritableAssetBackend(AssetBackend, StorageWriter[AssetKey, bytes, AssetInf
     def writable(self) -> bool: ...
 
 
-__all__ = ["AssetBackend", "AssetInfo", "AssetKey", "AssetRoot", "WritableAssetBackend"]
+__all__ = [
+    "AssetBackend",
+    "AssetInfo",
+    "AssetKey",
+    "AssetRoot",
+    "AssetVersionRef",
+    "WritableAssetBackend",
+]
