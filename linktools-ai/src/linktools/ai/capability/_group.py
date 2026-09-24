@@ -39,7 +39,7 @@ from ..spec import (
     parse_mcp_tool_selector,
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
-from ..storage import ObjectRef, ObjectStore, StorageRevision
+from ..storage import StorageRevision
 from ..workspace import Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
@@ -342,23 +342,6 @@ class _CapabilityAssetReader:
     ) -> "tuple[bytes, ...]":
         return await self._store.read_versions(refs)
 
-    async def snapshot(
-        self,
-        keys: Sequence[AssetKey],
-        *,
-        object_store: ObjectStore,
-        expected_revision: "StorageRevision | None" = None,
-    ) -> ObjectRef:
-        if (
-            expected_revision is not None
-            and expected_revision != self._revision
-        ):
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        return await self._store.snapshot(
-            keys,
-            object_store=object_store,
-            expected_revision=self._revision,
-        )
 
 
 @dataclass(frozen=True, slots=True)
