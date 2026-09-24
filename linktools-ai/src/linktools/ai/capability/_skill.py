@@ -99,8 +99,15 @@ class SkillDefinition:
             sandbox_materialize = source.get("sandbox_materialize", False)
             versions: tuple[SkillResourceVersion, ...] = ()
             if raw_versions is not None:
-                if not isinstance(raw_versions, list) or not isinstance(
-                    sandbox_materialize, bool
+                if (
+                    not isinstance(raw_versions, list)
+                    or not isinstance(sandbox_materialize, bool)
+                    or not isinstance(resource_semantic_digest, str)
+                    or len(resource_semantic_digest) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in resource_semantic_digest
+                    )
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 parsed: list[SkillResourceVersion] = []
