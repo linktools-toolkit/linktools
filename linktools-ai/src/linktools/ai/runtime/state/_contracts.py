@@ -1078,10 +1078,6 @@ class ArtifactRecord:
     def size(self) -> int:
         return self.object_ref.size
 
-    @property
-    def digest(self) -> str:
-        return self.object_ref.digest
-
 
 @dataclass(frozen=True, slots=True)
 class ExecutionTerminalCommit:
