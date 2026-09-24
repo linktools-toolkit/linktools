@@ -718,10 +718,11 @@ async def test_workspace_mcp_stdio_protocol_and_readonly_boundary(
         bwrap_executable=bwrap,
         read_policy=ReadOnlySandboxPolicy(readable_paths=("**",)),
     )
-    session = await sandbox.open(
-        root=workspace_root,
-        resources=(resource,),
-    )
+    session = await sandbox.open(root=workspace_root)
+    with pytest.raises(AIError) as hidden_resource:
+        session.resource_path("mcp")
+    assert hidden_resource.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
     transport = _SandboxMCPTransport(
         session,
         "/usr/bin/python3",
