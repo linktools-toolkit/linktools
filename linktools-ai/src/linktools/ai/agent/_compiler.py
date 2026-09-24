@@ -236,8 +236,6 @@ class AgentCompiler:
                     value,
                     pin.contract,
                 )
-                if candidate.fingerprint != pin.fingerprint:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             else:
                 current = self._by_identity.get((pin.kind, pin.id))
                 if current is None or current.fingerprint != pin.fingerprint:
