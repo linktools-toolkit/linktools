@@ -396,14 +396,20 @@ def _skill_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]"
         return result
     source_value = _mapping(source)
     source_projection = _fields(source_value, ("source_id", "root"))
-    snapshot = source_value.get("snapshot")
-    if snapshot is not None:
-        _mapping(snapshot)
+    resource_versions = source_value.get("resource_versions")
+    if resource_versions is not None:
+        if not isinstance(resource_versions, list) or not isinstance(
+            source_value.get("sandbox_materialize"), bool
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         digest = source_value.get("resource_semantic_digest")
         if not _is_digest(digest):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         source_projection["resource_semantic_digest"] = digest
-    elif source_value.get("resource_semantic_digest") is not None:
+    elif (
+        source_value.get("resource_semantic_digest") is not None
+        or source_value.get("sandbox_materialize") is not None
+    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result["source"] = source_projection
     return result
