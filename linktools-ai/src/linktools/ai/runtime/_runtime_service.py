@@ -191,7 +191,7 @@ def _request_files(value: Sequence[str]) -> tuple[str, ...]:
 
 
 class Runtime(Generic[AppT]):
-    """Frozen Runtime composition and service graph."""
+    """Immutable Runtime composition and service graph."""
 
     def __init__(
         self,
