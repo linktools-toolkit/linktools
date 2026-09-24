@@ -343,8 +343,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self._object_key_factory = object_key_factory
         if not isinstance(capability_snapshots, TaskCapabilitySnapshotStore):
             raise TypeError("capability_snapshots must be TaskCapabilitySnapshotStore")
-        self._capability_snapshots = capability_snapshots
-        self._capability_snapshots: dict[str, TaskCapabilitySnapshot] = {}
+        self._capability_snapshot_store = capability_snapshots
+        self._admitted_capabilities: dict[str, TaskCapabilitySnapshot] = {}
         self._agent = _AgentTaskNodeHandler(
             execution,
             catalog,
@@ -396,22 +396,22 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         admission: TaskGraphAdmission,
         graph: TaskGraph,
     ) -> TaskGraph:
-        capability_snapshot = await self._capability_snapshots.capture(
+        capability_snapshot = await self._capability_snapshot_store.capture(
             admission,
             graph,
         )
-        self._capability_snapshots[admission.graph_id] = capability_snapshot
+        self._admitted_capabilities[admission.graph_id] = capability_snapshot
         return TaskGraph(
             graph.graph_id,
             tuple(
                 [
-                    await self._freeze_node_input(node, admission.principal.tenant_id)
+                    await self._materialize_node_input(node, admission.principal.tenant_id)
                     for node in graph.nodes
                 ]
             ),
         )
 
-    async def _freeze_node_input(self, node: TaskNode, tenant_id: str) -> TaskNode:
+    async def _materialize_node_input(self, node: TaskNode, tenant_id: str) -> TaskNode:
         body = node.input
         prompt = body.get("user_prompt")
         if body.get("type") != self._agent.type or not isinstance(prompt, Mapping):
@@ -451,14 +451,14 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         self,
         admission: TaskGraphAdmission,
     ) -> None:
-        capability_snapshot = await self._capability_snapshots.load(admission)
-        self._capability_snapshots[admission.graph_id] = capability_snapshot
+        capability_snapshot = await self._capability_snapshot_store.load(admission)
+        self._admitted_capabilities[admission.graph_id] = capability_snapshot
 
-    def _require_capability_snapshots(
+    def _require_capability_snapshot(
         self,
         graph_id: str,
     ) -> TaskCapabilitySnapshot:
-        capability_snapshot = self._capability_snapshots.get(graph_id)
+        capability_snapshot = self._admitted_capabilities.get(graph_id)
         if capability_snapshot is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
@@ -479,7 +479,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if not isinstance(payload, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         snapshot = AgentBindingSnapshot.from_payload(payload)
-        frozen = self._require_capability_snapshots(graph_id)
+        capability_snapshot = self._require_capability_snapshot(graph_id)
         resolved = capability_snapshot.bindings.get(snapshot.binding_digest)
         if resolved is not None:
             return resolved
@@ -619,7 +619,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 tenant_id=tenant_id,
             )
         finally:
-            self._capability_snapshots.pop(snapshot.graph_id, None)
+            self._admitted_capabilities.pop(snapshot.graph_id, None)
 
     async def _release_nodes_dependencies(
         self,
@@ -1591,8 +1591,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         validate_agent_id(agent_id)
-        frozen = self._require_capability_snapshots(graph_id)
-        root = frozen.roots.get(agent_id)
+        capability_snapshot = self._require_capability_snapshot(graph_id)
+        root = capability_snapshot.roots.get(agent_id)
         if root is None:
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
@@ -1839,7 +1839,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             graph_id=graph_id,
         )
         expanded_nodes = tuple([
-            await self._freeze_node_input(expanded, principal.tenant_id)
+            await self._materialize_node_input(expanded, principal.tenant_id)
             for expanded in expanded_nodes
         ])
         return TaskNodeRunResult(
