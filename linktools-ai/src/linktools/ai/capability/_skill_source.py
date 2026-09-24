@@ -124,6 +124,9 @@ class SkillResourceSource(Protocol):
 
 @runtime_checkable
 class VersionedSkillResourceSource(SkillResourceSource, Protocol):
+    @property
+    def asset_reader(self) -> AssetStoreReader: ...
+
     async def freeze(self, root: str) -> SkillSourceRef: ...
 
 
