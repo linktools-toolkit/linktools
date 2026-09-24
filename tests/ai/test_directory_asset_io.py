@@ -14,11 +14,13 @@ from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
     AssetStore,
+    AssetVersionRef,
     DirectoryAssetBackend,
     PrefixAssetPathAdapter,
 )
 from linktools.ai.capability import AssetSkillResourceSource
-from linktools.ai.storage import StorageOverlay
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.storage import StorageEntryRevision, StorageOverlay
 
 
 @pytest.mark.asyncio
@@ -92,6 +94,43 @@ async def test_asset_skill_package_resolution_runs_off_event_loop(
         assert view.location.kind == "local"
         assert observed_threads
         assert all(thread is not main_thread for thread in observed_threads)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_directory_asset_versions_ignore_revision_but_verify_content(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "agents").mkdir()
+    path = tmp_path / "agents" / "default.json"
+    path.write_bytes(b"first")
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(tmp_path),
+                path_adapter=PrefixAssetPathAdapter({"agent": "agents"}),
+                kinds=("agent",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        key = AssetKey("agent", "default.json")
+        ref = (await store.resolve_versions((key,)))[0]
+        other_revision = AssetVersionRef(
+            ref.key,
+            ref.source_id,
+            StorageEntryRevision(ref.revision.value + 1),
+            ref.etag,
+            ref.size,
+        )
+        assert await store.read_versions((other_revision,)) == (b"first",)
+
+        path.write_bytes(b"changed")
+        with pytest.raises(AIError) as error:
+            await store.read_versions((other_revision,))
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await store.close()
 
