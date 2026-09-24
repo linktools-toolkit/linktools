@@ -43,6 +43,7 @@ from ..storage import ObjectRef, ObjectStore, StorageRevision
 from ..workspace import Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
+from ._skill_source import AssetSkillResourceSource
 from ._task import TaskExpander
 from ._tool_semantic import (
     tool_semantic_metadata,
@@ -286,6 +287,7 @@ class _CapabilityAssetReader:
     _store: AssetStore = field(repr=False, compare=False)
     _revision: StorageRevision
     _versions: Mapping[AssetKey, AssetVersionRef] = field(repr=False, compare=False)
+    _metadata: tuple[AssetInfo, ...] = field(repr=False, compare=False)
 
     async def _verify(self) -> None:
         if await self._store.current_revision() != self._revision:
@@ -320,10 +322,7 @@ class _CapabilityAssetReader:
         return values
 
     async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
-        await self._verify()
-        values = await self._store.metadata_snapshot()
-        await self._verify()
-        return values
+        return self._metadata
 
     async def resolve_versions(
         self,
@@ -785,6 +784,21 @@ class CapabilityGroup(Generic[AppT]):
                 )
                 for info in metadata
             )
+            asset_reader = _CapabilityAssetReader(
+                store,
+                source_revision,
+                {
+                    info.key: AssetVersionRef(
+                        info.key,
+                        info.root_digest,
+                        info.revision,
+                        info.etag,
+                        info.size,
+                    )
+                    for info in metadata
+                },
+                tuple(metadata),
+            )
             context = CapabilityLoadContext(self._id, store, entries)
             for kind, loader in loaders:
                 if getattr(loader, "source_kind", kind) != kind:
@@ -813,6 +827,16 @@ class CapabilityGroup(Generic[AppT]):
                         or skill.source_ref.frozen
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+                    if skill.source_ref is not None:
+                        frozen_ref = await AssetSkillResourceSource(
+                            self._id,
+                            asset_reader,
+                        ).freeze(skill.source_ref.root)
+                        skill = SkillDefinition(skill.spec, frozen_ref)
+                        item = cast(
+                            "CapabilityContribution[AppT]",
+                            CapabilityContribution.from_declaration(skill),
+                        )
                     normalized.append(item)
                 contributions.extend(normalized)
             await context.verify()
@@ -833,22 +857,7 @@ class CapabilityGroup(Generic[AppT]):
             frozen_contributions,
             source_revision,
             self._workspace,
-            None
-            if store is None
-            else _CapabilityAssetReader(
-                store,
-                cast(StorageRevision, source_revision),
-                {
-                    info.key: AssetVersionRef(
-                        info.key,
-                        info.root_digest,
-                        info.revision,
-                        info.etag,
-                        info.size,
-                    )
-                    for info in metadata
-                },
-            ),
+            None if store is None else asset_reader,
         )
         _logger.info(
             "capability group frozen: group=%s contributions=%d source_revision=%s",
