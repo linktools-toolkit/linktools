@@ -8,21 +8,18 @@ import asyncio
 import hashlib
 import os
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-import yaml
-
-from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_sha256
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
-    from ..asset import AssetKey, AssetStoreReader
     from ._root import WorkspacePolicy
 
-_PREAMBLE = """Repository instructions are workspace guidance.
+_PREAMBLE = """Instruction documents provide scoped guidance.
 
 Runtime-enforced security and permission policy cannot be overridden by repository text.
 
@@ -150,7 +147,7 @@ class RepositoryInstructionResolver(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class AssetRuleCatalog:
-    """Instruction documents decoded from captured rule Asset versions."""
+    """Instruction documents collected from captured Rule Assets."""
 
     documents: tuple[RepositoryInstructionDocument, ...] = ()
 
@@ -166,61 +163,58 @@ class AssetRuleCatalog:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
 
     @classmethod
-    async def load(
+    def from_asset_rules(
         cls,
-        readers: Mapping[str, AssetStoreReader],
-        policy: "WorkspacePolicy",
+        assets: Sequence[tuple[str, str]],
     ) -> "AssetRuleCatalog":
-        documents: list[RepositoryInstructionDocument] = []
-        sources: set[str] = set()
-        for reader in readers.values():
-            revision = await reader.current_revision()
-            candidates = tuple(
-                info
-                for info in await reader.metadata_snapshot()
-                if info.key.kind == "rule"
-                and info.key.id.endswith(".md")
+        if not isinstance(assets, Sequence) or isinstance(
+            assets,
+            (str, bytes, bytearray),
+        ) or any(
+            not isinstance(asset, tuple)
+            or len(asset) != 2
+            or not isinstance(asset[0], str)
+            or not isinstance(asset[1], str)
+            for asset in assets
+        ):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        documents = tuple(
+            RepositoryInstructionDocument(
+                f"rule:{asset_id}",
+                ".",
+                content,
             )
-            for info in candidates:
-                _validate_rule_id(info.key.id[:-3])
-            entries = tuple(
-                info
-                for info in candidates
-                if not any(
-                    DEFAULT_DISCOVERY_POLICY.ignores(part)
-                    for part in info.key.id.split("/")
-                )
-            )
-            keys: list[AssetKey] = []
-            for info in entries:
-                if info.size > policy.max_repository_instruction_bytes:
-                    raise AIError(ErrorCode.PROMPT_TOO_LARGE)
-                keys.append(info.key)
-            refs = await reader.resolve_versions(keys)
-            if len(refs) != len(entries):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if any(
-                not ref.matches_info(info)
-                for info, ref in zip(entries, refs, strict=True)
-            ):
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            values = await reader.read_versions(refs)
-            if len(values) != len(entries):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for info, value in zip(entries, values, strict=True):
-                try:
-                    content = value.decode("utf-8", errors="strict")
-                except UnicodeDecodeError as error:
-                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-                scope, body = _parse_rule_markdown(content)
-                source = f"rule:{info.key.id[:-3]}"
-                if source in sources:
-                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-                sources.add(source)
-                documents.append(RepositoryInstructionDocument(source, scope, body))
-            if await reader.current_revision() != revision:
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            for asset_id, content in assets
+        )
         return cls(tuple(sorted(documents, key=lambda document: document.source)))
+
+
+class AssetRuleInstructionResolver:
+    """Resolve captured Asset Rules without reading Workspace files."""
+
+    def __init__(
+        self,
+        rules: AssetRuleCatalog,
+        policy: "WorkspacePolicy",
+    ) -> None:
+        if not isinstance(rules, AssetRuleCatalog):
+            raise TypeError("rules must be AssetRuleCatalog")
+        self._rules = rules
+        self._policy = policy
+
+    async def resolve(
+        self,
+        path: str | Path = ".",
+        *,
+        exclude_sources: frozenset[str] = frozenset(),
+    ) -> RepositoryInstructions:
+        _validate_exclude_sources(exclude_sources)
+        target_scope = _normalize_rule_target(path)
+        bundle = RepositoryInstructions(
+            _applicable_rule_documents(self._rules, target_scope, exclude_sources)
+        )
+        _validate_limits(bundle, self._policy)
+        return bundle
 
 
 class LocalRepositoryInstructionResolver:
@@ -277,11 +271,10 @@ class LocalRepositoryInstructionResolver:
         relative_target = _normalize_target_path(self._root, path)
         target_scope = "." if not relative_target.parts else relative_target.as_posix()
         _validate_scope(target_scope)
-        rule_documents = tuple(
-            document
-            for document in self._rules.documents
-            if document.source not in exclude_sources
-            and _scope_applies(document.scope, target_scope)
+        rule_documents = _applicable_rule_documents(
+            self._rules,
+            target_scope,
+            exclude_sources,
         )
         agents = await asyncio.to_thread(
             self._resolve_agents_blocking,
@@ -291,6 +284,32 @@ class LocalRepositoryInstructionResolver:
         bundle = RepositoryInstructions((*rule_documents, *agents))
         _validate_limits(bundle, self._policy)
         return bundle
+
+
+def _applicable_rule_documents(
+    rules: AssetRuleCatalog,
+    target_scope: str,
+    exclude_sources: frozenset[str],
+) -> tuple[RepositoryInstructionDocument, ...]:
+    return tuple(
+        document
+        for document in rules.documents
+        if document.source not in exclude_sources
+        and _scope_applies(document.scope, target_scope)
+    )
+
+
+def _normalize_rule_target(value: str | Path) -> str:
+    try:
+        raw = os.fspath(value)
+    except TypeError as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    try:
+        return _validate_scope(raw)
+    except AIError as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
 
 
 def _validate_document(document: RepositoryInstructionDocument) -> None:
@@ -547,65 +566,6 @@ def _require_contained(path: Path, roots: tuple[Path, ...]) -> None:
             path.relative_to(root)
         except (ValueError, OSError) as error:
             raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT) from error
-
-
-def _parse_rule_markdown(content: str) -> tuple[str, str]:
-    lines = content.splitlines(keepends=True)
-    if not lines or _strip_line_ending(lines[0]) != "---":
-        return ".", content
-    closing = next(
-        (index for index, line in enumerate(lines[1:], 1) if _strip_line_ending(line) == "---"),
-        None,
-    )
-    if closing is None:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    frontmatter = "".join(lines[1:closing])
-    try:
-        raw = yaml.load(frontmatter, Loader=_StrictSafeLoader)
-    except Exception as error:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-    if not isinstance(raw, Mapping) or "scope" not in raw:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    scope = raw.get("scope")
-    if not isinstance(scope, str) or not scope:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    return _validate_scope(scope), "".join(lines[closing + 1 :])
-
-
-def _strip_line_ending(value: str) -> str:
-    if value.endswith("\r\n"):
-        return value[:-2]
-    if value.endswith("\n") or value.endswith("\r"):
-        return value[:-1]
-    return value
-
-
-class _StrictSafeLoader(yaml.SafeLoader):
-    pass
-
-
-def _construct_mapping(
-    loader: _StrictSafeLoader,
-    node: yaml.nodes.MappingNode,
-    deep: bool = False,
-) -> dict[object, object]:
-    result: dict[object, object] = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in result
-        except TypeError as error:
-            raise ValueError("unhashable YAML mapping key") from error
-        if duplicate:
-            raise ValueError("duplicate YAML key")
-        result[key] = loader.construct_object(value_node, deep=deep)
-    return result
-
-
-_StrictSafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_mapping,
-)
 
 
 def _validate_limits(bundle: RepositoryInstructions, policy: "WorkspacePolicy") -> None:

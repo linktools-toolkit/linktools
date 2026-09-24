@@ -14,6 +14,7 @@ from linktools.core import environ
 from ..asset import AssetStoreReader
 from ..agent import AgentCatalog, AgentCompiler
 from ..capability import (
+    AssetRuleResourceSource,
     AssetSkillResourceSource,
     CapabilityContribution,
     CapabilityGroup,
@@ -37,11 +38,13 @@ from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
     AssetRuleCatalog,
+    AssetRuleInstructionResolver,
     LocalRepositoryInstructionResolver,
     LocalSandbox,
     RepositoryInstructionResolver,
     Sandbox,
     Workspace,
+    WorkspacePolicy,
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
@@ -192,6 +195,17 @@ async def compose_runtime_components(
                 if (reader := group.asset_reader) is not None
             )
         )
+        asset_rules: list[tuple[str, str]] = []
+        for group in groups:
+            reader = group.asset_reader
+            if reader is not None:
+                asset_rules.extend(
+                    await AssetRuleResourceSource(group.group_id, reader).load()
+                )
+        rule_ids = tuple(rule_id for rule_id, _content in asset_rules)
+        if len(rule_ids) != len(set(rule_ids)):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        rules = AssetRuleCatalog.from_asset_rules(tuple(asset_rules))
         task_handlers = tuple(
             cast("TaskNodeHandler[object]", candidate.value)
             for candidate in candidates
@@ -241,17 +255,23 @@ async def compose_runtime_components(
             tenant_id=effective_tenant_id,
         )
         initialized = True
+        instruction_policy = (
+            WorkspacePolicy() if workspace is None else workspace.policy
+        )
+        for group in groups:
+            await group.verify_source_revision()
         if workspace is None:
-            instruction_resolver: RepositoryInstructionResolver | None = None
+            instruction_resolver: RepositoryInstructionResolver | None = (
+                AssetRuleInstructionResolver(rules, instruction_policy)
+                if rules.documents
+                else None
+            )
             workspace_access = None
             execution_cwd = _capture_host_cwd()
         else:
-            rules = await AssetRuleCatalog.load(asset_sources, workspace.policy)
-            for group in groups:
-                await group.verify_source_revision()
             instruction_resolver = LocalRepositoryInstructionResolver(
                 workspace.root,
-                workspace.policy,
+                instruction_policy,
                 rules,
             )
             workspace_access = WorkspaceAccess.for_workspace(

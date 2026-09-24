@@ -369,7 +369,7 @@ class _CapabilityAssetReader:
 
 @dataclass(frozen=True, slots=True)
 class CapabilityGroupSnapshot(Generic[AppT]):
-    """One parsed declaration set bound to its source revision."""
+    """Declarations and a versioned Asset reader captured from one revision."""
 
     group_id: str
     contributions: tuple[CapabilityContribution[AppT], ...]
@@ -413,7 +413,7 @@ class CapabilityGroupSnapshot(Generic[AppT]):
 
 @dataclass(frozen=True, slots=True)
 class CapabilityLoadEntry:
-    """Declaration-relevant metadata captured at the start of a group snapshot."""
+    """Asset metadata captured at the start of a group snapshot."""
 
     key: AssetKey
     etag: str
@@ -471,7 +471,7 @@ class CapabilityLoadContext:
         kind: "str | None" = None,
         prefix: "str | None" = None,
     ) -> "tuple[CapabilityLoadEntry, ...]":
-        """List captured declaration metadata without opening the backing store."""
+        """List captured Asset metadata without opening the backing store."""
         return tuple(
             entry
             for entry in self._entries
@@ -535,7 +535,10 @@ class CapabilityLoader(Protocol[AppT]):
     async def load(
         self,
         context: CapabilityLoadContext,
-    ) -> "Sequence[CapabilityContribution[AppT] | AgentSpec | SkillDefinition | MCPServerSpec]": ...
+    ) -> (
+        "Sequence[CapabilityContribution[AppT] | AgentSpec | SkillDefinition "
+        "| MCPServerSpec]"
+    ): ...
 
 
 class CapabilityGroup(Generic[AppT]):
@@ -777,7 +780,7 @@ class CapabilityGroup(Generic[AppT]):
         return loader
 
     async def snapshot(self) -> "CapabilityGroupSnapshot[AppT]":
-        """Capture direct registrations and declarations at one source revision."""
+        """Capture registrations and declarations at one Asset revision."""
         contributions = list(tuple(self._contributions))
         loaders = tuple(self._loaders.items())
         store = self._store

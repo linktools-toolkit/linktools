@@ -4,6 +4,7 @@
 
 from ._instructions import (
     AssetRuleCatalog,
+    AssetRuleInstructionResolver,
     LocalRepositoryInstructionResolver,
     RepositoryInstructionDocument,
     RepositoryInstructionResolver,
@@ -38,6 +39,7 @@ __all__ = [
     "ReadOnlySandboxPolicy",
     "BubblewrapSandbox",
     "AssetRuleCatalog",
+    "AssetRuleInstructionResolver",
     "LocalRepositoryInstructionResolver",
     "PermissionDecision",
     "RepositoryInstructionDocument",
