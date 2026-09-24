@@ -309,18 +309,10 @@ class DefaultEvaluationService:
                 AuthorizationAction.EVALUATION_READ,
             )
         )
-        digest = canonical_sha256(
-            {
-                "snapshot_id": evaluation_id,
-                "execution_id": record.execution_id,
-                "binding_digest": source.binding_digest,
-            }
-        )
         return RunSnapshot(
             evaluation_id,
             record.execution_id,
             source.binding_digest,
-            digest,
         )
 
     async def replay(

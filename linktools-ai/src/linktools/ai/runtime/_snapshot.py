@@ -33,7 +33,7 @@ from ..storage import (
     ObjectStore,
     read_object,
 )
-from ._snapshot_contract import RunSnapshot, snapshot_digest
+from ._snapshot_contract import RunSnapshot
 from ._runtime_history import RuntimeHistory
 from .state import SnapshotExclusiveGuard, RuntimeState, SnapshotLimits
 
@@ -1398,5 +1398,4 @@ __all__ = [
     "SnapshotExclusiveGuard",
     "SnapshotLimits",
     "SnapshotTargetInspection",
-    "snapshot_digest",
 ]
