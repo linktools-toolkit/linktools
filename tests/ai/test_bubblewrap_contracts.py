@@ -68,19 +68,28 @@ def test_stdio_policy_is_read_only_and_returns_detached_values(
         policy["network"] = "public"  # type: ignore[index]
 
 
-def test_readonly_hidden_path_can_be_absent_without_host_mutation(
+def test_readonly_hidden_path_requires_preprovisioned_mountpoint(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     hidden = (".linktools",)
 
+    with pytest.raises(AIError) as error:
+        _bubblewrap._prepare_hidden_paths(
+            workspace,
+            hidden,
+            create_missing=False,
+        )
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+    assert not (workspace / ".linktools").exists()
+
+    (workspace / ".linktools").mkdir()
     assert _bubblewrap._prepare_hidden_paths(
         workspace,
         hidden,
         create_missing=False,
     ) == hidden
-    assert not (workspace / ".linktools").exists()
 
 
 def test_stdio_resources_are_not_mounted_into_worker_session(
