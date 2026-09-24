@@ -19,7 +19,6 @@ from ..model import ModelBinding, ModelResolver
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
-    MCPServerSpecCodec,
     SubagentRef,
     bound_agent_spec_identity_payload,
     capability_identity_payload,
