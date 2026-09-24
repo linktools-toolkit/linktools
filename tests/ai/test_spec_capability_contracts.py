@@ -227,14 +227,13 @@ async def test_mcp_model_tool_collision_fails_before_exposure(
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
-def test_skill_snapshot_contract_preserves_object_store_owner() -> None:
-    reference = ObjectRef("execution", "snapshot", "a" * 64, 1)
+def test_skill_snapshot_contract_uses_runtime_logical_owner() -> None:
     definition = SkillDefinition(
         SkillSpec("review", "instructions"),
         SkillSourceRef(
             "application",
             "review",
-            reference,
+            ObjectRef("execution", "snapshot", "a" * 64, 1),
             "b" * 64,
         ),
     )
@@ -244,10 +243,15 @@ def test_skill_snapshot_contract_preserves_object_store_owner() -> None:
     assert isinstance(source, dict)
     snapshot = source["snapshot"]
     assert isinstance(snapshot, dict)
-    assert snapshot["store_id"] == "execution"
+    assert snapshot["store_id"] == "runtime"
     restored = SkillDefinition.from_semantic_contract(contract)
     assert restored.source_ref is not None
-    assert restored.source_ref.snapshot == reference
+    assert restored.source_ref.snapshot == ObjectRef(
+        "runtime",
+        "snapshot",
+        "a" * 64,
+        1,
+    )
 
 
 def test_frozen_skill_source_rejects_wrong_object_store_owner() -> None:
