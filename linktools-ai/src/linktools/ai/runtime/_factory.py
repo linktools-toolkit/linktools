@@ -519,7 +519,6 @@ async def _build_local_components(
             catalog,
             compiler,
             skill_sources,
-            state.object_store(RuntimeDomain.EXECUTION),
             workspace=workspace,
             mcp_assets=mcp_assets,
         )
@@ -550,7 +549,6 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
-            skill_snapshot_store=state.object_store(RuntimeDomain.EXECUTION),
             mcp_resource_store=state.object_store(RuntimeDomain.EXECUTION),
             metrics=metric_buffer,
         )
