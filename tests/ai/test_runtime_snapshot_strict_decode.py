@@ -97,6 +97,26 @@ def test_current_snapshot_object_ref_requires_store_id(decoder) -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
+@pytest.mark.parametrize(
+    "decoder",
+    (
+        runtime_snapshot_module._object_ref_from_payload,
+        runtime_state_root_module._object_ref_from_payload,
+    ),
+)
+def test_snapshot_manifest_refs_require_runtime_logical_owner(decoder) -> None:
+    with pytest.raises(AIError) as raised:
+        decoder(
+            {
+                "store_id": "physical",
+                "key": "snapshot",
+                "digest": "a" * 64,
+                "size": 1,
+            }
+        )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 @pytest.mark.asyncio
 async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
     tmp_path,
