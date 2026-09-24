@@ -265,11 +265,15 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         "id": resource_root["id"],
     }
     if not has_resource_versions:
-        if contract.get("resource_semantic_digest") is not None:
+        if (
+            contract.get("resource_source_id") is not None
+            or contract.get("resource_semantic_digest") is not None
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
+    source_id = contract.get("resource_source_id")
     digest = contract.get("resource_semantic_digest")
-    if not _is_digest(digest):
+    if not isinstance(source_id, str) or not source_id or not _is_digest(digest):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result["resource_semantic_digest"] = digest
     return result
