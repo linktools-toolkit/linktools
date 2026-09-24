@@ -334,8 +334,15 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     assert restored_server.args == ("resource:literal-value",)
     assert resource_versions is None
     assert len(selected) == 1
-    assert selected[0].semantic_contract == dict(pin.contract)
-    assert selected[0].fingerprint == pin.fingerprint
+    assert (
+        selected[0].id,
+        selected[0].revision,
+        selected[0].contract,
+    ) == (
+        pin.id,
+        pin.revision,
+        dict(pin.contract),
+    )
 
 
 @pytest.mark.asyncio
