@@ -15,13 +15,13 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Keep authoring adapters separate from durable codecs. Fill defaults before
   canonical decoding; explicit values always win, and persistence stores
   resolved execution meaning.
-- Freeze a CapabilityGroup declaration result once and reuse it for host
+- Capture a CapabilityGroup declaration snapshot once and reuse it for host
   inspection and Runtime composition. Bind cross-source reads to the captured
   revision or an immutable reference.
 - Keep visibility, execution authorization, and OS isolation as separate
   boundaries. A successful close for a restricted child process requires
   proof that its owned process tree is quiescent.
-- Architecture and release gates encode long-lived invariants only. Do not freeze current package names, module depth, class names, or layout as policy.
+- Architecture and release gates encode long-lived invariants only. Do not encode current package names, module depth, class names, or layout as policy.
 - Build/release tooling must not become a second owner of Runtime semantic truth.
 
 ### Durable contracts and identity
@@ -30,13 +30,13 @@ Package instructions for `linktools-ai`. Repository-wide rules in [../AGENTS.md]
 - Durable wire formats and semantic identities are explicit LinkTools contracts. Honor published or explicitly committed compatibility obligations. Without such an obligation, remove obsolete pre-release readers, aliases, defaults and migrations while updating current writers, readers and verification together. Do not prebuild compatibility paths for hypothetical versions.
 - Define each semantic or idempotency digest from one explicit minimal projection owned by the contract. Include only inputs needed to distinguish execution meaning, accepted request behavior or safe reuse/recovery. Non-semantic additions and default fields must not change that identity; whole-object reflection, incidental wire payloads and dependency serialization must not define it.
 - Separate semantic identity from byte integrity and storage addressing. Physical locators, credentials, transport tuning and pure display/diagnostic data do not enter semantic identity. Complete stored bytes still require complete integrity checks. Preserve logical scope, effect policy, model-visible instructions/schema and provenance when the specific contract needs them.
-- Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Identity-affecting data must remain stable after its contract is frozen, and identity comparisons must use the same projection as the digest.
+- Use stable protocol discriminators, not Python class/module names or dependency/build versions. Normalize only equivalences established by the owning contract; preserve ordered inputs and effective business parameters. Identity-affecting data must remain stable once its contract identity is committed, and identity comparisons must use the same projection as the digest.
 - Every current writer output must be accepted by its matching reader. Define omitted optional fields in that wire contract, not through changing runtime defaults. Reject corrupt or unsupported durable data with typed errors; never guess, silently repair or reinterpret unknown execution semantics. Verify original stored bytes before adapting decoded values.
 
 ### Persistence and concurrency
 
 - A semantic fact must have one durable owner. Any persisted duplicate used as an index, projection, or cache must be explicitly derived and must not become an independent source of truth or define conflicting recovery semantics.
-- Asset history belongs to AssetStore. Durable Runtime bindings may persist Asset version references and semantic digests, but must not copy Asset resource bytes into Runtime ObjectStore merely to freeze execution dependencies.
+- Asset history belongs to AssetStore. Durable Runtime bindings may persist Asset version references and semantic digests, but must not copy Asset resource bytes into Runtime ObjectStore merely to pin execution dependencies.
 - Caller cancellation does not determine durable truth. Resolve commit/readback state before reporting an unknown outcome.
 - Filesystem coordination uses `filelock`. Database concurrency must avoid pessimistic locking.
 
