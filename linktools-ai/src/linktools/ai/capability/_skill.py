@@ -10,14 +10,15 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext as PydanticRunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue
+from ..core import JsonValue
+from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef
 from ..spec import SkillSpec
 from ._context import AgentContext
 from ._skill_source import (
     FrozenSkillResourceSource,
     SkillLocation,
+    SkillResourceVersion,
     SkillResourceView,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -56,13 +57,16 @@ class SkillDefinition:
                 "source_id": self.source_ref.source_id,
                 "root": self.source_ref.root,
             }
-            if self.source_ref.snapshot is not None:
-                source["snapshot"] = {
-                    "store_id": "runtime",
-                    "key": self.source_ref.snapshot.key,
-                    "digest": self.source_ref.snapshot.digest,
-                    "size": self.source_ref.snapshot.size,
-                }
+            if self.source_ref.frozen:
+                source["resource_versions"] = [
+                    {
+                        "path": item.path,
+                        "asset": item.asset.to_payload(),
+                        "executable_bits": item.executable_bits,
+                    }
+                    for item in self.source_ref.resource_versions
+                ]
+                source["sandbox_materialize"] = self.source_ref.sandbox_materialize
                 source["resource_semantic_digest"] = (
                     self.source_ref.resource_semantic_digest
                 )
@@ -90,39 +94,41 @@ class SkillDefinition:
         elif isinstance(source, Mapping):
             source_id = source.get("source_id")
             root = source.get("root")
-            snapshot = source.get("snapshot")
-            if not isinstance(source_id, str) or not isinstance(root, str):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            snapshot_ref = None
+            raw_versions = source.get("resource_versions")
             resource_semantic_digest = source.get("resource_semantic_digest")
-            if snapshot is not None:
-                if not isinstance(snapshot, Mapping) or not {
-                    "store_id",
-                    "key",
-                    "digest",
-                    "size",
-                }.issubset(snapshot):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                store_id = snapshot["store_id"]
-                key = snapshot["key"]
-                digest = snapshot["digest"]
-                size = snapshot["size"]
-                if (
-                    store_id != RUNTIME_OBJECT_STORE_ID
-                    or not isinstance(key, str)
-                    or not key
-                    or not isinstance(digest, str)
-                    or len(digest) != 64
-                    or any(character not in "0123456789abcdef" for character in digest)
-                    or isinstance(size, bool)
-                    or not isinstance(size, int)
-                    or size < 0
+            sandbox_materialize = source.get("sandbox_materialize", False)
+            versions: tuple[SkillResourceVersion, ...] = ()
+            if raw_versions is not None:
+                if not isinstance(raw_versions, list) or not isinstance(
+                    sandbox_materialize, bool
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                parsed: list[SkillResourceVersion] = []
                 try:
-                    snapshot_ref = ObjectRef(store_id, key, digest, size)
-                except ValueError as error:
+                    for raw in raw_versions:
+                        if not isinstance(raw, Mapping):
+                            raise ValueError
+                        path = raw.get("path")
+                        asset = raw.get("asset")
+                        mode = raw.get("executable_bits", 0)
+                        if (
+                            not isinstance(path, str)
+                            or isinstance(mode, bool)
+                            or not isinstance(mode, int)
+                        ):
+                            raise ValueError
+                        parsed.append(
+                            SkillResourceVersion(
+                                path,
+                                AssetVersionRef.from_payload(asset),
+                                mode,
+                            )
+                        )
+                except (TypeError, ValueError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                versions = tuple(sorted(parsed, key=lambda item: item.path))
+            elif sandbox_materialize or resource_semantic_digest is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if resource_semantic_digest is not None and (
                 not isinstance(resource_semantic_digest, str)
                 or len(resource_semantic_digest) != 64
@@ -136,8 +142,9 @@ class SkillDefinition:
                 source_ref = SkillSourceRef(
                     source_id,
                     root,
-                    snapshot_ref,
+                    versions,
                     resource_semantic_digest,
+                    sandbox_materialize,
                 )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
