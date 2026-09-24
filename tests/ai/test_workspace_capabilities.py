@@ -379,7 +379,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     try:
-        frozen = await CapabilityGroup(
+        snapshot = await CapabilityGroup(
             "workspace",
             workspace=workspace,
             assets=store,
@@ -389,7 +389,7 @@ async def test_workspace_group_preserves_custom_asset_path_discovery(tmp_path: P
 
     identities = {
         (item.kind, item.id)
-        for item in frozen.contributions
+        for item in snapshot.contributions
     }
     assert ("agent", "audit") in identities
     assert ("tool", "read_file") in identities
@@ -624,9 +624,9 @@ async def test_workspace_group_does_not_discover_declarations(
     )
 
     group = CapabilityGroup("workspace", workspace=workspace)
-    frozen = await group.snapshot()
+    snapshot = await group.snapshot()
 
     assert group.workspace is workspace
-    assert frozen
-    assert all(item.kind == "tool" for item in frozen.contributions)
+    assert snapshot
+    assert all(item.kind == "tool" for item in snapshot.contributions)
     assert sandbox.sessions == []
