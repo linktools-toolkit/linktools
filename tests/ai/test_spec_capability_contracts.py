@@ -534,18 +534,21 @@ def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
     first = codec.to_frozen_payload(
         server,
         (first_ref,),
+        resource_source_id="group-a",
         resource_semantic_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
     second = codec.to_frozen_payload(
         server,
         (second_ref,),
+        resource_source_id="group-b",
         resource_semantic_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
 
     assert first["args"] is None
     assert first["frozen_args"] == ["resource:script.py"]
+    assert first["resource_source_id"] == "group-a"
     restored, versions = codec.from_frozen_payload(first)
     assert restored == server
     assert versions == (first_ref,)
