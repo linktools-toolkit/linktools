@@ -327,7 +327,7 @@ class MCPServerSpecCodec:
             }
         return payload
 
-    def to_frozen_payload(
+    def to_execution_payload(
         self,
         value: MCPServerSpec,
         resource_versions: "Sequence[AssetVersionRef] | None",
@@ -336,6 +336,7 @@ class MCPServerSpecCodec:
         resource_semantic_digest: "str | None" = None,
         execution_policy: "Mapping[str, JsonValue] | None" = None,
     ) -> "dict[str, JsonValue]":
+        """Return the MCP contract stored in an execution binding."""
         payload = self.to_payload(value)
         if execution_policy is not None:
             payload["execution_policy"] = _execution_policy_payload(
@@ -364,8 +365,6 @@ class MCPServerSpecCodec:
         if not isinstance(resource_source_id, str) or not resource_source_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _require_digest(resource_semantic_digest)
-        payload["args"] = None
-        payload["frozen_args"] = list(value.args)
         payload["resource_versions"] = [
             item.to_payload() for item in versions
         ]
@@ -377,7 +376,7 @@ class MCPServerSpecCodec:
         return self.to_payload(value)
 
     def from_payload(self, raw: Mapping[str, object]) -> MCPServerSpec:
-        value, resource_versions = self._decode_payload(raw, frozen=False)
+        value, resource_versions = self._decode_payload(raw, execution=False)
         if resource_versions is not None:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return value
@@ -427,35 +426,35 @@ class MCPServerSpecCodec:
             payload["resource_root"] = package_root
         return self.from_payload(payload)
 
-    def from_frozen_payload(
+    def from_execution_payload(
         self,
         raw: Mapping[str, object],
     ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
-        return self._decode_payload(raw, frozen=True)
+        """Decode an MCP contract carried by an execution binding."""
+        return self._decode_payload(raw, execution=True)
 
     def _decode_payload(
         self,
         raw: Mapping[str, object],
         *,
-        frozen: bool,
+        execution: bool,
     ) -> "tuple[MCPServerSpec, tuple[AssetVersionRef, ...] | None]":
         _require_v1(raw)
-        if not frozen and (
+        if not execution and (
             "resource_versions" in raw
             or "resource_source_id" in raw
-            or "frozen_args" in raw
             or "resource_semantic_digest" in raw
             or "execution_policy" in raw
         ):
             raise AIError(
                 ErrorCode.OUTPUT_CONTRACT_INVALID,
-                "MCP frozen resource fields are Runtime-owned",
+                "MCP execution resource fields are Runtime-owned",
             )
         identity = raw.get("id")
         command = raw.get("command")
         resource_root = _decode_asset_key(raw.get("resource_root"))
         resource_versions: tuple[AssetVersionRef, ...] | None = None
-        raw_versions = raw.get("resource_versions") if frozen else None
+        raw_versions = raw.get("resource_versions") if execution else None
         if raw_versions is not None:
             if not isinstance(raw_versions, list):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -472,32 +471,26 @@ class MCPServerSpecCodec:
             resource_versions = tuple(
                 sorted(parsed, key=lambda item: (item.key.kind, item.key.id))
             )
-        if frozen and "execution_policy" in raw:
+        if execution and "execution_policy" in raw:
             _execution_policy_payload(raw["execution_policy"])
             if resource_root is not None and resource_versions is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        resource_source_id = raw.get("resource_source_id") if frozen else None
+        resource_source_id = raw.get("resource_source_id") if execution else None
         if resource_versions is None:
-            if (
-                frozen
-                and (
-                    "resource_semantic_digest" in raw
-                    or "resource_source_id" in raw
-                    or "frozen_args" in raw
-                )
+            if execution and (
+                "resource_semantic_digest" in raw
+                or "resource_source_id" in raw
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            args = raw.get("args", [])
         else:
             if (
                 resource_root is None
-                or raw.get("args") is not None
                 or not isinstance(resource_source_id, str)
                 or not resource_source_id
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            args = raw.get("frozen_args")
             _require_digest(raw.get("resource_semantic_digest"))
+        args = raw.get("args", [])
         if not isinstance(identity, str) or not identity.strip():
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "MCP server id must be a non-empty string")
         if not isinstance(command, str) or not command.strip():
