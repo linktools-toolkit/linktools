@@ -87,7 +87,7 @@ def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
         left.definition_digest == right.definition_digest
         and AgentSpecCodec().to_payload(left.spec)
         == AgentSpecCodec().to_payload(right.spec)
-        and left.model.model_digest == right.model.model_digest
+        and dict(left.model.contract) == dict(right.model.contract)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_tools) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_tools)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_skills) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_skills)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_mcp) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_mcp)

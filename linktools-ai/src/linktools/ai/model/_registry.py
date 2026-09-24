@@ -178,9 +178,5 @@ class _ModelAliasBinding:
     def contract(self) -> Mapping[str, JsonValue]:
         return self._target.contract
 
-    @property
-    def model_digest(self) -> str:
-        return self._target.model_digest
-
     def materialize(self) -> Model:
         return self._target.materialize()

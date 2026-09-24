@@ -47,16 +47,17 @@ def _definition_payload(definition: MetricDefinition) -> dict[str, object]:
     return payload
 
 
-def definition_contract_digest(definition: MetricDefinition) -> str:
-    payload = _definition_payload(definition)
-    payload.pop("description", None)
-    payload["query_fields"] = sorted(definition.query_fields)
-    return canonical_sha256(
-        {
-            "version": 1,
-            "definition": payload,
-        }
-    )
+def same_definition_contract(
+    left: MetricDefinition,
+    right: MetricDefinition,
+) -> bool:
+    left_payload = _definition_payload(left)
+    right_payload = _definition_payload(right)
+    left_payload.pop("description", None)
+    right_payload.pop("description", None)
+    left_payload["query_fields"] = sorted(left.query_fields)
+    right_payload["query_fields"] = sorted(right.query_fields)
+    return left_payload == right_payload
 
 
 def definition_envelope(

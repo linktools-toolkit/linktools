@@ -238,7 +238,6 @@ def _result_payload(result: ExecutionResult) -> dict[str, object]:
         "execution_id": result.execution_id,
         "status": result.status.value,
         "output": result.output,
-        "output_contract_digest": result.output_contract_digest,
         "error_code": result.error_code,
         "safe_error_details": dict(result.safe_error_details),
         "error_diagnostics": (

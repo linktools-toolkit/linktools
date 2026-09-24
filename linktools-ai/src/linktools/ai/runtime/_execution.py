@@ -2466,7 +2466,6 @@ class DefaultExecutionService:
                     execution.execution_id,
                     execution.status,
                     None,
-                    None,
                     result.usage,
                     error_code,
                     safe_details,
@@ -2476,16 +2475,6 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        task_binding = (
-            execution.binding
-            if isinstance(execution.binding, TaskBindingSnapshot)
-            else None
-        )
-        binding = (
-            None
-            if task_binding is not None
-            else self._binding(execution.binding_digest, execution.binding)
-        )
         try:
             if result.output.kind == "inline":
                 decoded = result.output.decode()
@@ -2507,11 +2496,6 @@ class DefaultExecutionService:
                 execution.execution_id,
                 execution.status,
                 output,
-                (
-                    task_binding.output_contract_digest
-                    if task_binding is not None
-                    else binding.output_contract_digest
-                ),
                 result.usage,
                 error_code,
                 safe_details,

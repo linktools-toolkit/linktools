@@ -25,7 +25,7 @@ from ..storage import (
 from ._codec import (
     decode_definition_envelope,
     decode_observation_envelope,
-    definition_contract_digest,
+    same_definition_contract,
     definition_envelope,
     observation_digest,
     observation_envelope,
@@ -79,12 +79,6 @@ def build_metrics_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaDa
             BigInteger,
             nullable=False,
             comment="Metric semantic revision.",
-        ),
-        Column(
-            "definition_digest",
-            sql_sha256(),
-            nullable=False,
-            comment="SHA-256 of the normalized metric definition.",
         ),
         Column(
             "observation_kind",
@@ -299,12 +293,10 @@ class SqlMetricStore:
 
         await self._initialize()
         namespace_key = namespace_digest(namespace)
-        contract_digest = definition_contract_digest(definition)
         values = {
             "namespace_digest": namespace_key,
             "metric_name": definition.name,
             "revision": definition.revision,
-            "definition_digest": contract_digest,
             "observation_kind": definition.observation_kind,
             "payload_json": definition_envelope(namespace, definition),
         }
@@ -334,7 +326,7 @@ class SqlMetricStore:
             domain="metrics.definition",
         )
         stored = self._decode_definition_row(namespace, namespace_key, row)
-        if str(row["definition_digest"]) != contract_digest:
+        if not same_definition_contract(stored, definition):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return stored
 
@@ -401,7 +393,6 @@ class SqlMetricStore:
             or definition.name != row["metric_name"]
             or definition.revision != row["revision"]
             or definition.observation_kind != row["observation_kind"]
-            or definition_contract_digest(definition) != row["definition_digest"]
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return definition

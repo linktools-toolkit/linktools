@@ -360,8 +360,6 @@ class AgentExecutor:
             source_ref = skill.source_ref
             if source_ref is None:
                 continue
-            if source_ref.resource_digest is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if source_ref.source_id not in self._asset_sources:
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
@@ -737,13 +735,9 @@ def _mcp_resource_bindings(
         policy = pin.contract.get("execution_policy")
         if not isinstance(policy, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        digest = pin.contract.get("resource_digest")
-        if digest is not None and not isinstance(digest, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result[server.id] = _MCPResourceBinding(
             versions,
             cast("str | None", source_id),
-            digest,
             cast(Mapping[str, JsonValue], policy),
         )
     return result

@@ -428,7 +428,7 @@ class AgentCompiler:
         identity: dict[str, JsonValue] = {
             "contract": "agent-definition-v1",
             "agent": agent_ref_payload(AgentSpecCodec().to_payload(spec)),
-            "model_digest": model.model_digest,
+            "model": dict(model.contract),
             "selected": [
                 {"kind": item.kind, "id": item.id, "revision": item.revision}
                 for item in selected

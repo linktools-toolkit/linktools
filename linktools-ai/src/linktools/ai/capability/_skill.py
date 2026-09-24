@@ -16,7 +16,6 @@ from ..errors import AIError, ErrorCode
 from ..spec import SkillMarkdownSpecCodec, SkillSpec
 from ._context import AgentContext
 from ._skill_source import (
-    AssetVersionSkillResourceSource,
     SkillLocation,
     SkillResourceVersion,
     SkillResourceView,
@@ -64,7 +63,7 @@ class SkillDefinition:
                 "source_id": self.source_ref.source_id,
                 "root": self.source_ref.root,
             }
-            if self.source_ref.resource_digest is not None:
+            if self.source_ref.resource_versions:
                 source["resource_versions"] = [
                     {
                         "path": item.path,
@@ -73,9 +72,6 @@ class SkillDefinition:
                     }
                     for item in self.source_ref.resource_versions
                 ]
-                source["resource_digest"] = (
-                    self.source_ref.resource_digest
-                )
             contract["source"] = source
         return contract
 
@@ -110,18 +106,9 @@ class SkillDefinition:
             source_id = source.get("source_id")
             root = source.get("root")
             raw_versions = source.get("resource_versions")
-            resource_digest = source.get("resource_digest")
             versions: tuple[SkillResourceVersion, ...] = ()
             if raw_versions is not None:
-                if (
-                    not isinstance(raw_versions, list)
-                    or not isinstance(resource_digest, str)
-                    or len(resource_digest) != 64
-                    or any(
-                        character not in "0123456789abcdef"
-                        for character in resource_digest
-                    )
-                ):
+                if not isinstance(raw_versions, list):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 parsed: list[SkillResourceVersion] = []
                 try:
@@ -147,23 +134,11 @@ class SkillDefinition:
                 except (TypeError, ValueError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 versions = tuple(sorted(parsed, key=lambda item: item.path))
-            elif resource_digest is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if resource_digest is not None and (
-                not isinstance(resource_digest, str)
-                or len(resource_digest) != 64
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in resource_digest
-                )
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
                 source_ref = SkillSourceRef(
                     source_id,
                     root,
                     versions,
-                    resource_digest,
                 )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -355,7 +330,6 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if source_ref is None:
             raise AIError(ErrorCode.ASSET_NOT_FOUND)
         source = self._sources.resolve(source_ref.source_id)
-        await _verify_resource_semantics(source_ref, source)
         data = await source.read(source_ref.root, relative)
         try:
             content = data.decode("utf-8")
@@ -408,24 +382,6 @@ def _skill_description(specification: SkillSpec) -> str:
 
 def _validate_view(view: SkillResourceView) -> None:
     if not isinstance(view, SkillResourceView):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-async def _verify_resource_semantics(
-    source_ref: SkillSourceRef,
-    source: object,
-) -> None:
-    if source_ref.resource_digest is None:
-        return
-    if (
-        not isinstance(source, AssetVersionSkillResourceSource)
-        or source_ref.resource_digest is None
-    ):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if (
-        await source.resource_digest(source_ref.root)
-        != source_ref.resource_digest
-    ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 

@@ -65,16 +65,6 @@ class OutputBinding:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return cast("dict[str, JsonValue]", value)
 
-    @property
-    def contract_digest(self) -> str:
-        return canonical_sha256(
-            {
-                "contract": "output-v1",
-                "mode": self.mode,
-                "schema": self.schema_definition,
-            }
-        )
-
     def validate_payload(self, value: JsonValue) -> None:
         """Validate one final JSON payload against this durable output contract."""
         try:

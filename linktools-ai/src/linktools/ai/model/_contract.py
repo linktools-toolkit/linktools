@@ -26,9 +26,6 @@ class ModelBinding(Protocol):
     @property
     def contract(self) -> Mapping[str, JsonValue]: ...
 
-    @property
-    def model_digest(self) -> str: ...
-
     def materialize(self) -> Model:
         """Build the provider model; expected configuration failures raise AIError."""
         ...

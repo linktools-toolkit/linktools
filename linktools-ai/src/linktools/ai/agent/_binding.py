@@ -316,10 +316,6 @@ class AgentBinding:
     def output_type(self) -> "type[object]":
         return self.output_binding.runtime_output_type
 
-    @property
-    def output_contract_digest(self) -> str:
-        return self.output_binding.contract_digest
-
 
 def _definition_selected_pins(
     definition: "AgentDefinition",

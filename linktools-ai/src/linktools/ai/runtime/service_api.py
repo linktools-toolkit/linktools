@@ -202,7 +202,6 @@ class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
     output: JsonValue | None
-    output_contract_digest: "str | None"
     usage: UsageMetrics
     error_code: "str | None" = None
     safe_error_details: "Mapping[str, JsonValue]" = field(default_factory=dict)
@@ -222,15 +221,13 @@ class ExecutionResult:
                 or self.error_diagnostics is not None
             ):
                 raise ValueError("successful execution result cannot carry an error")
-            if not _is_digest(self.output_contract_digest):
-                raise ValueError("successful execution result requires output contract")
             return
         if self.status is ExecutionStatus.CANCELLED:
             if self.error_code != ErrorCode.EXECUTION_CANCELLED.value:
                 raise ValueError(
                     "cancelled execution result requires EXECUTION_CANCELLED"
                 )
-            if _has_output_contract(self) or self.error_diagnostics is not None:
+            if self.output is not None or self.error_diagnostics is not None:
                 raise ValueError(
                     "cancelled execution result cannot carry output or diagnostics"
                 )
@@ -242,22 +239,10 @@ class ExecutionResult:
                 raise ValueError(
                     "failed execution result cannot carry EXECUTION_CANCELLED"
                 )
-            if _has_output_contract(self):
+            if self.output is not None:
                 raise ValueError("failed execution result cannot carry output")
             return
         raise ValueError("execution result requires a terminal status")
-
-
-def _has_output_contract(result: ExecutionResult) -> bool:
-    return result.output is not None or result.output_contract_digest is not None
-
-
-def _is_digest(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 @dataclass(frozen=True, slots=True)

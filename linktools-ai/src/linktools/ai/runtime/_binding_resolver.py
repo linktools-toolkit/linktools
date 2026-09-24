@@ -22,7 +22,7 @@ from ..capability import (
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
 from ..workspace import Sandbox
-from ._mcp import _mcp_execution_policy, _mcp_resource_digest
+from ._mcp import _mcp_execution_policy
 
 
 class _RuntimeBindingResolver:
@@ -116,7 +116,6 @@ class _RuntimeBindingResolver:
                 selected.append(pin)
                 continue
             resource_source_id = None
-            resource_digest = None
             if server.resource_root is not None:
                 asset_source = self._mcp_assets.get(server.id)
                 if asset_source is None:
@@ -128,12 +127,10 @@ class _RuntimeBindingResolver:
                         },
                     )
                 resource_source_id, store = asset_source
-                resource_versions, resource_digest = (
-                    await _resolve_mcp_resource_versions(
-                        store,
-                        server.resource_root,
-                        server.args,
-                    )
+                resource_versions = await _resolve_mcp_resource_versions(
+                    store,
+                    server.resource_root,
+                    server.args,
                 )
             selected.append(
                 CapabilityPin(
@@ -143,7 +140,6 @@ class _RuntimeBindingResolver:
                         server,
                         resource_versions,
                         resource_source_id=resource_source_id,
-                        resource_digest=resource_digest,
                         execution_policy=execution_policy,
                     ),
                 )
@@ -158,7 +154,7 @@ async def _resolve_mcp_resource_versions(
     store: AssetStoreReader,
     root: AssetKey,
     args: Sequence[str],
-) -> tuple[tuple[AssetVersionRef, ...], str]:
+) -> tuple[AssetVersionRef, ...]:
     infos = await store.metadata_snapshot()
     selected_infos = tuple(
         (info, relative)
@@ -179,8 +175,4 @@ async def _resolve_mcp_resource_versions(
     for (info, _relative), version in zip(selected_infos, versions, strict=True):
         if not version.matches_info(info):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-    resource_digest = _mcp_resource_digest(
-        (relative, info.etag)
-        for info, relative in selected_infos
-    )
-    return tuple(versions), resource_digest
+    return tuple(versions)

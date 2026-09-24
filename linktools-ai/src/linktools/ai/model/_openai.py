@@ -25,7 +25,7 @@ from pydantic_ai.models.wrapper import WrapperModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.model.openai")
@@ -86,10 +86,6 @@ class _OpenAIModelBinding:
             "vision": self.vision,
             "settings": settings,
         }
-
-    @property
-    def model_digest(self) -> str:
-        return canonical_sha256({"contract": "model-v1", **self.contract})
 
     def materialize(self) -> Model:
         connection = _resolved_connection(self)

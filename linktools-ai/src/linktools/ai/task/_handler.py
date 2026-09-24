@@ -90,15 +90,6 @@ class TaskBindingSnapshot:
             }
         )
 
-    @property
-    def output_contract_digest(self) -> str:
-        return canonical_sha256(
-            {
-                "contract": "task-output-v1",
-                "output": dict(self.output_contract),
-            }
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class TaskDependency:

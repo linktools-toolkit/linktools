@@ -3,7 +3,6 @@
 """Vendor-neutral Skill package resource sources."""
 
 import asyncio
-import hashlib
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -14,7 +13,6 @@ from typing import Literal, Protocol, cast, runtime_checkable
 from ..asset import AssetInfo, AssetKey, AssetStoreReader, AssetVersionRef
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
-    canonical_json_bytes,
     validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
@@ -39,7 +37,6 @@ class SkillSourceRef:
     source_id: str
     root: str
     resource_versions: tuple[SkillResourceVersion, ...] = ()
-    resource_digest: "str | None" = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not self.source_id.strip():
@@ -54,22 +51,14 @@ class SkillSourceRef:
         ordered = tuple(sorted(versions, key=lambda item: item.path))
         if ordered != versions or len({item.path for item in versions}) != len(versions):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.resource_digest is None:
-            if versions:
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        elif not _valid_digest(self.resource_digest):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
     def with_asset_versions(
         self,
         resource_versions: Sequence[SkillResourceVersion],
-        resource_digest: str,
     ) -> "SkillSourceRef":
         return SkillSourceRef(
             self.source_id,
             self.root,
             tuple(sorted(resource_versions, key=lambda item: item.path)),
-            resource_digest,
         )
 
 
@@ -254,10 +243,8 @@ class AssetSkillResourceSource:
             _validate_resource_mode(mode)
             versions.append(SkillResourceVersion(relative, ref, mode))
         resolved_versions = tuple(sorted(versions, key=lambda item: item.path))
-        digest = _skill_resource_digest(resolved_versions)
         return SkillSourceRef(self._id, logical_root).with_asset_versions(
             resolved_versions,
-            digest,
         )
 
     async def _asset_infos(
@@ -358,27 +345,6 @@ def _validate_resource_mode(mode: object) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _skill_resource_digest(
-    resources: Sequence[SkillResourceVersion],
-) -> str:
-    return hashlib.sha256(
-        canonical_json_bytes(
-            {
-                "version": 1,
-                "kind": "skill-resource-v1",
-                "files": [
-                    {
-                        "path": item.path,
-                        "sha256": item.asset.etag,
-                        "executable_bits": item.executable_bits,
-                    }
-                    for item in resources
-                ],
-            }
-        )
-    ).hexdigest()
-
-
 class AssetVersionSkillResourceSource:
     """Read Skill resources through immutable Asset version references."""
 
@@ -399,7 +365,6 @@ class AssetVersionSkillResourceSource:
                 not isinstance(ref, SkillSourceRef)
                 or ref.source_id != source_id
                 or ref.root != logical_root
-                or ref.resource_digest is None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             normalized[logical_root] = ref
@@ -429,13 +394,6 @@ class AssetVersionSkillResourceSource:
             SkillLocation("virtual", f"{self._id}/skills/{binding.root}"),
             tuple(item.path for item in binding.resource_versions),
         )
-
-    async def resource_digest(self, root: str) -> str:
-        binding = self._root(root)
-        actual = _skill_resource_digest(binding.resource_versions)
-        if actual != binding.resource_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return actual
 
     async def resource_mode(self, root: str, path: str) -> int:
         binding = self._root(root)
@@ -503,14 +461,6 @@ def _normalize_resource_path(path: str) -> str:
             ErrorCode.REQUEST_FIELD_INVALID,
             "skill resource path is invalid",
         ) from error
-
-
-def _valid_digest(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 def _normalize_relative_path(path: str, *, field_name: str) -> str:

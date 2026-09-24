@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import stat
 from collections.abc import Mapping, Sequence
@@ -39,18 +38,6 @@ class RepositoryInstructionDocument:
 
     def __post_init__(self) -> None:
         _validate_document(self)
-
-    @property
-    def digest(self) -> str:
-        content_digest = hashlib.sha256(self.content.encode("utf-8")).hexdigest()
-        return canonical_sha256(
-            {
-                "version": 1,
-                "source": self.source,
-                "scope": self.scope,
-                "content_sha256": content_digest,
-            }
-        )
 
 
 @dataclass(frozen=True, slots=True)
