@@ -583,6 +583,8 @@ class FrozenSkillResourceSource:
         }
         if not roots or any(not isinstance(ref, ObjectRef) for ref in roots.values()):
             raise ValueError("skill snapshots must contain ObjectRef values")
+        if any(ref.store_id != object_store.store_id for ref in roots.values()):
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         self._id = source_id
         self._snapshots = MappingProxyType(dict(sorted(roots.items())))
         self._object_store = object_store
