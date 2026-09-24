@@ -43,7 +43,7 @@ from ..workspace import (
 )
 from ._agent_executor import AgentExecutor
 from ._approval import DefaultApprovalService
-from ._binding_freeze import _RuntimeBindingFreezer
+from ._binding_resolver import _RuntimeBindingResolver
 from ._artifact import DefaultArtifactService
 from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
@@ -88,7 +88,7 @@ class _RuntimeComponents:
     task_node_runtime: RuntimeTaskNodeRunner[object]
     tree_streamer: ExecutionTreeStreamer
     metric_control: _RuntimeMetricBuffer | None
-    binding_freezer: _RuntimeBindingFreezer
+    binding_resolver: _RuntimeBindingResolver
     history: object
 
 
@@ -123,7 +123,7 @@ async def compose_runtime_components(
     snapshots: list[CapabilityGroupSnapshot[AppT]] = []
     for source in sources:
         snapshot = (
-            await source.freeze()
+            await source.snapshot()
             if isinstance(source, CapabilityGroup)
             else source
         )
@@ -519,7 +519,7 @@ async def _build_local_components(
             history_reader,
             HmacCursorSigner("execution", runtime_token_seed),
         )
-        binding_freezer = _RuntimeBindingFreezer(
+        binding_resolver = _RuntimeBindingResolver(
             catalog,
             compiler,
             skill_sources,
@@ -653,7 +653,7 @@ async def _build_local_components(
         task_capability_snapshots = TaskCapabilitySnapshotStore(
             namespace,
             compiler,
-            binding_freezer,
+            binding_resolver,
             state.object_store(RuntimeDomain.TASK),
             agent_task_type="linktools.ai.agent",
         )
@@ -801,7 +801,7 @@ async def _build_local_components(
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
-        binding_freezer=binding_freezer,
+        binding_freezer=binding_resolver,
         history=_borrowed_runtime_history(
             history_service,
             tenant_id=tenant_id,
