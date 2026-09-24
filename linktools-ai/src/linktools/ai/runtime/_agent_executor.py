@@ -84,11 +84,14 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 
 from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
+from ..asset import AssetStoreReader
 from ..capability import (
     AgentContext,
+    AssetSkillResourceSource,
     CapabilityContribution,
     FrozenSkillResourceSource,
     SkillCapability,
+    SkillSourceRef,
     SkillSourceRegistry,
     SubagentCapability,
     SubagentDelegate,
@@ -261,14 +264,12 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
-        skill_snapshot_store: ObjectStore | None = None,
         mcp_resource_store: ObjectStore | None = None,
         metrics: MetricRecorder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
-        self._skill_snapshot_store = skill_snapshot_store
         self._mcp_resource_store = mcp_resource_store
         self._metrics = metrics
 
@@ -356,33 +357,28 @@ class AgentExecutor:
         self,
         definition: AgentDefinition,
     ) -> SkillSourceRegistry:
-        grouped: dict[str, dict[str, ObjectRef]] = {}
+        grouped: dict[str, dict[str, object]] = {}
+        readers: dict[str, object] = {}
         for skill in definition.skill_definitions:
             source_ref = skill.source_ref
-            if source_ref is None or source_ref.snapshot is None:
+            if source_ref is None or not source_ref.frozen:
                 continue
-            if source_ref.snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if self._skill_snapshot_store is None:
+            source = self._skill_sources.resolve(source_ref.source_id)
+            if not isinstance(source, AssetSkillResourceSource):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            physical_reference = ObjectRef(
-                self._skill_snapshot_store.store_id,
-                source_ref.snapshot.key,
-                source_ref.snapshot.digest,
-                source_ref.snapshot.size,
-            )
             roots = grouped.setdefault(source_ref.source_id, {})
             existing = roots.get(source_ref.root)
-            if existing is not None and existing != physical_reference:
+            if existing is not None and existing != source_ref:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            roots[source_ref.root] = physical_reference
+            roots[source_ref.root] = source_ref
+            readers[source_ref.source_id] = source.asset_reader
         if not grouped:
             return self._skill_sources
         frozen = tuple(
             FrozenSkillResourceSource(
                 source_id,
-                dict(sorted(roots.items())),
-                self._skill_snapshot_store,
+                cast("Mapping[str, SkillSourceRef]", dict(sorted(roots.items()))),
+                cast("AssetStoreReader", readers[source_id]),
             )
             for source_id, roots in sorted(grouped.items())
         )
