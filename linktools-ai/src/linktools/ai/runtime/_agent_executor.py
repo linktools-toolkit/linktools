@@ -87,12 +87,12 @@ from ..agent import AgentBinding, AgentDefinition, AssistantTextOutput
 from ..asset import AssetStoreReader
 from ..capability import (
     AgentContext,
-    AssetSkillResourceSource,
     CapabilityContribution,
     FrozenSkillResourceSource,
     SkillCapability,
     SkillSourceRef,
     SkillSourceRegistry,
+    VersionedSkillResourceSource,
     SubagentCapability,
     SubagentDelegate,
     tool_class_from_metadata,
@@ -362,7 +362,7 @@ class AgentExecutor:
             if source_ref is None or not source_ref.frozen:
                 continue
             source = self._skill_sources.resolve(source_ref.source_id)
-            if not isinstance(source, AssetSkillResourceSource):
+            if not isinstance(source, VersionedSkillResourceSource):
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             roots = grouped.setdefault(source_ref.source_id, {})
             existing = roots.get(source_ref.root)
