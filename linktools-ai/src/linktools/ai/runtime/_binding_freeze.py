@@ -69,32 +69,32 @@ class _RuntimeBindingFreezer:
         self,
         agent_id: str,
         *,
-        skill_snapshots: "dict[tuple[str, str], SkillSourceRef] | None" = None,
+        skill_versions: "dict[tuple[str, str], SkillSourceRef] | None" = None,
     ) -> AgentBindingSnapshot:
         """Freeze one Agent as a root execution target and its direct children."""
         definition = self._catalog.root_definition(agent_id)
         return await self.freeze_snapshot(
             self._compiler.bind(definition, output=None).snapshot,
-            skill_snapshots=skill_snapshots,
+            skill_versions=skill_versions,
         )
 
     async def freeze_snapshot(
         self,
         snapshot: AgentBindingSnapshot,
         *,
-        skill_snapshots: "dict[tuple[str, str], SkillSourceRef] | None" = None,
+        skill_versions: "dict[tuple[str, str], SkillSourceRef] | None" = None,
     ) -> AgentBindingSnapshot:
         """Freeze Skill resources and direct child bindings for one snapshot."""
         if not isinstance(snapshot, AgentBindingSnapshot):
             raise TypeError("snapshot must be AgentBindingSnapshot")
-        cache = {} if skill_snapshots is None else skill_snapshots
-        frozen = await self._freeze_skills(snapshot, skill_snapshots=cache)
+        cache = {} if skill_versions is None else skill_versions
+        frozen = await self._freeze_skills(snapshot, skill_versions=cache)
         frozen = await self._freeze_mcp(frozen)
         if frozen.subagent_bindings:
             children = tuple(
                 [
                     await self._freeze_mcp(
-                        await self._freeze_skills(child, skill_snapshots=cache)
+                        await self._freeze_skills(child, skill_versions=cache)
                     )
                     for child in frozen.subagent_bindings
                 ]
@@ -102,7 +102,7 @@ class _RuntimeBindingFreezer:
         else:
             children = tuple(
                 [
-                    await self._freeze_child(child_id, skill_snapshots=cache)
+                    await self._freeze_child(child_id, skill_versions=cache)
                     for child_id in frozen.subagent_ids
                 ]
             )
@@ -112,14 +112,14 @@ class _RuntimeBindingFreezer:
         self,
         agent_id: str,
         *,
-        skill_snapshots: "dict[tuple[str, str], SkillSourceRef]",
+        skill_versions: "dict[tuple[str, str], SkillSourceRef]",
     ) -> AgentBindingSnapshot:
         definition = self._catalog.root_definition(agent_id)
         snapshot = self._compiler.bind_subagent(definition).snapshot
         return await self._freeze_mcp(
             await self._freeze_skills(
                 snapshot,
-                skill_snapshots=skill_snapshots,
+                skill_versions=skill_versions,
             )
         )
 
@@ -190,7 +190,7 @@ class _RuntimeBindingFreezer:
         self,
         snapshot: AgentBindingSnapshot,
         *,
-        skill_snapshots: "dict[tuple[str, str], SkillSourceRef]",
+        skill_versions: "dict[tuple[str, str], SkillSourceRef]",
     ) -> AgentBindingSnapshot:
         selected: list[SemanticPin] = []
         for pin in snapshot.selected:
@@ -218,7 +218,7 @@ class _RuntimeBindingFreezer:
                     },
                 )
             source_key = (source_ref.source_id, source_ref.root)
-            frozen_ref = skill_snapshots.get(source_key)
+            frozen_ref = skill_versions.get(source_key)
             if frozen_ref is None:
                 frozen_ref = await source.freeze(source_ref.root)
                 if (
@@ -227,7 +227,7 @@ class _RuntimeBindingFreezer:
                     or not frozen_ref.frozen
                 ):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                skill_snapshots[source_key] = frozen_ref
+                skill_versions[source_key] = frozen_ref
             frozen_skill = SkillDefinition(skill.spec, frozen_ref)
             selected.append(
                 SemanticPin(
