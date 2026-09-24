@@ -62,11 +62,7 @@ class SkillSourceRef:
         if not isinstance(self.sandbox_materialize, bool):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-    @property
-    def frozen(self) -> bool:
-        return self.resource_semantic_digest is not None
-
-    def with_versions(
+    def with_asset_versions(
         self,
         resource_versions: Sequence[SkillResourceVersion],
         resource_semantic_digest: str,
@@ -123,11 +119,11 @@ class SkillResourceSource(Protocol):
 
 
 @runtime_checkable
-class VersionedSkillResourceSource(SkillResourceSource, Protocol):
+class ResolvableSkillResourceSource(SkillResourceSource, Protocol):
     @property
     def asset_reader(self) -> AssetStoreReader: ...
 
-    async def freeze(self, root: str) -> SkillSourceRef: ...
+    async def resolve(self, root: str) -> SkillSourceRef: ...
 
 
 class LocalSkillResourceSource:
@@ -250,7 +246,7 @@ class AssetSkillResourceSource:
     def asset_reader(self) -> AssetStoreReader:
         return self._store
 
-    async def freeze(self, root: str) -> SkillSourceRef:
+    async def resolve(self, root: str) -> SkillSourceRef:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         assets = await self._asset_infos(logical_root)
         resources = self._resource_infos(assets)
@@ -277,7 +273,7 @@ class AssetSkillResourceSource:
             frozen,
             sandbox_materialize=local is not None,
         )
-        return SkillSourceRef(self._id, logical_root).with_versions(
+        return SkillSourceRef(self._id, logical_root).with_asset_versions(
             frozen,
             digest,
             sandbox_materialize=local is not None,
@@ -405,8 +401,8 @@ def _skill_resource_semantic_digest(
     ).hexdigest()
 
 
-class FrozenSkillResourceSource:
-    """Read frozen Skill resources from immutable Asset versions."""
+class AssetVersionSkillResourceSource:
+    """Read Skill resources through immutable Asset version references."""
 
     def __init__(
         self,
@@ -425,12 +421,12 @@ class FrozenSkillResourceSource:
                 not isinstance(ref, SkillSourceRef)
                 or ref.source_id != source_id
                 or ref.root != logical_root
-                or not ref.frozen
+                or ref.resource_semantic_digest is None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             normalized[logical_root] = ref
         if not normalized:
-            raise ValueError("frozen skill roots must not be empty")
+            raise ValueError("asset-version skill roots must not be empty")
         self._id = source_id
         self._roots = MappingProxyType(dict(sorted(normalized.items())))
         self._asset_reader = asset_reader
@@ -450,37 +446,37 @@ class FrozenSkillResourceSource:
             ) from error
 
     async def inspect(self, root: str) -> SkillResourceView:
-        frozen = self._root(root)
+        binding = self._root(root)
         return SkillResourceView(
-            SkillLocation("virtual", f"{self._id}/skills/{frozen.root}"),
-            tuple(item.path for item in frozen.resource_versions),
+            SkillLocation("virtual", f"{self._id}/skills/{binding.root}"),
+            tuple(item.path for item in binding.resource_versions),
         )
 
     async def sandbox_materialize(self, root: str) -> bool:
         return self._root(root).sandbox_materialize
 
     async def semantic_digest(self, root: str) -> str:
-        frozen = self._root(root)
+        binding = self._root(root)
         actual = _skill_resource_semantic_digest(
-            frozen.resource_versions,
-            sandbox_materialize=frozen.sandbox_materialize,
+            binding.resource_versions,
+            sandbox_materialize=binding.sandbox_materialize,
         )
-        if actual != frozen.resource_semantic_digest:
+        if actual != binding.resource_semantic_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return actual
 
     async def resource_mode(self, root: str, path: str) -> int:
-        frozen = self._root(root)
+        binding = self._root(root)
         relative = _normalize_resource_path(path)
-        for item in frozen.resource_versions:
+        for item in binding.resource_versions:
             if item.path == relative:
                 return item.executable_bits
         raise AIError(ErrorCode.ASSET_NOT_FOUND)
 
     async def read(self, root: str, path: str) -> bytes:
-        frozen = self._root(root)
+        binding = self._root(root)
         relative = _normalize_resource_path(path)
-        for item in frozen.resource_versions:
+        for item in binding.resource_versions:
             if item.path != relative:
                 continue
             return (await self._asset_reader.read_versions((item.asset,)))[0]
@@ -598,12 +594,12 @@ def _resolve_contained_file(root: Path, candidate: Path) -> Path:
 
 __all__ = [
     "AssetSkillResourceSource",
-    "FrozenSkillResourceSource",
+    "AssetVersionSkillResourceSource",
     "LocalSkillResourceSource",
     "SkillLocation",
     "SkillResourceSource",
     "SkillResourceVersion",
-    "VersionedSkillResourceSource",
+    "ResolvableSkillResourceSource",
     "SkillResourceView",
     "SkillSourceRef",
     "SkillSourceRegistry",
