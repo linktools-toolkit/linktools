@@ -211,20 +211,11 @@ async def _close_process(
     try:
         await process.close_stdin()
     finally:
-        drain_task = asyncio.create_task(_drain_stdout(process))
         try:
             await process.close()
         finally:
-            if not drain_task.done():
-                drain_task.cancel()
-            await asyncio.gather(drain_task, return_exceptions=True)
             await read_send.aclose()
             await write_receive.aclose()
-
-
-async def _drain_stdout(process: SandboxStdioProcess) -> None:
-    while await process.read_stdout(65536):
-        pass
 
 
 def _find_ai_error(error: BaseException) -> AIError | None:
