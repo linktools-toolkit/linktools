@@ -103,7 +103,8 @@ class _TaskNodeRuntimePort(Protocol):
 
     def build_agent_task(
         self,
-        agent_digest: str,
+        agent_id: str,
+        agent_revision: int,
         node_id: str,
         user_prompt: CanonicalUserInput,
         *,
@@ -402,7 +403,7 @@ class Runtime(Generic[AppT]):
                 allow_skills,
             )
         ):
-            return Agent(self, root.spec.id, root.digest)
+            return Agent(self, root.spec.id, root.spec.revision)
         changes: dict[str, object] = {}
         if model is not None:
             changes["model"] = model
@@ -433,28 +434,33 @@ class Runtime(Generic[AppT]):
             item.id for item in derived.selected_skills
         }.issubset({item.id for item in root.selected_skills}):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return Agent(self, derived.spec.id, derived.digest, derived)
+        return Agent(self, derived.spec.id, derived.spec.revision, derived)
 
     def _agent_definition(
         self,
-        agent_digest: str,
+        agent_id: str,
+        agent_revision: int,
         definition: "AgentDefinition | None" = None,
     ) -> AgentDefinition:
         self._ensure_open()
         if definition is None:
-            return self._catalog.definition(agent_digest)
-        if definition.definition_digest != agent_digest:
+            definition = self._catalog.root_definition(agent_id)
+        if (
+            definition.spec.id != agent_id
+            or definition.spec.revision != agent_revision
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return definition
 
     def _bind_agent(
         self,
-        agent_digest: str,
+        agent_id: str,
+        agent_revision: int,
         *,
         output: "type[BaseModel] | None" = None,
         definition: "AgentDefinition | None" = None,
     ) -> AgentBinding:
-        resolved = self._agent_definition(agent_digest, definition)
+        resolved = self._agent_definition(agent_id, agent_revision, definition)
         return self._compiler.bind(resolved, output=output)
 
     async def _resolve_agent_binding(self, binding: AgentBinding) -> AgentBinding:
@@ -464,7 +470,8 @@ class Runtime(Generic[AppT]):
 
     async def _start_for_agent(
         self,
-        agent_digest: str,
+        agent_id: str,
+        agent_revision: int,
         user_prompt: CanonicalUserInput,
         *,
         files: Sequence[str],
@@ -486,7 +493,7 @@ class Runtime(Generic[AppT]):
             correlation,
         )
         resolved_files = _request_files(files)
-        definition = self._agent_definition(agent_digest, definition)
+        definition = self._agent_definition(agent_id, agent_revision, definition)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
             definition,
             mode=mode,
@@ -653,7 +660,7 @@ class Runtime(Generic[AppT]):
     async def _fork_session(
         self,
         agent_id: str,
-        agent_digest: str,
+        agent_revision: int,
         session_id: str,
         new_session_id: str,
         *,
@@ -676,7 +683,7 @@ class Runtime(Generic[AppT]):
         return Session(
             self,
             agent_id,
-            agent_digest,
+            agent_revision,
             new_session_id,
             resolved_principal,
             definition,
@@ -728,7 +735,8 @@ class Runtime(Generic[AppT]):
 
     async def _start_evaluation_for_agent(
         self,
-        agent_digest: str,
+        agent_id: str,
+        agent_revision: int,
         request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None",
@@ -736,7 +744,8 @@ class Runtime(Generic[AppT]):
     ) -> EvaluationHandle:
         binding = await self._resolve_agent_binding(
             self._bind_agent(
-                agent_digest,
+                agent_id,
+                agent_revision,
                 output=output,
                 definition=definition,
             )
@@ -767,7 +776,8 @@ class Runtime(Generic[AppT]):
 
     def _task_for_agent(
         self,
-        agent_digest: str,
+        agent_id: str,
+        agent_revision: int,
         node_id: str,
         user_prompt: CanonicalUserInput,
         *,
@@ -788,7 +798,8 @@ class Runtime(Generic[AppT]):
         dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         return self._require_task_node_runtime().build_agent_task(
-            agent_digest,
+            agent_id,
+            agent_revision,
             node_id,
             user_prompt,
             dependencies=dependencies,

@@ -1508,7 +1508,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
 
     def build_agent_task(
         self,
-        agent_digest: str,
+        agent_id: str,
+        agent_revision: int,
         node_id: str,
         user_prompt: CanonicalUserInput,
         *,
@@ -1528,9 +1529,13 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         definition: AgentDefinition | None = None,
         dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
+        validate_agent_id(agent_id)
         if definition is None:
-            definition = self._root_definition(agent_digest)
-        elif definition.definition_digest != agent_digest:
+            definition = self._catalog.root_definition(agent_id)
+        if (
+            definition.spec.id != agent_id
+            or definition.spec.revision != agent_revision
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if planning is not None and not isinstance(planning, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -1673,7 +1678,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 safe_details={"kind": "agent", "agent_id": agent_id},
             ) from error
         return self.build_agent_task(
-            definition.definition_digest,
+            agent_id,
+            definition.spec.revision,
             node_id,
             user_prompt,
             dependencies=dependencies,
@@ -2000,16 +2006,6 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 "node_id": node.node_id,
                 "request": request,
             },
-        )
-
-    def _root_definition(self, agent_digest: str) -> AgentDefinition:
-        for agent_id in self._catalog.root_ids:
-            definition = self._catalog.root_definition(agent_id)
-            if definition.definition_digest == agent_digest:
-                return definition
-        raise AIError(
-            ErrorCode.CAPABILITY_REQUIRED_MISSING,
-            safe_details={"kind": "agent", "agent_digest": agent_digest},
         )
 
     async def _dependencies(

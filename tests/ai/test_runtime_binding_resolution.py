@@ -255,8 +255,10 @@ async def test_runtime_start_admits_resolved_binding() -> None:
             _binding_resolver=fixture.resolver,
         )
 
+        definition = fixture.catalog.root_definition("parent")
         started = await runtime._start_for_agent(
-            fixture.catalog.root_definition("parent").definition_digest,
+            definition.spec.id,
+            definition.spec.revision,
             "prompt",
             files=(),
             output=None,

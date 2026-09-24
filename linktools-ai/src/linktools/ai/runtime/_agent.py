@@ -300,7 +300,7 @@ class Execution(Generic[AppT]):
 class Session(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     agent_id: str
-    _agent_digest: str
+    _agent_revision: int
     session_id: str
     _principal: "Principal | None" = None
     _definition: "AgentDefinition | None" = None
@@ -319,7 +319,8 @@ class Session(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.agent_id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -375,7 +376,8 @@ class Session(Generic[AppT]):
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.agent_id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -429,7 +431,7 @@ class Session(Generic[AppT]):
     ) -> "Session[AppT]":
         return await self._runtime._fork_session(
             self.agent_id,
-            self._agent_digest,
+            self._agent_revision,
             self.session_id,
             new_session_id,
             principal=principal or self._principal,
@@ -478,7 +480,7 @@ class Session(Generic[AppT]):
 class Agent(Generic[AppT]):
     _runtime: "Runtime[AppT]"
     id: str
-    _agent_digest: str
+    _agent_revision: int
     _definition: "AgentDefinition | None" = None
 
     async def start(
@@ -496,7 +498,8 @@ class Agent(Generic[AppT]):
         correlation: "Mapping[str, object] | None" = None,
     ) -> "Execution[AppT]":
         return await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -555,7 +558,8 @@ class Agent(Generic[AppT]):
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         execution = await self._runtime._start_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             validate_user_input(user_prompt),
             files=files,
             output=output,
@@ -580,7 +584,7 @@ class Agent(Generic[AppT]):
         return Session(
             self._runtime,
             self.id,
-            self._agent_digest,
+            self._agent_revision,
             session_id,
             principal,
             self._definition,
@@ -606,7 +610,7 @@ class Agent(Generic[AppT]):
         return Session(
             self._runtime,
             self.id,
-            self._agent_digest,
+            self._agent_revision,
             session_id,
             principal,
             self._definition,
@@ -619,7 +623,8 @@ class Agent(Generic[AppT]):
         output: "type[BaseModel] | None" = None,
     ) -> EvaluationHandle:
         return await self._runtime._start_evaluation_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             request,
             output=output,
             definition=self._definition,
@@ -657,7 +662,8 @@ class Agent(Generic[AppT]):
         dependency_policy: str = "all_succeeded",
     ) -> "TaskNode":
         return self._runtime._task_for_agent(
-            self._agent_digest,
+            self.id,
+            self._agent_revision,
             node_id,
             validate_user_input(user_prompt),
             dependencies=dependencies,
