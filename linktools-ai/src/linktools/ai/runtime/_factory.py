@@ -147,7 +147,8 @@ async def compose_runtime_components(
     ownership_transferred = False
     try:
         frozen: list[CapabilityContribution[object]] = []
-        mcp_assets: dict[str, AssetStoreReader] = {}
+        asset_sources: dict[str, AssetStoreReader] = {}
+        mcp_assets: dict[str, tuple[str, AssetStoreReader]] = {}
         for group in groups:
             values = group.contributions
             frozen.extend(values)
@@ -170,8 +171,9 @@ async def compose_runtime_components(
                     },
                 )
             if reader is not None:
+                asset_sources[group.group_id] = reader
                 for candidate in resource_mcp:
-                    mcp_assets[candidate.id] = reader
+                    mcp_assets[candidate.id] = (group.group_id, reader)
         _validate_candidate_uniqueness(frozen)
         skill_sources = SkillSourceRegistry(
             tuple(
@@ -285,6 +287,7 @@ async def compose_runtime_components(
             session_history_reader=session_history_reader,
             memory_store_factory=memory_store_factory,
             skill_sources=skill_sources,
+            asset_sources=asset_sources,
             mcp_assets=mcp_assets,
             runtime_token_seed=runtime_token_seed,
             instruction_resolver=instruction_resolver,
@@ -472,7 +475,8 @@ async def _build_local_components(
     session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], MemoryStore] | None",
     skill_sources: SkillSourceRegistry,
-    mcp_assets: Mapping[str, AssetStoreReader],
+    asset_sources: Mapping[str, AssetStoreReader],
+    mcp_assets: Mapping[str, tuple[str, AssetStoreReader]],
     runtime_token_seed: bytes,
     instruction_resolver: "RepositoryInstructionResolver | None",
     object_key_factory: RuntimeObjectKeyFactory,
@@ -549,7 +553,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
-            mcp_assets=mcp_assets,
+            asset_sources=asset_sources,
             metrics=metric_buffer,
         )
     except BaseException:
