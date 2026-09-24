@@ -31,7 +31,7 @@ async def test_directory_asset_stat_hashes_content_off_event_loop(
     (tmp_path / "agents").mkdir()
     (tmp_path / "agents" / "default.json").write_bytes(b"agent")
     backend = DirectoryAssetBackend(
-        AssetRoot("file", str(tmp_path), "assets"),
+        AssetRoot("file", str(tmp_path)),
         path_adapter=PrefixAssetPathAdapter({"agent": "agents"}),
         kinds=("agent",),
     )

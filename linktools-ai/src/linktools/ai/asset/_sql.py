@@ -215,11 +215,7 @@ class SqlAssetBackend:
         dialect_for_name(engine.dialect.name)
         self._namespace = namespace
         self._namespace_digest = hashlib.sha256(namespace.encode("utf-8")).digest()
-        self._root = AssetRoot(
-            "sql",
-            namespace,
-            self._namespace_digest.hex(),
-        )
+        self._root = AssetRoot("sql", namespace)
         self._context = create_sql_storage_context(engine)
         self._metadata = build_asset_sql_metadata()
         self._object_store = object_store or SqlObjectStore.from_context(self._context)
@@ -260,7 +256,7 @@ class SqlAssetBackend:
 
         await self._context.run_mutation(initialize_head)
         self._ready = True
-        _logger.info("SQL Asset backend initialized: namespace=%s", self._root.digest[:16])
+        _logger.info("SQL Asset backend initialized")
 
     async def close(self) -> None:
         self._ready = False
@@ -779,7 +775,7 @@ class SqlAssetBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if head_revision > 0 and (not store_revisions or max(store_revisions) != head_revision):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _logger.info("SQL Asset integrity validated: namespace=%s", self._root.digest[:16])
+        _logger.info("SQL Asset integrity validated")
 
     def _audit_info(self, row: Mapping[str, object], head: int) -> AssetInfo:
         try:

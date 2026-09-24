@@ -415,8 +415,7 @@ def directory_root(locator: str) -> AssetRoot:
         path = Path(locator).expanduser().resolve()
     except (OSError, RuntimeError) as error:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
-    return AssetRoot("file", str(path), digest)
+    return AssetRoot("file", str(path))
 
 
 def _store_revision(entries: "Sequence[_DirectoryEntry]") -> StorageRevision:

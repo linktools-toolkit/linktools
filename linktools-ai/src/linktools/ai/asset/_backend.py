@@ -39,11 +39,7 @@ class InMemoryAssetBackend:
     """Store each AssetKey as one independently versioned bytes file."""
 
     def __init__(self, root: "AssetRoot | None" = None, *, writable: bool = True) -> None:
-        self._root = root or AssetRoot(
-            "memory",
-            "memory",
-            hashlib.sha256(b"memory:default").hexdigest(),
-        )
+        self._root = root or AssetRoot("memory", "memory")
         self._writable = writable
         self._entries: dict[AssetKey, tuple[AssetInfo, bytes]] = {}
         self._versions: dict[AssetKey, list[tuple[AssetInfo, bytes]]] = {}

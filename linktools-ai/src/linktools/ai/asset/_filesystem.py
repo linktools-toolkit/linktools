@@ -514,8 +514,7 @@ class FilesystemAssetBackend:
         await self._ensure_ready()
         await self._reload()
         _logger.info(
-            "filesystem Asset integrity validated: root=%s revision=%s",
-            self._root.digest[:16],
+            "filesystem Asset integrity validated: revision=%s",
             self._revision,
         )
 
@@ -685,7 +684,6 @@ class FilesystemAssetBackend:
         return {
             "format": "linktools-ai-asset",
             "generation": _GENERATION,
-            "root_digest": self._root.digest,
         }
 
     def _validate_existing_root(self) -> None:
@@ -720,7 +718,6 @@ class FilesystemAssetBackend:
         if not isinstance(value, dict) or set(value) != {
             "format",
             "generation",
-            "root_digest",
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if value["format"] != "linktools-ai-asset":
@@ -734,11 +731,6 @@ class FilesystemAssetBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if generation != _GENERATION:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        root_digest = value["root_digest"]
-        if not isinstance(root_digest, str) or not root_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if root_digest != self._root.digest:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def _record(self, info: AssetInfo) -> None:
         self._entries[info.key] = info
@@ -1047,8 +1039,7 @@ def _raise_filesystem_error(error: BaseException) -> None:
 
 def filesystem_root(locator: str) -> AssetRoot:
     path = Path(locator).expanduser().resolve()
-    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
-    return AssetRoot("file", str(path), digest)
+    return AssetRoot("file", str(path))
 
 
 __all__ = ["FilesystemAssetBackend", "filesystem_root"]

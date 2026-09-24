@@ -133,14 +133,9 @@ class AssetVersionRef:
 class AssetRoot:
     scheme: "Literal['file', 'sql', 'memory']"
     locator: str
-    digest: str
 
     def __post_init__(self) -> None:
-        if (
-            self.scheme not in {"file", "sql", "memory"}
-            or not self.locator
-            or not self.digest
-        ):
+        if self.scheme not in {"file", "sql", "memory"} or not self.locator:
             raise ValueError("asset root is incomplete")
 
 
