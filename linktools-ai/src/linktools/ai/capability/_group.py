@@ -244,7 +244,7 @@ class CapabilityContribution(Generic[AppT]):
         """Restore an MCP contribution from its already frozen semantic contract."""
         if not isinstance(contract, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value, _snapshot = MCPServerSpecCodec().from_frozen_payload(
+        value, _resource_versions = MCPServerSpecCodec().from_frozen_payload(
             cast("Mapping[str, object]", contract)
         )
         return _SemanticContribution(
