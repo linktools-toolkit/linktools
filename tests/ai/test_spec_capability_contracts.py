@@ -562,7 +562,6 @@ def test_mcp_resource_versions_are_locator_only_for_semantic_identity() -> None:
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
 
-    assert first["args"] is None
     assert first["args"] == ["resource:script.py"]
     assert first["resource_source_id"] == "group-a"
     restored, versions = codec.from_execution_payload(first)
