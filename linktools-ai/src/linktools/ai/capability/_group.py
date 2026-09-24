@@ -324,12 +324,6 @@ class _CapabilityAssetReader:
     async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
         return self._metadata
 
-    async def version_snapshot(self) -> "tuple[AssetVersionRef, ...]":
-        return tuple(
-            self._versions[key]
-            for key in sorted(self._versions, key=lambda item: (item.kind, item.id))
-        )
-
     async def resolve_versions(
         self,
         keys: Sequence[AssetKey],
@@ -764,9 +758,9 @@ class CapabilityGroup(Generic[AppT]):
             if not isinstance(source_revision, StorageRevision):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             metadata = await store.metadata_snapshot()
-            versions = await store.version_snapshot()
-            if tuple(ref.key for ref in versions) != tuple(info.key for info in metadata):
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            versions = await store.resolve_versions(
+                tuple(info.key for info in metadata)
+            )
             entries = tuple(
                 CapabilityLoadEntry(
                     info.key,
