@@ -30,7 +30,7 @@ from ..capability import (
     validate_resource_tree,
 )
 from ..asset import AssetStore
-from ..core import JsonValue, canonical_sha256
+from ..core import RUNTIME_OBJECT_STORE_ID, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import (
     MCPServerSpec,
@@ -460,10 +460,16 @@ async def _materialize_resource_snapshot(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,
             safe_details={"kind": "mcp_resource", "server_id": server.id},
         )
-    if frozen.snapshot.store_id != resource_objects.store_id:
-        raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+    if frozen.snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    physical_reference = ObjectRef(
+        resource_objects.store_id,
+        frozen.snapshot.key,
+        frozen.snapshot.digest,
+        frozen.snapshot.size,
+    )
     snapshot = AssetStore.from_snapshot(
-        frozen.snapshot,
+        physical_reference,
         object_store=resource_objects,
     )
     await snapshot.initialize()
