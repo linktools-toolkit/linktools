@@ -415,7 +415,6 @@ class _RecoveryCoordinator:
             checkpoint.step_run_id,
             tool_call_id,
             arguments_digest,
-            canonical_sha256(next_overlay.to_payload()),
         )
         committed = await self._port.commit_repository_instruction_barrier(
             execution,

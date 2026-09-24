@@ -1259,7 +1259,6 @@ class RepositoryInstructionBarrier:
     step_run_id: str
     tool_call_id: str
     arguments_digest: str
-    resulting_overlay_digest: str
 
     def __post_init__(self) -> None:
         if not all(
@@ -1268,11 +1267,8 @@ class RepositoryInstructionBarrier:
                 self.step_run_id,
                 self.tool_call_id,
                 self.arguments_digest,
-                self.resulting_overlay_digest,
             )
-        ) or not _is_sha256(self.arguments_digest) or not _is_sha256(
-            self.resulting_overlay_digest
-        ):
+        ) or not _is_sha256(self.arguments_digest):
             raise ValueError("repository instruction barrier is invalid")
 
 

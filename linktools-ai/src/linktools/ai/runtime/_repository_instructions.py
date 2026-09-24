@@ -84,10 +84,7 @@ def _validate_repository_instruction_frontier(
     if overlay is None or not barriers:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     overlay_digest = canonical_sha256(overlay.to_payload())
-    if (
-        reference.payload.digest != overlay_digest
-        or barriers[-1].resulting_overlay_digest != overlay_digest
-    ):
+    if reference.payload.digest != overlay_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 

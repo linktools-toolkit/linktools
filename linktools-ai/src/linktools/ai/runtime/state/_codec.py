@@ -307,7 +307,7 @@ _V1_GENERIC_DATACLASS_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "recovery_conversation_intent": ("session_id", "expected_cursor", "next_cursor"),
         "recovery_terminal_handoff": ("outcome", "source_step_run_id", "conversation"),
         "recovery_terminal_outcome": ("terminal_status", "error_code", "safe_error_details", "stop_reason", "output", "object_source_domain", "usage", "terminal_event_type", "terminal_event_payload", "result_created_at", "error_diagnostics"),
-        "repository_instruction_barrier": ("step_run_id", "tool_call_id", "arguments_digest", "resulting_overlay_digest"),
+        "repository_instruction_barrier": ("step_run_id", "tool_call_id", "arguments_digest"),
         "resource_ref": ("kind", "id", "tenant_id", "owner_principal_id"),
         "result_record": ("output", "stop_reason", "usage", "created_at"),
         "session_record": ("session_id", "owner_principal_id", "status", "revision", "cwd", "metadata", "created_at", "updated_at", "closed_at", "active_execution_id", "agent_id", "continuation", "history_quality", "history_id", "timeline_parent_session_id", "timeline_parent_turn_sequence"),

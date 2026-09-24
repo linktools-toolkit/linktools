@@ -3860,8 +3860,6 @@ class LocalExecutionBackend:
         overlay: RepositoryInstructions,
         barrier: RepositoryInstructionBarrier,
     ) -> RecoveryCheckpoint:
-        if barrier.resulting_overlay_digest != canonical_sha256(overlay.to_payload()):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing = tuple(
             item
             for item in checkpoint.repository_instruction_barriers
