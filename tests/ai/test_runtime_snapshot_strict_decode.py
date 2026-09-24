@@ -98,6 +98,32 @@ def test_current_snapshot_object_ref_requires_store_id(decoder) -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_snapshot_entrypoints_reject_wrong_object_store_owner(
+    tmp_path,
+) -> None:
+    store = InMemoryObjectStore("snapshot")
+    reference = ObjectRef("other", "missing", "a" * 64, 0)
+    limits = SnapshotLimits(max_entries=100, max_bytes=1024 * 1024)
+
+    with pytest.raises(AIError) as state_error:
+        await RuntimeState.restore_snapshot(
+            reference,
+            object_store=store,
+            root=tmp_path / "state",
+            limits=limits,
+        )
+    assert state_error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+
+    with pytest.raises(AIError) as runtime_error:
+        await RuntimeSnapshot.verify(
+            reference,
+            object_store=store,
+            limits=limits,
+        )
+    assert runtime_error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+
+
+@pytest.mark.asyncio
 async def test_runtime_state_snapshot_identity_ignores_target_store(
     tmp_path,
 ) -> None:
