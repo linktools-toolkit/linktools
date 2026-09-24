@@ -208,7 +208,7 @@ class _MCPRuntimeCapability(AbstractCapability[AgentContext[object]]):
 async def close_mcp_resources(
     capabilities: Sequence[AbstractCapability[AgentContext[object]]],
 ) -> None:
-    """Release temporary directories used by frozen MCP resources."""
+    """Release temporary directories used by bound MCP resources."""
     failure: BaseException | None = None
     for capability in capabilities:
         if isinstance(capability, _MCPRuntimeCapability):
