@@ -332,6 +332,7 @@ class MCPServerSpecCodec:
         value: MCPServerSpec,
         resource_versions: "Sequence[AssetVersionRef] | None",
         *,
+        resource_source_id: "str | None" = None,
         resource_semantic_digest: "str | None" = None,
         execution_policy: "Mapping[str, JsonValue] | None" = None,
     ) -> "dict[str, JsonValue]":
@@ -341,12 +342,18 @@ class MCPServerSpecCodec:
                 execution_policy
             )
         if value.resource_root is None:
-            if resource_versions is not None or resource_semantic_digest is not None:
+            if (
+                resource_versions is not None
+                or resource_source_id is not None
+                or resource_semantic_digest is not None
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
         if resource_versions is None or any(
             not isinstance(item, AssetVersionRef) for item in resource_versions
         ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not isinstance(resource_source_id, str) or not resource_source_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _require_digest(resource_semantic_digest)
         payload["args"] = None
@@ -354,6 +361,7 @@ class MCPServerSpecCodec:
         payload["resource_versions"] = [
             item.to_payload() for item in resource_versions
         ]
+        payload["resource_source_id"] = resource_source_id
         payload["resource_semantic_digest"] = resource_semantic_digest
         return payload
 
@@ -426,6 +434,7 @@ class MCPServerSpecCodec:
         _require_v1(raw)
         if not frozen and (
             "resource_versions" in raw
+            or "resource_source_id" in raw
             or "frozen_args" in raw
             or "resource_semantic_digest" in raw
             or "execution_policy" in raw
@@ -457,14 +466,25 @@ class MCPServerSpecCodec:
             )
         if frozen and "execution_policy" in raw:
             _execution_policy_payload(raw["execution_policy"])
+        resource_source_id = raw.get("resource_source_id") if frozen else None
         if resource_versions is None:
-            if frozen and "resource_semantic_digest" in raw:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if frozen and "frozen_args" in raw:
+            if (
+                frozen
+                and (
+                    "resource_semantic_digest" in raw
+                    or "resource_source_id" in raw
+                    or "frozen_args" in raw
+                )
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             args = raw.get("args", [])
         else:
-            if resource_root is None or raw.get("args") is not None:
+            if (
+                resource_root is None
+                or raw.get("args") is not None
+                or not isinstance(resource_source_id, str)
+                or not resource_source_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             args = raw.get("frozen_args")
             _require_digest(raw.get("resource_semantic_digest"))
