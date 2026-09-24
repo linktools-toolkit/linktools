@@ -176,10 +176,6 @@ class BubblewrapSandbox:
                 bwrap=bwrap,
                 hidden_paths=hidden_paths,
                 read_policy=policy,
-                resource_sources={
-                    resource.id: resource.source
-                    for resource in normalized_resources
-                },
                 lock_root=lock_root if cleanup_lock_root else None,
             )
             try:
@@ -225,7 +221,6 @@ class _BubblewrapSandboxSession:
         bwrap: Path | None = None,
         hidden_paths: tuple[str, ...] = (),
         read_policy: ReadOnlySandboxPolicy | None = None,
-        resource_sources: Mapping[str, Path] | None = None,
         lock_root: Path | None = None,
     ) -> None:
         self._process = process
@@ -238,7 +233,6 @@ class _BubblewrapSandboxSession:
         self._bwrap = bwrap
         self._hidden_paths = hidden_paths
         self._read_policy = read_policy
-        self._resource_sources = dict(resource_sources or {})
         self._lock_root = lock_root
         self._state = "OPENING"
         self._state_lock = asyncio.Lock()
@@ -289,9 +283,9 @@ class _BubblewrapSandboxSession:
     async def open_stdio_process(
         self,
         command: str,
-        args: "tuple[str | SandboxResourcePath, ...] | list[str | SandboxResourcePath]" = (),
+        args: "Sequence[str | SandboxResourcePath]" = (),
         *,
-        resources: "tuple[SandboxResource, ...] | list[SandboxResource]" = (),
+        resources: "Sequence[SandboxResource]" = (),
     ) -> SandboxStdioProcess:
         async with self._stdio_lock:
             self._ensure_open_sync()
@@ -299,17 +293,20 @@ class _BubblewrapSandboxSession:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             if "/" in command and not command.startswith("/"):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            selected_resources = _select_stdio_resources(
-                resources,
-                self._resource_sources,
-            )
-            command_args = _stdio_command_args(args, selected_resources)
+            if isinstance(resources, (str, bytes, bytearray)):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             if (
                 self._workspace_root is None
                 or self._runtime_root is None
                 or self._bwrap is None
             ):
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
+            selected_resources = _validate_resources(
+                self._workspace_root,
+                self._runtime_root,
+                tuple(resources),
+            )
+            command_args = _stdio_command_args(args, selected_resources)
             self._stdio_execution_policy()
             lock_root = (
                 workspace_locks_root(self._workspace_root)
@@ -925,33 +922,6 @@ def _stdio_execution_policy(
             "network": "isolated",
         }
     )
-
-
-def _select_stdio_resources(
-    resources: Sequence[SandboxResource],
-    available: Mapping[str, Path],
-) -> tuple[SandboxResource, ...]:
-    if isinstance(resources, (str, bytes, bytearray)):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    selected: list[SandboxResource] = []
-    seen: set[str] = set()
-    for resource in resources:
-        if not isinstance(resource, SandboxResource) or resource.id in seen:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        registered = available.get(resource.id)
-        if registered is None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        try:
-            source = resource.source.resolve(strict=True)
-            expected = registered.resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
-        if source != expected or not source.is_dir():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        _validate_resource_tree(source)
-        selected.append(SandboxResource(resource.id, source))
-        seen.add(resource.id)
-    return tuple(selected)
 
 
 def _stdio_command_args(
