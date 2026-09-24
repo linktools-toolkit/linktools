@@ -58,7 +58,7 @@ from ..task import (
     TaskExpanderRef,
 )
 from ._agent import Agent, Execution, Session
-from ._binding_freeze import _RuntimeBindingFreezer
+from ._binding_resolver import _RuntimeBindingResolver
 from ._task import TaskGraphRun
 from ._context import RuntimeContext
 from ._input import CanonicalUserInput
@@ -213,7 +213,7 @@ class Runtime(Generic[AppT]):
         task_node_runtime: "_TaskNodeRuntimePort | None" = None,
         tree_streamer: "_ExecutionTreeStreamer | None" = None,
         metric_control: "_RuntimeMetricControl | None" = None,
-        _binding_freezer: "_RuntimeBindingFreezer | None" = None,
+        _binding_resolver: "_RuntimeBindingResolver | None" = None,
     ) -> None:
         if any(
             value is None
@@ -255,7 +255,7 @@ class Runtime(Generic[AppT]):
         self._task_node_runtime = task_node_runtime
         self._tree_streamer = tree_streamer
         self._metric_control = metric_control
-        self._binding_freezer = _binding_freezer
+        self._binding_resolver = _binding_resolver
         self._closed = False
         self._closing = False
         self._close_lock = asyncio.Lock()
@@ -457,10 +457,10 @@ class Runtime(Generic[AppT]):
         resolved = self._agent_definition(agent_digest, definition)
         return self._compiler.bind(resolved, output=output)
 
-    async def _freeze_agent_binding(self, binding: AgentBinding) -> AgentBinding:
-        if self._binding_freezer is None:
+    async def _resolve_agent_binding(self, binding: AgentBinding) -> AgentBinding:
+        if self._binding_resolver is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        return await self._binding_freezer.freeze(binding)
+        return await self._binding_resolver.resolve(binding)
 
     async def _start_for_agent(
         self,
@@ -493,7 +493,7 @@ class Runtime(Generic[AppT]):
             planning=planning,
             thinking=thinking,
         )
-        binding = await self._freeze_agent_binding(
+        binding = await self._resolve_agent_binding(
             self._compiler.bind(definition, output=output)
         )
         request = ExecutionRequest(
@@ -734,7 +734,7 @@ class Runtime(Generic[AppT]):
         output: "type[BaseModel] | None",
         definition: "AgentDefinition | None" = None,
     ) -> EvaluationHandle:
-        binding = await self._freeze_agent_binding(
+        binding = await self._resolve_agent_binding(
             self._bind_agent(
                 agent_digest,
                 output=output,
@@ -1229,7 +1229,7 @@ async def _open_runtime(
             task_node_runtime=components.task_node_runtime,
             tree_streamer=components.tree_streamer,
             metric_control=components.metric_control,
-            _binding_freezer=components.binding_freezer,
+            _binding_resolver=components.binding_resolver,
         )
     except BaseException:
         try:
