@@ -17,6 +17,7 @@ from ..storage import (
     StorageRevision,
     StorageWriter,
     StoredPayload,
+    VersionedStorage,
     normalize_storage_metadata,
 )
 
@@ -170,7 +171,11 @@ class AssetInfo:
 
 
 @runtime_checkable
-class AssetBackend(ReadableStorageBackend[AssetKey, bytes, AssetInfo], Protocol):
+class AssetBackend(
+    ReadableStorageBackend[AssetKey, bytes, AssetInfo],
+    VersionedStorage[AssetKey, bytes],
+    Protocol,
+):
     @property
     def root(self) -> AssetRoot: ...
 
