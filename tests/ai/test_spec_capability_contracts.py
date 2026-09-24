@@ -254,6 +254,29 @@ def test_skill_snapshot_contract_uses_runtime_logical_owner() -> None:
     )
 
 
+def test_skill_contract_rejects_non_runtime_snapshot_owner() -> None:
+    with pytest.raises(AIError) as error:
+        SkillDefinition.from_semantic_contract(
+            {
+                "version": 1,
+                "id": "review",
+                "content": "instructions",
+                "source": {
+                    "source_id": "application",
+                    "root": "review",
+                    "resource_semantic_digest": "b" * 64,
+                    "snapshot": {
+                        "store_id": "other",
+                        "key": "snapshot",
+                        "digest": "a" * 64,
+                        "size": 1,
+                    },
+                },
+            }
+        )
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
 def test_frozen_skill_source_rejects_wrong_object_store_owner() -> None:
     with pytest.raises(AIError) as error:
         FrozenSkillResourceSource(
@@ -443,7 +466,7 @@ def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() ->
     )
     second = codec.to_frozen_payload(
         server,
-        ObjectRef("other", "v1/asset-snapshot/two", "a" * 64, 1),
+        ObjectRef("runtime", "v1/asset-snapshot/two", "a" * 64, 2),
         resource_semantic_digest="d" * 64,
         execution_policy={"version": 1, "boundary": "host-stdio"},
     )
@@ -461,6 +484,15 @@ def test_mcp_resource_snapshot_is_runtime_owned_and_locator_is_not_semantic() ->
     with pytest.raises(AIError) as raised:
         codec.from_payload(first)
     assert raised.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+    with pytest.raises(AIError) as wrong_owner:
+        codec.to_frozen_payload(
+            server,
+            ObjectRef("other", "v1/asset-snapshot/two", "a" * 64, 1),
+            resource_semantic_digest="d" * 64,
+            execution_policy={"version": 1, "boundary": "host-stdio"},
+        )
+    assert wrong_owner.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 @pytest.mark.asyncio
