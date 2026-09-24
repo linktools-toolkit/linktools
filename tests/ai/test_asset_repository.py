@@ -25,7 +25,7 @@ from linktools.ai.capability._group import (
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import AgentSpec, AgentSpecCodec, MCPServerSpec, MCPServerSpecCodec, SkillSpec, SkillSpecCodec
-from linktools.ai.storage import ObjectRef, StorageOverlay
+from linktools.ai.storage import InMemoryObjectStore, ObjectRef, StorageOverlay
 
 
 async def _store() -> AssetStore:
@@ -77,6 +77,24 @@ async def test_group_snapshot_exposes_only_read_only_asset_access() -> None:
     assert not hasattr(snapshot, "asset_store")
     assert not hasattr(reader, "put")
     assert await reader.get(key) == b"contents"
+
+
+@pytest.mark.asyncio
+async def test_asset_snapshot_rejects_wrong_object_store_owner() -> None:
+    store = await _store()
+    objects = InMemoryObjectStore("owner")
+    try:
+        key = AssetKey("custom", "file")
+        await store.put(key, b"contents")
+        reference = await store.snapshot((key,), object_store=objects)
+        with pytest.raises(AIError) as error:
+            AssetStore.from_snapshot(
+                reference,
+                object_store=InMemoryObjectStore("other"),
+            )
+        assert error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio
