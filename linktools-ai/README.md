@@ -9,7 +9,7 @@ namespace
     + CapabilityGroup(s)
         -> optional Workspace via CapabilityGroup(..., workspace=...)
         -> Runtime.open(...)
-        -> frozen capability/declaration candidates
+        -> snapshotted capability/declaration candidates
         -> AgentCompiler
         -> AgentDefinition
         -> Runtime.agent(id)
@@ -22,9 +22,9 @@ The main ownership rules are:
 - `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
 - `Workspace` owns paths, policy, and sandbox configuration when installed through `CapabilityGroup(..., workspace=...)`; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
-- `CapabilityGroup` is the only public registration/discovery composition unit. A group freezes direct registrations and, when store-backed, one declaration view pinned to Asset version references.
+- `CapabilityGroup` is the only public registration/discovery composition unit. A group captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
-- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the frozen Runtime candidate set.
+- `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the snapshotted Runtime candidate set.
 - `Runtime` is the composition root and owns the service graph.
 - `Runtime.agent(id)` returns a Runtime-bound `Agent`; it does not compile or register new definitions.
 - `AgentBinding` is created per execution and pins the exact durable semantics, including the output contract.
@@ -71,7 +71,7 @@ async with Runtime.open(
     )
 ```
 
-`Runtime.open()` is the public composition root. The Runtime is frozen for the lifetime of the context; registrations are completed before it opens.
+`Runtime.open()` is the public composition root. The Runtime composition is immutable for the lifetime of the context; registrations are completed before it opens.
 
 Connection settings can be resolved lazily for a route. The resolver runs only
 when that route is materialized, and each materialization resolves independently;
@@ -140,8 +140,8 @@ MCP declarations from Workspace paths.
 
 Agent, Skill, and MCP declarations use one explicit source: pass a ready
 `AssetStore` with `CapabilityGroup(..., assets=store)`. A store-backed group
-captures the declaration metadata visible when freeze starts. Assets added
-afterward are ignored for that freeze; assets actually read by a loader must
+captures the declaration metadata visible when snapshot capture starts. Assets added
+afterward are ignored for that snapshot; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
 identities or layouts fail closed.
 
@@ -167,9 +167,9 @@ Custom source kinds such as `worker` can use
 layouts with validated defaults. Defaults fill missing declaration fields;
 explicit Agent fields take precedence.
 
-`CapabilityGroup.freeze()` returns a `CapabilityGroupSnapshot`. Pass that
+`CapabilityGroup.snapshot()` returns a `CapabilityGroupSnapshot`. Pass that
 snapshot to `Runtime.open()` when the host also needs to inspect the same
-frozen contributions; this avoids parsing the source declarations twice.
+snapshotted contributions; this avoids parsing the source declarations twice.
 The snapshot contains the group id, contributions, source revision, and
 Workspace association. A changed source revision fails Runtime admission.
 Runtime reads snapshot resources through `AssetStoreReader`, a read-only view
@@ -194,8 +194,8 @@ value starts with `resource:` then name files below that root. Runtime resolves 
 rejects absolute paths, traversal, and missing files, and reads those refs
 through AssetStore when materializing the temporary MCP process directory.
 Digest and size are verified before use. Asset updates after the
-CapabilityGroup freeze do not alter that frozen declaration set; a later
-CapabilityGroup freeze sees the newer Asset versions. Runtime does not persist
+CapabilityGroup snapshot do not alter that declaration snapshot; a later
+CapabilityGroup snapshot sees the newer Asset versions. Runtime does not persist
 a second copy of MCP resource bytes.
 Without `resource_root`, existing argument strings keep their original
 meaning.
@@ -270,7 +270,7 @@ spec = AgentSpec(
 )
 ```
 
-The compiler resolves these selectors once from the frozen candidate universe.
+The compiler resolves these selectors once from the snapshotted candidate universe.
 Missing or conflicting required candidates fail closed. MCP selectors use
 `mcp:<encoded-server>:<encoded-tool>` or `mcp:<encoded-server>:*`; use
 `mcp_server_selector()` and `mcp_tool_selector()` to encode logical ids and
@@ -284,7 +284,7 @@ The fixed prefix is not appended as a new conversation message on each model cal
 
 `allow_tools` controls ordinary/external model-visible tools. Planning is an execution mode and is not enabled or disabled by pretending `write_plan` is an ordinary business tool. Runtime infrastructure capabilities such as planning, memory, Skill loading, and Subagent delegation are composed by Runtime according to the resolved execution contract.
 
-Subagents are root Agent definitions selected from the same frozen catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
+Subagents are root Agent definitions selected from the same snapshotted catalog. A root Agent cannot select itself as a Subagent, and the Runtime does not create a second registration system for child Agents.
 
 ## 5. Output contracts
 
@@ -308,7 +308,7 @@ The exact durable binding stores:
 
 - the v1 `AgentSpec` semantic payload;
 - the resolved model semantic payload;
-- the selected semantic pins, including frozen Skill resource references when Execution state is durable;
+- the selected semantic pins, including bound Skill Asset version references when Execution state is durable;
 - selected Subagent ids and their direct execution bindings;
 - `output_mode`;
 - the canonical output JSON Schema;
@@ -332,13 +332,13 @@ second = await session.run(
 history = await session.history()
 ```
 
-A Session owns conversation continuity and the stable Agent id. Every new execution binds the current frozen Agent definition to that execution's output contract. Retry, fork, durable recovery, evaluation, and Task execution use the exact binding snapshot/digest required by their contract rather than re-running current selector discovery.
+A Session owns conversation continuity and the stable Agent id. Every new execution binds the current snapshotted Agent definition to that execution's output contract. Retry, fork, durable recovery, evaluation, and Task execution use the exact binding snapshot/digest required by their contract rather than re-running current selector discovery.
 
 User prompt transport is also durable: plain text uses the `text` codec, while supported native Pydantic user content uses the v1 durable user-content codec. Unsupported external file lifecycle objects fail closed instead of being guessed or silently converted.
 
 URL and uploaded-file content remains an external reference: Runtime persists
 its declared metadata and does not implicitly download it. Inline binary
-content and workspace file inputs are frozen as bytes before execution
+content and workspace file inputs are materialized as bytes before execution
 reservation when their durable contract requires it. Model transport retries
 use `max_retries=2` with a fixed `retry_delay=1.0`; tool correction defaults
 to `tool_retries=10`, and output correction defaults to `output_retries=3`.
@@ -359,7 +359,7 @@ result = await agent.run(
 )
 ```
 
-When a file must be frozen as part of the accepted prompt, use the pure
+When a file must be captured as part of the accepted prompt, use the pure
 `WorkspaceFileInput` value. Runtime reads it through the configured Sandbox and
 preserves its order and optional opaque identifier:
 
@@ -377,11 +377,11 @@ result = await agent.run(
 
 The Sandbox canonicalizes logical paths before reading them and preserves every input occurrence. Passing the same path twice therefore produces two attachment occurrences with distinct execution-local `attachment_id` values, while their content digests may be identical. The initial model request receives each file as `BinaryContent` together with its canonical Workspace path, and the captured bytes are recovered from Runtime state rather than reread from the Workspace during retry or recovery. After a complete model response consumes that binary input, Runtime keeps only lightweight file/path context in the active model context, so later agent-loop requests, Session turns, and forks do not repeatedly resend the bytes. The raw transcript remains lossless.
 
-If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task(files=...)` keeps the existing node-execution materialization semantics. Use `BinaryContent` or `WorkspaceFileInput` in the task prompt when bytes must be frozen at graph admission; delegated subagents use the same explicit execution-input rules.
+If an Agent needs to inspect a Workspace file again, select `attach_files` in `allow_tools`. `attach_files(paths=[...])` is a normal `filesystem.read` Workspace tool: it applies the existing Sandbox, path, approval, and repository-instruction boundaries, preserves duplicate occurrences, reads the current Workspace contents, and sends those files only to the next model request. Runtime binds those occurrences to the originating tool call before the content enters model history, so parallel tool calls do not require transcript-order inference. A later complete model response consumes them under the same transient rule. `Agent.task(files=...)` keeps the existing node-execution materialization semantics. Use `BinaryContent` or `WorkspaceFileInput` in the task prompt when bytes must be materialized at graph admission; delegated subagents use the same explicit execution-input rules.
 
 Attachment delivery evidence is available through `runtime.history.attachment_facts(...)` and `RuntimeHistory.open(...)`. The structured facts distinguish `accepted` from `included_in_request`, expose known media type/size/digest, request association, and the optional opaque `input_identifier` originally supplied by the caller. Runtime does not interpret or synthesize that identifier for Workspace or `attach_files` inputs, and keeps `processing_status="unknown"` unless it has verifiable provider-specific evidence. External URL references are not downloaded just to manufacture size or digest facts.
 
-`Agent.task()` prompts support both `BinaryContent` and `WorkspaceFileInput`. Runtime freezes their bytes when accepting the graph, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph snapshots retain the frozen input objects.
+`Agent.task()` prompts support both `BinaryContent` and `WorkspaceFileInput`. Runtime materializes their bytes when accepting the graph, or when accepting a dynamically expanded batch, before dependent nodes run. Replaying an accepted graph does not reread the source files; graph snapshots retain the captured input objects.
 
 ### Runtime context and execution queries
 
@@ -488,7 +488,7 @@ request context projection; it never rewrites the raw transcript.
 
 Workspace has no independent persistent identity. `Workspace.root`, Runtime state paths, SQLite paths, SQL endpoints, ObjectStore locations, and storage topology are deployment details. The Runtime persistence identity remains the explicit `namespace` plus tenant supplied to `Runtime.open()` / `RuntimeState`.
 
-Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime state consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the frozen execution inputs and
+Moving a Workspace therefore does not require preserving or regenerating a Workspace ID. Restore Workspace files and Runtime state consistently, reopen the Runtime with the same logical namespace and tenant, and normal durable recovery continues to use the captured execution inputs and
 Asset-version-pinned Skill resources. A separate `Runtime.restore()` migration step is not required.
 
 ## 8. Execution failure diagnostics
