@@ -810,7 +810,7 @@ class CapabilityGroup(Generic[AppT]):
                     skill = cast(SkillDefinition, item.value)
                     if skill.source_ref is not None and (
                         skill.source_ref.source_id != self._id
-                        or skill.source_ref.snapshot is not None
+                        or skill.source_ref.frozen
                     ):
                         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
                     normalized.append(item)
