@@ -51,7 +51,7 @@ async def test_builtin_loader_freezes_agent_skill_and_mcp_declarations() -> None
     await store.put(AssetKey("skill", "skill"), SkillSpecCodec().encode(skill))
     await store.put(AssetKey("mcp", "server"), MCPServerSpecCodec().encode(mcp))
 
-    frozen = await CapabilityGroup("workspace", assets=store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).snapshot()
 
     assert [(item.kind, item.id) for item in frozen.contributions] == [
         ("agent", "agent"),
@@ -75,7 +75,7 @@ async def test_group_snapshot_exposes_only_read_only_asset_access() -> None:
     key = AssetKey("custom", "file")
     await store.put(key, b"contents")
 
-    snapshot = await CapabilityGroup("workspace", assets=store).freeze()
+    snapshot = await CapabilityGroup("workspace", assets=store).snapshot()
     reader = snapshot.asset_reader
 
     assert isinstance(reader, AssetStoreReader)
@@ -139,7 +139,7 @@ async def test_builtin_loader_rejects_declaration_identity_mismatch() -> None:
     )
 
     with pytest.raises(AIError) as error:
-        await CapabilityGroup("workspace", assets=store).freeze()
+        await CapabilityGroup("workspace", assets=store).snapshot()
 
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
 
@@ -150,7 +150,7 @@ async def test_store_group_requires_initialized_asset_store() -> None:
     store = AssetStore(StorageOverlay(backend, writer=backend))
 
     with pytest.raises(AIError) as error:
-        await CapabilityGroup("workspace", assets=store).freeze()
+        await CapabilityGroup("workspace", assets=store).snapshot()
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
 
@@ -184,7 +184,7 @@ async def test_custom_loader_receives_frozen_metadata_and_reads_explicit_keys_on
     group = CapabilityGroup("workspace", assets=store)
     group.loader("custom", loader)
 
-    assert (await group.freeze()).contributions == ()
+    assert (await group.snapshot()).contributions == ()
     assert loader.calls == 1
     assert [entry.key for entry in loader.entries] == [AssetKey("custom", "a"), AssetKey("custom", "b")]
     assert loader.read_value == b"a"
@@ -207,7 +207,7 @@ async def test_replacing_skill_loader_disables_builtin_skill_layout_validation()
     group = CapabilityGroup("workspace", assets=store)
     group.loader("skill", _NoopLoader())
 
-    assert (await group.freeze()).contributions == ()
+    assert (await group.snapshot()).contributions == ()
 
 
 class _ForeignSkillSourceLoader:
@@ -233,7 +233,7 @@ async def test_custom_loader_cannot_bind_skill_resources_to_another_group() -> N
     group.loader("skill", _ForeignSkillSourceLoader())
 
     with pytest.raises(AIError) as error:
-        await group.freeze()
+        await group.snapshot()
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
@@ -275,7 +275,7 @@ async def test_custom_loader_cannot_prebind_skill_versions() -> None:
     group.loader("skill", _PinnedSkillVersionLoader())
 
     with pytest.raises(AIError) as error:
-        await group.freeze()
+        await group.snapshot()
 
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
@@ -301,7 +301,7 @@ async def test_custom_loader_cannot_read_key_outside_frozen_metadata() -> None:
     group.loader("custom", _OutsideSnapshotLoader())
 
     with pytest.raises(AIError) as error:
-        await group.freeze()
+        await group.snapshot()
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
 
 
@@ -339,7 +339,7 @@ async def test_duplicate_candidate_identity_is_rejected_after_all_loaders_finish
     group.loader("custom", _DuplicateAgentLoader())
 
     with pytest.raises(AIError) as error:
-        await group.freeze()
+        await group.snapshot()
 
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
@@ -368,7 +368,7 @@ async def test_freeze_rejects_assets_added_during_declaration_loading() -> None:
     await store.put(AssetKey("skill", "first"), SkillSpecCodec().encode(SkillSpec("first", "first")))
 
     with pytest.raises(AIError) as error:
-        await CapabilityGroup("workspace", assets=store).freeze()
+        await CapabilityGroup("workspace", assets=store).snapshot()
 
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
 
@@ -380,14 +380,14 @@ async def test_group_snapshot_rejects_source_changes_before_admission() -> None:
         AssetKey("agent", "agent"),
         AgentSpecCodec().encode(AgentSpec("agent", model="model")),
     )
-    snapshot = await CapabilityGroup("workspace", assets=store).freeze()
+    snapshot = await CapabilityGroup("workspace", assets=store).snapshot()
     await store.put(AssetKey("other", "late"), b"changed")
 
     with pytest.raises(AIError) as error:
         await snapshot.verify_source_revision()
 
     assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
-    updated = await CapabilityGroup("workspace", assets=store).freeze()
+    updated = await CapabilityGroup("workspace", assets=store).snapshot()
     assert updated.source_revision != snapshot.source_revision
 
 
@@ -431,7 +431,7 @@ async def test_builtin_loader_batches_declaration_body_reads() -> None:
         SkillSpecCodec().encode(SkillSpec("skill", "instructions")),
     )
 
-    frozen = await CapabilityGroup("workspace", assets=store).freeze()
+    frozen = await CapabilityGroup("workspace", assets=store).snapshot()
 
     assert [item.id for item in frozen.contributions] == [
         "agent",
