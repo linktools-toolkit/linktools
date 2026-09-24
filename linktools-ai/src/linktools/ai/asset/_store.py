@@ -67,8 +67,6 @@ class AssetStoreReader(Protocol):
 
     async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]": ...
 
-    async def version_snapshot(self) -> "tuple[AssetVersionRef, ...]": ...
-
     async def resolve_versions(
         self,
         keys: Sequence[AssetKey],
@@ -354,30 +352,6 @@ class AssetStore:
                 key=lambda info: (info.key.kind, info.key.id),
             )
         )
-
-    async def version_snapshot(self) -> "tuple[AssetVersionRef, ...]":
-        """Return current effective Asset version references in key order."""
-        self._ensure_ready()
-        infos = await self.metadata_snapshot()
-        locations = await self._storage.locate_many(tuple(info.key for info in infos))
-        refs: list[AssetVersionRef] = []
-        for info, location in zip(infos, locations, strict=True):
-            if (
-                location is None
-                or location.info != info
-                or location.info.status is not StorageEntryStatus.NORMAL
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            refs.append(
-                AssetVersionRef(
-                    info.key,
-                    location.layer,
-                    info.revision,
-                    info.etag,
-                    info.size,
-                )
-            )
-        return tuple(refs)
 
     async def resolve_versions(
         self,
