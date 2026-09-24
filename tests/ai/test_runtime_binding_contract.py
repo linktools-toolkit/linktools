@@ -16,9 +16,11 @@ from linktools.ai.agent import (
     SemanticPin,
 )
 from linktools.ai.agent._output import bind_output
+from linktools.ai.asset import AssetKey, AssetVersionRef
 from linktools.ai.capability import (
     CapabilityContribution,
     SkillDefinition,
+    SkillResourceVersion,
     SkillSourceRef,
     tool_semantic_metadata,
 )
@@ -29,7 +31,7 @@ from linktools.ai.runtime.state import RuntimeDomain
 from linktools.ai.runtime.state import _codec as runtime_codec
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import AgentSpec, SkillSpec
-from linktools.ai.storage import ObjectRef, StoredPayload
+from linktools.ai.storage import StorageEntryRevision, StoredPayload
 from pydantic_ai import Tool
 from pydantic import (
     BaseModel,
@@ -156,70 +158,96 @@ def _compiler() -> AgentCompiler:
     )
 
 
-def test_skill_snapshot_semantics_ignore_physical_store_id() -> None:
-    specification = SkillSpec("review", "review instructions")
-    first = SkillDefinition(
-        specification,
-        SkillSourceRef(
-            "application",
-            "review",
-            ObjectRef("store-a", "skill/snapshot", "a" * 64, 1),
-            "b" * 64,
-        ),
+def _versioned_skill(
+    *,
+    source_id: str,
+    revision: int,
+    size: int,
+    etag: str = "a" * 64,
+) -> SkillDefinition:
+    asset = AssetVersionRef(
+        AssetKey("skill", "review/guide.md"),
+        source_id,
+        StorageEntryRevision(revision),
+        etag,
+        size,
     )
-    second = SkillDefinition(
-        specification,
-        SkillSourceRef(
-            "application",
-            "review",
-            ObjectRef("store-b", "skill/snapshot", "a" * 64, 1),
+    return SkillDefinition(
+        SkillSpec("review", "review instructions"),
+        SkillSourceRef("application", "review").with_versions(
+            (SkillResourceVersion("guide.md", asset),),
             "b" * 64,
+            sandbox_materialize=False,
         ),
     )
 
-    assert first.semantic_contract == second.semantic_contract
-    snapshot = first.semantic_contract["source"]["snapshot"]
-    assert snapshot["store_id"] == "runtime"
+
+def test_skill_asset_version_locator_is_not_semantic_identity() -> None:
+    first = _versioned_skill(source_id="source-a", revision=1, size=1)
+    second = _versioned_skill(source_id="source-b", revision=9, size=99)
+
+    assert first.semantic_contract != second.semantic_contract
+    first_pin = SemanticPin("skill", "review", first.semantic_contract)
+    second_pin = SemanticPin("skill", "review", second.semantic_contract)
+    assert first_pin.fingerprint == second_pin.fingerprint
+
     restored = SkillDefinition.from_semantic_contract(first.semantic_contract)
-    assert restored.source_ref is not None
-    assert restored.source_ref.snapshot is not None
-    assert restored.source_ref.snapshot.store_id == "runtime"
+    assert restored == first
 
 
-def test_skill_snapshot_identity_ignores_integrity_size() -> None:
-    specification = SkillSpec("review", "review instructions")
-    first = SemanticPin(
-        "skill",
-        "review",
-        SkillDefinition(
-            specification,
-            SkillSourceRef(
-                "application",
-                "review",
-                ObjectRef("store", "skill/snapshot", "a" * 64, 1),
-                "b" * 64,
+def test_skill_asset_content_digest_changes_semantic_identity() -> None:
+    first = _versioned_skill(source_id="source", revision=1, size=1)
+    second = SkillDefinition(
+        first.spec,
+        first.source_ref.with_versions(
+            (
+                SkillResourceVersion(
+                    "guide.md",
+                    AssetVersionRef(
+                        AssetKey("skill", "review/guide.md"),
+                        "source",
+                        StorageEntryRevision(2),
+                        "c" * 64,
+                        1,
+                    ),
+                ),
             ),
-        ).semantic_contract,
-    )
-    second = SemanticPin(
-        "skill",
-        "review",
-        SkillDefinition(
-            specification,
-            SkillSourceRef(
-                "application",
-                "review",
-                ObjectRef("store", "skill/snapshot", "a" * 64, 2),
-                "b" * 64,
-            ),
-        ).semantic_contract,
+            "d" * 64,
+            sandbox_materialize=False,
+        ),
     )
 
-    assert first.contract != second.contract
-    assert first.fingerprint == second.fingerprint
+    assert SemanticPin("skill", "review", first.semantic_contract).fingerprint != (
+        SemanticPin("skill", "review", second.semantic_contract).fingerprint
+    )
 
 
-def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
+@pytest.mark.parametrize(
+    "asset",
+    (
+        {
+            "version": 1,
+            "kind": "skill",
+            "id": "review/guide.md",
+            "source_id": "",
+            "revision": 1,
+            "etag": "a" * 64,
+            "size": 1,
+        },
+        {
+            "version": 1,
+            "kind": "skill",
+            "id": "review/guide.md",
+            "source_id": "source",
+            "revision": "1",
+            "etag": "a" * 64,
+            "size": 1,
+        },
+    ),
+)
+def test_skill_asset_version_reference_rejects_malformed_fields(
+    asset: dict[str, object],
+) -> None:
     with pytest.raises(AIError) as raised:
         SkillDefinition.from_semantic_contract(
             {
@@ -229,79 +257,39 @@ def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
                 "source": {
                     "source_id": "application",
                     "root": "review",
+                    "resource_versions": [
+                        {
+                            "path": "guide.md",
+                            "asset": asset,
+                            "executable_bits": 0,
+                        }
+                    ],
+                    "sandbox_materialize": False,
                     "resource_semantic_digest": "b" * 64,
-                    "snapshot": {
-                        "store_id": 1,
-                        "key": "snapshot",
-                        "digest": "a" * 64,
-                        "size": "1",
-                    },
                 },
             }
         )
-
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_skill_snapshot_reference_requires_store_id() -> None:
-    with pytest.raises(AIError) as raised:
-        SkillDefinition.from_semantic_contract(
-            {
-                "version": 1,
-                "id": "review",
-                "content": "instructions",
-                "source": {
-                    "source_id": "application",
-                    "root": "review",
-                    "resource_semantic_digest": "b" * 64,
-                    "snapshot": {
-                        "key": "snapshot",
-                        "digest": "a" * 64,
-                        "size": 1,
-                    },
-                },
-            }
-        )
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-
-
-def test_binding_object_dependency_scan_requires_runtime_store_id() -> None:
+def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
     pin = SemanticPin(
         "skill",
         "review",
-        {
-            "version": 1,
-            "id": "review",
-            "content": "instructions",
-            "source": {
-                "source_id": "application",
-                "root": "review",
-                "resource_semantic_digest": "b" * 64,
-                "snapshot": {
-                    "store_id": "runtime",
-                    "key": "snapshot",
-                    "digest": "a" * 64,
-                    "size": 1,
-                },
-            },
-        },
+        _versioned_skill(
+            source_id="source",
+            revision=1,
+            size=1,
+        ).semantic_contract,
     )
     snapshot = replace(_snapshot(), selected=(pin,))
 
-    refs = tuple(
+    assert tuple(
         runtime_codec._iter_agent_binding_object_refs(
             snapshot,
             RuntimeDomain.EXECUTION,
         )
-    )
-
-    assert refs == (
-        (
-            RuntimeDomain.EXECUTION,
-            ObjectRef("runtime", "snapshot", "a" * 64, 1),
-        ),
-    )
+    ) == ()
 
 
 def test_agent_declaration_identity_keeps_model_selector() -> None:
