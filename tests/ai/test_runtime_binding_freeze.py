@@ -31,7 +31,7 @@ from linktools.ai.runtime._context import RuntimeContext
 from linktools.ai.runtime._runtime_service import Runtime
 from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapshotStore
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
-from linktools.ai.runtime.state import RuntimeState, SnapshotLimits
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
 from linktools.ai.spec import (
     AgentSpec,
@@ -511,7 +511,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
             "namespace",
             fixture.compiler,
             fixture.freezer,
-            state.object_store("task"),  # type: ignore[arg-type]
+            state.object_store(RuntimeDomain.TASK),
             agent_task_type="linktools.ai.agent",
         )
         await capabilities.capture(admission, graph)
@@ -555,7 +555,7 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
             "namespace",
             fixture.compiler,
             fixture.freezer,
-            restored.object_store("task"),  # type: ignore[arg-type]
+            restored.object_store(RuntimeDomain.TASK),
             agent_task_type="linktools.ai.agent",
         )
         loaded = await restored_capabilities.load(admission)
