@@ -39,7 +39,13 @@ from linktools.ai.runtime._task_capability_snapshot import TaskCapabilitySnapsho
 from linktools.ai.runtime.service_api import ExecutionHandle, ExecutionRequest
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, SnapshotLimits
 from linktools.ai.runtime.state._contracts import ExecutionRecord, StoredUserInput
-from linktools.ai.spec import AgentSpec, MCPServerSpec, MCPServerSpecCodec, SkillSpec
+from linktools.ai.spec import (
+    AgentSpec,
+    MCPServerSpec,
+    MCPServerSpecCodec,
+    SkillSpec,
+    mcp_server_selector,
+)
 from linktools.ai.storage import InMemoryObjectStore, StorageOverlay, StoredPayload
 from linktools.ai.task import (
     TaskGraph,
@@ -285,6 +291,47 @@ async def test_execution_binding_freezes_selected_child_skills(
     assert frozen.snapshot != fixture.binding.snapshot
     child = _frozen_child(frozen.snapshot)
     assert _skill_snapshot(child).store_id == "runtime"
+
+
+@pytest.mark.asyncio
+async def test_binding_freeze_restores_frozen_mcp_contract() -> None:
+    server = MCPServerSpec("server", "python")
+    specification = AgentSpec(
+        "agent",
+        allow_tools=(mcp_server_selector(server.id),),
+        allow_skills=(),
+        allow_subagents=(),
+        allow_capabilities=(),
+    )
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(CapabilityContribution.from_declaration(server),),
+        agents={specification.id: specification},
+    )
+    catalog = AgentCatalog(
+        {specification.id: compiler.compile(specification)}
+    )
+    freezer = _RuntimeBindingFreezer(
+        catalog,
+        compiler,
+        SkillSourceRegistry(),
+        InMemoryObjectStore("runtime"),
+        workspace=None,
+    )
+
+    frozen = await freezer.freeze(
+        compiler.bind(catalog.root_definition(specification.id))
+    )
+
+    pin = next(item for item in frozen.snapshot.selected if item.kind == "mcp")
+    selected = frozen.definition.selected_mcp
+    assert pin.contract["execution_policy"] == {
+        "version": 1,
+        "boundary": "host-stdio",
+    }
+    assert len(selected) == 1
+    assert selected[0].semantic_contract == dict(pin.contract)
+    assert selected[0].fingerprint == pin.fingerprint
 
 
 @pytest.mark.asyncio
