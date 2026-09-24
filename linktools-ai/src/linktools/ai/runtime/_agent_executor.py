@@ -92,7 +92,6 @@ from ..capability import (
     SkillCapability,
     SkillSourceRef,
     SkillSourceRegistry,
-    VersionedSkillResourceSource,
     SubagentCapability,
     SubagentDelegate,
     tool_class_from_metadata,
@@ -262,13 +261,13 @@ class AgentExecutor:
         self,
         skill_sources: SkillSourceRegistry,
         *,
-        mcp_assets: "Mapping[str, AssetStoreReader] | None" = None,
+        asset_sources: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
-        self._mcp_assets = dict(mcp_assets or {})
+        self._asset_sources = dict(asset_sources or {})
         self._metrics = metrics
 
     async def execute(self, scope: _RunScope) -> AgentExecutionOutcome:
@@ -355,28 +354,31 @@ class AgentExecutor:
         self,
         definition: AgentDefinition,
     ) -> SkillSourceRegistry:
-        grouped: dict[str, dict[str, object]] = {}
-        readers: dict[str, object] = {}
+        grouped: dict[str, dict[str, SkillSourceRef]] = {}
         for skill in definition.skill_definitions:
             source_ref = skill.source_ref
             if source_ref is None or not source_ref.frozen:
                 continue
-            source = self._skill_sources.resolve(source_ref.source_id)
-            if not isinstance(source, VersionedSkillResourceSource):
-                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            if source_ref.source_id not in self._asset_sources:
+                raise AIError(
+                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                    safe_details={
+                        "kind": "skill_asset_source",
+                        "source_id": source_ref.source_id,
+                    },
+                )
             roots = grouped.setdefault(source_ref.source_id, {})
             existing = roots.get(source_ref.root)
             if existing is not None and existing != source_ref:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             roots[source_ref.root] = source_ref
-            readers[source_ref.source_id] = source.asset_reader
         if not grouped:
             return self._skill_sources
         frozen = tuple(
             FrozenSkillResourceSource(
                 source_id,
-                cast("Mapping[str, SkillSourceRef]", dict(sorted(roots.items()))),
-                cast("AssetStoreReader", readers[source_id]),
+                dict(sorted(roots.items())),
+                self._asset_sources[source_id],
             )
             for source_id, roots in sorted(grouped.items())
         )
@@ -474,7 +476,7 @@ class AgentExecutor:
             mcp_projections = await prepare_mcp_resource_projections(
                 scope.binding.definition.mcp_servers,
                 mcp_frozen_resources,
-                asset_readers=self._mcp_assets,
+                asset_readers=self._asset_sources,
                 sandboxed=workspace is not None,
             )
         except BaseException:
@@ -725,9 +727,15 @@ def _mcp_frozen_resources(
         if pin.kind != "mcp":
             continue
         server, versions = codec.from_frozen_payload(pin.contract)
-        if server.resource_root is not None and versions is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if server.resource_root is None and versions is not None:
+        source_id = pin.contract.get("resource_source_id")
+        if server.resource_root is not None:
+            if (
+                versions is None
+                or not isinstance(source_id, str)
+                or not source_id
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif versions is not None or source_id is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if server.id in result:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -739,6 +747,7 @@ def _mcp_frozen_resources(
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result[server.id] = _FrozenMCPResources(
             versions,
+            cast("str | None", source_id),
             digest,
             cast(Mapping[str, JsonValue], policy),
         )
