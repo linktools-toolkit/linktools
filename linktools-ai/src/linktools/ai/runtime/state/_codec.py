@@ -31,6 +31,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 
 from ...agent import AgentBindingSnapshot
 from ...core import (
+    RUNTIME_OBJECT_STORE_ID,
     ApprovalDecision,
     ApprovalStatus,
     EvaluationStatus,
@@ -840,9 +841,6 @@ def _decode_v1_task_result(
     )
 
 
-_RUNTIME_OBJECT_STORE_ID = "runtime"
-
-
 def _encode_v1_object_ref(
     value: object,
     codec: "_VersionCodec",
@@ -874,7 +872,7 @@ def _decode_v1_object_ref(
     )
     _require_contract_fields(raw_fields, expected, persisted=persisted)
     store_id = (
-        _RUNTIME_OBJECT_STORE_ID
+        RUNTIME_OBJECT_STORE_ID
         if persisted
         else cast(
             str,
@@ -1675,16 +1673,15 @@ def _iter_agent_binding_object_refs(
         raw = source.get("snapshot")
         if raw is None:
             continue
-        required = {"key", "digest", "size"}
+        required = {"store_id", "key", "digest", "size"}
         if not isinstance(raw, Mapping) or not required.issubset(raw):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        store_id = raw.get("store_id", "runtime")
+        store_id = raw["store_id"]
         key = raw["key"]
         digest = raw["digest"]
         size = raw["size"]
         if (
-            not isinstance(store_id, str)
-            or not store_id
+            store_id != RUNTIME_OBJECT_STORE_ID
             or not isinstance(key, str)
             or not key
             or not isinstance(digest, str)
