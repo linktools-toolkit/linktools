@@ -88,7 +88,7 @@ from ..asset import AssetStoreReader
 from ..capability import (
     AgentContext,
     CapabilityContribution,
-    FrozenSkillResourceSource,
+    AssetVersionSkillResourceSource,
     SkillCapability,
     SkillSourceRef,
     SkillSourceRegistry,
@@ -127,13 +127,13 @@ from ._compaction import RuntimeCompactionPolicy
 from ._input import CanonicalUserInput
 from ._journal import ModelRequestJournal
 from ._mcp import (
-    _FrozenMCPResources,
+    _MCPResourceBinding,
     _MCPResourceProjection,
     close_mcp_projections,
     close_mcp_resources,
     materialize_mcp_capabilities,
     prepare_mcp_resource_projections,
-    validate_frozen_mcp_policy,
+    validate_mcp_binding_policy,
 )
 from ._memory import MemoryStore
 from ._metric_capability import RuntimeModelObservationCapability
@@ -216,7 +216,7 @@ class _RunScope:
     ) = None
     sandbox_session: "SandboxSession | None" = None
     skill_resource_paths: Mapping[str, "str | None"] = field(default_factory=dict)
-    mcp_frozen_resources: Mapping[str, _FrozenMCPResources] = field(
+    mcp_resource_bindings: Mapping[str, _MCPResourceBinding] = field(
         default_factory=dict
     )
     mcp_resource_projections: Mapping[str, _MCPResourceProjection] = field(
@@ -357,7 +357,7 @@ class AgentExecutor:
         grouped: dict[str, dict[str, SkillSourceRef]] = {}
         for skill in definition.skill_definitions:
             source_ref = skill.source_ref
-            if source_ref is None or not source_ref.frozen:
+            if source_ref is None or source_ref.resource_semantic_digest is None:
                 continue
             if source_ref.source_id not in self._asset_sources:
                 raise AIError(
@@ -374,15 +374,15 @@ class AgentExecutor:
             roots[source_ref.root] = source_ref
         if not grouped:
             return self._skill_sources
-        frozen = tuple(
-            FrozenSkillResourceSource(
+        version_sources = tuple(
+            AssetVersionSkillResourceSource(
                 source_id,
                 dict(sorted(roots.items())),
                 self._asset_sources[source_id],
             )
             for source_id, roots in sorted(grouped.items())
         )
-        return self._skill_sources.with_overrides(frozen)
+        return self._skill_sources.with_overrides(version_sources)
 
     def _record_agent_run(
         self,
@@ -453,12 +453,12 @@ class AgentExecutor:
         selected = tuple(
             candidate.id
             for candidate in scope.binding.definition.selected_tools
-            if tool_class_from_metadata(_frozen_tool_metadata(candidate))
+            if tool_class_from_metadata(_bound_tool_metadata(candidate))
             in {"filesystem.read", "filesystem.write", "shell"}
         )
         workspace = scope.workspace
         temporary_resources: tuple[TemporaryDirectory[str], ...] = ()
-        mcp_frozen_resources = _mcp_frozen_resources(scope.binding)
+        mcp_resource_bindings = _mcp_resource_bindings(scope.binding)
         if workspace is None:
             skill_resources: tuple[SandboxResource, ...] = ()
             resource_keys: Mapping[str, "str | None"] = {
@@ -475,7 +475,7 @@ class AgentExecutor:
         try:
             mcp_projections = await prepare_mcp_resource_projections(
                 scope.binding.definition.mcp_servers,
-                mcp_frozen_resources,
+                mcp_resource_bindings,
                 asset_readers=self._asset_sources,
                 sandboxed=workspace is not None,
             )
@@ -498,7 +498,7 @@ class AgentExecutor:
                             skill.id: None
                             for skill in scope.binding.definition.skill_definitions
                         },
-                        mcp_frozen_resources=mcp_frozen_resources,
+                        mcp_resource_bindings=mcp_resource_bindings,
                         mcp_resource_projections=mcp_projections,
                     ),
                     run_usage=run_usage,
@@ -513,7 +513,7 @@ class AgentExecutor:
                             skill.id: None
                             for skill in scope.binding.definition.skill_definitions
                         },
-                        mcp_frozen_resources=mcp_frozen_resources,
+                        mcp_resource_bindings=mcp_resource_bindings,
                         mcp_resource_projections=mcp_projections,
                     ),
                     run_usage=run_usage,
@@ -526,7 +526,7 @@ class AgentExecutor:
                 else LocalSandbox()
             )
             if scope.binding.definition.mcp_servers:
-                validate_frozen_mcp_policy(mcp_frozen_resources, workspace)
+                validate_mcp_binding_policy(mcp_resource_bindings, workspace)
             session = await backend.open(
                 root=workspace.root,
                 resources=skill_resources,
@@ -549,7 +549,7 @@ class AgentExecutor:
                     scope,
                     sandbox_session=session,
                     skill_resource_paths=resource_paths,
-                    mcp_frozen_resources=mcp_frozen_resources,
+                    mcp_resource_bindings=mcp_resource_bindings,
                     mcp_resource_projections=mcp_projections,
                 ),
                 run_usage=run_usage,
@@ -718,15 +718,15 @@ async def _close_mcp_resources(
         raise primary_error from cleanup_error
 
 
-def _mcp_frozen_resources(
+def _mcp_resource_bindings(
     binding: AgentBinding,
-) -> dict[str, _FrozenMCPResources]:
+) -> dict[str, _MCPResourceBinding]:
     codec = MCPServerSpecCodec()
-    result: dict[str, _FrozenMCPResources] = {}
+    result: dict[str, _MCPResourceBinding] = {}
     for pin in binding.snapshot.selected:
         if pin.kind != "mcp":
             continue
-        server, versions = codec.from_frozen_payload(pin.contract)
+        server, versions = codec.from_execution_payload(pin.contract)
         source_id = pin.contract.get("resource_source_id")
         if server.resource_root is not None:
             if (
@@ -745,7 +745,7 @@ def _mcp_frozen_resources(
         digest = pin.contract.get("resource_semantic_digest")
         if digest is not None and not isinstance(digest, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        result[server.id] = _FrozenMCPResources(
+        result[server.id] = _MCPResourceBinding(
             versions,
             cast("str | None", source_id),
             digest,
@@ -790,7 +790,7 @@ async def _skill_sandbox_resources(
             if view.location.kind == "local":
                 source_path = Path(view.location.path)
             elif (
-                isinstance(source, FrozenSkillResourceSource)
+                isinstance(source, AssetVersionSkillResourceSource)
                 and await source.sandbox_materialize(source_ref.root)
             ):
                 holder = TemporaryDirectory(
@@ -911,7 +911,7 @@ async def _materialize_agent(
     compaction_policy = RuntimeCompactionPolicy()
     for candidate in definition.selected_tools:
         source_tool = cast("Tool[AgentContext[object]]", candidate.value)
-        metadata = _frozen_tool_metadata(candidate)
+        metadata = _bound_tool_metadata(candidate)
         tool = _tool_with_metadata(source_tool, metadata)
         tool_class = tool_class_from_metadata(metadata)
         if tool_class is None:
@@ -1061,7 +1061,7 @@ async def _materialize_agent(
                 workspace=scope.workspace,
                 sandbox_session=scope.sandbox_session,
                 host_cwd=(scope.mcp_cwd if scope.workspace is None else None),
-                frozen_resources=scope.mcp_frozen_resources,
+                resource_bindings=scope.mcp_resource_bindings,
                 projections=scope.mcp_resource_projections,
                 tool_operations=scope.tool_operations,
                 tool_metrics=tool_metrics,
@@ -1147,7 +1147,7 @@ async def _materialize_agent(
     return agent, tuple(capabilities)
 
 
-def _frozen_tool_metadata(
+def _bound_tool_metadata(
     candidate: "CapabilityContribution[object]",
 ) -> Mapping[str, object]:
     contract = candidate.semantic_contract
