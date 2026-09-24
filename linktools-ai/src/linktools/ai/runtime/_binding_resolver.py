@@ -13,14 +13,7 @@ from ..agent import (
     AgentCompiler,
     SemanticPin,
 )
-from ..capability import (
-    SkillDefinition,
-    SkillSourceRef,
-    SkillSourceRegistry,
-    ResolvableSkillResourceSource,
-    validate_resource_path,
-    validate_resource_tree,
-)
+from ..capability import validate_resource_path, validate_resource_tree
 from ..asset import AssetKey, AssetStoreReader, AssetVersionRef
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -29,13 +22,12 @@ from ..workspace import StdioSandbox, Workspace
 
 
 class _RuntimeBindingResolver:
-    """Resolve immutable Asset dependencies required by one execution binding."""
+    """Resolve execution-owned MCP resources and direct child bindings."""
 
     def __init__(
         self,
         catalog: AgentCatalog,
         compiler: AgentCompiler,
-        skill_sources: SkillSourceRegistry,
         *,
         workspace: Workspace | None,
         mcp_assets: "Mapping[str, tuple[str, AssetStoreReader]] | None" = None,
@@ -44,11 +36,8 @@ class _RuntimeBindingResolver:
             raise TypeError("catalog must be AgentCatalog")
         if not isinstance(compiler, AgentCompiler):
             raise TypeError("compiler must be AgentCompiler")
-        if not isinstance(skill_sources, SkillSourceRegistry):
-            raise TypeError("skill_sources must be SkillSourceRegistry")
         self._catalog = catalog
         self._compiler = compiler
-        self._skill_sources = skill_sources
         self._workspace = workspace
         self._mcp_assets = dict(mcp_assets or {})
 
@@ -65,63 +54,35 @@ class _RuntimeBindingResolver:
             return binding
         return self._compiler.restore(snapshot)
 
-    async def resolve_root(
-        self,
-        agent_id: str,
-        *,
-        skill_versions: "dict[tuple[str, str], SkillSourceRef] | None" = None,
-    ) -> AgentBindingSnapshot:
+    async def resolve_root(self, agent_id: str) -> AgentBindingSnapshot:
         """Resolve one Agent as a root execution target and its direct children."""
         definition = self._catalog.root_definition(agent_id)
         return await self.resolve_snapshot(
-            self._compiler.bind(definition, output=None).snapshot,
-            skill_versions=skill_versions,
+            self._compiler.bind(definition, output=None).snapshot
         )
 
     async def resolve_snapshot(
         self,
         snapshot: AgentBindingSnapshot,
-        *,
-        skill_versions: "dict[tuple[str, str], SkillSourceRef] | None" = None,
     ) -> AgentBindingSnapshot:
-        """Resolve Skill Asset versions and direct child bindings for one snapshot."""
+        """Resolve MCP Asset versions and direct child bindings for one snapshot."""
         if not isinstance(snapshot, AgentBindingSnapshot):
             raise TypeError("snapshot must be AgentBindingSnapshot")
-        cache = {} if skill_versions is None else skill_versions
-        resolved = await self._resolve_skills(snapshot, skill_versions=cache)
-        resolved = await self._resolve_mcp(resolved)
+        resolved = await self._resolve_mcp(snapshot)
         if resolved.subagent_bindings:
             children = tuple(
-                [
-                    await self._resolve_mcp(
-                        await self._resolve_skills(child, skill_versions=cache)
-                    )
-                    for child in resolved.subagent_bindings
-                ]
+                [await self._resolve_mcp(child) for child in resolved.subagent_bindings]
             )
         else:
             children = tuple(
-                [
-                    await self._resolve_child(child_id, skill_versions=cache)
-                    for child_id in resolved.subagent_ids
-                ]
+                [await self._resolve_child(child_id) for child_id in resolved.subagent_ids]
             )
         return replace(resolved, subagent_bindings=children)
 
-    async def _resolve_child(
-        self,
-        agent_id: str,
-        *,
-        skill_versions: "dict[tuple[str, str], SkillSourceRef]",
-    ) -> AgentBindingSnapshot:
+    async def _resolve_child(self, agent_id: str) -> AgentBindingSnapshot:
         definition = self._catalog.root_definition(agent_id)
         snapshot = self._compiler.bind_subagent(definition).snapshot
-        return await self._resolve_mcp(
-            await self._resolve_skills(
-                snapshot,
-                skill_versions=skill_versions,
-            )
-        )
+        return await self._resolve_mcp(snapshot)
 
     async def _resolve_mcp(
         self,
@@ -148,7 +109,6 @@ class _RuntimeBindingResolver:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 selected.append(pin)
                 continue
-            resource_versions = None
             resource_source_id = None
             resource_semantic_digest = None
             if server.resource_root is not None:
@@ -182,58 +142,6 @@ class _RuntimeBindingResolver:
                         resource_semantic_digest=resource_semantic_digest,
                         execution_policy=execution_policy,
                     ),
-                )
-            )
-        return replace(snapshot, selected=tuple(selected))
-
-    async def _resolve_skills(
-        self,
-        snapshot: AgentBindingSnapshot,
-        *,
-        skill_versions: "dict[tuple[str, str], SkillSourceRef]",
-    ) -> AgentBindingSnapshot:
-        selected: list[SemanticPin] = []
-        for pin in snapshot.selected:
-            if pin.kind != "skill":
-                selected.append(pin)
-                continue
-            skill = SkillDefinition.from_semantic_contract(
-                cast("Mapping[str, object]", pin.contract)
-            )
-            source_ref = skill.source_ref
-            if source_ref is None:
-                selected.append(pin)
-                continue
-            if source_ref.resource_semantic_digest is not None:
-                selected.append(pin)
-                continue
-            source = self._skill_sources.resolve(source_ref.source_id)
-            if not isinstance(source, ResolvableSkillResourceSource):
-                raise AIError(
-                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={
-                        "kind": "skill_version_source",
-                        "skill_id": skill.id,
-                        "source_id": source_ref.source_id,
-                    },
-                )
-            source_key = (source_ref.source_id, source_ref.root)
-            resolved_ref = skill_versions.get(source_key)
-            if resolved_ref is None:
-                resolved_ref = await source.resolve(source_ref.root)
-                if (
-                    resolved_ref.source_id != source_ref.source_id
-                    or resolved_ref.root != source_ref.root
-                    or resolved_ref.resource_semantic_digest is None
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                skill_versions[source_key] = resolved_ref
-            resolved_skill = SkillDefinition(skill.spec, resolved_ref)
-            selected.append(
-                SemanticPin(
-                    "skill",
-                    pin.id,
-                    resolved_skill.semantic_contract,
                 )
             )
         return replace(snapshot, selected=tuple(selected))
