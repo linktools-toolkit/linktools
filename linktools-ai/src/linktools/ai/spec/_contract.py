@@ -247,7 +247,7 @@ class AgentSpec:
                 ErrorCode.CAPABILITY_RESOLUTION_INVALID,
                 "preload_skills requires exact skill ids",
             )
-        if allow_skills != ("*",) and any(
+        if "*" not in allow_skills and any(
             skill_id not in allow_skills for skill_id in preload_skills
         ):
             raise AIError(
