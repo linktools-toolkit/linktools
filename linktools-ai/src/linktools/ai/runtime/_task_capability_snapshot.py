@@ -13,7 +13,7 @@ from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, read_object
 from ..task import TaskGraph, TaskGraphAdmission, TaskNode
-from ._binding_freeze import _RuntimeBindingFreezer
+from ._binding_resolver import _RuntimeBindingResolver
 from ._runtime_identity import task_capability_snapshot_key
 
 _KIND = "task-capability-snapshot"
@@ -21,7 +21,7 @@ _VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenTaskCapabilities:
+class TaskCapabilitySnapshot:
     roots: Mapping[str, AgentBindingSnapshot]
     bindings: Mapping[str, AgentBindingSnapshot]
 
@@ -54,7 +54,7 @@ class TaskCapabilitySnapshotStore:
         self,
         namespace: str,
         compiler: AgentCompiler,
-        binding_freezer: _RuntimeBindingFreezer,
+        binding_resolver: _RuntimeBindingResolver,
         object_store: ObjectStore,
         *,
         agent_task_type: str,
@@ -63,13 +63,13 @@ class TaskCapabilitySnapshotStore:
             raise ValueError("namespace is required")
         if not isinstance(compiler, AgentCompiler):
             raise TypeError("compiler must be AgentCompiler")
-        if not isinstance(binding_freezer, _RuntimeBindingFreezer):
-            raise TypeError("binding_freezer must be _RuntimeBindingFreezer")
+        if not isinstance(binding_resolver, _RuntimeBindingResolver):
+            raise TypeError("binding_resolver must be _RuntimeBindingResolver")
         if not isinstance(agent_task_type, str) or not agent_task_type:
             raise ValueError("agent_task_type is required")
         self._namespace = namespace
         self._compiler = compiler
-        self._binding_freezer = binding_freezer
+        self._binding_resolver = binding_resolver
         self._objects = object_store
         self._agent_task_type = agent_task_type
 
@@ -77,7 +77,7 @@ class TaskCapabilitySnapshotStore:
         self,
         admission: TaskGraphAdmission,
         graph: TaskGraph,
-    ) -> FrozenTaskCapabilities:
+    ) -> TaskCapabilitySnapshot:
         key = self._key(admission)
         existing = await self._objects.stat(key)
         if existing is not None:
@@ -103,14 +103,14 @@ class TaskCapabilitySnapshotStore:
         skill_versions: dict[tuple[str, str], SkillSourceRef] = {}
         roots: dict[str, AgentBindingSnapshot] = {}
         if any(node.expander is not None for node in graph.nodes):
-            for agent_id in self._binding_freezer.root_ids:
-                roots[agent_id] = await self._binding_freezer.freeze_root(
+            for agent_id in self._binding_resolver.root_ids:
+                roots[agent_id] = await self._binding_resolver.resolve_root(
                     agent_id,
                     skill_versions=skill_versions,
                 )
         bindings: dict[str, AgentBindingSnapshot] = {}
         for binding_digest, snapshot in sorted(unique_bindings.items()):
-            bindings[binding_digest] = await self._binding_freezer.freeze_snapshot(
+            bindings[binding_digest] = await self._binding_resolver.resolve_snapshot(
                 snapshot,
                 skill_versions=skill_versions,
             )
@@ -172,7 +172,7 @@ class TaskCapabilitySnapshotStore:
     async def load(
         self,
         admission: TaskGraphAdmission,
-    ) -> FrozenTaskCapabilities:
+    ) -> TaskCapabilitySnapshot:
         key = self._key(admission)
         stat = await self._objects.stat(key)
         if stat is None:
@@ -208,7 +208,7 @@ class TaskCapabilitySnapshotStore:
         self,
         ref: ObjectRef,
         admission: TaskGraphAdmission,
-    ) -> FrozenTaskCapabilities:
+    ) -> TaskCapabilitySnapshot:
         payload = await read_object(
             self._objects,
             ref.key,
@@ -273,7 +273,7 @@ class TaskCapabilitySnapshotStore:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._compiler.restore(snapshot)
-        return FrozenTaskCapabilities(roots, bindings)
+        return TaskCapabilitySnapshot(roots, bindings)
 
     def _key(self, admission: TaskGraphAdmission) -> str:
         return task_capability_snapshot_key(
@@ -285,6 +285,6 @@ class TaskCapabilitySnapshotStore:
 
 
 __all__ = [
-    "FrozenTaskCapabilities",
+    "TaskCapabilitySnapshot",
     "TaskCapabilitySnapshotStore",
 ]
