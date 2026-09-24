@@ -1661,6 +1661,8 @@ def _iter_agent_binding_object_refs(
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             if resource_snapshot is not None:
+                if resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 yield domain, resource_snapshot
             continue
         if pin.kind != "skill":
