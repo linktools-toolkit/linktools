@@ -22,7 +22,6 @@ from linktools.ai.capability import (
     AssetVersionSkillResourceSource,
     SkillDefinition,
     SkillSourceRef,
-    SkillSourceRegistry,
 )
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.model import ModelRegistry
@@ -83,12 +82,16 @@ async def _fixture() -> _BindingFixture:
     assets = AssetStore(StorageOverlay(backend, writer=backend))
     await assets.initialize()
     await assets.put(AssetKey("skill", "child-skill/guide.txt"), b"original")
+    child_ref = await AssetSkillResourceSource(
+        "application",
+        assets,
+    ).resolve("child-skill")
 
     candidates = (
         CapabilityContribution.from_declaration(
             SkillDefinition(
                 SkillSpec("child-skill", "Use the child guide."),
-                SkillSourceRef("application", "child-skill"),
+                child_ref,
             )
         ),
         CapabilityContribution.from_declaration(
@@ -129,9 +132,6 @@ async def _fixture() -> _BindingFixture:
     resolver = _RuntimeBindingResolver(
         catalog,
         compiler,
-        SkillSourceRegistry(
-            (AssetSkillResourceSource("application", assets),)
-        ),
         workspace=None,
     )
     return _BindingFixture(
@@ -174,7 +174,7 @@ async def _read_skill(
 
 
 @pytest.mark.asyncio
-async def test_binding_resolution_captures_only_direct_child_asset_versions() -> None:
+async def test_binding_resolution_preserves_direct_child_asset_versions() -> None:
     fixture = await _fixture()
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
@@ -277,7 +277,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execution_binding_resolves_selected_child_skills() -> None:
+async def test_execution_binding_uses_selected_child_asset_versions() -> None:
     fixture = await _fixture()
     try:
         resolved = await fixture.resolver.resolve(fixture.binding)
@@ -309,7 +309,6 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     resolver = _RuntimeBindingResolver(
         catalog,
         compiler,
-        SkillSourceRegistry(),
         workspace=None,
     )
 
@@ -368,8 +367,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         resolver = _RuntimeBindingResolver(
             fixture.catalog,
             fixture.compiler,
-            SkillSourceRegistry(),
-            workspace=None,
+                workspace=None,
             mcp_assets={"server": ("application", store)},
         )
         await store.put(resource, b"print('updated')")
