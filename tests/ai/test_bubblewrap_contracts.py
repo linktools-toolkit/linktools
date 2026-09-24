@@ -67,6 +67,7 @@ def test_stdio_policy_is_read_only_and_returns_detached_values(
     with pytest.raises(TypeError):
         policy["network"] = "public"  # type: ignore[index]
 
+
 def test_stdio_resources_are_not_mounted_into_worker_session(
     tmp_path: Path,
 ) -> None:
