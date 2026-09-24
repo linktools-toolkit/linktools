@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.workspace import BubblewrapSandbox, ReadOnlySandboxPolicy
+from linktools.ai.workspace import (
+    BubblewrapSandbox,
+    ReadOnlySandboxPolicy,
+    SandboxResource,
+)
+from linktools.ai.workspace import _bubblewrap
 
 
 @pytest.mark.parametrize(
@@ -61,3 +66,42 @@ def test_stdio_policy_is_read_only_and_returns_detached_values(
     assert "outside" not in policy["hidden_paths"]
     with pytest.raises(TypeError):
         policy["network"] = "public"  # type: ignore[index]
+
+def test_stdio_resources_are_not_mounted_into_worker_session(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    locks = tmp_path / "locks"
+    resource_root = tmp_path / "mcp"
+    for path in (workspace, runtime, locks, resource_root):
+        path.mkdir()
+    resource = SandboxResource("mcp", resource_root)
+
+    worker_args = _bubblewrap._build_bwrap_args(
+        root=workspace,
+        runtime_root=runtime,
+        bwrap=tmp_path / "bwrap",
+        lock_root=locks,
+        resources=(),
+        hidden_paths=(),
+        worker_resources=[],
+    )
+    stdio_args = _bubblewrap._build_bwrap_args(
+        root=workspace,
+        runtime_root=runtime,
+        bwrap=tmp_path / "bwrap",
+        lock_root=locks,
+        resources=(resource,),
+        hidden_paths=(),
+        worker_resources=[],
+        mode="stdio",
+        command="/usr/bin/python3",
+    )
+
+    guest_path = _bubblewrap._resource_guest_path(resource.id)
+    assert str(resource_root) not in worker_args
+    assert guest_path not in worker_args
+    assert str(resource_root) in stdio_args
+    assert guest_path in stdio_args
+
