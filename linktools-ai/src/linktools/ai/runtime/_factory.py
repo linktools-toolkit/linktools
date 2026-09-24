@@ -165,7 +165,7 @@ async def compose_runtime_components(
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
                     safe_details={
-                        "kind": "mcp_resource_store",
+                        "kind": "mcp_asset_source",
                         "group_id": group.group_id,
                     },
                 )
