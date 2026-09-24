@@ -112,6 +112,10 @@ class AssetStore:
         storage: "StorageOverlay[AssetKey, bytes, AssetInfo]",
     ) -> None:
         """Create a raw Asset file store from one storage overlay."""
+        if not isinstance(storage, StorageOverlay):
+            raise TypeError("storage must be StorageOverlay")
+        if any(not isinstance(backend, AssetBackend) for backend in storage.backends):
+            raise TypeError("AssetStore backends must implement AssetBackend")
         self._storage = storage
         self._ready = False
         self._closing = False
@@ -387,8 +391,6 @@ class AssetStore:
         for key, location in zip(requested, locations, strict=True):
             if location is None or location.info.status is not StorageEntryStatus.NORMAL:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            if not isinstance(location.backend, AssetBackend):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             info = location.info
             result.append(
                 AssetVersionRef(
@@ -422,9 +424,10 @@ class AssetStore:
                 if len(matches) != 1:
                     raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
                 backend = matches[0]
-            if not isinstance(backend, AssetBackend):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value = await backend.get_at_revision(ref.key, ref.revision)
+            value = await cast(AssetBackend, backend).get_at_revision(
+                ref.key,
+                ref.revision,
+            )
             if value is None:
                 raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
             data = bytes(value)
