@@ -265,26 +265,27 @@ class AgentCompiler:
             for candidate in self._candidates
             if candidate.kind == "tool"
         }
-        if spec.allow_tools == ("*",):
-            selected_tools = tuple(tools[name] for name in sorted(tools))
-            selected_mcp = tuple(
-                sorted(self._mcp_by_id.values(), key=lambda item: item.id)
-            )
-            return (
-                selected_tools,
-                selected_mcp,
-                ("*",),
-                tuple(mcp_server_selector(item.id) for item in selected_mcp),
-            )
-        selected_tool_ids: set[str] = set()
-        selected_mcp_by_id: dict[str, CapabilityContribution[object]] = {}
-        ordinary_policy: list[str] = []
-        mcp_policy: list[str] = []
+        select_all = "*" in spec.allow_tools
+        selected_tool_ids: set[str] = set(tools) if select_all else set()
+        selected_mcp_by_id: dict[str, CapabilityContribution[object]] = (
+            dict(self._mcp_by_id) if select_all else {}
+        )
+        ordinary_policy: list[str] = ["*"] if select_all else []
+        mcp_policy: list[str] = (
+            [
+                mcp_server_selector(item.id)
+                for item in sorted(self._mcp_by_id.values(), key=lambda item: item.id)
+            ]
+            if select_all
+            else []
+        )
         workspace_tool_classes = {
             declaration.name: declaration.metadata["linktools.ai.tool_class"]
             for declaration in workspace_tool_declarations()
         }
         for selector in spec.allow_tools:
+            if selector == "*":
+                continue
             workspace_classes = _workspace_selector_classes(selector)
             if workspace_classes is not None:
                 selected_workspace_tools = {
@@ -325,22 +326,15 @@ class AgentCompiler:
             for candidate in self._candidates
             if candidate.kind == kind
         }
-        if tuple(selectors) == ("*",):
-            selected = tuple(
-                candidate for candidate in self._candidates if candidate.kind == kind
-            )
-            return (
-                selected
-                if kind == "capability"
-                else tuple(sorted(selected, key=lambda item: item.id))
-            )
-        selected_ids = set(selectors)
+        select_all = "*" in selectors
+        selected_ids = set(selectors).difference({"*"})
         if not selected_ids.issubset(values):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         selected = tuple(
             candidate
             for candidate in self._candidates
-            if candidate.kind == kind and candidate.id in selected_ids
+            if candidate.kind == kind
+            and (select_all or candidate.id in selected_ids)
         )
         return (
             selected
@@ -350,12 +344,17 @@ class AgentCompiler:
 
     def _select_subagents(self, spec: AgentSpec) -> "tuple[str, ...]":
         available = set(self._agent_ids)
-        if spec.allow_subagents == ("*",):
-            return tuple(sorted(available.difference({spec.id})))
-        selected = set(spec.allow_subagents)
+        select_all = "*" in spec.allow_subagents
+        selected = set(spec.allow_subagents).difference({"*"})
         if spec.id in selected or not selected.issubset(available):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return tuple(sorted(selected))
+        return tuple(
+            sorted(
+                available.difference({spec.id})
+                if select_all
+                else selected
+            )
+        )
 
     def _restore_policies(
         self,
@@ -363,21 +362,16 @@ class AgentCompiler:
         selected_tools: Sequence[CapabilityContribution[object]],
         selected_mcp: Sequence[CapabilityContribution[object]],
     ) -> "tuple[tuple[str, ...], tuple[str, ...]]":
-        if spec.allow_tools == ("*",):
-            return (
-                ("*",),
-                tuple(
-                    mcp_server_selector(item.id)
-                    for item in sorted(selected_mcp, key=lambda item: item.id)
-                ),
-            )
+        select_all = "*" in spec.allow_tools
         selected_tool_names = {item.id for item in selected_tools}
-        ordinary: set[str] = set()
+        ordinary: set[str] = {"*"} if select_all else set()
         workspace_tool_classes = {
             declaration.name: declaration.metadata["linktools.ai.tool_class"]
             for declaration in workspace_tool_declarations()
         }
         for selector in spec.allow_tools:
+            if selector == "*":
+                continue
             workspace_classes = _workspace_selector_classes(selector)
             if workspace_classes is not None:
                 ordinary.update(
@@ -391,8 +385,17 @@ class AgentCompiler:
                     raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
                 ordinary.add(selector)
         allowed_server_ids = {item.id for item in selected_mcp}
-        mcp_policy = []
+        mcp_policy = (
+            [
+                mcp_server_selector(item.id)
+                for item in sorted(selected_mcp, key=lambda item: item.id)
+            ]
+            if select_all
+            else []
+        )
         for selector in spec.allow_tools:
+            if selector == "*":
+                continue
             parsed = parse_mcp_tool_selector(selector)
             if parsed is None:
                 continue
