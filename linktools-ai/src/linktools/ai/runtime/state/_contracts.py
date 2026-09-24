@@ -1234,10 +1234,6 @@ class PendingDeferredCall:
         except (TypeError, ValueError) as error:
             raise ValueError("deferred call metadata is invalid") from error
 
-    @property
-    def arguments_digest(self) -> str:
-        return self.arguments_payload.digest
-
 
 @dataclass(frozen=True, slots=True)
 class PendingToolContinuation:

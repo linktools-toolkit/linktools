@@ -182,7 +182,7 @@ class RuntimeStateCommands:
                 {
                     "tool_call_id": item.tool_call_id,
                     "tool_name": item.tool_name,
-                    "arguments_digest": item.arguments_digest,
+                    "arguments_digest": item.arguments_payload.digest,
                 },
             )
             for item in continuation.approvals
@@ -192,7 +192,7 @@ class RuntimeStateCommands:
                 {
                     "tool_call_id": item.tool_call_id,
                     "tool_name": item.tool_name,
-                    "arguments_digest": item.arguments_digest,
+                    "arguments_digest": item.arguments_payload.digest,
                 },
             )
             for item in continuation.calls
