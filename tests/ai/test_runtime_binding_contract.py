@@ -275,7 +275,6 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
                             "executable_bits": 0,
                         }
                     ],
-                    "resource_digest": "b" * 64,
                 },
             }
         )
