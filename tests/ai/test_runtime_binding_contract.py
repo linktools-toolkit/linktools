@@ -243,35 +243,30 @@ def test_skill_snapshot_reference_rejects_malformed_known_fields() -> None:
     assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_skill_snapshot_reference_defaults_store_id_to_runtime() -> None:
-    skill = SkillDefinition.from_semantic_contract(
-        {
-            "version": 1,
-            "id": "review",
-            "content": "instructions",
-            "source": {
-                "source_id": "application",
-                "root": "review",
-                "resource_semantic_digest": "b" * 64,
-                "snapshot": {
-                    "key": "snapshot",
-                    "digest": "a" * 64,
-                    "size": 1,
+def test_skill_snapshot_reference_requires_store_id() -> None:
+    with pytest.raises(AIError) as raised:
+        SkillDefinition.from_semantic_contract(
+            {
+                "version": 1,
+                "id": "review",
+                "content": "instructions",
+                "source": {
+                    "source_id": "application",
+                    "root": "review",
+                    "resource_semantic_digest": "b" * 64,
+                    "snapshot": {
+                        "key": "snapshot",
+                        "digest": "a" * 64,
+                        "size": 1,
+                    },
                 },
-            },
-        }
-    )
+            }
+        )
 
-    assert skill.source_ref is not None
-    assert skill.source_ref.snapshot == ObjectRef(
-        "runtime",
-        "snapshot",
-        "a" * 64,
-        1,
-    )
+    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_binding_object_dependency_scan_defaults_skill_store_id() -> None:
+def test_binding_object_dependency_scan_requires_runtime_store_id() -> None:
     pin = SemanticPin(
         "skill",
         "review",
@@ -284,6 +279,7 @@ def test_binding_object_dependency_scan_defaults_skill_store_id() -> None:
                 "root": "review",
                 "resource_semantic_digest": "b" * 64,
                 "snapshot": {
+                    "store_id": "runtime",
                     "key": "snapshot",
                     "digest": "a" * 64,
                     "size": 1,
