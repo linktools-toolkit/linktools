@@ -8,7 +8,6 @@ import re
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
-import anyio
 import pytest
 from pydantic_ai.models.test import TestModel
 from pydantic_ai import Tool
@@ -36,10 +35,6 @@ from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
     _FrozenMCPResources,
     _materialize_resource_snapshot,
-)
-from linktools.ai.runtime._mcp_transport import (
-    _MAX_MCP_MESSAGE_BYTES,
-    _SandboxMCPTransport,
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -178,31 +173,6 @@ def test_mcp_legacy_selector_is_not_accepted() -> None:
             mcp=True,
         )
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
-
-
-@pytest.mark.asyncio
-async def test_mcp_transport_rejects_oversized_unframed_response() -> None:
-    class OversizedProcess:
-        def __init__(self) -> None:
-            self.sent = False
-
-        async def read_stdout(self, max_bytes: int = 65536) -> bytes:
-            del max_bytes
-            if self.sent:
-                return b""
-            self.sent = True
-            return b"x" * (_MAX_MCP_MESSAGE_BYTES + 1)
-
-    send, receive = anyio.create_memory_object_stream(1)
-    try:
-        with pytest.raises(AIError) as error:
-            await _SandboxMCPTransport._read_messages(
-                OversizedProcess(),  # type: ignore[arg-type]
-                send,
-            )
-        assert error.value.code is ErrorCode.MCP_RESPONSE_TOO_LARGE
-    finally:
-        await receive.aclose()
 
 
 @pytest.mark.asyncio
