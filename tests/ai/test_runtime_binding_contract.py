@@ -174,7 +174,7 @@ def _versioned_skill(
     )
     return SkillDefinition(
         SkillSpec("review", "review instructions"),
-        SkillSourceRef("application", "review").with_versions(
+        SkillSourceRef("application", "review").with_asset_versions(
             (SkillResourceVersion("guide.md", asset),),
             "b" * 64,
             sandbox_materialize=False,
@@ -199,7 +199,7 @@ def test_skill_asset_content_digest_changes_semantic_identity() -> None:
     first = _versioned_skill(source_id="source", revision=1, size=1)
     second = SkillDefinition(
         first.spec,
-        first.source_ref.with_versions(
+        first.source_ref.with_asset_versions(
             (
                 SkillResourceVersion(
                     "guide.md",
