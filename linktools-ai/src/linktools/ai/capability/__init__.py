@@ -23,9 +23,10 @@ from ._skill_source import (
     LocalSkillResourceSource,
     SkillLocation,
     SkillResourceSource,
+    SkillResourceVersion,
     SkillResourceView,
-    SnapshotSkillResourceSource,
     SkillSourceRef,
+    VersionedSkillResourceSource,
     SkillSourceRegistry,
 )
 from ._subagent import SubagentCapability, SubagentDelegate
@@ -79,9 +80,10 @@ __all__ = [
     "SkillDefinition",
     "SkillLocation",
     "SkillResourceSource",
+    "SkillResourceVersion",
     "SkillResourceView",
-    "SnapshotSkillResourceSource",
     "SkillSourceRef",
+    "VersionedSkillResourceSource",
     "SkillSourceRegistry",
     "SubagentDelegate",
     "TaskExpander",
