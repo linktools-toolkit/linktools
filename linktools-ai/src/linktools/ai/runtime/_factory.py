@@ -549,7 +549,7 @@ async def _build_local_components(
         )
         executor = AgentExecutor(
             skill_sources,
-            mcp_resource_store=state.object_store(RuntimeDomain.EXECUTION),
+            mcp_assets=mcp_assets,
             metrics=metric_buffer,
         )
     except BaseException:
