@@ -485,7 +485,6 @@ class RuntimeState:
             if reference.key.startswith(
                 (
                     "v1/asset-snapshot/",
-                    "v1/skill-source-snapshot/",
                     "v1/task-capability-snapshot/",
                 )
             ):
@@ -862,7 +861,6 @@ class RuntimeState:
             if not source.key.startswith(
                 (
                     "v1/asset-snapshot/",
-                    "v1/skill-source-snapshot/",
                     "v1/task-capability-snapshot/",
                 )
             ):
