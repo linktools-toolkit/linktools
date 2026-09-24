@@ -232,7 +232,12 @@ class AgentCompiler:
                 value, _resource_snapshot = MCPServerSpecCodec().from_frozen_payload(
                     cast("Mapping[str, object]", pin.contract)
                 )
-                candidate = CapabilityContribution("mcp", pin.id, pin.fingerprint, value)
+                candidate = CapabilityContribution.from_mcp_contract(
+                    value,
+                    pin.contract,
+                )
+                if candidate.fingerprint != pin.fingerprint:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             else:
                 current = self._by_identity.get((pin.kind, pin.id))
                 if current is None or current.fingerprint != pin.fingerprint:
