@@ -291,7 +291,11 @@ async def test_execution_binding_uses_selected_child_asset_versions() -> None:
 
 @pytest.mark.asyncio
 async def test_binding_resolution_restores_mcp_execution_contract() -> None:
-    server = MCPServerSpec("server", "python")
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:literal-value",),
+    )
     specification = AgentSpec(
         "agent",
         allow_tools=(mcp_server_selector(server.id),),
@@ -322,6 +326,11 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
         "version": 1,
         "boundary": "host-stdio",
     }
+    restored_server, resource_versions = MCPServerSpecCodec().from_execution_payload(
+        pin.contract
+    )
+    assert restored_server.args == ("resource:literal-value",)
+    assert resource_versions is None
     assert len(selected) == 1
     assert selected[0].semantic_contract == dict(pin.contract)
     assert selected[0].fingerprint == pin.fingerprint

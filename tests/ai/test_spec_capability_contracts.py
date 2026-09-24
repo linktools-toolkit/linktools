@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """Declaration, capability semantic, and runtime-leaf contracts."""
 
+import asyncio
 import hashlib
 import json
 import re
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -413,6 +415,54 @@ async def test_business_tool_semantics_are_captured_in_tool_metadata() -> None:
     }
     assert candidate.semantic_contract["metadata"] == tool.tool_def.metadata
     assert "config" not in candidate.semantic_contract
+
+
+@pytest.mark.asyncio
+async def test_business_tool_adapter_preserves_sync_execution_and_ctx_keyword() -> None:
+    release = threading.Event()
+
+    def blocking_tool(_context: object, ctx: str) -> str:
+        return ctx if release.wait(0.2) else "blocked"
+
+    group = CapabilityGroup[None]("business")
+    tool = group.tool(blocking_tool, effect="none")
+    toolset = FunctionToolset([tool])
+    context = _context()
+    tools = await toolset.get_tools(context)
+
+    async def release_tool() -> None:
+        await asyncio.sleep(0)
+        release.set()
+
+    release_task = asyncio.create_task(release_tool())
+    result = await toolset.call_tool(
+        tool.name,
+        {"ctx": "business-value"},
+        context,
+        tools[tool.name],
+    )
+    await release_task
+
+    assert result == "business-value"
+
+
+@pytest.mark.asyncio
+async def test_business_tool_adapter_preserves_ctx_keyword_for_async_tools() -> None:
+    async def business_tool(_context: object, ctx: str) -> str:
+        return ctx
+
+    group = CapabilityGroup[None]("business")
+    tool = group.tool(business_tool, effect="none")
+    toolset = FunctionToolset([tool])
+    context = _context()
+    tools = await toolset.get_tools(context)
+
+    assert await toolset.call_tool(
+        tool.name,
+        {"ctx": "business-value"},
+        context,
+        tools[tool.name],
+    ) == "business-value"
 
 
 def test_runtime_domain_object_store_trait_has_one_owner() -> None:
@@ -828,6 +878,31 @@ async def test_mcp_resource_versions_reject_invalid_tree(
         assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_resource_prefix_is_literal_without_resource_root() -> None:
+    server = MCPServerSpec(
+        "server",
+        "python",
+        ("resource:literal-value",),
+    )
+    binding = _MCPResourceBinding(
+        None,
+        None,
+        None,
+        {"version": 1, "boundary": "host-stdio"},
+    )
+
+    projections = await prepare_mcp_resource_projections(
+        (server,),
+        {server.id: binding},
+        asset_readers={},
+        sandboxed=False,
+    )
+
+    assert projections[server.id].args == ("resource:literal-value",)
+    assert projections[server.id].resources == ()
 
 
 @pytest.mark.asyncio

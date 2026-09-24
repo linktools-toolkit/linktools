@@ -297,28 +297,52 @@ class _CapabilityAssetReader:
         return self._revision
 
     async def get(self, key: AssetKey) -> "bytes | None":
-        await self._verify()
-        value = await self._store.get(key)
-        await self._verify()
-        return value
+        ref = self._versions.get(key)
+        if ref is None:
+            return None
+        return (await self._store.read_versions((ref,)))[0]
 
     async def get_many(
         self,
         keys: Sequence[AssetKey],
     ) -> "tuple[bytes | None, ...]":
-        await self._verify()
-        values = await self._store.get_many(keys)
-        await self._verify()
-        return values
+        refs = tuple(self._versions.get(key) for key in keys)
+        captured = tuple(ref for ref in refs if ref is not None)
+        values = iter(await self._store.read_versions(captured))
+        return tuple(next(values) if ref is not None else None for ref in refs)
 
     async def local_paths(
         self,
         keys: Sequence[AssetKey],
     ) -> "tuple[Path | None, ...]":
-        await self._verify()
-        values = await self._store.local_paths(keys)
-        await self._verify()
-        return values
+        requested = tuple(
+            dict.fromkeys(key for key in keys if key in self._versions)
+        )
+        if not requested:
+            return tuple(None for _ in keys)
+        paths = await self._store.local_paths(requested)
+        path_by_key = dict(zip(requested, paths, strict=True))
+        present = tuple(
+            key
+            for key, path in zip(requested, paths, strict=True)
+            if path is not None
+        )
+        if present:
+            try:
+                current = await self._store.resolve_versions(present)
+            except AIError as error:
+                if error.code is ErrorCode.STORAGE_NOT_FOUND:
+                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
+                raise
+            if any(
+                ref != self._versions[key]
+                for key, ref in zip(present, current, strict=True)
+            ):
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        return tuple(
+            path_by_key.get(key) if key in self._versions else None
+            for key in keys
+        )
 
     async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
         return self._metadata
@@ -761,8 +785,8 @@ class CapabilityGroup(Generic[AppT]):
         if store is not None:
             if not store.ready:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            source_revision = await store.current_revision()
-            if not isinstance(source_revision, StorageRevision):
+            capture_revision = await store.current_revision()
+            if not isinstance(capture_revision, StorageRevision):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             metadata = await store.metadata_snapshot()
             versions = await store.resolve_versions(
@@ -787,7 +811,7 @@ class CapabilityGroup(Generic[AppT]):
             )
             asset_reader = _CapabilityAssetReader(
                 store,
-                source_revision,
+                capture_revision,
                 version_by_key,
                 tuple(metadata),
             )
@@ -831,9 +855,16 @@ class CapabilityGroup(Generic[AppT]):
                         )
                     normalized.append(item)
                 contributions.extend(normalized)
+            source_revision = await store.current_revision()
+            if not isinstance(source_revision, StorageRevision):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await context.verify()
-            if await store.current_revision() != source_revision:
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            asset_reader = _CapabilityAssetReader(
+                store,
+                source_revision,
+                version_by_key,
+                tuple(metadata),
+            )
         elif loaders:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         snapshot_items = tuple(_snapshot_contribution(item) for item in contributions)
@@ -883,16 +914,31 @@ def _adapt_tool(function: Callable[..., object], *, name: str) -> Tool:
     if not parameters:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID, "tool requires AgentContext")
 
-    @functools.wraps(function)
-    async def invoke(
-        ctx: PydanticRunContext[AgentContext[object]],
-        *args: object,
-        **kwargs: object,
-    ) -> object:
-        result = function(ctx.deps, *args, **kwargs)
-        if inspect.isawaitable(result):
-            return await cast(Awaitable[object], result)
-        return result
+    invoke: Callable[..., object]
+    if inspect.iscoroutinefunction(function):
+        async def invoke_async(
+            runtime_context: PydanticRunContext[AgentContext[object]],
+            /,
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            return await cast(Callable[..., Awaitable[object]], function)(
+                runtime_context.deps,
+                *args,
+                **kwargs,
+            )
+
+        invoke = functools.wraps(function)(invoke_async)
+    else:
+        def invoke_sync(
+            runtime_context: PydanticRunContext[AgentContext[object]],
+            /,
+            *args: object,
+            **kwargs: object,
+        ) -> object:
+            return function(runtime_context.deps, *args, **kwargs)
+
+        invoke = functools.wraps(function)(invoke_sync)
 
     first = parameters[0].replace(
         annotation=PydanticRunContext[AgentContext[object]],

@@ -260,8 +260,6 @@ async def prepare_mcp_resource_projections(
                 or binding.resource_semantic_digest is not None
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if any(argument.startswith("resource:") for argument in server.args):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             projections[server.id] = _MCPResourceProjection(
                 server.id,
                 tuple(server.args),

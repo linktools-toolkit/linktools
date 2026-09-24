@@ -135,8 +135,6 @@ class _RuntimeBindingResolver:
                         server.args,
                     )
                 )
-            elif any(argument.startswith("resource:") for argument in server.args):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
             selected.append(
                 SemanticPin(
                     "mcp",

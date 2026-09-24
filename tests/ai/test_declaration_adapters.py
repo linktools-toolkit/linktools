@@ -309,6 +309,72 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_snapshot_ignores_unrelated_asset_added_during_loader() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    declaration = AssetKey("worker", "team/AGENT.md")
+    late = AssetKey("audit", "late")
+    await store.put(declaration, b"worker")
+
+    class WorkerLoader:
+        source_kind = "worker"
+
+        async def load(
+            self,
+            context: CapabilityLoadContext,
+        ) -> "Sequence[AgentSpec]":
+            assert await context.read(declaration) == b"worker"
+            await store.put(late, b"late")
+            return (AgentSpec("team"),)
+
+    group = CapabilityGroup("application", assets=store)
+    group.loader("worker", WorkerLoader())
+    try:
+        snapshot = await group.snapshot()
+        reader = snapshot.asset_reader
+        assert reader is not None
+        assert late not in {
+            info.key
+            for info in await reader.metadata_snapshot()
+        }
+        assert snapshot.source_revision == await store.current_revision()
+        await snapshot.verify_source_revision()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_local_paths_ignore_unrelated_directory_revision(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "snapshot-assets"
+    key = AssetKey("audit", "value.bin")
+    target = root / "audit" / "value.bin"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"value")
+    backend = DirectoryAssetBackend(str(root), kinds=("audit",))
+    store = AssetStore(StorageOverlay(backend))
+    await store.initialize()
+    try:
+        snapshot = await CapabilityGroup("application", assets=store).snapshot()
+        reader = snapshot.asset_reader
+        assert reader is not None
+        refs = await reader.resolve_versions((key,))
+
+        (root / "audit" / "late.bin").write_bytes(b"late")
+        await store.current_revision()
+
+        assert await reader.local_paths((key,)) == (target.resolve(),)
+        assert await reader.read_versions(refs) == (b"value",)
+        with pytest.raises(AIError) as error:
+            await snapshot.verify_source_revision()
+        assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+    finally:
+        await store.close()
+
+
 def test_agent_json_and_markdown_and_mcp_json_and_yaml_converge() -> None:
     agent_json = AgentSpecCodec().decode(
         json.dumps(
