@@ -228,22 +228,27 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
             execution_policy
         )
     resource_root = contract.get("resource_root")
-    resource_snapshot = contract.get("resource_snapshot")
+    has_resource_versions = "resource_versions" in contract
+    resource_versions = contract.get("resource_versions")
     frozen_args = contract.get("frozen_args")
     raw_args = contract.get("args")
-    if resource_snapshot is None:
+    if not has_resource_versions:
         if frozen_args is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         args = raw_args
     else:
-        if raw_args is not None or not isinstance(frozen_args, list):
+        if (
+            not isinstance(resource_versions, list)
+            or raw_args is not None
+            or not isinstance(frozen_args, list)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         args = frozen_args
     if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     result["args"] = args
     if resource_root is None:
-        if resource_snapshot is not None:
+        if has_resource_versions:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if contract.get("resource_semantic_digest") is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -259,12 +264,10 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
         "kind": resource_root["kind"],
         "id": resource_root["id"],
     }
-    if resource_snapshot is None:
+    if not has_resource_versions:
         if contract.get("resource_semantic_digest") is not None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
-    if not isinstance(resource_snapshot, Mapping):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     digest = contract.get("resource_semantic_digest")
     if not _is_digest(digest):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
