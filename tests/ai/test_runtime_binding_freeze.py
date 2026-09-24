@@ -370,7 +370,7 @@ async def test_existing_child_mcp_freezes_asset_versions(
             fixture.compiler,
             SkillSourceRegistry(),
             workspace=None,
-            mcp_assets={"server": store},
+            mcp_assets={"server": ("application", store)},
         )
         await store.put(resource, b"print('updated')")
         frozen = await freezer.freeze_snapshot(snapshot)
@@ -378,6 +378,7 @@ async def test_existing_child_mcp_freezes_asset_versions(
             frozen.subagent_bindings[0].selected[0].contract
         )
         assert server.resource_root == root
+        assert frozen.subagent_bindings[0].selected[0].contract["resource_source_id"] == "application"
         assert versions is not None
         assert await store.read_versions(versions) == (b"print('updated')",)
         assert await freezer.freeze_snapshot(frozen) == frozen
