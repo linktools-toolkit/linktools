@@ -357,8 +357,10 @@ class AgentExecutor:
         grouped: dict[str, dict[str, SkillSourceRef]] = {}
         for skill in definition.skill_definitions:
             source_ref = skill.source_ref
-            if source_ref is None or source_ref.resource_semantic_digest is None:
+            if source_ref is None:
                 continue
+            if source_ref.resource_semantic_digest is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if source_ref.source_id not in self._asset_sources:
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
