@@ -464,8 +464,6 @@ async def _snapshot_skill_source(
 ) -> ObjectRef:
     if not isinstance(expected_revision, StorageRevision):
         raise TypeError("expected_revision must be StorageRevision")
-    if await source.current_revision(root) != expected_revision:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     view = await source.inspect(root)
     if not isinstance(view, SkillResourceView):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
