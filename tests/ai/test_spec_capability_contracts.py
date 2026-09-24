@@ -340,6 +340,16 @@ def test_invalid_tool_semantics_fail_without_fallback(
     assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
 
 
+def test_business_tool_rejects_reserved_mcp_transport_prefix() -> None:
+    async def reserved(_ctx: RunContext[None]) -> str:
+        return "ok"
+
+    group = CapabilityGroup[None]("business")
+    with pytest.raises(AIError) as error:
+        group.tool(reserved, name="mcp__reserved")
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
 @pytest.mark.asyncio
 async def test_business_tool_semantics_are_frozen_in_tool_metadata() -> None:
     async def business_tool(
