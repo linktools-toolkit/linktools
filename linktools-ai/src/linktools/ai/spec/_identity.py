@@ -272,6 +272,7 @@ def _mcp_semantic(contract: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
     result["resource_semantic_digest"] = digest
     return result
 
+
 def _execution_policy_semantic(value: JsonValue) -> "dict[str, JsonValue]":
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
