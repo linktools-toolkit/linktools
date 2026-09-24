@@ -146,6 +146,7 @@ class _RuntimeBindingResolver:
             )
         return replace(snapshot, selected=tuple(selected))
 
+
 def _mcp_execution_policy(
     workspace: Workspace | None,
 ) -> "Mapping[str, JsonValue]":
