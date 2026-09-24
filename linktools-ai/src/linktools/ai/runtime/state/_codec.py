@@ -56,7 +56,6 @@ from ...core import (
     canonical_json_bytes,
 )
 from ...errors import AIError, ErrorCode, ErrorDiagnostics
-from ...spec import MCPServerSpecCodec
 from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskBindingSnapshot,
