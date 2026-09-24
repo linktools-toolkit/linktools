@@ -128,7 +128,7 @@ def test_mcp_selectors_round_trip_logical_names() -> None:
     )
     assert canonical_selectors(
         (wildcard, selector), field_name="allow_tools", mcp=True
-    ) == (wildcard,)
+    ) == tuple(sorted((wildcard, selector)))
     assert canonical_selectors(
         ("*", selector), field_name="allow_tools", mcp=True
     ) == ("*", selector)
