@@ -230,6 +230,28 @@ class CapabilityContribution(Generic[AppT]):
             contract,
         )
 
+    @classmethod
+    def from_mcp_contract(
+        cls,
+        value: MCPServerSpec,
+        contract: Mapping[str, JsonValue],
+    ) -> "CapabilityContribution[object]":
+        """Restore an MCP contribution from its already frozen semantic contract."""
+        if not isinstance(value, MCPServerSpec) or not isinstance(contract, Mapping):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        restored, _snapshot = MCPServerSpecCodec().from_frozen_payload(
+            cast("Mapping[str, object]", contract)
+        )
+        if restored != value:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return _SemanticContribution(
+            "mcp",
+            value.id,
+            capability_fingerprint("mcp", value.id, contract),
+            value,
+            contract,
+        )
+
     @property
     def semantic_contract(self) -> "dict[str, JsonValue]":
         return contribution_semantic_contract(
