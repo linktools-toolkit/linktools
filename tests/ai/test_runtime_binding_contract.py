@@ -382,7 +382,8 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     first = compiler.bind(compiler.compile(AgentSpec("agent", model="first")))
     second = compiler.bind(compiler.compile(AgentSpec("agent", model="second")))
 
-    assert first.definition.definition_digest == second.definition.definition_digest
+    assert first.definition.spec.id == second.definition.spec.id
+    assert first.definition.spec.revision == second.definition.spec.revision
     assert first.binding_digest == second.binding_digest
     assert first.snapshot != second.snapshot
     assert first.definition.model is not second.definition.model
@@ -390,7 +391,6 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     catalog = AgentCatalog({"agent": first.definition})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is second
-    assert catalog.definition(first.definition.definition_digest) is first.definition
     assert catalog.binding(first.binding_digest) is second
 
 

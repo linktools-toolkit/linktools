@@ -13,14 +13,13 @@ from ..capability import (
     SkillDefinition,
     workspace_tool_declarations,
 )
-from ..core import JsonValue, canonical_sha256
+from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding, ModelResolver
 from ..spec import (
     AgentSpec,
     AgentSpecCodec,
     SubagentRef,
-    agent_ref_payload,
     mcp_server_selector,
     parse_mcp_tool_selector,
 )
@@ -416,31 +415,7 @@ class AgentCompiler:
         selected_skill_ids = {candidate.id for candidate in selected_skills}
         if any(skill_id not in selected_skill_ids for skill_id in spec.preload_skills):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        selected = tuple(
-            (
-                *sorted(
-                    (*selected_tools, *selected_skills, *selected_mcp),
-                    key=lambda item: (item.kind, item.id),
-                ),
-                *selected_capabilities,
-            )
-        )
-        identity: dict[str, JsonValue] = {
-            "contract": "agent-definition-v1",
-            "agent": agent_ref_payload(AgentSpecCodec().to_payload(spec)),
-            "model": dict(model.contract),
-            "selected": [
-                {"kind": item.kind, "id": item.id, "revision": item.revision}
-                for item in selected
-            ],
-            "subagents": [
-                {"kind": "agent", "id": agent_id, "revision": self._agents[agent_id].revision}
-                for agent_id in sorted(set(selected_subagents))
-            ],
-        }
-        definition_digest = canonical_sha256(identity)
         return AgentDefinition(
-            definition_digest=definition_digest,
             spec=spec,
             model=model,
             selected_tools=tuple(sorted(selected_tools, key=lambda item: item.id)),

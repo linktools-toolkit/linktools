@@ -616,10 +616,10 @@ class AgentExecutor:
             _event_stream_capability(cast(EventSink, scope.event_sink)),
         )
         _logger.debug(
-            "agent execution started: agent=%s definition=%s step=%s "
+            "agent execution started: agent=%s revision=%s step=%s "
             "mode=%s planning=%s thinking=%s selected_tools=%s",
             definition.spec.id,
-            definition.definition_digest,
+            definition.spec.revision,
             scope.step_run_id,
             scope.mode,
             scope.planning,

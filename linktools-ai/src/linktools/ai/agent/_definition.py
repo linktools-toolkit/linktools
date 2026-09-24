@@ -9,16 +9,8 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import AgentSpec, MCPServerSpec
 
-
-def _is_digest(value: object) -> bool:
-    return isinstance(value, str) and len(value) == 64 and all(
-        character in "0123456789abcdef" for character in value
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class AgentDefinition:
-    definition_digest: str
     spec: AgentSpec
     model: ModelBinding
     selected_tools: "tuple[CapabilityContribution[object], ...]"
@@ -30,7 +22,7 @@ class AgentDefinition:
     mcp_selector_policy: "tuple[str, ...]"
 
     def __post_init__(self) -> None:
-        if not _is_digest(self.definition_digest) or not isinstance(self.spec, AgentSpec):
+        if not isinstance(self.spec, AgentSpec):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         groups = (
             ("tool", self.selected_tools),

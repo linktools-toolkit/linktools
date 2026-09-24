@@ -165,9 +165,6 @@ def test_skill_and_agent_use_v1_declaration_contracts() -> None:
     described = AgentSpec("agent", description="Worker")
     assert AgentSpecCodec().to_payload(plain) == AgentSpecCodec().to_payload(described)
     assert AgentSpecCodec().to_wire_payload(described)["description"] == "Worker"
-    assert _compiler({"agent": plain}).compile(plain).definition_digest == _compiler(
-        {"agent": described}
-    ).compile(described).definition_digest
 
 
 def test_future_capability_pin_contract_version_is_unsupported() -> None:

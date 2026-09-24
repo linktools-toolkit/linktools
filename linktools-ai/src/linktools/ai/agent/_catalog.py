@@ -14,17 +14,11 @@ from ._definition import AgentDefinition
 
 class AgentCatalog:
     def __init__(self, roots: Mapping[str, AgentDefinition]) -> None:
-        by_digest: dict[str, AgentDefinition] = {}
         for agent_id, definition in roots.items():
             validate_agent_id(agent_id)
             if definition.spec.id != agent_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            existing = by_digest.get(definition.definition_digest)
-            if existing is not None and not _same_definition(existing, definition):
-                raise AIError(ErrorCode.BINDING_CONFLICT)
-            by_digest[definition.definition_digest] = definition
         self._roots = MappingProxyType(dict(roots))
-        self._definitions = by_digest
         self._bindings: dict[str, AgentBinding] = {}
 
     @property
@@ -41,28 +35,7 @@ class AgentCatalog:
                 safe_details={"agent_id": agent_id},
             ) from error
 
-    def register_definition(self, definition: AgentDefinition) -> AgentDefinition:
-        existing = self._definitions.get(definition.definition_digest)
-        if existing is not None:
-            if not _same_definition(existing, definition):
-                raise AIError(ErrorCode.BINDING_CONFLICT)
-            return existing
-        self._definitions[definition.definition_digest] = definition
-        return definition
-
-    def definition(self, definition_digest: str) -> AgentDefinition:
-        try:
-            return self._definitions[definition_digest]
-        except KeyError as error:
-            raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                safe_details={"definition_digest": definition_digest},
-            ) from error
-
     def register_binding(self, binding: AgentBinding) -> AgentBinding:
-        definition = self.register_definition(binding.definition)
-        if definition.definition_digest != binding.definition.definition_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing = self._bindings.get(binding.binding_digest)
         if existing is not None and _same_runtime_definition(
             existing.definition,
@@ -84,8 +57,7 @@ class AgentCatalog:
 
 def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
     return (
-        left.definition_digest == right.definition_digest
-        and AgentSpecCodec().to_payload(left.spec)
+        AgentSpecCodec().to_payload(left.spec)
         == AgentSpecCodec().to_payload(right.spec)
         and dict(left.model.contract) == dict(right.model.contract)
         and tuple((item.kind, item.id, item.revision, item.contract) for item in left.selected_tools) == tuple((item.kind, item.id, item.revision, item.contract) for item in right.selected_tools)
