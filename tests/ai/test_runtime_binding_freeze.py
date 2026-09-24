@@ -597,7 +597,12 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         skill_ref = _skill_snapshot(_frozen_child(binding))
         source = FrozenSkillResourceSource(
             "application",
-            {"child-skill": skill_ref},
+            {
+                "child-skill": _physical_ref(
+                    state.object_store(RuntimeDomain.EXECUTION),
+                    skill_ref,
+                )
+            },
             state.object_store(RuntimeDomain.EXECUTION),
         )
         assert await source.read("child-skill", "guide.txt") == b"original"
@@ -652,7 +657,12 @@ async def test_runtime_state_snapshot_restores_task_capability_manifest(
         skill_ref = _skill_snapshot(_frozen_child(binding))
         source = FrozenSkillResourceSource(
             "application",
-            {"child-skill": skill_ref},
+            {
+                "child-skill": _physical_ref(
+                    restored.object_store(RuntimeDomain.EXECUTION),
+                    skill_ref,
+                )
+            },
             restored.object_store(RuntimeDomain.EXECUTION),
         )
         assert await source.read("child-skill", "guide.txt") == b"original"
