@@ -210,7 +210,7 @@ async def test_agent_declaration_loader_freezes_custom_kind_defaults() -> None:
     group = CapabilityGroup("application", assets=store)
     group.loader("worker", loader)
 
-    snapshot = await group.freeze()
+    snapshot = await group.snapshot()
 
     assert len(snapshot.contributions) == 1
     spec = snapshot.contributions[0].value
@@ -252,7 +252,7 @@ async def test_custom_agent_loader_consumes_business_fields_with_public_parser()
     group = CapabilityGroup("application", assets=store)
     group.loader("worker", WorkerLoader())
 
-    snapshot = await group.freeze()
+    snapshot = await group.snapshot()
 
     assert [item.id for item in snapshot.contributions] == ["security/audit"]
     assert isinstance(snapshot.contributions[0].value, AgentSpec)
@@ -343,7 +343,7 @@ async def test_declaration_loaders_are_backend_agnostic(
     try:
         results = []
         for store, _engine in stores:
-            snapshot = await CapabilityGroup("assets", assets=store).freeze()
+            snapshot = await CapabilityGroup("assets", assets=store).snapshot()
             results.append(
                 tuple(
                     (item.kind, item.id, item.value)
@@ -373,6 +373,6 @@ async def test_builtin_loader_rejects_multiple_mcp_package_declarations() -> Non
             b"version: 1\ncommand: python\n",
         )
     with pytest.raises(AIError) as error:
-        await CapabilityGroup("application", assets=store).freeze()
+        await CapabilityGroup("application", assets=store).snapshot()
     assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
     await store.close()
