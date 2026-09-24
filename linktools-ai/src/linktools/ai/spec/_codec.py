@@ -474,6 +474,8 @@ class MCPServerSpecCodec:
             )
         if frozen and "execution_policy" in raw:
             _execution_policy_payload(raw["execution_policy"])
+            if resource_root is not None and resource_versions is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         resource_source_id = raw.get("resource_source_id") if frozen else None
         if resource_versions is None:
             if (
