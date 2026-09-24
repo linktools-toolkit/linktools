@@ -477,19 +477,11 @@ class AgentExecutor:
         except BaseException:
             await _cleanup_skill_resources(temporary_resources)
             raise
-        resources = (*skill_resources, *(
-            resource
-            for projection in mcp_projections.values()
-            for resource in projection.resources
-        ))
         primary_error: BaseException | None = None
         try:
-            resource_ids = tuple(resource.id for resource in resources)
-            if len(resource_ids) != len(set(resource_ids)):
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             if (
                 not selected
-                and not resources
+                and not skill_resources
                 and not scope.binding.definition.mcp_servers
             ):
                 return await self._execute(
@@ -526,7 +518,7 @@ class AgentExecutor:
                 validate_frozen_mcp_policy(mcp_frozen_resources, workspace)
             session = await backend.open(
                 root=workspace.root,
-                resources=tuple(resources),
+                resources=skill_resources,
             )
             try:
                 resource_paths = {
@@ -718,19 +710,16 @@ class AgentExecutor:
         finally:
             await _close_mcp_resources(
                 capabilities,
-                scope.mcp_resource_projections,
                 primary_error,
             )
 
 
 async def _close_mcp_resources(
     capabilities: Sequence[AbstractCapability[AgentContext[object]]],
-    projections: Mapping[str, _MCPResourceProjection],
     primary_error: BaseException | None,
 ) -> None:
     try:
         await close_mcp_resources(capabilities)
-        await close_mcp_projections(projections)
     except BaseException as cleanup_error:
         if primary_error is None or cleanup_error is primary_error:
             raise
