@@ -14,15 +14,14 @@ from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
 from ..errors import AIError, ErrorCode
-_MAX_MCP_MESSAGE_BYTES = 16 * 1024 * 1024
-
-
 from ..workspace import (
     SandboxResource,
     SandboxResourcePath,
     SandboxStdioProcess,
     StdioSandboxSession,
 )
+
+_MAX_MCP_MESSAGE_BYTES = 16 * 1024 * 1024
 
 
 class _SandboxMCPTransport(ClientTransport):
