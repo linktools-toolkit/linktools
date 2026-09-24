@@ -801,7 +801,7 @@ async def _build_local_components(
         task_node_runtime=cast("RuntimeTaskNodeRunner[object]", task_runner),
         tree_streamer=tree_streamer,
         metric_control=metric_buffer,
-        binding_freezer=binding_resolver,
+        binding_resolver=binding_resolver,
         history=_borrowed_runtime_history(
             history_service,
             tenant_id=tenant_id,
