@@ -184,6 +184,30 @@ def test_asset_store_reads_effective_layer_owner() -> None:
     asyncio.run(run())
 
 
+def test_asset_version_ref_pins_effective_layer() -> None:
+    async def run() -> None:
+        primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
+        fallback = InMemoryAssetBackend(AssetRoot("memory", "fallback", "fallback"))
+        key = AssetKey("sample", "shared")
+        await fallback.put(key, b"fallback")
+        store = AssetStore(
+            StorageOverlay(
+                primary,
+                writer=primary,
+                layers=(StorageLayer("fallback", fallback),),
+            )
+        )
+        await store.initialize()
+        frozen = (await store.resolve_versions((key,)))[0]
+        assert frozen.source_id == "fallback"
+
+        await store.put(key, b"primary")
+        assert await store.get(key) == b"primary"
+        assert await store.read_versions((frozen,)) == (b"fallback",)
+
+    asyncio.run(run())
+
+
 def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
     async def run() -> None:
         primary = InMemoryAssetBackend(AssetRoot("memory", "primary", "primary"))
