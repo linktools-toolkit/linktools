@@ -41,7 +41,7 @@ class _CountingModel(TestModel):
         )
 
 
-def test_openai_operational_settings_do_not_change_model_digest() -> None:
+def test_openai_operational_settings_do_not_change_model_contract() -> None:
     first = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://first.example/v1",
@@ -60,7 +60,6 @@ def test_openai_operational_settings_do_not_change_model_digest() -> None:
     ).snapshot().resolve("default")
 
     assert dict(first.contract) == dict(second.contract)
-    assert first.model_digest == second.model_digest
 
 
 def test_openai_custom_endpoint_is_operational_configuration() -> None:
@@ -89,7 +88,7 @@ def test_openai_vision_is_durable_model_contract() -> None:
 
     assert dict(without_vision.contract)["vision"] is False
     assert dict(with_vision.contract)["vision"] is True
-    assert without_vision.model_digest != with_vision.model_digest
+    assert dict(without_vision.contract) != dict(with_vision.contract)
 
 
 @pytest.mark.asyncio
@@ -214,7 +213,7 @@ async def test_openai_without_vision_does_not_guess_opaque_uploaded_file_type() 
     assert wrapped.calls == 1
 
 
-def test_openai_max_tokens_changes_model_digest() -> None:
+def test_openai_max_tokens_changes_model_contract() -> None:
     plain = ModelRegistry.openai(model="gpt-test").snapshot().resolve("default")
     configured = ModelRegistry.openai(
         model="gpt-test",
@@ -223,7 +222,7 @@ def test_openai_max_tokens_changes_model_digest() -> None:
 
     assert dict(plain.contract)["settings"] == {}
     assert dict(configured.contract)["settings"] == {"max_tokens": 2048}
-    assert plain.model_digest != configured.model_digest
+    assert dict(plain.contract) != dict(configured.contract)
 
 
 def test_model_registry_restore_requires_exact_model_contract() -> None:

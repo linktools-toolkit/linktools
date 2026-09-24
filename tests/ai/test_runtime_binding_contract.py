@@ -318,7 +318,7 @@ def test_agent_declaration_identity_uses_explicit_revision() -> None:
     assert first.revision != revised.revision
 
 
-def test_model_digest_ignores_openai_prefix_and_connection_config() -> None:
+def test_model_contract_ignores_openai_prefix_and_connection_config() -> None:
     plain = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://first.example/v1",
@@ -337,11 +337,10 @@ def test_model_digest_ignores_openai_prefix_and_connection_config() -> None:
         "settings": {},
     }
     assert dict(prefixed.contract) == dict(plain.contract)
-    assert plain.model_digest == prefixed.model_digest
     assert plain.model_identity == "openai:gpt-test"
 
 
-def test_model_registry_replaces_connection_with_same_model_digest() -> None:
+def test_model_registry_replaces_connection_with_same_model_contract() -> None:
     registry = ModelRegistry.openai(
         model="gpt-test",
         base_url="https://first.example/v1",
@@ -359,7 +358,7 @@ def test_model_registry_replaces_connection_with_same_model_digest() -> None:
     second = registry.snapshot().resolve("default")
 
     assert second is not first
-    assert second.model_digest == first.model_digest
+    assert dict(second.contract) == dict(first.contract)
     assert first_snapshot.resolve("default") is first
 
 
