@@ -18,6 +18,7 @@ from filelock import FileLock, Timeout
 from linktools.core import environ
 
 from ..core import (
+    RUNTIME_OBJECT_STORE_ID,
     JsonValue,
     canonical_json_bytes,
     canonical_sha256,
@@ -339,8 +340,14 @@ class RuntimeSnapshot:
                     encoding="utf-8",
                 )
                 state_root = staging / "state"
+                logical_state_ref = _object_ref_from_payload(manifest["state"])
                 await RuntimeState.restore_snapshot(
-                    _object_ref_from_payload(manifest["state"]),
+                    ObjectRef(
+                        object_store.store_id,
+                        logical_state_ref.key,
+                        logical_state_ref.digest,
+                        logical_state_ref.size,
+                    ),
                     object_store=object_store,
                     root=state_root,
                     limits=limits,
@@ -612,7 +619,7 @@ async def _capture_workspace(
                 "path": relative,
                 "mode": after_publish.st_mode & 0o111,
                 "content": {
-                    "store_id": "runtime",
+                    "store_id": RUNTIME_OBJECT_STORE_ID,
                     "key": key,
                     "digest": digest,
                     "size": size,
@@ -1264,8 +1271,7 @@ def _object_ref_from_payload(value: object) -> ObjectRef:
     digest = value["digest"]
     size = value["size"]
     if (
-        not isinstance(store_id, str)
-        or not store_id
+        store_id != RUNTIME_OBJECT_STORE_ID
         or not isinstance(key, str)
         or not key
         or not isinstance(digest, str)
