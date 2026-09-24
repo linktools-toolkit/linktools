@@ -274,34 +274,35 @@ async def test_mcp_model_tool_collision_fails_before_exposure(
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
-def test_skill_snapshot_contract_uses_runtime_logical_owner() -> None:
+def test_skill_contract_round_trips_asset_version_refs() -> None:
+    asset = AssetVersionRef(
+        AssetKey("skill", "review/guide.md"),
+        "asset-source",
+        StorageEntryRevision(3),
+        "a" * 64,
+        7,
+    )
     definition = SkillDefinition(
         SkillSpec("review", "instructions"),
-        SkillSourceRef(
-            "application",
-            "review",
-            ObjectRef("execution", "snapshot", "a" * 64, 1),
+        SkillSourceRef("application", "review").with_versions(
+            (SkillResourceVersion("guide.md", asset),),
             "b" * 64,
+            sandbox_materialize=False,
         ),
     )
 
     contract = definition.semantic_contract
     source = contract["source"]
     assert isinstance(source, dict)
-    snapshot = source["snapshot"]
-    assert isinstance(snapshot, dict)
-    assert snapshot["store_id"] == "runtime"
+    versions = source["resource_versions"]
+    assert isinstance(versions, list)
+    assert versions[0]["asset"] == asset.to_payload()
+
     restored = SkillDefinition.from_semantic_contract(contract)
-    assert restored.source_ref is not None
-    assert restored.source_ref.snapshot == ObjectRef(
-        "runtime",
-        "snapshot",
-        "a" * 64,
-        1,
-    )
+    assert restored == definition
 
 
-def test_skill_contract_rejects_non_runtime_snapshot_owner() -> None:
+def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
     with pytest.raises(AIError) as error:
         SkillDefinition.from_semantic_contract(
             {
@@ -311,27 +312,50 @@ def test_skill_contract_rejects_non_runtime_snapshot_owner() -> None:
                 "source": {
                     "source_id": "application",
                     "root": "review",
+                    "resource_versions": [
+                        {
+                            "path": "guide.md",
+                            "asset": {
+                                "version": 1,
+                                "kind": "skill",
+                                "id": "review/guide.md",
+                                "source_id": "",
+                                "revision": 1,
+                                "etag": "a" * 64,
+                                "size": 1,
+                            },
+                            "executable_bits": 0,
+                        }
+                    ],
+                    "sandbox_materialize": False,
                     "resource_semantic_digest": "b" * 64,
-                    "snapshot": {
-                        "store_id": "other",
-                        "key": "snapshot",
-                        "digest": "a" * 64,
-                        "size": 1,
-                    },
                 },
             }
         )
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
-def test_frozen_skill_source_rejects_wrong_object_store_owner() -> None:
+def test_frozen_skill_source_rejects_mismatched_source_ref() -> None:
+    store = AssetStore(StorageOverlay(InMemoryAssetBackend()))
+    ref = SkillSourceRef("other", "review").with_versions(
+        (),
+        canonical_sha256(
+            {
+                "version": 1,
+                "kind": "skill-resource-semantics",
+                "sandbox_materialize": False,
+                "files": [],
+            }
+        ),
+        sandbox_materialize=False,
+    )
     with pytest.raises(AIError) as error:
         FrozenSkillResourceSource(
             "application",
-            {"review": ObjectRef("owner", "snapshot", "a" * 64, 1)},
-            InMemoryObjectStore("other"),
+            {"review": ref},
+            store,
         )
-    assert error.value.code is ErrorCode.STORAGE_OWNER_MISMATCH
+    assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
 
 def test_memory_owner_selects_only_its_declared_tools() -> None:
