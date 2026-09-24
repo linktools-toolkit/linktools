@@ -9,7 +9,7 @@ from typing import Literal, Protocol, TypeVar, cast
 
 import yaml
 
-from ..core import JsonValue, normalize_json_value
+from ..core import ImmutableJsonMapping, JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
 from ..asset import AssetKey, AssetVersionRef
 from ._contract import AgentSpec, AgentUsageLimits, MCPServerSpec, SkillSpec, normalize_thinking
@@ -28,6 +28,7 @@ _AGENT_AUTHOR_FIELDS = frozenset(
         "id",
         "model",
         "instructions",
+        "metadata",
         "allow_tools",
         "allow_skills",
         "allow_subagents",
@@ -47,7 +48,7 @@ _MCP_AUTHOR_FIELDS = frozenset(
     {"version", "id", "command", "args", "resource_root"}
 )
 _SKILL_AUTHOR_FIELDS = frozenset(
-    {"version", "id", "content", "description"}
+    {"version", "id", "content", "description", "metadata"}
 )
 class SpecCodec(Protocol[SpecT]):
     def encode(self, value: SpecT) -> bytes: ...
@@ -91,6 +92,8 @@ class AgentSpecCodec:
         payload = self.to_payload(value)
         if value.description is not None:
             payload["description"] = value.description
+        if value.metadata:
+            payload["metadata"] = dict(value.metadata)
         return payload
 
     def from_payload(self, raw: Mapping[str, object]) -> AgentSpec:
@@ -109,6 +112,7 @@ class AgentSpecCodec:
         tool_retries = raw.get("tool_retries", AgentSpec.DEFAULT_TOOL_RETRIES)
         output_retries = raw.get("output_retries", AgentSpec.DEFAULT_OUTPUT_RETRIES)
         description = raw.get("description")
+        metadata = raw.get("metadata", {})
         preload_skills: object = raw.get("preload_skills", [])
         if not isinstance(preload_skills, list) or any(
             not isinstance(item, str) for item in preload_skills
@@ -163,12 +167,13 @@ class AgentSpecCodec:
                 output_retries=output_retries,
                 description=cast("str | None", description),
                 preload_skills=tuple(cast("list[str]", preload_skills)),
+                metadata=cast("Mapping[str, JsonValue]", metadata),
             )
         except AIError as error:
             if error.code in {ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_VERSION_UNSUPPORTED}:
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, UnicodeError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "agent spec is invalid") from error
 
     def from_author_payload(self, raw: Mapping[str, object]) -> AgentSpec:
@@ -198,14 +203,25 @@ class SkillSpecCodec:
         payload: dict[str, JsonValue] = {
             "version": 1,
             "id": value.id,
-            "content": value.content,
+            "content": SkillMarkdownSpecCodec().model_content(value.content),
         }
         if value.description is not None:
             payload["description"] = value.description
         return payload
 
     def to_wire_payload(self, value: SkillSpec) -> "dict[str, JsonValue]":
-        return self.to_payload(value)
+        if not isinstance(value, SkillSpec):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
+        payload: dict[str, JsonValue] = {
+            "version": 1,
+            "id": value.id,
+            "content": value.content,
+        }
+        if value.description is not None:
+            payload["description"] = value.description
+        if value.metadata:
+            payload["metadata"] = dict(value.metadata)
+        return payload
 
     def from_payload(self, raw: Mapping[str, object]) -> SkillSpec:
         _require_v1(raw)
@@ -214,6 +230,7 @@ class SkillSpecCodec:
         if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid")
         description = raw.get("description")
+        metadata = raw.get("metadata", {})
         if description is not None and (
             not isinstance(description, str) or not 1 <= len(description) <= 1024
         ):
@@ -223,8 +240,9 @@ class SkillSpecCodec:
                 identity,
                 content,
                 cast("str | None", description),
+                cast("Mapping[str, JsonValue]", metadata),
             )
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, UnicodeError) as error:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "skill spec is invalid") from error
 
     def from_author_payload(self, raw: Mapping[str, object]) -> SkillSpec:
@@ -246,6 +264,51 @@ class SkillSpecCodec:
 class SkillMarkdownSpecCodec:
     """Decode standard SKILL.md documents without rewriting their text."""
 
+    def model_content(self, content: str) -> str:
+        """Return the model-visible Markdown with display metadata removed."""
+        if not isinstance(content, str):
+            raise TypeError("skill content must be a string")
+        try:
+            frontmatter = _parse_skill_markdown(content)
+            lines = content.splitlines(keepends=True)
+            closing = next(
+                index
+                for index, line in enumerate(lines[1:], 1)
+                if line.rstrip("\r\n") == "---"
+            )
+            node = yaml.compose(
+                "".join(lines[1:closing]), Loader=_StrictSafeLoader
+            )
+        except (AIError, yaml.YAMLError, TypeError, ValueError):
+            return content
+        if not isinstance(node, yaml.nodes.MappingNode):
+            return content
+        if not node.flow_style:
+            if "metadata" not in frontmatter:
+                return content
+            for index, (key_node, _value_node) in enumerate(node.value):
+                if (
+                    isinstance(key_node, yaml.nodes.ScalarNode)
+                    and key_node.tag == "tag:yaml.org,2002:str"
+                    and key_node.value == "metadata"
+                ):
+                    start = key_node.start_mark.line
+                    end = (
+                        node.value[index + 1][0].start_mark.line
+                        if index + 1 < len(node.value)
+                        else closing - 1
+                    )
+                    return "".join(lines[: start + 1] + lines[end + 1 :])
+            return content
+        frontmatter.pop("metadata", None)
+        encoded = yaml.safe_dump(
+            frontmatter,
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=True,
+        )
+        return f"---\n{encoded}---\n{''.join(lines[closing + 1:])}"
+
     def encode(self, value: SkillSpec) -> bytes:
         try:
             frontmatter = _parse_skill_markdown(value.content)
@@ -253,7 +316,11 @@ class SkillMarkdownSpecCodec:
             if isinstance(error, AIError):
                 raise
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        if frontmatter["name"] != value.id or frontmatter["description"] != value.description:
+        if (
+            frontmatter["name"] != value.id
+            or frontmatter["description"] != value.description
+            or frontmatter.get("metadata", {}) != dict(value.metadata)
+        ):
             raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
         try:
             return value.content.encode("utf-8")
@@ -268,6 +335,7 @@ class SkillMarkdownSpecCodec:
                 cast(str, frontmatter["name"]),
                 content,
                 cast(str, frontmatter["description"]),
+                cast("Mapping[str, JsonValue]", frontmatter.get("metadata", {})),
             )
         except AIError:
             raise
@@ -286,6 +354,7 @@ class SkillMarkdownSpecAdapter:
             logical_id,
             value.content,
             value.description,
+            value.metadata,
         )
 
     def to_storage(self, logical_id: str, value: SkillSpec) -> SkillSpec:
@@ -295,6 +364,7 @@ class SkillMarkdownSpecAdapter:
             logical_id.rsplit("/", 1)[-1],
             value.content,
             value.description,
+            value.metadata,
         )
 
 
@@ -729,14 +799,20 @@ def _parse_skill_markdown(content: str) -> dict[str, object]:
     for key in ("license", "allowed-tools"):
         if key in frontmatter and not isinstance(frontmatter[key], str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    metadata = frontmatter.get("metadata")
-    if metadata is not None and (
-        not isinstance(metadata, Mapping)
-        or any(not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items())
-    ):
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-    if isinstance(metadata, Mapping) and "linktools-revision" in metadata:
-        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    if "metadata" in frontmatter:
+        metadata = frontmatter["metadata"]
+        if not isinstance(metadata, Mapping) or "linktools-revision" in metadata:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+        try:
+            normalized = normalize_json_value(dict(metadata))
+            frontmatter["metadata"] = dict(
+                ImmutableJsonMapping(
+                    cast("dict[str, JsonValue]", normalized),
+                    allow_empty_keys=True,
+                )
+            )
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
     return frontmatter
 
 

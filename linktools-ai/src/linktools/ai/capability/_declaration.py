@@ -299,7 +299,7 @@ def _package_declarations(
     )
     if set(ordered_roots).intersection(entry.key.id for entry in flat):
         raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
-    return roots, tuple(sorted((*flat, *roots), key=lambda entry: entry.key))
+    return roots, tuple(sorted((*flat, *roots), key=lambda entry: entry.key.id))
 
 
 def _validate_package_roots(roots: Sequence[str]) -> None:

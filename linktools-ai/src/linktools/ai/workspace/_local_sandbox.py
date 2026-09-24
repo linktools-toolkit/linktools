@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Local workspace backend.
+"""Local execution backend.
 
-The local backend provides the workspace contract and lifecycle guarantees; it
+The local backend provides the sandbox contract and lifecycle guarantees; it
 is deliberately not a security sandbox.  Agent code still only receives the
 logical file and command operations exposed by ``SandboxSession``.
 """
@@ -36,11 +36,7 @@ from ._sandbox import (
     SandboxSession,
     normalize_workspace_input_path,
 )
-from ._paths import (
-    is_workspace_storage_path,
-    workspace_locks_root,
-    workspace_storage_name,
-)
+from ._root import Workspace
 from ._sandbox_protocol import validate_request_size
 from ._local_process import (
     _ProcessState,
@@ -92,7 +88,7 @@ _DANGEROUS_COMMANDS = frozenset(
 
 
 class LocalSandbox:
-    """Open local sessions rooted at the caller-provided workspace."""
+    """Open local sessions rooted at the caller-provided directory."""
 
     def __init__(self, *, read_policy: ReadOnlySandboxPolicy | None = None) -> None:
         if read_policy is not None and not isinstance(
@@ -110,13 +106,14 @@ class LocalSandbox:
     ) -> SandboxSession:
         policy = self._read_policy
         normalized_root = _normalize_root(root)
-        normalized_resources = _validate_resources(normalized_root, resources)
+        workspace = Workspace(normalized_root, {})
+        normalized_resources = _validate_resources(workspace, resources)
         _logger.debug(
             "opening local sandbox session: root=%s resources=%s",
             normalized_root,
             tuple(resource.id for resource in normalized_resources),
         )
-        lock_root = workspace_locks_root(normalized_root)
+        lock_root = workspace.locks_root
         if policy is None:
             _prepare_lock_root(lock_root)
         return _LocalSandboxSession(
@@ -124,6 +121,7 @@ class LocalSandbox:
             normalized_resources,
             lock_root=lock_root,
             read_policy=policy,
+            workspace=workspace,
         )
 
 
@@ -137,12 +135,17 @@ class _LocalSandboxSession:
         *,
         lock_root: Path | None = None,
         read_policy: ReadOnlySandboxPolicy | None = None,
+        workspace: Workspace | None = None,
     ) -> None:
         self._root = root
+        self._workspace = workspace if workspace is not None else Workspace(root, {})
         self._resources = {
-            resource.id: resource.source.resolve() for resource in resources
+            resource.id: resource.source.resolve()
+            for resource in resources
+            if resource.source is not None
         }
-        self._lock_root = lock_root or workspace_locks_root(root)
+        self._resource_ids = frozenset(resource.id for resource in resources)
+        self._lock_root = lock_root or self._workspace.locks_root
         self._read_policy = read_policy
         self._environment = _command_environment()
         self._state = "OPEN"
@@ -161,9 +164,11 @@ class _LocalSandboxSession:
         self._ensure_open_sync()
         if not isinstance(resource_id, str):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if resource_id not in self._resource_ids:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source = self._resources.get(resource_id)
         if source is None:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            return None
         if (
             self._read_policy is not None
             and not self._read_policy.may_descend(
@@ -621,11 +626,11 @@ class _LocalSandboxSession:
 
         def operation() -> str:
             try:
-                if _is_protected(normalized):
+                if _is_protected(self._workspace, normalized):
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 target = self._directory_path(normalized, allow_missing=True)
                 relative = _relative(self._root, target)
-                if _is_protected(relative):
+                if _is_protected(self._workspace, relative):
                     raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                 if target.exists():
                     return _write_result(normalized, "directory", status="exists")
@@ -1082,11 +1087,11 @@ class _LocalSandboxSession:
         return resolved if candidate.is_symlink() else candidate
 
     def _file_path(self, path: str, *, write: bool) -> Path:
-        if write and _is_protected(path):
+        if write and _is_protected(self._workspace, path):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         candidate = self._resolve_path(path, allow_missing=write)
         resolved = candidate.resolve(strict=False)
-        if write and _is_protected(_relative(self._root, resolved)):
+        if write and _is_protected(self._workspace, _relative(self._root, resolved)):
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if write and not candidate.parent.is_dir():
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -1289,17 +1294,23 @@ def _session_state_error(state: str) -> ErrorCode:
 
 
 def _validate_resources(
-    root: Path,
+    workspace: Workspace,
     resources: tuple[SandboxResource, ...],
 ) -> tuple[SandboxResource, ...]:
     if not isinstance(resources, tuple):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     seen: set[str] = set()
     values: list[SandboxResource] = []
+    root = workspace.root
+    storage_root = workspace.storage_root
     for resource in resources:
         if not isinstance(resource, SandboxResource) or resource.id in seen:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source = resource.source
+        if source is None:
+            seen.add(resource.id)
+            values.append(resource)
+            continue
         try:
             resolved = source.resolve(strict=True)
         except (OSError, RuntimeError) as error:
@@ -1309,8 +1320,8 @@ def _validate_resources(
             or source.is_symlink()
             or resolved == root
             or _inside(resolved, root)
-            or resolved == workspace_locks_root(root).parent
-            or _inside(resolved, workspace_locks_root(root).parent)
+            or resolved == storage_root
+            or _inside(resolved, storage_root)
         ):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         seen.add(resource.id)
@@ -1369,10 +1380,10 @@ def _check_parent_chain(root: Path, parent: Path) -> None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
-def _is_protected(path: str) -> bool:
+def _is_protected(workspace: Workspace, path: str) -> bool:
     normalized = path.replace("\\", "/")
     if (
-        is_workspace_storage_path(normalized)
+        workspace.is_storage_path(normalized)
         or normalized == ".git"
         or normalized.startswith(".git/")
     ):
@@ -1787,7 +1798,7 @@ def _check_expected_digest(actual: str | None, expected: str) -> None:
 def _create_temp_file(parent: Path) -> tuple[int, Path]:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     for _ in range(8):
-        target = parent / f"{workspace_storage_name()}-{uuid.uuid4().hex}"
+        target = parent / f"{Workspace.STORAGE_DIR_NAME}-{uuid.uuid4().hex}"
         try:
             return os.open(str(target), flags, 0o666), target
         except FileExistsError:

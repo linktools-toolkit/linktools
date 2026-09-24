@@ -1,23 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace discovery, configuration, and immutable policy."""
+"""Workspace paths, discovery, configuration, and immutable policy."""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import ClassVar, Literal
 
 import yaml as _yaml
 from linktools.core import environ
 
 from ..core import JsonValue, normalize_json_value
 from ..errors import AIError, ErrorCode
-from ._paths import validate_workspace_path, workspace_storage_root
-
-if TYPE_CHECKING:
-    from ._sandbox import Sandbox
 
 _logger = environ.get_logger("ai.workspace")
+
+
+def validate_workspace_path(path: str) -> str:
+    """Validate a canonical Workspace-relative POSIX path."""
+    if not isinstance(path, str) or not path:
+        raise ValueError("workspace path must be a non-empty string")
+    try:
+        path.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ValueError("workspace path must be valid UTF-8") from error
+    if "\\" in path or "\x00" in path or "//" in path or path.startswith("/"):
+        raise ValueError("workspace path must be canonical relative POSIX")
+    if path == ".":
+        return path
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("workspace path contains a non-canonical component")
+    return path
+
 
 PermissionDecision = Literal["allow", "ask", "deny"]
 _PERMISSION_DECISION_RANK: Mapping[PermissionDecision, int] = {
@@ -141,10 +156,11 @@ class WorkspacePolicy:
 
 @dataclass(frozen=True, slots=True)
 class Workspace:
+    STORAGE_DIR_NAME: ClassVar[str] = ".linktools"
+
     root: Path
     config: "dict[str, JsonValue]"
     policy: WorkspacePolicy = field(default_factory=WorkspacePolicy)
-    sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.root, Path):
@@ -157,7 +173,18 @@ class Workspace:
 
     @property
     def storage_root(self) -> Path:
-        return workspace_storage_root(self.root)
+        return self.root / self.STORAGE_DIR_NAME
+
+    @property
+    def locks_root(self) -> Path:
+        return self.storage_root / "locks"
+
+    def is_storage_path(self, path: str) -> bool:
+        return path == self.STORAGE_DIR_NAME or path.startswith(self.STORAGE_DIR_NAME + "/")
+
+    def validate_path(self, path: str) -> str:
+        """Validate a canonical Workspace-relative POSIX path."""
+        return validate_workspace_path(path)
 
     @classmethod
     def discover(
@@ -166,7 +193,6 @@ class Workspace:
         *,
         root: "str | Path | None" = None,
         policy: "WorkspacePolicy | None" = None,
-        sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
         selected_policy = _select_policy(policy)
         candidate = (
@@ -178,20 +204,18 @@ class Workspace:
             candidate = candidate.parent
         if root is None:
             for parent in (candidate, *candidate.parents):
-                config_file = workspace_storage_root(parent) / "config.yaml"
+                config_file = parent / cls.STORAGE_DIR_NAME / "config.yaml"
                 if config_file.exists():
                     return cls._build(
                         parent,
                         config_file,
                         selected_policy,
-                        sandbox,
                     )
-        config_file = workspace_storage_root(candidate) / "config.yaml"
+        config_file = candidate / cls.STORAGE_DIR_NAME / "config.yaml"
         return cls._build(
             candidate,
             config_file if config_file.exists() else None,
             selected_policy,
-            sandbox,
         )
 
     @classmethod
@@ -200,15 +224,13 @@ class Workspace:
         root: "str | Path",
         *,
         policy: "WorkspacePolicy | None" = None,
-        sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
         candidate = Path(root).expanduser().resolve()
-        config_file = workspace_storage_root(candidate) / "config.yaml"
+        config_file = candidate / cls.STORAGE_DIR_NAME / "config.yaml"
         return cls._build(
             candidate,
             config_file if config_file.exists() else None,
             _select_policy(policy),
-            sandbox,
         )
 
     @classmethod
@@ -217,11 +239,10 @@ class Workspace:
         root: "str | Path",
         *,
         policy: "WorkspacePolicy | None" = None,
-        sandbox: "Sandbox | None" = None,
     ) -> "Workspace":
         """Create the workspace storage directory without persisting identity."""
         candidate = Path(root).expanduser().resolve()
-        config_dir = workspace_storage_root(candidate)
+        config_dir = candidate / cls.STORAGE_DIR_NAME
         config_dir.mkdir(parents=True, exist_ok=True)
         config_file = config_dir / "config.yaml"
         if config_file.exists():
@@ -231,7 +252,6 @@ class Workspace:
             candidate,
             config_file if config_file.exists() else None,
             _select_policy(policy),
-            sandbox,
         )
 
     @classmethod
@@ -240,14 +260,12 @@ class Workspace:
         root: Path,
         config_file: "Path | None",
         policy: WorkspacePolicy,
-        sandbox: "Sandbox | None",
     ) -> "Workspace":
         config = load_config(config_file) if config_file else {}
         return cls(
             root=root,
             config=config,
             policy=policy,
-            sandbox=sandbox,
         )
 
 

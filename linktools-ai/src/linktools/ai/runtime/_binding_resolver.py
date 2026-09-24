@@ -22,7 +22,7 @@ from ..capability import (
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
-from ..workspace import StdioSandbox, Workspace
+from ..workspace import Sandbox, StdioSandbox
 
 
 class _RuntimeBindingResolver:
@@ -33,7 +33,7 @@ class _RuntimeBindingResolver:
         catalog: AgentCatalog,
         compiler: AgentCompiler,
         *,
-        workspace: Workspace | None,
+        sandbox: Sandbox | None = None,
         mcp_assets: "Mapping[str, tuple[str, AssetStoreReader]] | None" = None,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
@@ -42,7 +42,7 @@ class _RuntimeBindingResolver:
             raise TypeError("compiler must be AgentCompiler")
         self._catalog = catalog
         self._compiler = compiler
-        self._workspace = workspace
+        self._sandbox = sandbox
         self._mcp_assets = dict(mcp_assets or {})
 
     @property
@@ -100,7 +100,9 @@ class _RuntimeBindingResolver:
                 continue
             codec = MCPServerSpecCodec()
             if execution_policy is None:
-                execution_policy = _mcp_execution_policy(self._workspace)
+                execution_policy = _mcp_execution_policy(
+                    self._sandbox,
+                )
             server, resource_versions = codec.from_execution_payload(
                 cast("Mapping[str, object]", pin.contract)
             )
@@ -152,14 +154,13 @@ class _RuntimeBindingResolver:
 
 
 def _mcp_execution_policy(
-    workspace: Workspace | None,
+    sandbox: Sandbox | None,
 ) -> "Mapping[str, JsonValue]":
-    if workspace is None:
+    if sandbox is None:
         return {"version": 1, "boundary": "host-stdio"}
-    backend = workspace.sandbox
-    if not isinstance(backend, StdioSandbox):
+    if not isinstance(sandbox, StdioSandbox):
         raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-    return backend.stdio_execution_policy()
+    return sandbox.stdio_execution_policy()
 
 
 __all__ = ["_RuntimeBindingResolver"]
@@ -188,11 +189,7 @@ async def _resolve_mcp_resource_versions(
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     versions = await store.resolve_versions(selected)
     for (info, _relative), version in zip(selected_infos, versions, strict=True):
-        if (
-            version.key != info.key
-            or version.etag != info.etag
-            or version.size != info.size
-        ):
+        if not version.matches_info(info):
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     resource_files = [
         {
@@ -210,4 +207,3 @@ async def _resolve_mcp_resource_versions(
         }
     )
     return tuple(versions), resource_semantic_digest
-

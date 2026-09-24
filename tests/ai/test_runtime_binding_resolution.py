@@ -47,6 +47,7 @@ from linktools.ai.task import (
     TaskGraphRequest,
     TaskNode,
 )
+from linktools.ai.workspace import BubblewrapSandbox
 
 
 @dataclass(frozen=True)
@@ -132,7 +133,6 @@ async def _fixture() -> _BindingFixture:
     resolver = _RuntimeBindingResolver(
         catalog,
         compiler,
-        workspace=None,
     )
     return _BindingFixture(
         compiler,
@@ -248,6 +248,7 @@ async def test_runtime_start_admits_resolved_binding() -> None:
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
             object(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
             None,
             namespace="namespace",
             context=RuntimeContext(None),
@@ -309,7 +310,6 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     resolver = _RuntimeBindingResolver(
         catalog,
         compiler,
-        workspace=None,
     )
 
     resolved = await resolver.resolve(
@@ -325,6 +325,44 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     assert len(selected) == 1
     assert selected[0].semantic_contract == dict(pin.contract)
     assert selected[0].fingerprint == pin.fingerprint
+
+
+@pytest.mark.asyncio
+async def test_binding_resolution_uses_sandbox_policy_without_workspace(
+    tmp_path: Path,
+) -> None:
+    server = MCPServerSpec("server", "python")
+    specification = AgentSpec(
+        "agent",
+        allow_tools=(mcp_server_selector(server.id),),
+        allow_skills=(),
+        allow_subagents=(),
+        allow_capabilities=(),
+    )
+    compiler = AgentCompiler(
+        model_resolver=ModelRegistry.openai(model="gpt-test").snapshot(),
+        candidates=(CapabilityContribution.from_declaration(server),),
+        agents={specification.id: specification},
+    )
+    catalog = AgentCatalog(
+        {specification.id: compiler.compile(specification)}
+    )
+    sandbox = BubblewrapSandbox(
+        runtime_root=tmp_path,
+        bwrap_executable=tmp_path / "bwrap",
+    )
+    resolver = _RuntimeBindingResolver(
+        catalog,
+        compiler,
+        sandbox=sandbox,
+    )
+
+    resolved = await resolver.resolve(
+        compiler.bind(catalog.root_definition(specification.id))
+    )
+
+    pin = next(item for item in resolved.snapshot.selected if item.kind == "mcp")
+    assert pin.contract["execution_policy"] == sandbox.stdio_execution_policy()
 
 
 @pytest.mark.asyncio
@@ -367,7 +405,6 @@ async def test_existing_child_mcp_resolves_asset_versions(
         resolver = _RuntimeBindingResolver(
             fixture.catalog,
             fixture.compiler,
-            workspace=None,
             mcp_assets={"server": ("application", store)},
         )
         await store.put(resource, b"print('updated')")

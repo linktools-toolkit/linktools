@@ -269,7 +269,8 @@ def test_workspace_tool_pin_contains_one_version_source(tmp_path: Path) -> None:
 async def test_workspace_tool_binding_restores_before_disabled_sandbox_materialization(
     tmp_path: Path,
 ) -> None:
-    workspace = Workspace.load(tmp_path, sandbox=DisabledSandbox())
+    workspace = Workspace.load(tmp_path)
+    sandbox = DisabledSandbox()
     candidates = _workspace_tool_contributions(workspace)
     spec = AgentSpec(
         "workspace-persistence-v1",
@@ -306,7 +307,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         workspace_capabilities(workspace, selected)
     assert missing_session.value.code is ErrorCode.SANDBOX_SESSION_CLOSED
     with pytest.raises(AIError) as raised:
-        await workspace.sandbox.open(root=workspace.root)  # type: ignore[union-attr]
+        await sandbox.open(root=workspace.root)
     assert raised.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 

@@ -261,7 +261,6 @@ class _PinnedSkillVersionLoader:
                             ),
                         ),
                         "1" * 64,
-                        sandbox_materialize=False,
                     ),
                 )
             ),
@@ -349,11 +348,11 @@ class _RaceStore(AssetStore):
         super().__init__(StorageOverlay(backend, writer=backend))
         self._raced = False
 
-    async def get_many(
+    async def read_versions(
         self,
-        keys: "Sequence[AssetKey]",
-    ) -> "tuple[bytes | None, ...]":
-        values = await super().get_many(keys)
+        refs: "Sequence[AssetVersionRef]",
+    ) -> "tuple[bytes, ...]":
+        values = await super().read_versions(refs)
         if not self._raced:
             self._raced = True
             await self.put(AssetKey("skill", "late"), SkillSpecCodec().encode(SkillSpec("late", "late")))
@@ -394,15 +393,15 @@ async def test_group_snapshot_rejects_source_changes_before_admission() -> None:
 class _BatchReadStore(AssetStore):
     def __init__(self, backend: InMemoryAssetBackend) -> None:
         super().__init__(StorageOverlay(backend, writer=backend))
-        self.batch_reads: list[tuple[AssetKey, ...]] = []
+        self.version_reads: list[tuple[AssetVersionRef, ...]] = []
         self.individual_reads = 0
 
-    async def get_many(
+    async def read_versions(
         self,
-        keys: "Sequence[AssetKey]",
-    ) -> "tuple[bytes | None, ...]":
-        self.batch_reads.append(tuple(keys))
-        return await super().get_many(keys)
+        refs: "Sequence[AssetVersionRef]",
+    ) -> "tuple[bytes, ...]":
+        self.version_reads.append(tuple(refs))
+        return await super().read_versions(refs)
 
     async def get(self, key: AssetKey) -> "bytes | None":
         self.individual_reads += 1
@@ -414,7 +413,36 @@ class _BatchReadStore(AssetStore):
 
 
 @pytest.mark.asyncio
-async def test_builtin_loader_batches_declaration_body_reads() -> None:
+async def test_asset_snapshot_reads_captured_versions_for_all_kinds() -> None:
+    backend = InMemoryAssetBackend()
+    store = _BatchReadStore(backend)
+    objects = InMemoryObjectStore("snapshot")
+    await store.initialize()
+    try:
+        agent = AssetKey("agent", "review")
+        rule = AssetKey("rule", "review.md")
+        await store.put(agent, b"agent")
+        await store.put(rule, b"rule")
+
+        reference = await store.snapshot((rule, agent), object_store=objects)
+
+        assert tuple(tuple(ref.key for ref in batch) for batch in store.version_reads) == (
+            (agent,),
+            (rule,),
+        )
+        assert store.individual_reads == 0
+        restored = AssetStore.from_snapshot(reference, object_store=objects)
+        await restored.initialize()
+        try:
+            assert await restored.get_many((agent, rule)) == (b"agent", b"rule")
+        finally:
+            await restored.close()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_builtin_loader_batches_declaration_version_reads() -> None:
     backend = InMemoryAssetBackend()
     store = _BatchReadStore(backend)
     await store.initialize()
@@ -438,8 +466,8 @@ async def test_builtin_loader_batches_declaration_body_reads() -> None:
         "server",
         "skill",
     ]
-    assert len(store.batch_reads) == 3
-    assert tuple(store.batch_reads) == (
+    assert len(store.version_reads) == 3
+    assert tuple(tuple(ref.key for ref in batch) for batch in store.version_reads) == (
         (AssetKey("agent", "agent"),),
         (AssetKey("skill", "skill"),),
         (AssetKey("mcp", "server"),),

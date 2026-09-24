@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
-from tempfile import TemporaryDirectory
 from collections.abc import (
     AsyncIterable,
     Awaitable,
@@ -116,7 +114,12 @@ from ..core import (
 from ..errors import AIError, ErrorCode, ErrorDiagnostics
 from ..observe import MetricMeasurement, MetricRecorder, Observation
 from ..spec import MCPServerSpecCodec
-from ..workspace import LocalSandbox, SandboxResource, SandboxSession, Workspace
+from ..workspace import (
+    Sandbox,
+    SandboxResource,
+    SandboxSession,
+    Workspace,
+)
 
 if TYPE_CHECKING:
     from ..workspace import RepositoryInstructions
@@ -129,7 +132,6 @@ from ._journal import ModelRequestJournal
 from ._mcp import (
     _MCPResourceBinding,
     _MCPResourceProjection,
-    close_mcp_projections,
     close_mcp_resources,
     materialize_mcp_capabilities,
     prepare_mcp_resource_projections,
@@ -200,7 +202,7 @@ class _RunScope:
     context: AgentContext[object]
     workspace: "Workspace | None"
     limits: PromptLimits
-    mcp_cwd: "str | None"
+    execution_cwd: "str | None"
     user_prompt: CanonicalUserInput | None
     history: list[ModelMessage]
     initial_context: LoadedModelContext
@@ -263,12 +265,14 @@ class AgentExecutor:
         *,
         asset_sources: "Mapping[str, AssetStoreReader] | None" = None,
         metrics: MetricRecorder | None = None,
+        sandbox: Sandbox | None = None,
     ) -> None:
         if not isinstance(skill_sources, SkillSourceRegistry):
             raise TypeError("skill_sources must be SkillSourceRegistry")
         self._skill_sources = skill_sources
         self._asset_sources = dict(asset_sources or {})
         self._metrics = metrics
+        self._sandbox = sandbox
 
     async def execute(self, scope: _RunScope) -> AgentExecutionOutcome:
         binding = scope.binding
@@ -459,39 +463,40 @@ class AgentExecutor:
             in {"filesystem.read", "filesystem.write", "shell"}
         )
         workspace = scope.workspace
-        temporary_resources: tuple[TemporaryDirectory[str], ...] = ()
+        backend = self._sandbox
         mcp_resource_bindings = _mcp_resource_bindings(scope.binding)
-        if workspace is None:
+        if backend is None:
             skill_resources: tuple[SandboxResource, ...] = ()
             resource_keys: Mapping[str, "str | None"] = {
                 skill.id: None
                 for skill in scope.binding.definition.skill_definitions
             }
         else:
-            skill_resources, resource_keys, temporary_resources = (
+            skill_resources, resource_keys = (
                 await _skill_sandbox_resources(
                     scope.binding.definition,
-                    skill_sources,
+                    self._asset_sources,
                 )
             )
-        try:
-            mcp_projections = await prepare_mcp_resource_projections(
-                scope.binding.definition.mcp_servers,
-                mcp_resource_bindings,
-                asset_readers=self._asset_sources,
-                sandboxed=workspace is not None,
-            )
-        except BaseException:
-            await _cleanup_skill_resources(temporary_resources)
-            raise
+        mcp_projections = await prepare_mcp_resource_projections(
+            scope.binding.definition.mcp_servers,
+            mcp_resource_bindings,
+            asset_readers=self._asset_sources,
+            sandboxed=backend is not None,
+        )
 
         session: SandboxSession | None = None
         primary_error: BaseException | None = None
         try:
+            if backend is None and selected:
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             if (
-                not selected
-                and not skill_resources
-                and not scope.binding.definition.mcp_servers
+                backend is None
+                or (
+                    not selected
+                    and not skill_resources
+                    and not scope.binding.definition.mcp_servers
+                )
             ):
                 return await self._execute(
                     replace(
@@ -507,30 +512,22 @@ class AgentExecutor:
                     usage_limits=usage_limits,
                     skill_sources=skill_sources,
                 )
-            if workspace is None:
-                return await self._execute(
-                    replace(
-                        scope,
-                        skill_resource_paths={
-                            skill.id: None
-                            for skill in scope.binding.definition.skill_definitions
-                        },
-                        mcp_resource_bindings=mcp_resource_bindings,
-                        mcp_resource_projections=mcp_projections,
-                    ),
-                    run_usage=run_usage,
-                    usage_limits=usage_limits,
-                    skill_sources=skill_sources,
-                )
-            backend = (
-                workspace.sandbox
-                if workspace.sandbox is not None
-                else LocalSandbox()
-            )
             if scope.binding.definition.mcp_servers:
-                validate_mcp_binding_policy(mcp_resource_bindings, workspace)
+                validate_mcp_binding_policy(
+                    mcp_resource_bindings,
+                    backend,
+                )
+            if workspace is None:
+                if scope.execution_cwd is None:
+                    raise AIError(
+                        ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                        safe_details={"reason": "sandbox_cwd_unavailable"},
+                    )
+                root = Path(scope.execution_cwd)
+            else:
+                root = workspace.root
             session = await backend.open(
-                root=workspace.root,
+                root=root,
                 resources=skill_resources,
             )
             resource_paths = {
@@ -540,7 +537,7 @@ class AgentExecutor:
                 for skill_id, resource_id in resource_keys.items()
             }
             _logger.debug(
-                "workspace sandbox opened for agent run: "
+                "sandbox opened for agent run: "
                 "step=%s tools=%s resources=%s",
                 scope.step_run_id,
                 selected,
@@ -563,9 +560,7 @@ class AgentExecutor:
             raise
         finally:
             await _cleanup_agent_run_resources(
-                mcp_projections,
                 session,
-                temporary_resources,
                 primary_error,
             )
 
@@ -608,6 +603,7 @@ class AgentExecutor:
             deferred_pause_sink=capture_deferred_step,
             metrics=self._metrics,
             model_journal=model_journal,
+            sandbox=self._sandbox,
         )
         capabilities = cast(
             "tuple[AbstractCapability[AgentContext[object]], ...]",
@@ -771,108 +767,59 @@ async def _close_sandbox_session(session: SandboxSession) -> None:
 
 async def _skill_sandbox_resources(
     definition: AgentDefinition,
-    sources: SkillSourceRegistry,
+    asset_readers: Mapping[str, AssetStoreReader],
 ) -> tuple[
     tuple[SandboxResource, ...],
     Mapping[str, "str | None"],
-    tuple[TemporaryDirectory[str], ...],
 ]:
     resources: dict[str, SandboxResource] = {}
     resource_keys: dict[str, str | None] = {}
-    temporary: list[TemporaryDirectory[str]] = []
-    try:
-        for skill in definition.skill_definitions:
-            source_ref = skill.source_ref
-            if source_ref is None:
-                continue
-            resource_keys[skill.id] = None
-            source = sources.resolve(source_ref.source_id)
-            view = await source.inspect(source_ref.root)
-            source_path: Path | None
-            if view.location.kind == "local":
-                source_path = Path(view.location.path)
-            elif (
-                isinstance(source, AssetVersionSkillResourceSource)
-                and await source.sandbox_materialize(source_ref.root)
-            ):
-                holder = TemporaryDirectory(
-                    prefix="linktools-skill-snapshot-"
-                )
-                temporary.append(holder)
-                source_path = Path(holder.name)
-                for relative in view.resources:
-                    target = source_path / relative
-                    await asyncio.to_thread(
-                        target.parent.mkdir,
-                        parents=True,
-                        exist_ok=True,
-                    )
-                    payload = await source.read(
-                        source_ref.root,
-                        relative,
-                    )
-                    await asyncio.to_thread(target.write_bytes, payload)
-                    mode = await source.resource_mode(
-                        source_ref.root,
-                        relative,
-                    )
-                    await asyncio.to_thread(
-                        os.chmod,
-                        target,
-                        0o444 | mode,
-                    )
-            else:
-                continue
-            resource = SandboxResource(id=skill.id, source=source_path)
-            existing = resources.get(skill.id)
-            if existing is not None and existing.source != resource.source:
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            resources[skill.id] = resource
-            resource_keys[skill.id] = skill.id
-        ordered = tuple(resources[key] for key in sorted(resources))
-        return ordered, resource_keys, tuple(temporary)
-    except BaseException:
-        await _cleanup_skill_resources(tuple(temporary))
-        raise
-
-
-async def _cleanup_skill_resources(
-    values: tuple[TemporaryDirectory[str], ...],
-) -> None:
-    for value in values:
-        await asyncio.to_thread(value.cleanup)
+    for skill in definition.skill_definitions:
+        source_ref = skill.source_ref
+        if source_ref is None:
+            continue
+        resource_keys[skill.id] = None
+        reader = asset_readers.get(source_ref.source_id)
+        if reader is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "skill_asset_source",
+                    "source_id": source_ref.source_id,
+                },
+            )
+        resource = await SandboxResource.from_asset_versions(
+            skill.id,
+            reader,
+            {item.path: item.asset for item in source_ref.resource_versions},
+            executable_bits={
+                item.path: item.executable_bits
+                for item in source_ref.resource_versions
+            },
+        )
+        if resource is None:
+            continue
+        existing = resources.get(skill.id)
+        if existing is not None and existing != resource:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        resources[skill.id] = resource
+        resource_keys[skill.id] = skill.id
+    ordered = tuple(resources[key] for key in sorted(resources))
+    return ordered, resource_keys
 
 
 async def _cleanup_agent_run_resources(
-    projections: Mapping[str, _MCPResourceProjection],
     session: "SandboxSession | None",
-    temporary_resources: tuple[TemporaryDirectory[str], ...],
     primary_error: BaseException | None,
 ) -> None:
-    cleanup_error: BaseException | None = None
-    actions: list[Callable[[], Awaitable[None]]] = [
-        lambda: close_mcp_projections(projections),
-    ]
-    if session is not None:
-        actions.append(lambda: _close_sandbox_session(session))
-    actions.append(lambda: _cleanup_skill_resources(temporary_resources))
-    for action in actions:
-        try:
-            await action()
-        except BaseException as error:
-            if cleanup_error is None:
-                cleanup_error = error
-            else:
-                _logger.warning(
-                    "secondary agent resource cleanup failed: "
-                    "exception_type=%s",
-                    type(error).__name__,
-                )
-    if cleanup_error is None:
+    if session is None:
         return
-    if primary_error is not None and cleanup_error is not primary_error:
-        raise primary_error from cleanup_error
-    raise cleanup_error
+    try:
+        await _close_sandbox_session(session)
+    except BaseException as cleanup_error:
+        if primary_error is not None and cleanup_error is not primary_error:
+            raise primary_error from cleanup_error
+        raise
 
 
 def _validate_deferred_requests(requests: DeferredToolRequests) -> None:
@@ -900,6 +847,7 @@ async def _materialize_agent(
     deferred_pause_sink: Callable[[int], None],
     metrics: MetricRecorder | None,
     model_journal: ModelRequestJournal,
+    sandbox: Sandbox | None,
 ) -> tuple[
     PydanticAgent[AgentContext[object], object],
     tuple[AbstractCapability[AgentContext[object]], ...],
@@ -1060,9 +1008,9 @@ async def _materialize_agent(
             await materialize_mcp_capabilities(
                 definition.mcp_servers,
                 definition.mcp_selector_policy,
-                workspace=scope.workspace,
+                sandbox=sandbox,
                 sandbox_session=scope.sandbox_session,
-                host_cwd=(scope.mcp_cwd if scope.workspace is None else None),
+                host_cwd=(scope.execution_cwd if sandbox is None else None),
                 resource_bindings=scope.mcp_resource_bindings,
                 projections=scope.mcp_resource_projections,
                 tool_operations=scope.tool_operations,

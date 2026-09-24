@@ -19,6 +19,7 @@ _AGENT_FIELDS = frozenset(
         "description",
         "id",
         "instructions",
+        "metadata",
         "model",
         "output_retries",
         "planning",

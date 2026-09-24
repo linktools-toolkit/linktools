@@ -11,12 +11,12 @@ from linktools.ai.workspace import (
     BubblewrapSandbox,
     ReadOnlySandboxPolicy,
     SandboxResource,
+    normalize_workspace_input_path,
 )
 from linktools.ai.workspace import _bubblewrap
 
 
-@pytest.mark.asyncio
-async def test_session_workspace_paths_match_logical_contract(tmp_path: Path) -> None:
+def test_workspace_read_policy_matches_logical_paths(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     allowed = workspace / "allowed"
@@ -26,18 +26,23 @@ async def test_session_workspace_paths_match_logical_contract(tmp_path: Path) ->
     hidden.mkdir()
     (hidden / "secret.bin").write_bytes(b"secret")
 
-    session = object.__new__(_bubblewrap._BubblewrapSandboxSession)
-    session._state = "OPEN"
-    session._workspace_root = workspace
-    session._read_policy = ReadOnlySandboxPolicy(("allowed/**",))
-    session._hidden_paths = (".linktools",)
-
-    assert await session.canonicalize_path("./allowed//evidence.bin") == (
-        "allowed/evidence.bin"
-    )
-    assert await session.read_bytes("allowed/evidence.bin") == b"evidence"
+    path = normalize_workspace_input_path("./allowed//evidence.bin")
+    assert path == "allowed/evidence.bin"
+    assert _bubblewrap._read_workspace_bytes(
+        workspace,
+        path,
+        read_policy=ReadOnlySandboxPolicy(("allowed/**",)),
+        hidden_paths=(".linktools",),
+        max_bytes=None,
+    ) == b"evidence"
     with pytest.raises(AIError) as hidden_error:
-        await session.read_bytes(".linktools/secret.bin")
+        _bubblewrap._read_workspace_bytes(
+            workspace,
+            ".linktools/secret.bin",
+            read_policy=ReadOnlySandboxPolicy(("allowed/**",)),
+            hidden_paths=(".linktools",),
+            max_bytes=None,
+        )
     assert hidden_error.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
@@ -156,3 +161,38 @@ def test_stdio_resources_are_not_mounted_into_worker_session(
     assert str(resource_root) in stdio_args
     assert guest_path in stdio_args
 
+
+def test_stdio_asset_files_bind_without_exposing_sibling_files(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    runtime = tmp_path / "runtime"
+    locks = tmp_path / "locks"
+    source = tmp_path / "assets"
+    for path in (workspace, runtime, locks, source):
+        path.mkdir()
+    script = source / "run.py"
+    script.write_text("print('ready')\n", encoding="utf-8")
+    sibling = source / "private.txt"
+    sibling.write_text("private", encoding="utf-8")
+    resource = SandboxResource("mcp", files={"tools/run.py": script})
+
+    args = _bubblewrap._build_bwrap_args(
+        root=workspace,
+        runtime_root=runtime,
+        bwrap=tmp_path / "bwrap",
+        lock_root=locks,
+        resources=(resource,),
+        hidden_paths=(),
+        worker_resources=[],
+        mode="stdio",
+        command="/usr/bin/python3",
+    )
+
+    guest = _bubblewrap._resource_guest_path("mcp")
+    index = args.index(str(script))
+    assert args[index - 1] == "--ro-bind"
+    assert args[index + 1] == f"{guest}/tools/run.py"
+    assert str(source) not in args
+    assert str(sibling) not in args
+    assert f"{guest}/tools" in args

@@ -190,7 +190,7 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
         context=context,  # type: ignore[arg-type]
         workspace=None,
         limits=PromptLimits(),
-        mcp_cwd="",
+        execution_cwd="",
         user_prompt=None,
         history=[],
         initial_context=LoadedModelContext(()),

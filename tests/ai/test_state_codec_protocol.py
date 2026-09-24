@@ -84,14 +84,13 @@ def test_golden_current_envelopes_and_storage_primitives_decode() -> None:
     )
 
 
-def test_record_reader_rejects_superseded_partition_field() -> None:
+def test_record_reader_ignores_additive_fields() -> None:
     value = dict(_fixture()["stored_primitives"]["record"])
     value["partition"] = "11" * 32
-
-    with pytest.raises(AIError) as raised:
-        decode_record(value)
-
-    assert raised.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    value["lease"] = {**value["lease"], "future_note": {"source": "remote"}}
+    assert decode_record(value) == decode_record(
+        _fixture()["stored_primitives"]["record"]
+    )
 
 
 def test_future_envelope_version_is_parseable_but_not_decoded_without_registry() -> None:

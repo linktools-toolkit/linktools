@@ -76,7 +76,8 @@ async def test_workspace_access_uses_local_workspace_boundary(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_workspace_access_does_not_fallback_from_disabled_sandbox(tmp_path: Path) -> None:
     access = WorkspaceAccess.for_workspace(
-        Workspace.load(tmp_path, sandbox=DisabledSandbox())
+        Workspace.load(tmp_path),
+        sandbox=DisabledSandbox(),
     )
     with pytest.raises(AIError) as raised:
         await access.read_bytes("evidence.bin")

@@ -177,7 +177,6 @@ def _versioned_skill(
         SkillSourceRef("application", "review").with_asset_versions(
             (SkillResourceVersion("guide.md", asset),),
             "b" * 64,
-            sandbox_materialize=False,
         ),
     )
 
@@ -213,7 +212,6 @@ def test_skill_asset_content_digest_changes_semantic_identity() -> None:
                 ),
             ),
             "d" * 64,
-            sandbox_materialize=False,
         ),
     )
 
@@ -264,7 +262,6 @@ def test_skill_asset_version_reference_rejects_malformed_fields(
                             "executable_bits": 0,
                         }
                     ],
-                    "sandbox_materialize": False,
                     "resource_semantic_digest": "b" * 64,
                 },
             }
@@ -285,9 +282,9 @@ def test_binding_asset_versions_are_not_runtime_object_dependencies() -> None:
     snapshot = replace(_snapshot(), selected=(pin,))
 
     assert tuple(
-        runtime_codec._iter_agent_binding_object_refs(
-            snapshot,
-            RuntimeDomain.EXECUTION,
+        runtime_codec.iter_runtime_object_refs(
+            runtime_codec._encode_persisted_domain(_execution(binding=snapshot)),
+            default_domain=RuntimeDomain.EXECUTION,
         )
     ) == ()
 

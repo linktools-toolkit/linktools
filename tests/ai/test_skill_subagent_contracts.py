@@ -13,7 +13,11 @@ from linktools.ai.agent import (
     AgentCompiler,
     SemanticPin,
 )
-from linktools.ai.capability import SkillDefinition
+from linktools.ai.capability import (
+    SkillCapability,
+    SkillDefinition,
+    SkillSourceRegistry,
+)
 from linktools.ai.core import Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
@@ -21,6 +25,7 @@ from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.spec import (
     AgentSpec,
     AgentSpecCodec,
+    SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
     SkillSpec,
     SkillSpecCodec,
@@ -186,3 +191,116 @@ def test_skill_markdown_preserves_description_and_rejects_mismatch() -> None:
     with pytest.raises(AIError) as error:
         codec.encode(SkillSpec("review", content, "Different description"))
     assert error.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_skill_markdown_metadata_round_trips_without_changing_instructions_or_identity() -> None:
+    content = (
+        "---\nname: review\nmetadata:\n"
+        "  author: Mei\n  version: 2\n  '': retained\n"
+        "  flags: [true, null, 1.5]\n"
+        "  options: {enabled: false, '': retained}\n"
+        "description: Review changes\n---\n\nDo the review.\n"
+    )
+    codec = SkillMarkdownSpecCodec()
+    local = codec.decode(content.encode("utf-8"))
+    expected = {
+        "author": "Mei",
+        "version": 2,
+        "": "retained",
+        "flags": [True, None, 1.5],
+        "options": {"enabled": False, "": "retained"},
+    }
+    assert dict(local.metadata) == expected
+    assert codec.encode(local) == content.encode("utf-8")
+    with pytest.raises(AIError) as mismatch:
+        codec.encode(SkillSpec("review", content, "Review changes", {"author": "Other"}))
+    assert mismatch.value.code is ErrorCode.ASSET_CONTENT_MISMATCH
+
+    adapter = SkillMarkdownSpecAdapter()
+    spec = adapter.to_logical("team/review", local)
+    assert dict(spec.metadata) == expected
+    assert adapter.to_storage("team/review", spec) == local
+    wire_codec = SkillSpecCodec()
+    assert wire_codec.decode(wire_codec.encode(spec)) == spec
+    definition = SkillDefinition(spec)
+    assert SkillDefinition.from_semantic_contract(definition.semantic_contract) == definition
+
+    changed_metadata = SkillDefinition(
+        adapter.to_logical(
+            "team/review",
+            codec.decode(content.replace("version: 2", "version: 3").encode()),
+        )
+    )
+    changed_body = SkillDefinition(
+        adapter.to_logical(
+            "team/review",
+            codec.decode(content.replace("Do the review.", "Review carefully.").encode()),
+        )
+    )
+    without_metadata = SkillDefinition(
+        adapter.to_logical(
+            "team/review",
+            codec.decode(
+                b"---\nname: review\ndescription: Review changes\n---\n\nDo the review.\n"
+            ),
+        )
+    )
+    assert definition.model_content == changed_metadata.model_content
+    assert definition.model_content == without_metadata.model_content
+    assert "metadata:" not in definition.model_content
+    assert "author: Mei" not in definition.model_content
+    assert wire_codec.to_payload(spec)["content"] == definition.model_content
+    assert (
+        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
+        == SemanticPin("skill", changed_metadata.id, changed_metadata.semantic_contract).fingerprint
+    )
+    assert (
+        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
+        == SemanticPin("skill", without_metadata.id, without_metadata.semantic_contract).fingerprint
+    )
+    assert (
+        SemanticPin("skill", definition.id, definition.semantic_contract).fingerprint
+        != SemanticPin("skill", changed_body.id, changed_body.semantic_contract).fingerprint
+    )
+
+    capability = SkillCapability(
+        (definition,),
+        SkillSourceRegistry(),
+        preloaded_skill_ids=(definition.id,),
+    )
+    instructions = capability.instructions()
+    assert instructions is not None
+    assert "Do the review." in instructions
+    assert "author: Mei" not in instructions
+    root = await capability.load_skill(definition.id)
+    assert root["instructions"] == definition.model_content
+
+
+def test_skill_flow_frontmatter_metadata_does_not_change_identity() -> None:
+    codec = SkillMarkdownSpecCodec()
+    plain = SkillDefinition(
+        codec.decode(
+            b"---\n{name: review, description: Review changes}\n---\nReview.\n"
+        )
+    )
+    annotated = SkillDefinition(
+        codec.decode(
+            b"---\n{name: review, description: Review changes, "
+            b"metadata: {author: Mei}}\n---\nReview.\n"
+        )
+    )
+    assert plain.model_content == annotated.model_content
+    assert (
+        SemanticPin("skill", plain.id, plain.semantic_contract).fingerprint
+        == SemanticPin("skill", annotated.id, annotated.semantic_contract).fingerprint
+    )
+
+
+def test_markdown_metadata_rejects_non_json_values() -> None:
+    with pytest.raises(AIError) as error:
+        SkillMarkdownSpecCodec().decode(
+            b"---\nname: review\ndescription: Review changes\n"
+            b"metadata: {published: 2026-01-02}\n---\nReview.\n"
+        )
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID

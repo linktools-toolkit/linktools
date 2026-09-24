@@ -59,8 +59,13 @@ def test_persisted_session_round_trips() -> None:
 def test_persisted_session_allows_additive_unknown_fields() -> None:
     session = _session()
     additive = copy.deepcopy(_encode_persisted_domain(session))
+    additive["future_payload_field"] = {"future": True}
     additive["fields"]["future_metadata"] = {"future": True}
-    assert _decode_enveloped_domain(_envelope(additive), SessionRecord) == session
+    additive["fields"]["status"]["future_enum_field"] = {"future": True}
+    envelope = _envelope(additive)
+    envelope["future_envelope_field"] = {"future": True}
+    envelope["value"]["future_value_field"] = {"future": True}
+    assert _decode_enveloped_domain(envelope, SessionRecord) == session
 
 
 def test_persisted_session_requires_history_id_field() -> None:

@@ -169,6 +169,56 @@ def test_agent_markdown_resolves_defaults_without_truthiness_or_deep_merge() -> 
     assert closed_limits.usage_limits is None
 
 
+def test_agent_markdown_metadata_round_trips_without_changing_identity() -> None:
+    document = (
+        b"---\nmetadata:\n  author: Mei\n  version: 2\n"
+        b"  flags: [true, null, 1.5]\n  options: {enabled: false}\n"
+        b"---\nReview requests.\n"
+    )
+    codec = AgentMarkdownSpecCodec()
+    spec = codec.decode(document, logical_id="worker")
+    expected = {
+        "author": "Mei",
+        "version": 2,
+        "flags": [True, None, 1.5],
+        "options": {"enabled": False},
+    }
+    assert dict(spec.metadata) == expected
+    flags = spec.metadata["flags"]
+    assert isinstance(flags, list)
+    flags.append("changed")
+    assert dict(spec.metadata) == expected
+
+    wire = AgentSpecCodec().encode(spec)
+    assert AgentSpecCodec().decode(wire) == spec
+    assert json.loads(wire)["metadata"] == expected
+    changed_metadata = codec.decode(
+        document.replace(b"version: 2", b"version: 3"),
+        logical_id="worker",
+    )
+    changed_prompt = codec.decode(
+        document.replace(b"Review requests.", b"Review carefully."),
+        logical_id="worker",
+    )
+    assert (
+        CapabilityContribution.from_declaration(spec).fingerprint
+        == CapabilityContribution.from_declaration(changed_metadata).fingerprint
+    )
+    assert (
+        CapabilityContribution.from_declaration(spec).fingerprint
+        != CapabilityContribution.from_declaration(changed_prompt).fingerprint
+    )
+
+
+def test_agent_markdown_rejects_metadata_that_is_not_a_json_map() -> None:
+    with pytest.raises(AIError) as error:
+        AgentMarkdownSpecCodec().decode(
+            b"---\nmetadata: [author, Mei]\n---\nPrompt.\n",
+            logical_id="worker",
+        )
+    assert error.value.code is ErrorCode.OUTPUT_CONTRACT_INVALID
+
+
 def test_agent_markdown_rejects_version_unknown_fields_and_invalid_defaults() -> None:
     codec = AgentMarkdownSpecCodec()
     with pytest.raises(AIError) as version:

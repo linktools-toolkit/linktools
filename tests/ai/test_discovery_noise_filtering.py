@@ -24,9 +24,10 @@ from linktools.ai.capability import (
     SkillSourceRegistry,
 )
 from linktools.ai.core import DEFAULT_DISCOVERY_POLICY
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import SkillSpec
 from linktools.ai.storage import StorageLayer, StorageOverlay
-from linktools.ai.workspace import LocalRuleCatalog, WorkspacePolicy
+from linktools.ai.workspace import AssetRuleCatalog, SandboxResource, WorkspacePolicy
 
 
 class _SuffixSkillPathAdapter:
@@ -236,6 +237,64 @@ async def test_directory_asset_skill_preserves_local_path_and_executable_mode(
 
 
 @pytest.mark.asyncio
+async def test_sandbox_uses_original_pinned_asset_files(tmp_path: Path) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    package.mkdir(parents=True)
+    script = package / "run.sh"
+    script.write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+    os.chmod(script, 0o755)
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        binding = await AssetSkillResourceSource("application", store).resolve("review")
+        files = {item.path: item.asset for item in binding.resource_versions}
+        modes = {item.path: item.executable_bits for item in binding.resource_versions}
+        resource = await SandboxResource.from_asset_versions(
+            "review", store, files, executable_bits=modes
+        )
+        assert resource is not None
+        assert resource.source == package.resolve()
+        assert resource.files == {"run.sh": script.resolve()}
+
+        script.write_text("#!/bin/sh\necho changed\n", encoding="utf-8")
+        with pytest.raises(AIError) as error:
+            await SandboxResource.from_asset_versions(
+                "review", store, files, executable_bits=modes
+            )
+        assert error.value.code in {
+            ErrorCode.SNAPSHOT_CONFLICT,
+            ErrorCode.STORAGE_INTEGRITY_ERROR,
+        }
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_keeps_memory_assets_virtual() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        key = AssetKey("skill", "review/run.sh")
+        await store.put(key, b"#!/bin/sh\n")
+        version = (await store.resolve_versions((key,)))[0]
+        assert await SandboxResource.from_asset_versions(
+            "review", store, {"run.sh": version}
+        ) is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_directory_asset_skill_local_path_does_not_require_skill_markdown(
     tmp_path: Path,
 ) -> None:
@@ -368,7 +427,7 @@ async def test_local_skill_source_reports_current_executable_mode(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_rule_catalog_ignores_hidden_and_cache_discovery_paths(tmp_path: Path) -> None:
-    rules = tmp_path / ".linktools" / "rules"
+    rules = tmp_path / "assets" / "rules"
     (rules / "nested").mkdir(parents=True)
     (rules / ".cache").mkdir()
     (rules / "__pycache__").mkdir()
@@ -380,7 +439,20 @@ async def test_rule_catalog_ignores_hidden_and_cache_discovery_paths(tmp_path: P
     (rules / "__pycache__" / "invalid.md").write_bytes(b"\xff")
     (rules / "__MACOSX" / "invalid.md").write_bytes(b"\xff")
 
-    catalog = await LocalRuleCatalog.load(tmp_path, WorkspacePolicy())
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(tmp_path / "assets"),
+                path_adapter=PrefixAssetPathAdapter({"rule": "rules"}),
+                kinds=("rule",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        catalog = await AssetRuleCatalog.load({"rules": store}, WorkspacePolicy())
+    finally:
+        await store.close()
 
     assert tuple(document.source for document in catalog.documents) == (
         "rule:active",

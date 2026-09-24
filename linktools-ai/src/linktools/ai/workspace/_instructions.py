@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace repository instruction contracts and local resolution."""
+"""Repository instruction contracts and Workspace path resolution."""
 
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ import yaml
 
 from ..core import DEFAULT_DISCOVERY_POLICY, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ._paths import workspace_rules_root
 
 if TYPE_CHECKING:
+    from ..asset import AssetKey, AssetStoreReader
     from ._root import WorkspacePolicy
 
 _PREAMBLE = """Repository instructions are workspace guidance.
@@ -149,7 +149,9 @@ class RepositoryInstructionResolver(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class LocalRuleCatalog:
+class AssetRuleCatalog:
+    """Instruction documents decoded from captured rule Asset versions."""
+
     documents: tuple[RepositoryInstructionDocument, ...] = ()
 
     def __post_init__(self) -> None:
@@ -164,173 +166,61 @@ class LocalRuleCatalog:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
 
     @classmethod
-    async def load(cls, root: Path, policy: "WorkspacePolicy") -> "LocalRuleCatalog":
-        if not isinstance(root, Path):
-            raise TypeError("root must be Path")
-        documents = await asyncio.to_thread(cls._load_blocking, root, policy)
-        return cls(documents)
-
-    @classmethod
-    def _load_blocking(
+    async def load(
         cls,
-        root: Path,
+        readers: Mapping[str, AssetStoreReader],
         policy: "WorkspacePolicy",
-    ) -> tuple[RepositoryInstructionDocument, ...]:
-        resolved_workspace_root = _resolve_existing_path(root)
-        rules_root = workspace_rules_root(root)
-        try:
-            root_lstat = rules_root.lstat()
-        except FileNotFoundError:
-            return ()
-        except NotADirectoryError as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if stat.S_ISLNK(root_lstat.st_mode):
-            raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT)
-        if not stat.S_ISDIR(root_lstat.st_mode):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        resolved_rules_root = _resolve_existing_path(rules_root)
-        _require_contained(resolved_rules_root, (resolved_workspace_root,))
-        try:
-            root_identity = os.stat(rules_root, follow_symlinks=False)
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        collected: list[tuple[Path, RepositoryInstructionDocument]] = []
-        cls._scan_rules_directory_blocking(
-            rules_root,
-            resolved_workspace_root=resolved_workspace_root,
-            resolved_rules_root=resolved_rules_root,
-            expected_identity=root_identity,
-            policy=policy,
-            collected=collected,
-        )
-        collected.sort(key=lambda item: item[0].relative_to(rules_root).as_posix())
-        return tuple(document for _, document in collected)
-
-    @classmethod
-    def _scan_rules_directory_blocking(
-        cls,
-        directory: Path,
-        *,
-        resolved_workspace_root: Path,
-        resolved_rules_root: Path,
-        expected_identity: os.stat_result | None,
-        policy: "WorkspacePolicy",
-        collected: list[tuple[Path, RepositoryInstructionDocument]],
-    ) -> None:
-        try:
-            lexical_stat = directory.lstat()
-        except FileNotFoundError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        except NotADirectoryError as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if stat.S_ISLNK(lexical_stat.st_mode):
-            raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT)
-        if not stat.S_ISDIR(lexical_stat.st_mode):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-
-        resolved_directory = _resolve_existing_path(directory)
-        _require_contained(
-            resolved_directory,
-            (resolved_workspace_root, resolved_rules_root),
-        )
-        try:
-            current_stat = resolved_directory.stat()
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if not stat.S_ISDIR(current_stat.st_mode):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if expected_identity is not None and not os.path.samestat(current_stat, expected_identity):
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        before_stat = current_stat
-
-        try:
-            with os.scandir(resolved_directory) as iterator:
-                entries = tuple(iterator)
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        entries = tuple(sorted(entries, key=lambda entry: entry.name))
-        child_directories: list[tuple[Path, os.stat_result]] = []
-        rule_files: list[Path] = []
-        for entry in entries:
-            if DEFAULT_DISCOVERY_POLICY.ignores(entry.name):
-                continue
-            try:
-                entry_stat = entry.stat(follow_symlinks=False)
-            except OSError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            lexical_child = directory / entry.name
-            if stat.S_ISLNK(entry_stat.st_mode):
-                raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT)
-            if entry.name.endswith(".md"):
-                if not stat.S_ISREG(entry_stat.st_mode):
-                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-                rule_files.append(lexical_child)
-                continue
-            if stat.S_ISDIR(entry_stat.st_mode):
-                child_directories.append((lexical_child, entry_stat))
-
-        for candidate in rule_files:
-            content = _read_verified_instruction_file(
-                candidate,
-                containment_roots=(resolved_workspace_root, resolved_rules_root),
-                max_bytes=policy.max_repository_instruction_bytes,
-                missing_ok=False,
-                allow_lexical_symlink=False,
+    ) -> "AssetRuleCatalog":
+        documents: list[RepositoryInstructionDocument] = []
+        sources: set[str] = set()
+        for reader in readers.values():
+            revision = await reader.current_revision()
+            candidates = tuple(
+                info
+                for info in await reader.metadata_snapshot()
+                if info.key.kind == "rule"
+                and info.key.id.endswith(".md")
             )
-            if content is None:
+            for info in candidates:
+                _validate_rule_id(info.key.id[:-3])
+            entries = tuple(
+                info
+                for info in candidates
+                if not any(
+                    DEFAULT_DISCOVERY_POLICY.ignores(part)
+                    for part in info.key.id.split("/")
+                )
+            )
+            keys: list[AssetKey] = []
+            for info in entries:
+                if info.size > policy.max_repository_instruction_bytes:
+                    raise AIError(ErrorCode.PROMPT_TOO_LARGE)
+                keys.append(info.key)
+            refs = await reader.resolve_versions(keys)
+            if len(refs) != len(entries):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            scope, body = _parse_rule_markdown(content)
-            logical_relative = candidate.relative_to(
-                workspace_rules_root(resolved_workspace_root)
-            ).with_suffix("").as_posix()
-            source = f"rule:{_validate_rule_id(logical_relative)}"
-            collected.append((candidate, RepositoryInstructionDocument(source, scope, body)))
-
-        for child, child_stat in child_directories:
-            cls._scan_rules_directory_blocking(
-                child,
-                resolved_workspace_root=resolved_workspace_root,
-                resolved_rules_root=resolved_rules_root,
-                expected_identity=child_stat,
-                policy=policy,
-                collected=collected,
-            )
-
-        try:
-            final_lstat = directory.lstat()
-        except FileNotFoundError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        except NotADirectoryError as error:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if stat.S_ISLNK(final_lstat.st_mode):
-            raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT)
-        if not stat.S_ISDIR(final_lstat.st_mode):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        final_resolved = _resolve_existing_path(directory)
-        _require_contained(
-            final_resolved,
-            (resolved_workspace_root, resolved_rules_root),
-        )
-        if final_resolved != resolved_directory:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-        try:
-            after_stat = final_resolved.stat()
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if not stat.S_ISDIR(after_stat.st_mode):
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        if (
-            not os.path.samestat(before_stat, after_stat)
-            or before_stat.st_mtime_ns != after_stat.st_mtime_ns
-            or before_stat.st_ctime_ns != after_stat.st_ctime_ns
-        ):
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+            if any(
+                not ref.matches_info(info)
+                for info, ref in zip(entries, refs, strict=True)
+            ):
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            values = await reader.read_versions(refs)
+            if len(values) != len(entries):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for info, value in zip(entries, values, strict=True):
+                try:
+                    content = value.decode("utf-8", errors="strict")
+                except UnicodeDecodeError as error:
+                    raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID) from error
+                scope, body = _parse_rule_markdown(content)
+                source = f"rule:{info.key.id[:-3]}"
+                if source in sources:
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+                sources.add(source)
+                documents.append(RepositoryInstructionDocument(source, scope, body))
+            if await reader.current_revision() != revision:
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        return cls(tuple(sorted(documents, key=lambda document: document.source)))
 
 
 class LocalRepositoryInstructionResolver:
@@ -338,12 +228,12 @@ class LocalRepositoryInstructionResolver:
         self,
         root: Path,
         policy: "WorkspacePolicy",
-        rules: LocalRuleCatalog,
+        rules: AssetRuleCatalog,
     ) -> None:
         if not isinstance(root, Path):
             raise TypeError("root must be Path")
-        if not isinstance(rules, LocalRuleCatalog):
-            raise TypeError("rules must be LocalRuleCatalog")
+        if not isinstance(rules, AssetRuleCatalog):
+            raise TypeError("rules must be AssetRuleCatalog")
         self._root = root
         self._policy = policy
         self._rules = rules
@@ -727,7 +617,7 @@ def _validate_limits(bundle: RepositoryInstructions, policy: "WorkspacePolicy") 
 
 __all__ = [
     "LocalRepositoryInstructionResolver",
-    "LocalRuleCatalog",
+    "AssetRuleCatalog",
     "RepositoryInstructionDocument",
     "RepositoryInstructionResolver",
     "RepositoryInstructions",

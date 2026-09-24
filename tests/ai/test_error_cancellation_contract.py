@@ -3,11 +3,8 @@
 """Cancellation and capability error-boundary behavior."""
 
 import asyncio
-import threading
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import cast, get_args, get_origin, get_type_hints
+from typing import get_args, get_origin, get_type_hints
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,8 +13,6 @@ from linktools.ai.capability import SubagentDelegate
 from linktools.ai.core import ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime._execution import DefaultExecutionService
-from linktools.ai.runtime import _agent_executor
-from linktools.ai.runtime import _mcp
 from linktools.ai.runtime._agent_executor import (
     _cleanup_agent_run_resources,
     _close_mcp_resources,
@@ -26,10 +21,7 @@ from linktools.ai.runtime._handoff import HandoffGate
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime._mcp import (
     _MCPRuntimeCapability,
-    _MCPResourceProjection,
-    _cleanup_resource_directory,
     _raise_primary_after_cleanup,
-    close_mcp_projections,
     close_mcp_resources,
     materialize_mcp_capabilities,
 )
@@ -43,6 +35,7 @@ from linktools.ai.task import (
 )
 from linktools.ai.task._local import LocalTaskGraphLauncher
 from linktools.ai.core import Principal, PrincipalKind
+from linktools.ai.workspace import BubblewrapSandbox
 
 
 async def _no_dependency_body(_dependency: object) -> object:
@@ -63,10 +56,10 @@ async def test_mcp_materialization_rejects_unselected_server(tmp_path) -> None:
         await materialize_mcp_capabilities(
             (MCPServerSpec("server", "echo"),),
             (),
-            workspace=None,
+            sandbox=None,
             sandbox_session=None,
             host_cwd=str(tmp_path),
-            frozen_resources={},
+            resource_bindings={},
             projections={},
             tool_operations=None,
             tool_metrics=None,
@@ -82,10 +75,10 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
         await materialize_mcp_capabilities(
             (MCPServerSpec("server", "echo"),),
             (mcp_server_selector("server"),),
-            workspace=None,
+            sandbox=None,
             sandbox_session=None,
             host_cwd=None,
-            frozen_resources={},
+            resource_bindings={},
             projections={},
             tool_operations=None,
             tool_metrics=None,
@@ -94,6 +87,29 @@ async def test_mcp_materialization_requires_captured_runtime_cwd() -> None:
 
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
     assert error.value.safe_details == {"reason": "mcp_cwd_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_mcp_requires_session_without_workspace(tmp_path) -> None:
+    sandbox = BubblewrapSandbox(
+        runtime_root=tmp_path,
+        bwrap_executable=tmp_path / "bwrap",
+    )
+    with pytest.raises(AIError) as error:
+        await materialize_mcp_capabilities(
+            (MCPServerSpec("server", "echo"),),
+            (mcp_server_selector("server"),),
+            sandbox=sandbox,
+            sandbox_session=None,
+            host_cwd=None,
+            resource_bindings={},
+            projections={},
+            tool_operations=None,
+            tool_metrics=None,
+            background_tasks=set(),
+        )
+
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -106,60 +122,11 @@ async def test_mcp_cleanup_failure_keeps_the_execution_error() -> None:
     execution_error = ValueError("execution failed")
 
     with pytest.raises(ValueError) as error:
-        await _close_mcp_resources((capability,), {}, execution_error)
+        await _close_mcp_resources((capability,), execution_error)
 
     assert error.value is execution_error
     assert isinstance(error.value.__cause__, AIError)
     assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
-
-
-@pytest.mark.asyncio
-async def test_mcp_resource_projection_outlives_failed_client_close(
-    monkeypatch,
-) -> None:
-    events: list[str] = []
-
-    class FailedClient:
-        async def close(self) -> None:
-            events.append("client")
-            raise RuntimeError("process close failed")
-
-    async def cleanup_directory(directory) -> None:
-        events.append("projection")
-        await original_cleanup(directory)
-
-    directory = TemporaryDirectory()
-    original_cleanup = _mcp._cleanup_resource_directory
-    monkeypatch.setattr(
-        _mcp,
-        "_cleanup_resource_directory",
-        cleanup_directory,
-    )
-    projection = _MCPResourceProjection(
-        "mcp",
-        (),
-        (),
-        directory,
-    )
-    capability = _MCPRuntimeCapability("mcp", object(), FailedClient())
-    execution_error = ValueError("execution failed")
-
-    with pytest.raises(ValueError) as error:
-        await _close_mcp_resources(
-            (capability,),
-            {"mcp": projection},
-            execution_error,
-        )
-
-    assert error.value is execution_error
-    assert Path(directory.name).exists()
-    assert events == ["client"]
-
-    events.append("session")
-    await close_mcp_projections({"mcp": projection})
-
-    assert not Path(directory.name).exists()
-    assert events == ["client", "session", "projection"]
 
 
 @pytest.mark.asyncio
@@ -177,42 +144,19 @@ async def test_mcp_cleanup_failure_is_typed_without_an_execution_error() -> None
 
 
 @pytest.mark.asyncio
-async def test_agent_run_cleanup_attempts_all_resources_and_keeps_execution_error(
-    monkeypatch,
-) -> None:
-    projection_error = AIError(ErrorCode.SANDBOX_CLEANUP_FAILED)
-    skill_error = OSError("skill cleanup failed")
+async def test_agent_run_cleanup_keeps_execution_error() -> None:
     execution_error = ValueError("execution failed")
-    cleaned: list[str] = []
 
-    async def close_projections(projections) -> None:
-        assert projections == {}
-        cleaned.append("projections")
-        raise projection_error
-
-    async def cleanup_skills(resources) -> None:
-        assert resources == ()
-        cleaned.append("skills")
-        raise skill_error
-
-    monkeypatch.setattr(
-        _agent_executor,
-        "close_mcp_projections",
-        close_projections,
-    )
-    monkeypatch.setattr(
-        _agent_executor,
-        "_cleanup_skill_resources",
-        cleanup_skills,
-    )
+    class FailedSession:
+        async def close(self) -> None:
+            raise RuntimeError("session close failed")
 
     with pytest.raises(ValueError) as error:
-        await _cleanup_agent_run_resources({}, (), execution_error)
+        await _cleanup_agent_run_resources(FailedSession(), execution_error)
 
     assert error.value is execution_error
-    assert error.value.__cause__ is skill_error
-    assert skill_error.__context__ is projection_error
-    assert cleaned == ["projections", "skills"]
+    assert isinstance(error.value.__cause__, AIError)
+    assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
 
 
 def test_mcp_initialization_cleanup_failure_keeps_the_primary_error() -> None:
@@ -227,29 +171,6 @@ def test_mcp_initialization_cleanup_failure_keeps_the_primary_error() -> None:
     assert error.value is primary_error
     assert isinstance(error.value.__cause__, AIError)
     assert error.value.__cause__.code is ErrorCode.SANDBOX_CLEANUP_FAILED
-
-
-@pytest.mark.asyncio
-async def test_mcp_resource_directory_cleanup_finishes_during_cancellation() -> None:
-    started = threading.Event()
-    release = threading.Event()
-
-    class Directory:
-        def cleanup(self) -> None:
-            started.set()
-            release.wait()
-
-    cleanup = asyncio.create_task(
-        _cleanup_resource_directory(cast(TemporaryDirectory[str], Directory()))
-    )
-    assert await asyncio.to_thread(started.wait, 1)
-    cleanup.cancel()
-    await asyncio.sleep(0)
-    assert not cleanup.done()
-    release.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await cleanup
 
 
 @pytest.mark.asyncio

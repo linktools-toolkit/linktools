@@ -454,18 +454,8 @@ def _decode_v1_task_node(
     required = frozenset(
         {"node_id", "dependencies", "input", "budget_cost", "expander"}
     )
-    optional = frozenset(
-        {
-            "input_refs",
-            "timeout_seconds",
-            "max_attempts",
-            "retry_delay_seconds",
-            "output_contract",
-            "effect",
-        }
-    )
     keys = set(raw_fields)
-    if not required.issubset(keys) or (not persisted and not keys <= required | optional):
+    if not required.issubset(keys):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     raw_refs = raw_fields.get("input_refs", [])
     if not isinstance(raw_refs, list):
@@ -477,7 +467,7 @@ def _decode_v1_task_node(
         name, raw_reference = item
         if not isinstance(name, str) or not isinstance(raw_reference, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _require_exact_keys(
+        _require_required_keys(
             raw_reference,
             frozenset(
                 {"namespace", "tenant_id", "graph_id", "node_id", "result_digest"}
@@ -612,7 +602,7 @@ def _decode_v1_task_graph_view(
     expected = frozenset({"graph_id", "status"}) if persisted else frozenset(
         {"graph_id", "status", "nodes"}
     )
-    _require_contract_fields(raw_fields, expected, persisted=persisted)
+    _require_required_keys(raw_fields, expected)
     nodes = () if persisted else tuple(
         _decode_domain(raw_fields["nodes"], tuple[TaskNode, ...], codec, persisted=persisted)
     )
@@ -684,7 +674,7 @@ def _decode_v1_task_node_view(
     }
     if not persisted:
         expected.update({"dependencies", "owner", "fence", "lease_expires_at"})
-    _require_contract_fields(raw_fields, frozenset(expected), persisted=persisted)
+    _require_required_keys(raw_fields, frozenset(expected))
     return TaskNodeView(
         cast(str, _decode_domain(raw_fields["graph_id"], str, codec, persisted=persisted)),
         cast(str, _decode_domain(raw_fields["node_id"], str, codec, persisted=persisted)),
@@ -869,7 +859,7 @@ def _decode_v1_object_ref(
         if persisted
         else frozenset({"store_id", "key", "digest", "size"})
     )
-    _require_contract_fields(raw_fields, expected, persisted=persisted)
+    _require_required_keys(raw_fields, expected)
     store_id = (
         RUNTIME_OBJECT_STORE_ID
         if persisted
@@ -916,10 +906,9 @@ def _decode_v1_stored_user_input(
     required = frozenset({"codec", "payload"})
     if "view" in raw_fields:
         required = frozenset({"codec", "payload", "view"})
-    _require_contract_fields(
+    _require_required_keys(
         raw_fields,
         required,
-        persisted=persisted,
     )
     codec_name = _decode_domain(
         raw_fields["codec"], str, codec, persisted=persisted
@@ -1009,29 +998,18 @@ class CanonicalEnvelope:
     value: Mapping[str, JsonValue]
 
 
-def _require_exact_keys(
-    value: Mapping[str, object],
-    expected: frozenset[str],
-) -> None:
-    if set(value.keys()) != expected:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _require_contract_fields(
+def _require_required_keys(
     value: Mapping[str, object],
     required: frozenset[str],
-    *,
-    persisted: bool,
 ) -> None:
-    keys = set(value.keys())
-    if not required.issubset(keys) or (not persisted and keys != required):
+    if not required.issubset(value):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _unwrap_tagged_list(value: object, tag: str) -> list[object]:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(value, frozenset({tag}))
+    _require_required_keys(value, frozenset({tag}))
     items = value[tag]
     if not isinstance(items, list):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1056,7 +1034,7 @@ def parse_envelope(value: Mapping[str, JsonValue]) -> CanonicalEnvelope:
             ErrorCode.STORAGE_INTEGRITY_ERROR,
             "canonical data must be an object",
         )
-    _require_exact_keys(value, frozenset({"v", "value"}))
+    _require_required_keys(value, frozenset({"v", "value"}))
     version = value.get("v")
     payload = value.get("value")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -1117,11 +1095,11 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             "data",
         }
     )
-    _require_exact_keys(value, current_keys)
+    _require_required_keys(value, current_keys)
     lease = value["lease"]
     if not isinstance(lease, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(lease, frozenset({"owner", "fence", "expires_at"}))
+    _require_required_keys(lease, frozenset({"owner", "fence", "expires_at"}))
     data = value["data"]
     if not isinstance(data, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1163,7 +1141,7 @@ def encode_fact(fact: StoredFact) -> dict[str, JsonValue]:
 def decode_fact(value: Mapping[str, JsonValue]) -> StoredFact:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(
+    _require_required_keys(
         value,
         frozenset(
             {"stream", "sequence", "owner", "kind", "subject", "state", "data"}
@@ -1200,7 +1178,7 @@ def encode_operation(operation: StoredOperation) -> dict[str, JsonValue]:
 def decode_operation(value: Mapping[str, JsonValue]) -> StoredOperation:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(
+    _require_required_keys(
         value,
         frozenset({"key", "stream", "sequence", "state", "compactable", "data"}),
     )
@@ -1230,7 +1208,7 @@ def encode_alias(alias: StoredAlias) -> dict[str, JsonValue]:
 def decode_alias(value: Mapping[str, JsonValue]) -> StoredAlias:
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(value, frozenset({"alias", "record"}))
+    _require_required_keys(value, frozenset({"alias", "record"}))
     try:
         return StoredAlias(
             _digest_wire(_string(value, "alias")),
@@ -1342,7 +1320,7 @@ def _decode_external(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if target is IdempotencyTerminalUpdate:
-        _require_contract_fields(
+        _require_required_keys(
             value,
             frozenset(
                 {
@@ -1355,7 +1333,6 @@ def _decode_external(
                     "error_code",
                 }
             ),
-            persisted=persisted,
         )
         return IdempotencyTerminalUpdate(
             scope=cast(str, _decode_domain(value["scope"], str, codec)),
@@ -1387,7 +1364,7 @@ def _decode_external(
             ),
         )
     if target is OperationTerminalUpdate:
-        _require_contract_fields(
+        _require_required_keys(
             value,
             frozenset(
                 {
@@ -1399,7 +1376,6 @@ def _decode_external(
                     "error_code",
                 }
             ),
-            persisted=persisted,
         )
         return OperationTerminalUpdate(
             operation_id=cast(
@@ -1603,7 +1579,7 @@ def _decode_enveloped_domain(
 ) -> DomainT:
     """Decode persisted domain data without losing its envelope version."""
     envelope = decode_envelope(value)
-    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
+    _require_required_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1637,7 +1613,7 @@ def _iter_enveloped_runtime_object_refs(
 ) -> Iterator[tuple[RuntimeDomain, ObjectRef]]:
     """Traverse object references using the envelope's own version codec."""
     envelope = decode_envelope(value)
-    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
+    _require_required_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
@@ -1941,7 +1917,7 @@ def _decode_domain(
     if target is datetime:
         if not isinstance(value, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _require_exact_keys(value, frozenset({"$datetime"}))
+        _require_required_keys(value, frozenset({"$datetime"}))
         raw = value["$datetime"]
         if not isinstance(raw, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1960,7 +1936,7 @@ def _decode_domain(
     if target is bytes:
         if not isinstance(value, Mapping):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _require_exact_keys(value, frozenset({"$bytes"}))
+        _require_required_keys(value, frozenset({"$bytes"}))
         raw = value["$bytes"]
         if not isinstance(raw, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2016,7 +1992,7 @@ def _decode_enum(
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _require_exact_keys(value, frozenset({"$enum", "value"}))
+    _require_required_keys(value, frozenset({"$enum", "value"}))
     wire_id = value["$enum"]
     if not isinstance(wire_id, str) or wire_id != expected_wire_id:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -2050,11 +2026,11 @@ def _decode_dataclass(
     if not isinstance(value, Mapping):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if persisted:
-        _require_exact_keys(
+        _require_required_keys(
             value, frozenset({"$dataclass", "schema", "fields"})
         )
     else:
-        _require_exact_keys(value, frozenset({"$dataclass", "fields"}))
+        _require_required_keys(value, frozenset({"$dataclass", "fields"}))
 
     wire_id = value.get("$dataclass")
     if not isinstance(wire_id, str):
@@ -2088,10 +2064,7 @@ def _decode_dataclass(
     if frozen_names is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
     frozen_name_set = frozenset(frozen_names)
-    if persisted:
-        if not frozen_name_set.issubset(raw_fields):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    elif set(raw_fields) != frozen_name_set:
+    if not frozen_name_set.issubset(raw_fields):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     try:
         hints = get_type_hints(target)
@@ -2368,7 +2341,7 @@ def _encode_step_envelope(value: object) -> dict[str, JsonValue]:
 
 def _decode_step_envelope(value: Mapping[str, JsonValue]) -> object:
     envelope = decode_envelope(value)
-    _require_exact_keys(envelope.value, frozenset({"type", "payload"}))
+    _require_required_keys(envelope.value, frozenset({"type", "payload"}))
     codec = _VERSION_CODECS.get(envelope.version)
     if codec is None:
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)

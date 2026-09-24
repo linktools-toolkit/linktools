@@ -3,8 +3,8 @@
 """Workspace identity, discovery, policy, instructions, and sandbox contracts."""
 
 from ._instructions import (
+    AssetRuleCatalog,
     LocalRepositoryInstructionResolver,
-    LocalRuleCatalog,
     RepositoryInstructionDocument,
     RepositoryInstructionResolver,
     RepositoryInstructions,
@@ -37,8 +37,8 @@ __all__ = [
     "DisabledSandbox",
     "ReadOnlySandboxPolicy",
     "BubblewrapSandbox",
+    "AssetRuleCatalog",
     "LocalRepositoryInstructionResolver",
-    "LocalRuleCatalog",
     "PermissionDecision",
     "RepositoryInstructionDocument",
     "RepositoryInstructionResolver",

@@ -34,7 +34,9 @@ from linktools.ai.asset import (
     AssetKey,
     AssetStore,
     AssetVersionRef,
+    DirectoryAssetBackend,
     InMemoryAssetBackend,
+    PrefixAssetPathAdapter,
 )
 from linktools.ai.core import canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
@@ -44,7 +46,8 @@ from linktools.ai.runtime._harness_memory import select_harness_memory_tools
 from linktools.ai.runtime._mcp import (
     _MCPModelToolset,
     _MCPResourceBinding,
-    _materialize_resource_versions,
+    _bound_resource_versions,
+    prepare_mcp_resource_projections,
 )
 from linktools.ai.runtime._tool_boundary import (
     ManagedToolDescriptor,
@@ -72,6 +75,7 @@ from linktools.ai.storage import (
     StorageEntryRevision,
     StorageOverlay,
 )
+from linktools.ai.workspace import SandboxResourcePath
 
 
 def _expected_mcp_tool_name(server_id: str, tool_name: str) -> str:
@@ -267,7 +271,6 @@ def test_skill_contract_round_trips_asset_version_refs() -> None:
         SkillSourceRef("application", "review").with_asset_versions(
             (SkillResourceVersion("guide.md", asset),),
             "b" * 64,
-            sandbox_materialize=False,
         ),
     )
 
@@ -307,7 +310,6 @@ def test_skill_contract_rejects_malformed_asset_version_ref() -> None:
                             "executable_bits": 0,
                         }
                     ],
-                    "sandbox_materialize": False,
                     "resource_semantic_digest": "b" * 64,
                 },
             }
@@ -323,11 +325,9 @@ def test_asset_version_skill_source_rejects_mismatched_source_ref() -> None:
             {
                 "version": 1,
                 "kind": "skill-resource-semantics",
-                "sandbox_materialize": False,
                 "files": [],
             }
         ),
-        sandbox_materialize=False,
     )
     with pytest.raises(AIError) as error:
         AssetVersionSkillResourceSource(
@@ -586,7 +586,6 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
             {
                 "version": 1,
                 "kind": "skill-resource-semantics",
-                "sandbox_materialize": True,
                 "files": [
                     {
                         "path": "scripts/run.bin",
@@ -611,7 +610,6 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
                 ),
             ),
             expected_digest,
-            sandbox_materialize=True,
         )
 
         async def digest(ref: SkillSourceRef) -> str:
@@ -638,7 +636,6 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
                 ),
             ),
             first,
-            sandbox_materialize=True,
         )
         non_executable = SkillSourceRef("application", "review").with_asset_versions(
             (
@@ -649,12 +646,6 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
                 ),
             ),
             "0" * 64,
-            sandbox_materialize=True,
-        )
-        not_materialized = SkillSourceRef("application", "review").with_asset_versions(
-            relocated.resource_versions,
-            "0" * 64,
-            sandbox_materialize=False,
         )
         changed = SkillSourceRef("application", "review").with_asset_versions(
             (
@@ -671,14 +662,11 @@ async def test_skill_resource_digest_tracks_behavior_not_asset_locator() -> None
                 ),
             ),
             "0" * 64,
-            sandbox_materialize=True,
         )
 
         assert first == await digest(relocated)
         with pytest.raises(AIError):
             await digest(non_executable)
-        with pytest.raises(AIError):
-            await digest(not_materialized)
         with pytest.raises(AIError):
             await digest(changed)
         assert first == expected_digest
@@ -810,8 +798,8 @@ async def test_mcp_resource_resolution_excludes_declaration_files() -> None:
         ("lib", "lib/helper.py"),
     ),
 )
-@pytest.mark.parametrize("boundary", ("resolution", "materialization"))
-async def test_mcp_resource_versions_reject_unmaterializable_tree(
+@pytest.mark.parametrize("boundary", ("resolution", "binding"))
+async def test_mcp_resource_versions_reject_invalid_tree(
     paths: tuple[str, ...],
     boundary: str,
 ) -> None:
@@ -828,7 +816,7 @@ async def test_mcp_resource_versions_reject_unmaterializable_tree(
                 await _resolve_mcp_resource_versions(store, root, ())
             else:
                 versions = await store.resolve_versions(keys)
-                await _materialize_resource_versions(
+                _bound_resource_versions(
                     MCPServerSpec("server", "python", (), root),
                     _MCPResourceBinding(
                         versions,
@@ -836,7 +824,6 @@ async def test_mcp_resource_versions_reject_unmaterializable_tree(
                         "a" * 64,
                         {"version": 1, "boundary": "host-stdio"},
                     ),
-                    store,
                 )
         assert raised.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
     finally:
@@ -844,11 +831,10 @@ async def test_mcp_resource_versions_reject_unmaterializable_tree(
 
 
 @pytest.mark.asyncio
-async def test_mcp_resource_versions_materialize_deleted_current_assets() -> None:
+async def test_mcp_resource_path_requires_local_asset_files() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
     await store.initialize()
-    directory = None
     try:
         resource = AssetKey("mcp", "server/assets/script.py")
         helper = AssetKey("mcp", "server/assets/lib/helper.py")
@@ -860,33 +846,87 @@ async def test_mcp_resource_versions_materialize_deleted_current_assets() -> Non
             root,
             ("resource:script.py",),
         )
-        await store.delete(resource)
-        await store.delete(helper)
-
         server = MCPServerSpec(
             "foo/bar",
             "python",
             ("resource:script.py",),
             root,
         )
-        directory = await _materialize_resource_versions(
-            server,
-            _MCPResourceBinding(
-                versions,
-                "application",
-                digest,
-                {"version": 1, "boundary": "host-stdio"},
-            ),
-            store,
-        )
-
-        assert (Path(directory.name) / "script.py").read_bytes() == (
-            b"print('versioned')\n"
-        )
-        assert (Path(directory.name) / "lib/helper.py").read_bytes() == b"VALUE = 42\n"
+        with pytest.raises(AIError) as raised:
+            await prepare_mcp_resource_projections(
+                (server,),
+                {
+                    server.id: _MCPResourceBinding(
+                        versions,
+                        "application",
+                        digest,
+                        {"version": 1, "boundary": "host-stdio"},
+                    )
+                },
+                asset_readers={"application": store},
+                sandboxed=False,
+            )
+        assert raised.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
+        assert raised.value.safe_details == {
+            "kind": "mcp_local_resource",
+            "server_id": server.id,
+        }
     finally:
-        if directory is not None:
-            directory.cleanup()
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_resource_paths_use_original_local_files(tmp_path: Path) -> None:
+    root = tmp_path / "assets"
+    script = root / "mcp" / "server" / "assets" / "script.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('ready')\n", encoding="utf-8")
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"mcp": "mcp"}),
+                kinds=("mcp",),
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        resource_root = AssetKey("mcp", "server/assets")
+        server = MCPServerSpec(
+            "server", "python", ("resource:script.py",), resource_root
+        )
+        versions, digest = await _resolve_mcp_resource_versions(
+            store, resource_root, server.args
+        )
+        binding = _MCPResourceBinding(
+            versions,
+            "application",
+            digest,
+            {"version": 1, "boundary": "host-stdio"},
+        )
+        host = await prepare_mcp_resource_projections(
+            (server,),
+            {server.id: binding},
+            asset_readers={"application": store},
+            sandboxed=False,
+        )
+        assert host[server.id].args == (str(script.resolve()),)
+        assert host[server.id].resources == ()
+
+        sandboxed = await prepare_mcp_resource_projections(
+            (server,),
+            {server.id: binding},
+            asset_readers={"application": store},
+            sandboxed=True,
+        )
+        assert sandboxed[server.id].args == (
+            SandboxResourcePath(server.id, "script.py"),
+        )
+        assert sandboxed[server.id].resources[0].files == {
+            "script.py": script.resolve()
+        }
+    finally:
         await store.close()
 
 

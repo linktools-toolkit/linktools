@@ -3,7 +3,6 @@
 """Capability groups snapshot runtime candidate definitions before execution."""
 
 import functools
-import hashlib
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -40,7 +39,7 @@ from ..spec import (
 )
 from ..task import TaskEffectResolution, TaskExpanderRef, TaskNodeContext, TaskNodeHandler
 from ..storage import StorageRevision
-from ..workspace import Workspace
+from ..workspace import Sandbox, Workspace
 from ._context import AgentContext
 from ._skill import SkillDefinition
 from ._skill_source import AssetSkillResourceSource
@@ -353,6 +352,7 @@ class CapabilityGroupSnapshot(Generic[AppT]):
     source_revision: "StorageRevision | None"
     workspace: "Workspace | None"
     _asset_reader: "AssetStoreReader | None" = field(repr=False, compare=False)
+    sandbox: "Sandbox | None" = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.group_id, str) or not self.group_id.strip():
@@ -416,14 +416,25 @@ class CapabilityLoadContext:
         group_id: str,
         store: AssetStore,
         entries: Sequence[CapabilityLoadEntry],
+        versions: Mapping[AssetKey, AssetVersionRef],
     ) -> None:
         self._group_id = group_id
         self._store = store
         self._entries = tuple(entries)
         self._by_key = {entry.key: entry for entry in self._entries}
+        self._versions = dict(versions)
         self._cache: dict[AssetKey, bytes] = {}
         self._read_keys: set[AssetKey] = set()
-        if len(self._by_key) != len(self._entries):
+        if (
+            len(self._by_key) != len(self._entries)
+            or set(self._by_key) != set(self._versions)
+            or any(
+                self._versions[entry.key].key != entry.key
+                or self._versions[entry.key].etag != entry.etag
+                or self._versions[entry.key].size != entry.size
+                for entry in self._entries
+            )
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @property
@@ -445,22 +456,7 @@ class CapabilityLoadContext:
         )
 
     async def read(self, key: AssetKey) -> bytes:
-        entry = self._by_key.get(key)
-        if entry is None:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        cached = self._cache.get(key)
-        if cached is not None:
-            self._read_keys.add(key)
-            return cached
-        value = await self._store.get(key)
-        if value is None:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        data = bytes(value)
-        if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.etag:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-        self._cache[key] = data
-        self._read_keys.add(key)
-        return data
+        return (await self.read_many((key,)))[0]
 
     async def read_many(self, keys: Sequence[AssetKey]) -> "tuple[bytes, ...]":
         """Read captured assets once, preserving the requested order."""
@@ -474,15 +470,18 @@ class CapabilityLoadContext:
         )
         if not pending:
             return tuple(self._cache[key] for key in keys)
-        values = await self._store.get_many(tuple(entry.key for entry in pending))
-        for entry, value in zip(pending, values, strict=True):
-            if (
-                value is None
-            ):
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-            data = bytes(value)
-            if len(data) != entry.size or hashlib.sha256(data).hexdigest() != entry.etag:
-                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        refs = tuple(self._versions[entry.key] for entry in pending)
+        try:
+            values = await self._store.read_versions(refs)
+        except AIError as error:
+            if error.code in {
+                ErrorCode.ASSET_VERSION_NOT_FOUND,
+                ErrorCode.ASSET_VERSION_OWNER_UNKNOWN,
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+            }:
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT) from error
+            raise
+        for entry, data in zip(pending, values, strict=True):
             self._cache[entry.key] = data
             self._read_keys.add(entry.key)
         return tuple(self._cache[key] for key in keys)
@@ -524,6 +523,7 @@ class CapabilityGroup(Generic[AppT]):
         *,
         assets: "AssetStore | None" = None,
         workspace: "Workspace | None" = None,
+        sandbox: "Sandbox | None" = None,
     ) -> None:
         if not isinstance(group_id, str) or not group_id.strip():
             raise ValueError("capability group id must be a non-empty string")
@@ -534,6 +534,7 @@ class CapabilityGroup(Generic[AppT]):
         self._id = group_id
         self._store = assets
         self._workspace = workspace
+        self._sandbox = sandbox
         self._loaders: dict[str, CapabilityLoader[AppT]] = {}
         self._contributions: list[CapabilityContribution[AppT]] = []
         if workspace is not None:
@@ -559,7 +560,11 @@ class CapabilityGroup(Generic[AppT]):
         return self._workspace
 
     @property
-    def asset_store(self) -> "AssetStore | None":
+    def sandbox(self) -> "Sandbox | None":
+        return self._sandbox
+
+    @property
+    def assets(self) -> "AssetStore | None":
         """Return the explicit AssetStore used by this capability group."""
         return self._store
 
@@ -707,6 +712,7 @@ class CapabilityGroup(Generic[AppT]):
         tool_retries: int = AgentSpec.DEFAULT_TOOL_RETRIES,
         output_retries: int = AgentSpec.DEFAULT_OUTPUT_RETRIES,
         description: "str | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AgentSpec:
         """Register one declarative Agent before Runtime.open()."""
         values = (instructions,) if isinstance(instructions, str) else tuple(instructions)
@@ -725,6 +731,7 @@ class CapabilityGroup(Generic[AppT]):
             tool_retries=tool_retries,
             output_retries=output_retries,
             description=description,
+            metadata={} if metadata is None else metadata,
         )
         self._contributions.append(CapabilityContribution.from_declaration(spec))
         return spec
@@ -761,6 +768,14 @@ class CapabilityGroup(Generic[AppT]):
             versions = await store.resolve_versions(
                 tuple(info.key for info in metadata)
             )
+            if len(versions) != len(metadata):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if any(
+                not ref.matches_info(info)
+                for info, ref in zip(metadata, versions, strict=True)
+            ):
+                raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+            version_by_key = {ref.key: ref for ref in versions}
             entries = tuple(
                 CapabilityLoadEntry(
                     info.key,
@@ -773,10 +788,10 @@ class CapabilityGroup(Generic[AppT]):
             asset_reader = _CapabilityAssetReader(
                 store,
                 source_revision,
-                {ref.key: ref for ref in versions},
+                version_by_key,
                 tuple(metadata),
             )
-            context = CapabilityLoadContext(self._id, store, entries)
+            context = CapabilityLoadContext(self._id, store, entries, version_by_key)
             for kind, loader in loaders:
                 if getattr(loader, "source_kind", kind) != kind:
                     raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -835,6 +850,7 @@ class CapabilityGroup(Generic[AppT]):
             source_revision,
             self._workspace,
             None if store is None else asset_reader,
+            sandbox=self._sandbox,
         )
         _logger.info(
             "capability group snapshotted: group=%s contributions=%d source_revision=%s",

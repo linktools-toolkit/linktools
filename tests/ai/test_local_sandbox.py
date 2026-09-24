@@ -87,6 +87,24 @@ async def test_read_only_policy_exposes_authorized_resource_root(
         await session.close()
 
 
+async def test_local_sandbox_keeps_non_native_resource_virtual(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = tmp_path / "run.py"
+    source.write_text("print('ready')\n", encoding="utf-8")
+
+    session = await LocalSandbox().open(
+        root=workspace,
+        resources=(SandboxResource("skill", files={"script.py": source}),),
+    )
+    try:
+        assert session.resource_path("skill") is None
+    finally:
+        await session.close()
+
+
 def _python_command(code: str) -> str:
     if os.name == "nt":
         return f'"{sys.executable}" -c "{code}"'

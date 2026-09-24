@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Linux Bubblewrap implementation of the workspace sandbox contract."""
+"""Linux Bubblewrap implementation of the sandbox execution boundary."""
 
 from __future__ import annotations
 
@@ -33,11 +33,7 @@ from ._sandbox import (
     StdioSandbox,
     normalize_workspace_input_path,
 )
-from ._paths import (
-    validate_workspace_path,
-    workspace_locks_root,
-    workspace_storage_name,
-)
+from ._root import Workspace, validate_workspace_path
 from ._sandbox_protocol import (
     ERROR_EFFECT_NOT_APPLIED,
     ERROR_EFFECT_VALUES,
@@ -120,6 +116,7 @@ class BubblewrapSandbox:
         if not hasattr(os, "pidfd_open"):
             raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
         normalized_root = _resolve_directory(root)
+        workspace = Workspace(normalized_root, {})
         runtime_root = _resolve_directory(self._runtime_root)
         bwrap = _resolve_executable(self._bwrap_executable)
         policy = self._read_policy
@@ -130,7 +127,7 @@ class BubblewrapSandbox:
         lock_root = (
             Path(tempfile.mkdtemp(prefix="linktools-sandbox-locks-"))
             if cleanup_lock_root
-            else workspace_locks_root(normalized_root)
+            else workspace.locks_root
         )
         runtime_pidfd = -1
         process: asyncio.subprocess.Process | None = None
@@ -140,7 +137,7 @@ class BubblewrapSandbox:
             _validate_rootfs(runtime_root, normalized_root)
             _validate_bwrap(bwrap)
             normalized_resources = _validate_resources(
-                normalized_root,
+                workspace,
                 runtime_root,
                 resources,
             )
@@ -178,6 +175,7 @@ class BubblewrapSandbox:
                 hidden_paths=hidden_paths,
                 read_policy=policy,
                 lock_root=lock_root if cleanup_lock_root else None,
+                workspace=workspace,
             )
             try:
                 await session._open_handshake()
@@ -223,6 +221,7 @@ class _BubblewrapSandboxSession:
         hidden_paths: tuple[str, ...] = (),
         read_policy: ReadOnlySandboxPolicy | None = None,
         lock_root: Path | None = None,
+        workspace: Workspace | None = None,
     ) -> None:
         self._process = process
         self._resources = dict(resources)
@@ -230,6 +229,9 @@ class _BubblewrapSandboxSession:
             resources if resource_ids is None else resource_ids
         )
         self._workspace_root = workspace_root
+        self._workspace = workspace
+        if self._workspace is None and workspace_root is not None:
+            self._workspace = Workspace(workspace_root, {})
         self._runtime_root = runtime_root
         self._bwrap = bwrap
         self._hidden_paths = hidden_paths
@@ -343,20 +345,21 @@ class _BubblewrapSandboxSession:
             if isinstance(resources, (str, bytes, bytearray)):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             if (
-                self._workspace_root is None
+                self._workspace is None
+                or self._workspace_root is None
                 or self._runtime_root is None
                 or self._bwrap is None
             ):
                 raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
             selected_resources = _validate_resources(
-                self._workspace_root,
+                self._workspace,
                 self._runtime_root,
                 tuple(resources),
             )
             command_args = _stdio_command_args(args, selected_resources)
             self._stdio_execution_policy()
             lock_root = (
-                workspace_locks_root(self._workspace_root)
+                self._workspace.locks_root
                 if self._lock_root is None
                 else self._lock_root
             )
@@ -922,7 +925,7 @@ def _validate_bwrap(executable: Path) -> None:
 
 
 def _validate_resources(
-    workspace_root: Path,
+    workspace: Workspace,
     runtime_root: Path,
     resources: tuple[SandboxResource, ...],
 ) -> tuple[SandboxResource, ...]:
@@ -930,30 +933,61 @@ def _validate_resources(
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     seen: set[str] = set()
     values: list[SandboxResource] = []
+    workspace_root = workspace.root
+    storage_root = workspace.storage_root
     for resource in resources:
         if not isinstance(resource, SandboxResource) or resource.id in seen:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         source = resource.source
-        try:
-            resolved = source.resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
-        if source.is_symlink() or not resolved.is_dir():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if (
-            resolved == workspace_root
-            or _inside(resolved, workspace_root)
-            or resolved == workspace_locks_root(workspace_root).parent
-            or _inside(resolved, workspace_locks_root(workspace_root).parent)
-            or resolved == runtime_root
-            or _inside(runtime_root, resolved)
-            or _inside(resolved, runtime_root)
-        ):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        _validate_resource_tree(resolved)
+        resolved: Path | None = None
+        if source is not None:
+            try:
+                resolved = source.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+            if source.is_symlink() or not resolved.is_dir():
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            if resource.files is None:
+                if _resource_source_conflicts(
+                    resolved, workspace_root, storage_root, runtime_root
+                ):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                _validate_resource_tree(resolved)
+        files: dict[str, Path] | None = None
+        if resource.files is not None:
+            files = {}
+            for relative, path in resource.files.items():
+                try:
+                    selected = path.resolve(strict=True)
+                except (OSError, RuntimeError) as error:
+                    raise AIError(ErrorCode.SANDBOX_UNAVAILABLE) from error
+                if path.is_symlink() or not selected.is_file():
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                if _resource_source_conflicts(
+                    selected, workspace_root, storage_root, runtime_root
+                ) or (resolved is not None and not _inside(resolved, selected)):
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                files[relative] = selected
         seen.add(resource.id)
-        values.append(SandboxResource(resource.id, resolved))
+        values.append(SandboxResource(resource.id, resolved, files))
     return tuple(values)
+
+
+def _resource_source_conflicts(
+    source: Path,
+    workspace_root: Path,
+    storage_root: Path,
+    runtime_root: Path,
+) -> bool:
+    return (
+        source == workspace_root
+        or _inside(source, workspace_root)
+        or source == storage_root
+        or _inside(source, storage_root)
+        or source == runtime_root
+        or _inside(runtime_root, source)
+        or _inside(source, runtime_root)
+    )
 
 
 def _resource_guest_path(resource_id: str) -> str:
@@ -1050,7 +1084,7 @@ def _stdio_command_args(
 ) -> tuple[str, ...]:
     if isinstance(args, (str, bytes, bytearray)):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    by_id = {resource.id: resource.source for resource in resources}
+    by_id = {resource.id: resource for resource in resources}
     result: list[str] = []
     for argument in args:
         if isinstance(argument, str):
@@ -1060,16 +1094,23 @@ def _stdio_command_args(
             continue
         if not isinstance(argument, SandboxResourcePath):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        root = by_id.get(argument.resource_id)
-        if root is None:
+        resource = by_id.get(argument.resource_id)
+        if resource is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        target = root.joinpath(*PurePosixPath(argument.path).parts)
-        try:
-            resolved = target.resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
-        if not _inside(root, resolved) or not resolved.is_file():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if resource.files is not None:
+            if argument.path not in resource.files:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        else:
+            root = resource.source
+            if root is None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            target = root.joinpath(*PurePosixPath(argument.path).parts)
+            try:
+                resolved = target.resolve(strict=True)
+            except (OSError, RuntimeError) as error:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+            if not _inside(root, resolved) or not resolved.is_file():
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         result.append(
             f"{_resource_guest_path(argument.resource_id)}/{argument.path}"
         )
@@ -1337,13 +1378,35 @@ def _build_bwrap_args(
     )
     for resource in resources:
         target = _resource_guest_path(resource.id)
-        args.extend(("--dir", target, "--ro-bind", str(resource.source), target))
-        if _inside(root, resource.source):
-            relative = _relative(root, resource.source)
-            if not _hidden_path_covers(hidden_paths, relative):
-                args.extend(
-                    ("--ro-bind", str(resource.source), f"/workspace/{relative}")
-                )
+        args.extend(("--dir", target))
+        if resource.files is not None:
+            created: set[str] = set()
+            for relative, source in sorted(resource.files.items()):
+                parts = PurePosixPath(relative).parts
+                for index in range(1, len(parts)):
+                    parent = f"{target}/{'/'.join(parts[:index])}"
+                    if parent not in created:
+                        args.extend(("--dir", parent))
+                        created.add(parent)
+                args.extend(("--ro-bind", str(source), f"{target}/{relative}"))
+                if _inside(root, source):
+                    workspace_relative = _relative(root, source)
+                    if not _hidden_path_covers(hidden_paths, workspace_relative):
+                        args.extend(
+                            (
+                                "--ro-bind",
+                                str(source),
+                                f"/workspace/{workspace_relative}",
+                            )
+                        )
+        elif resource.source is not None:
+            args.extend(("--ro-bind", str(resource.source), target))
+            if _inside(root, resource.source):
+                relative = _relative(root, resource.source)
+                if not _hidden_path_covers(hidden_paths, relative):
+                    args.extend(
+                        ("--ro-bind", str(resource.source), f"/workspace/{relative}")
+                    )
     for path in hidden_paths if not (
         mode == "stdio"
         and read_policy is not None
@@ -1678,7 +1741,7 @@ def _validate_guardian_exit(
 
 
 def _normalize_hidden_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
-    normalized = {workspace_storage_name()}
+    normalized = {Workspace.STORAGE_DIR_NAME}
     for path in paths:
         if not isinstance(path, str) or path in {"", "."}:
             raise ValueError("hidden path is invalid")

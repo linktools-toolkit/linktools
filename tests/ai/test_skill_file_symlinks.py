@@ -26,6 +26,7 @@ from linktools.ai.spec import (
     MCPServerSpecCodec,
 )
 from linktools.ai.storage import StorageOverlay
+from linktools.ai.workspace import SandboxResource
 
 
 def _symlink(target: Path, link: Path, *, directory: bool = False) -> None:
@@ -52,6 +53,57 @@ async def test_local_skill_resource_file_symlink_is_discovered_and_read(tmp_path
 
     assert view.resources == ("guide.md", "shared/guide.md")
     assert await source.read("review", "guide.md") == b"shared guide"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_asset_skill_uses_contained_file_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "assets"
+    package = root / "skills" / "review"
+    shared = package / "shared"
+    shared.mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review files\n---\n\nRun the script.\n",
+        encoding="utf-8",
+    )
+    target = shared / "run.sh"
+    target.write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+    target.chmod(0o755)
+    _symlink(target, package / "run.sh")
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(root),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+                follow_external_symlinks=True,
+            )
+        )
+    )
+    await store.initialize()
+    try:
+        binding = await AssetSkillResourceSource("application", store).resolve("review")
+        assert {item.path for item in binding.resource_versions} == {
+            "run.sh",
+            "shared/run.sh",
+        }
+        resource = await SandboxResource.from_asset_versions(
+            "review",
+            store,
+            {item.path: item.asset for item in binding.resource_versions},
+            executable_bits={
+                item.path: item.executable_bits
+                for item in binding.resource_versions
+            },
+        )
+        assert resource is not None
+        assert resource.source == package.resolve()
+        assert resource.files is not None
+        assert resource.files["run.sh"] == target.resolve()
+        assert resource.files["shared/run.sh"] == target.resolve()
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

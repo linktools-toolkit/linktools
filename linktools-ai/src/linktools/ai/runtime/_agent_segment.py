@@ -100,7 +100,7 @@ class _AgentSegmentInput:
     context: AgentContext[object]
     workspace: "Workspace | None"
     limits: PromptLimits
-    mcp_cwd: "str | None"
+    execution_cwd: "str | None"
     user_prompt: CanonicalUserInput | None
     initial_attachments: tuple[Mapping[str, JsonValue], ...]
     history: list[ModelMessage]
@@ -164,7 +164,7 @@ class _AgentSegmentRunner:
             context=segment.context,
             workspace=segment.workspace,
             limits=segment.limits,
-            mcp_cwd=segment.mcp_cwd,
+            execution_cwd=segment.execution_cwd,
             user_prompt=segment.user_prompt,
             history=segment.history,
             initial_context=segment.initial_context,

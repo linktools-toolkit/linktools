@@ -26,7 +26,6 @@ from ..workspace import (
     SandboxSession,
     Workspace,
     WorkspacePolicy,
-    validate_workspace_path,
 )
 from ._context import AgentContext
 from ._tool_signal import ToolCallRetry
@@ -266,17 +265,27 @@ class WorkspaceAccess:
         *,
         root: Path,
         session: SandboxSession | None = None,
+        workspace: Workspace | None = None,
     ) -> None:
         self._sandbox = sandbox
         self._root = root
+        self._workspace = workspace if workspace is not None else Workspace(root, {})
         self._session = session
         self._lock = asyncio.Lock()
         self._closed = False
 
     @classmethod
-    def for_workspace(cls, workspace: Workspace) -> "WorkspaceAccess":
-        sandbox = workspace.sandbox if workspace.sandbox is not None else LocalSandbox()
-        return cls(sandbox, root=workspace.root)
+    def for_workspace(
+        cls,
+        workspace: Workspace,
+        *,
+        sandbox: Sandbox | None = None,
+    ) -> "WorkspaceAccess":
+        return cls(
+            sandbox if sandbox is not None else LocalSandbox(),
+            root=workspace.root,
+            workspace=workspace,
+        )
 
     async def _ensure_session(self) -> SandboxSession:
         async with self._lock:
@@ -288,7 +297,7 @@ class WorkspaceAccess:
 
     async def canonicalize_path(self, path: str) -> str:
         session = await self._ensure_session()
-        return validate_workspace_path(await session.canonicalize_path(path))
+        return self._workspace.validate_path(await session.canonicalize_path(path))
 
     async def read_bytes(
         self,

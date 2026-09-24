@@ -13,7 +13,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..core import JsonValue
 from ..asset import AssetVersionRef
 from ..errors import AIError, ErrorCode
-from ..spec import SkillSpec
+from ..spec import SkillMarkdownSpecCodec, SkillSpec
 from ._context import AgentContext
 from ._skill_source import (
     AssetVersionSkillResourceSource,
@@ -44,6 +44,10 @@ class SkillDefinition:
         return self.spec.id
 
     @property
+    def model_content(self) -> str:
+        return SkillMarkdownSpecCodec().model_content(self.spec.content)
+
+    @property
     def semantic_contract(self) -> "dict[str, JsonValue]":
         contract: dict[str, JsonValue] = {
             "version": 1,
@@ -52,6 +56,8 @@ class SkillDefinition:
         }
         if self.spec.description is not None:
             contract["description"] = self.spec.description
+        if self.spec.metadata:
+            contract["metadata"] = dict(self.spec.metadata)
         if self.source_ref is not None:
             source: dict[str, JsonValue] = {
                 "source_id": self.source_ref.source_id,
@@ -66,7 +72,6 @@ class SkillDefinition:
                     }
                     for item in self.source_ref.resource_versions
                 ]
-                source["sandbox_materialize"] = self.source_ref.sandbox_materialize
                 source["resource_semantic_digest"] = (
                     self.source_ref.resource_semantic_digest
                 )
@@ -83,6 +88,7 @@ class SkillDefinition:
         identity = contract.get("id")
         content = contract.get("content")
         description = contract.get("description")
+        metadata = contract.get("metadata", {})
         source = contract.get("source")
         if not isinstance(identity, str) or not identity.strip() or not isinstance(content, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -96,12 +102,10 @@ class SkillDefinition:
             root = source.get("root")
             raw_versions = source.get("resource_versions")
             resource_semantic_digest = source.get("resource_semantic_digest")
-            sandbox_materialize = source.get("sandbox_materialize", False)
             versions: tuple[SkillResourceVersion, ...] = ()
             if raw_versions is not None:
                 if (
                     not isinstance(raw_versions, list)
-                    or not isinstance(sandbox_materialize, bool)
                     or not isinstance(resource_semantic_digest, str)
                     or len(resource_semantic_digest) != 64
                     or any(
@@ -134,7 +138,7 @@ class SkillDefinition:
                 except (TypeError, ValueError) as error:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 versions = tuple(sorted(parsed, key=lambda item: item.path))
-            elif sandbox_materialize or resource_semantic_digest is not None:
+            elif resource_semantic_digest is not None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if resource_semantic_digest is not None and (
                 not isinstance(resource_semantic_digest, str)
@@ -151,15 +155,14 @@ class SkillDefinition:
                     root,
                     versions,
                     resource_semantic_digest,
-                    sandbox_materialize,
                 )
             except AIError as error:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         else:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            specification = SkillSpec(identity, content, description)
-        except (TypeError, ValueError) as error:
+            specification = SkillSpec(identity, content, description, metadata)
+        except (TypeError, ValueError, UnicodeError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return cls(specification, source_ref)
 
@@ -295,14 +298,14 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
                 (
                     "The following skill instructions are preloaded for this agent run.",
                     *(
-                        f"[skill: {item.id}]\n{item.spec.content}"
+                        f"[skill: {item.id}]\n{item.model_content}"
                         for item in self._preloaded
                     ),
                 )
             )
             try:
                 preloaded = "\n\n".join(
-                    f"[skill: {item.id}]\n{item.spec.content}"
+                    f"[skill: {item.id}]\n{item.model_content}"
                     for item in self._preloaded
                 ).encode("utf-8", errors="strict")
             except UnicodeEncodeError as error:
@@ -356,7 +359,7 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         result: dict[str, JsonValue] = {
             "id": definition.id,
             "description": _skill_description(definition.spec),
-            "instructions": definition.spec.content,
+            "instructions": definition.model_content,
             "resources": [],
         }
         source_ref = definition.source_ref

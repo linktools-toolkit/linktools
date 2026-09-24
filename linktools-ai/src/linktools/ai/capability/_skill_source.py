@@ -40,7 +40,6 @@ class SkillSourceRef:
     root: str
     resource_versions: tuple[SkillResourceVersion, ...] = ()
     resource_semantic_digest: "str | None" = None
-    sandbox_materialize: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not self.source_id.strip():
@@ -56,26 +55,21 @@ class SkillSourceRef:
         if ordered != versions or len({item.path for item in versions}) != len(versions):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if self.resource_semantic_digest is None:
-            if versions or self.sandbox_materialize:
+            if versions:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         elif not _valid_digest(self.resource_semantic_digest):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if not isinstance(self.sandbox_materialize, bool):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
     def with_asset_versions(
         self,
         resource_versions: Sequence[SkillResourceVersion],
         resource_semantic_digest: str,
-        *,
-        sandbox_materialize: bool,
     ) -> "SkillSourceRef":
         return SkillSourceRef(
             self.source_id,
             self.root,
             tuple(sorted(resource_versions, key=lambda item: item.path)),
             resource_semantic_digest,
-            sandbox_materialize,
         )
 
 
@@ -243,33 +237,27 @@ class AssetSkillResourceSource:
         logical_root = _normalize_relative_path(root, field_name="skill root")
         assets = await self._asset_infos(logical_root)
         resources = self._resource_infos(assets)
-        local = await self._local_resources(logical_root, assets)
         refs = await self._store.resolve_versions(
             tuple(info.key for _relative, info in resources)
         )
+        paths = await self._store.local_paths(tuple(ref.key for ref in refs))
         versions: list[SkillResourceVersion] = []
-        for (relative, info), ref in zip(resources, refs, strict=True):
-            if ref.key != info.key or ref.etag != info.etag or ref.size != info.size:
+        for (relative, info), ref, path in zip(resources, refs, paths, strict=True):
+            if not ref.matches_info(info):
                 raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
             mode = 0
-            if local is not None:
+            if path is not None:
                 try:
-                    mode = (
-                        await asyncio.to_thread(local[1][relative].stat)
-                    ).st_mode & 0o111
+                    mode = (await asyncio.to_thread(path.stat)).st_mode & 0o111
                 except OSError as error:
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             _validate_resource_mode(mode)
             versions.append(SkillResourceVersion(relative, ref, mode))
         resolved_versions = tuple(sorted(versions, key=lambda item: item.path))
-        digest = _skill_resource_semantic_digest(
-            resolved_versions,
-            sandbox_materialize=local is not None,
-        )
+        digest = _skill_resource_semantic_digest(resolved_versions)
         return SkillSourceRef(self._id, logical_root).with_asset_versions(
             resolved_versions,
             digest,
-            sandbox_materialize=local is not None,
         )
 
     async def _asset_infos(
@@ -372,15 +360,12 @@ def _validate_resource_mode(mode: object) -> None:
 
 def _skill_resource_semantic_digest(
     resources: Sequence[SkillResourceVersion],
-    *,
-    sandbox_materialize: bool,
 ) -> str:
     return hashlib.sha256(
         canonical_json_bytes(
             {
                 "version": 1,
                 "kind": "skill-resource-semantics",
-                "sandbox_materialize": sandbox_materialize,
                 "files": [
                     {
                         "path": item.path,
@@ -445,15 +430,9 @@ class AssetVersionSkillResourceSource:
             tuple(item.path for item in binding.resource_versions),
         )
 
-    async def sandbox_materialize(self, root: str) -> bool:
-        return self._root(root).sandbox_materialize
-
     async def semantic_digest(self, root: str) -> str:
         binding = self._root(root)
-        actual = _skill_resource_semantic_digest(
-            binding.resource_versions,
-            sandbox_materialize=binding.sandbox_materialize,
-        )
+        actual = _skill_resource_semantic_digest(binding.resource_versions)
         if actual != binding.resource_semantic_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return actual

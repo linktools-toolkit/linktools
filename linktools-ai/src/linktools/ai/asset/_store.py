@@ -381,7 +381,7 @@ class AssetStore:
         self,
         refs: Sequence[AssetVersionRef],
     ) -> "tuple[bytes, ...]":
-        """Read exact historical Asset versions and verify their integrity."""
+        """Read referenced Asset bytes and verify their size and digest."""
         self._ensure_ready()
         values: list[bytes] = []
         for ref in refs:
@@ -478,14 +478,24 @@ class AssetStore:
         if len(set(selected)) != len(selected):
             raise ValueError("asset snapshot keys must be unique")
         infos = {info.key: info for info in await self.metadata_snapshot()}
+        ordered = tuple(sorted(selected, key=lambda item: (item.kind, item.id)))
+        if any(key not in infos for key in ordered):
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        refs = await self.resolve_versions(ordered)
+        if len(refs) != len(ordered):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if any(
+            not ref.matches_info(infos[key])
+            for key, ref in zip(ordered, refs, strict=True)
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
         entries: list[dict[str, JsonValue]] = []
-        for key in sorted(selected, key=lambda item: (item.kind, item.id)):
-            info = infos.get(key)
-            if info is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            value = await self.get(key)
-            if value is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        for key, ref in zip(ordered, refs, strict=True):
+            values = await self.read_versions((ref,))
+            if len(values) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            value = values[0]
+            info = infos[key]
             content_key = f"v{_SNAPSHOT_VERSION}/asset-content/{info.etag}"
             await _put_snapshot_object(object_store, content_key, value)
             entries.append(_snapshot_entry(info, content_key))
@@ -783,12 +793,7 @@ class _SnapshotAssetStore(AssetStore):
             if ref.source_id != "snapshot":
                 raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
             info = self._entries.get(ref.key)
-            if (
-                info is None
-                or info.revision != ref.revision
-                or info.etag != ref.etag
-                or info.size != ref.size
-            ):
+            if info is None or not ref.matches_info(info):
                 raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
             value = await self.get(ref.key)
             if value is None:

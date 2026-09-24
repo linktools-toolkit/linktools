@@ -5,13 +5,16 @@
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import ClassVar, Literal
+from dataclasses import dataclass, field
+from typing import ClassVar, Literal, cast
 
 from ..asset import AssetKey
 from ..core import (
+    ImmutableJsonMapping,
+    JsonValue,
     ThinkingEffort,
     ThinkingValue,
+    normalize_json_value,
     normalize_thinking,
     validate_logical_id,
 )
@@ -207,6 +210,7 @@ class AgentSpec:
     output_retries: int = DEFAULT_OUTPUT_RETRIES
     description: "str | None" = None
     preload_skills: "tuple[str, ...]" = ()
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
@@ -261,6 +265,7 @@ class AgentSpec:
         object.__setattr__(self, "allow_capabilities", allow_capabilities)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "preload_skills", preload_skills)
+        object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +273,7 @@ class SkillSpec:
     id: str
     content: str
     description: "str | None" = None
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_logical_id(self.id)
@@ -277,6 +283,18 @@ class SkillSpec:
             not isinstance(self.description, str) or not 1 <= len(self.description) <= 1024
         ):
             raise ValueError("skill description must contain 1..1024 characters")
+        object.__setattr__(self, "metadata", _validated_metadata(self.metadata))
+
+
+def _validated_metadata(value: object) -> Mapping[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise TypeError("spec metadata must be a mapping")
+    if "linktools-revision" in value:
+        raise ValueError("linktools-revision is reserved")
+    normalized = normalize_json_value(dict(value))
+    return ImmutableJsonMapping(
+        cast("dict[str, JsonValue]", normalized), allow_empty_keys=True
+    )
 
 
 @dataclass(frozen=True, slots=True)

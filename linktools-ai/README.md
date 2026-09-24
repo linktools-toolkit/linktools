@@ -7,7 +7,7 @@ namespace
     + ModelRegistry
     + RuntimeState
     + CapabilityGroup(s)
-        -> optional Workspace via CapabilityGroup(..., workspace=...)
+        -> optional, independent Workspace and Sandbox via CapabilityGroup(...)
         -> Runtime.open(...)
         -> snapshotted capability/declaration candidates
         -> AgentCompiler
@@ -20,9 +20,9 @@ namespace
 The main ownership rules are:
 
 - `Runtime` owns a stable persistence namespace; it does not require a filesystem Workspace.
-- `Workspace` owns paths, policy, and sandbox configuration when installed through `CapabilityGroup(..., workspace=...)`; it is not a persistence identity.
+- `Workspace` owns paths and policy; it is not a persistence identity.
 - `AssetStore` stores raw asset bytes. It does not interpret declarations.
-- `CapabilityGroup` is the only public registration/discovery composition unit. A group captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
+- `CapabilityGroup` is the only public registration/discovery composition unit. It can provide a Workspace or Sandbox independently and captures direct registrations and, when store-backed, one declaration view pinned to Asset version references.
 - `AgentSpec` is a runtime-independent Agent declaration.
 - `AgentCompiler` is the sole Agent-level selector. It resolves model, tool, Skill, MCP, capability, and Subagent candidates from the snapshotted Runtime candidate set.
 - `Runtime` is the composition root and owns the service graph.
@@ -138,12 +138,31 @@ these declarations instead of inferring behavior from Tool names.
 Workspace tools and sandbox boundary only. It does not discover Agent, Skill, or
 MCP declarations from Workspace paths.
 
-Agent, Skill, and MCP declarations use one explicit source: pass a ready
+Agent, Skill, MCP, and repository rule files use one explicit source: pass a ready
 `AssetStore` with `CapabilityGroup(..., assets=store)`. A store-backed group
 captures the declaration metadata visible when snapshot capture starts. Assets added
 afterward are ignored for that snapshot; assets actually read by a loader must
 still match their captured metadata through verification. Conflicting
 identities or layouts fail closed.
+
+Every Asset kind uses `AssetVersionRef` for byte-version reads through
+`AssetStore.resolve_versions()` and `read_versions()`. Agent, Skill, MCP, and
+Rule declarations are read from the versions captured by the group. Writable
+Asset backends retain historical versions; `DirectoryAssetBackend` is a
+read-only view of local files and ignores the requested revision by default.
+For that backend, `AssetStore` verifies the current bytes against the captured
+size and digest, so changed or missing content cannot satisfy a version read.
+Declaration format versions and semantic fingerprints are separate from Asset
+byte versions.
+
+Repository rules use the `rule` Asset kind and Markdown keys such as
+`AssetKey("rule", "review.md")` or `AssetKey("rule", "python/strict.md")`.
+Optional YAML frontmatter can declare a Workspace-relative `scope`; without it,
+the rule applies at the root. Runtime reads rules from the captured Asset
+versions when a Workspace is present, while `AGENTS.md` is resolved from the
+Workspace directory. The Workspace's `.linktools/rules` directory is not an
+implicit rule source. A directory-backed AssetStore can expose local rule files
+through `DirectoryAssetBackend` and a `PrefixAssetPathAdapter`.
 
 For downstream declaration formats or custom kinds such as `worker` or
 `audit`, implement `CapabilityLoader` and register it for its input Asset
@@ -167,6 +186,13 @@ Custom source kinds such as `worker` can use
 layouts with validated defaults. Defaults fill missing declaration fields;
 explicit Agent fields take precedence.
 
+`AGENT.md` and `SKILL.md` frontmatter, as well as flat Agent and Skill JSON
+declarations, may include a `metadata` map for extra data such as `author` or
+`version`. Values may be any JSON value, including nested maps and arrays.
+Metadata is retained in Agent and Skill specs and their spec wire payloads,
+but does not affect semantic fingerprints. Skill metadata is omitted from the
+instructions shown to the model.
+
 `CapabilityGroup.snapshot()` returns a `CapabilityGroupSnapshot`. Pass that
 snapshot to `Runtime.open()` when the host also needs to inspect the same
 snapshotted contributions; this avoids parsing the source declarations twice.
@@ -180,70 +206,79 @@ all effective Skill assets under the declared resource root map to one
 consistent local package tree. The declaration filename is loader-defined; it
 does not need to be `SKILL.md`. This allows Skill scripts to be invoked by
 absolute path without letting a single file symlink redefine the package root.
-If an overlay mixes resource origins, the Skill is exposed as virtual instead
-of claiming a partial local tree. Durable executions pin Asset version references for Skill resources and read
-them through AssetStore when needed. AssetStore verifies the bound version digest and
-size before the bytes are used; a source that can no longer reproduce the
-bound version content fails integrity instead of silently using changed content. A
-filesystem path is only materialized temporarily at the sandbox boundary;
-Runtime does not copy Skill resource bytes into its ObjectStore.
+If an overlay mixes resource origins, the declaration view is virtual rather
+than claiming a single native package directory. Bubblewrap can still bind
+its local files individually; LocalSandbox requires one matching native tree.
+Durable executions pin Asset version
+references for Skill resources and read them through AssetStore when needed.
+The Sandbox exposes existing local resource files by path after verifying their
+bound Asset versions and executable bits. Resources without native file paths
+remain available through `load_skill` but cannot be executed by file path.
+No Asset resource bytes are copied to a temporary directory or Runtime ObjectStore.
+Because the paths point to original files, external edits after verification
+can be observed by an already running process.
 
 For a store-backed `CapabilityGroup`, an `MCPServerSpec` may declare
 `resource_root=AssetKey("mcp", "server/assets")`. Arguments whose complete
 value starts with `resource:` then name files below that root. Runtime resolves the selected resource files to Asset version references,
-rejects absolute paths, traversal, and missing files, and reads those refs
-through AssetStore when materializing the temporary MCP process directory.
-Digest and size are verified before use. Asset updates after the
+rejects absolute paths, traversal, and missing files, and verifies those refs
+through AssetStore before use. `resource:` arguments require local Asset files:
+host MCP receives their original absolute paths and Bubblewrap mounts each
+selected file read-only. Asset updates after the
 CapabilityGroup snapshot do not alter that declaration snapshot; a later
-CapabilityGroup snapshot sees the newer Asset versions. Runtime does not persist
-a second copy of MCP resource bytes.
+CapabilityGroup snapshot sees the newer Asset versions. Runtime does not copy
+MCP resource bytes to a temporary directory or persist a second copy.
 Without `resource_root`, existing argument strings keep their original
 meaning.
 
-### Workspace sandbox
+### Execution sandbox
 
-Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `Workspace(..., sandbox=...)`, `Workspace.load(..., sandbox=...)`, or `Workspace.discover(..., sandbox=...)`.
+Workspace filesystem and shell tool effects run through the public `Sandbox` / `SandboxSession` boundary. Inject a custom implementation with `CapabilityGroup(..., sandbox=...)`; the Workspace can come from the same or another group. A Sandbox can also be configured without a Workspace for Skill resource paths and MCP stdio.
 
-When `sandbox=None`, LinkTools uses its built-in local adapter. LinkTools owns
-the stable model-visible workspace tool signatures, descriptions, metadata, and
-durable semantic pins.
+When a Workspace is present and no Sandbox is configured, LinkTools uses its
+built-in local adapter. Without either, MCP stdio runs on the host and Skill
+locations remain virtual. LinkTools owns the stable model-visible workspace
+tool signatures, descriptions, metadata, and durable semantic pins.
 
-A run with no selected workspace filesystem/shell tools does not open a sandbox. Otherwise the run opens exactly one `SandboxSession`; filesystem tools, foreground shell commands, and background `start/check/stop` commands share that session, which is closed when the model run succeeds, fails, or is cancelled.
+A run opens a `SandboxSession` when it needs a selected Workspace filesystem/shell tool, a local Skill resource path, or a sandboxed MCP server. Workspace tool commands share that session, which is closed when the model run succeeds, fails, or is cancelled. Without a Workspace, the Sandbox uses the host current directory captured when Runtime opens as its execution root.
 
 Use `DisabledSandbox` to keep workspace tool declarations and historical binding recovery available while making runtime workspace tool materialization fail with `SANDBOX_UNAVAILABLE`. A custom Sandbox failure does not fall back to the local host environment.
 
-`LocalSandbox` runs with the workspace as its current directory and is an
-execution boundary, not an operating-system security boundary. On Linux,
+`LocalSandbox` runs with the selected execution root as its current directory.
+It is an execution boundary, not an operating-system security boundary. On Linux,
 `BubblewrapSandbox` is an explicit deployment choice. It requires a non-root
 user, usable unprivileged namespaces, `bwrap >= 0.12.0`, and a trusted
 read-only runtime rootfs containing the same LinkTools build and Python >=
 3.10. It has no automatic Local fallback. Bubblewrap isolates Session
-file/command execution and Workspace-bound MCP stdio. The host Agent, model
+file/command execution and sandboxed MCP stdio. The host Agent, model
 requests, and Python custom tools remain outside it. A restricted MCP process
-sees the Workspace under its configured read policy and its own declared
-resources as read-only, with no external network route. LocalSandbox,
-DisabledSandbox, and file-only custom sessions reject Workspace-bound MCP
-stdio. MCP stdio without a Workspace remains a trusted host process.
+sees the selected execution root under its configured read policy and its own
+declared resources as read-only, with no external network route. LocalSandbox,
+DisabledSandbox, and file-only custom sessions reject sandboxed MCP
+stdio. MCP stdio without a configured Sandbox remains a trusted host process.
 
-Selected local Skills are exposed as read-only `SandboxResource` directories at
-`/skills/<key>` in Bubblewrap and at their validated host location in Local
-sessions. The mapping is derived for the current run and is not persisted into
-Skill declarations. Background command state is ephemeral and is cleaned up
+Selected local Skills are exposed at `/skills/r<hash>` in Bubblewrap through
+read-only file mounts and at their original package location in Local sessions.
+The mapping is derived for the current run and is not persisted into Skill
+declarations. Background command state is ephemeral and is cleaned up
 with the Session; it is not a cross-run service.
 
 For a read-only Runtime session, configure the supported backend with one
 immutable policy. Rules are root-relative POSIX patterns; an empty rule set
-denies reads, and resource rules are keyed by `SandboxResource.key`:
+denies reads, and resource rules are keyed by `SandboxResource.id`:
 
 ```python
+from linktools.ai import CapabilityGroup, Workspace
 from linktools.ai.workspace import LocalSandbox, ReadOnlySandboxPolicy
 
 readonly = ReadOnlySandboxPolicy(
     readable_paths=("src/**", "README.md"),
     resource_paths={"review": ("**",)},
 )
-workspace = Workspace.load(
-    "/workspace/project",
+workspace = Workspace.load("/workspace/project")
+group = CapabilityGroup(
+    "workspace",
+    workspace=workspace,
     sandbox=LocalSandbox(read_policy=readonly),
 )
 ```

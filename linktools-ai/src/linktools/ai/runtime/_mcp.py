@@ -4,11 +4,8 @@
 
 import asyncio
 import json
-import os
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, NoReturn, cast
 
 from linktools.core import environ
@@ -37,12 +34,12 @@ from ..spec import (
     parse_mcp_tool_selector,
 )
 from ..workspace import (
+    Sandbox,
     SandboxResource,
     SandboxResourcePath,
     SandboxStdioProcess,
     StdioSandbox,
     StdioSandboxSession,
-    Workspace,
 )
 from ._tool import ToolOperationBridge
 from ._tool_boundary import (
@@ -73,18 +70,11 @@ class _MCPResourceBinding:
     execution_policy: Mapping[str, JsonValue]
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _MCPResourceProjection:
     server_id: str
     args: tuple[str | SandboxResourcePath, ...]
     resources: tuple[SandboxResource, ...]
-    directory: "tempfile.TemporaryDirectory[str] | None"
-
-    async def close(self) -> None:
-        directory = self.directory
-        if directory is not None:
-            await _cleanup_resource_directory(directory)
-            self.directory = None
 
 
 class _MCPModelToolset(WrapperToolset[object]):
@@ -208,7 +198,7 @@ class _MCPRuntimeCapability(AbstractCapability[AgentContext[object]]):
 async def close_mcp_resources(
     capabilities: Sequence[AbstractCapability[AgentContext[object]]],
 ) -> None:
-    """Release temporary directories used by bound MCP resources."""
+    """Close selected MCP client processes."""
     failure: BaseException | None = None
     for capability in capabilities:
         if isinstance(capability, _MCPRuntimeCapability):
@@ -221,38 +211,10 @@ async def close_mcp_resources(
         _raise_cleanup_failure(failure)
 
 
-async def close_mcp_projections(
-    projections: Mapping[str, _MCPResourceProjection],
-) -> None:
-    failure: BaseException | None = None
-    for projection in projections.values():
-        try:
-            await projection.close()
-        except BaseException as error:
-            if failure is None:
-                failure = error
-    if failure is not None:
-        _raise_cleanup_failure(failure)
-
-
 def _raise_cleanup_failure(error: BaseException) -> None:
     if isinstance(error, (AIError, asyncio.CancelledError)):
         raise error
     raise AIError(ErrorCode.SANDBOX_CLEANUP_FAILED) from error
-
-
-async def _cleanup_resource_directory(
-    directory: tempfile.TemporaryDirectory[str],
-) -> None:
-    task = asyncio.create_task(asyncio.to_thread(directory.cleanup))
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        try:
-            await asyncio.shield(task)
-        except BaseException as cleanup_error:
-            raise cancellation from cleanup_error
-        raise cancellation
 
 
 def _raise_primary_after_cleanup(
@@ -269,9 +231,9 @@ def _raise_primary_after_cleanup(
 
 def validate_mcp_binding_policy(
     resources: Mapping[str, _MCPResourceBinding],
-    workspace: Workspace | None,
+    sandbox: Sandbox | None,
 ) -> None:
-    current_policy = _current_execution_policy(workspace)
+    current_policy = _current_execution_policy(sandbox)
     if any(
         dict(binding.execution_policy) != dict(current_policy)
         for binding in resources.values()
@@ -286,75 +248,72 @@ async def prepare_mcp_resource_projections(
     asset_readers: Mapping[str, AssetStoreReader],
     sandboxed: bool,
 ) -> dict[str, _MCPResourceProjection]:
-    """Verify and materialize each selected server's bound Asset versions."""
+    """Verify selected Asset versions and expose existing local resource files."""
     projections: dict[str, _MCPResourceProjection] = {}
-    try:
-        for server in servers:
-            binding = resources.get(server.id)
-            if binding is None:
+    for server in servers:
+        binding = resources.get(server.id)
+        if binding is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if server.resource_root is None:
+            if (
+                binding.versions is not None
+                or binding.resource_semantic_digest is not None
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if server.resource_root is None:
-                if binding.versions is not None or binding.resource_semantic_digest is not None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if any(argument.startswith("resource:") for argument in server.args):
-                    raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-                projections[server.id] = _MCPResourceProjection(
-                    server.id,
-                    tuple(server.args),
-                    (),
-                    None,
-                )
-                continue
-            if binding.source_id is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            reader = asset_readers.get(binding.source_id)
-            if reader is None:
-                raise AIError(
-                    ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={
-                        "kind": "mcp_asset_source",
-                        "source_id": binding.source_id,
-                        "server_id": server.id,
-                    },
-                )
-            directory = await _materialize_resource_versions(
-                server,
-                binding,
-                reader,
+            if any(argument.startswith("resource:") for argument in server.args):
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+            projections[server.id] = _MCPResourceProjection(
+                server.id,
+                tuple(server.args),
+                (),
             )
-            try:
-                arguments: list[str | SandboxResourcePath] = []
-                for argument in server.args:
-                    if not argument.startswith("resource:"):
-                        arguments.append(argument)
-                        continue
-                    relative = argument[len("resource:") :]
-                    target = _resource_target(directory.name, relative)
-                    arguments.append(
-                        SandboxResourcePath(server.id, relative)
-                        if sandboxed
-                        else str(target)
-                    )
-                projections[server.id] = _MCPResourceProjection(
-                    server.id,
-                    tuple(arguments),
-                    (SandboxResource(server.id, Path(directory.name)),)
-                    if sandboxed
-                    else (),
-                    directory,
-                )
-            except BaseException as primary_error:
-                try:
-                    await _cleanup_resource_directory(directory)
-                except BaseException as cleanup_error:
-                    _raise_primary_after_cleanup(primary_error, cleanup_error)
-                raise
-    except BaseException as primary_error:
-        try:
-            await close_mcp_projections(projections)
-        except BaseException as cleanup_error:
-            _raise_primary_after_cleanup(primary_error, cleanup_error)
-        raise
+            continue
+        if binding.source_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        reader = asset_readers.get(binding.source_id)
+        if reader is None:
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={
+                    "kind": "mcp_asset_source",
+                    "source_id": binding.source_id,
+                    "server_id": server.id,
+                },
+            )
+        versions = _bound_resource_versions(server, binding)
+        resource = await SandboxResource.from_asset_versions(
+            server.id,
+            reader,
+            versions,
+        )
+        if resource is None:
+            await reader.read_versions(tuple(versions.values()))
+        local_files = None if resource is None else resource.files
+        if local_files is None and any(
+            argument.startswith("resource:") for argument in server.args
+        ):
+            raise AIError(
+                ErrorCode.CAPABILITY_REQUIRED_MISSING,
+                safe_details={"kind": "mcp_local_resource", "server_id": server.id},
+            )
+        arguments: list[str | SandboxResourcePath] = []
+        for argument in server.args:
+            if not argument.startswith("resource:"):
+                arguments.append(argument)
+                continue
+            relative = argument[len("resource:") :]
+            if local_files is None:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+            arguments.append(
+                SandboxResourcePath(server.id, relative)
+                if sandboxed
+                else str(local_files[relative])
+            )
+        projections[server.id] = _MCPResourceProjection(
+            server.id,
+            tuple(arguments),
+            (resource,) if sandboxed and resource is not None else (),
+        )
     return projections
 
 
@@ -362,7 +321,7 @@ async def materialize_mcp_capabilities(
     servers: Sequence[MCPServerSpec],
     selectors: Sequence[str],
     *,
-    workspace: Workspace | None,
+    sandbox: Sandbox | None,
     sandbox_session: object | None,
     host_cwd: "str | None",
     resource_bindings: Mapping[str, _MCPResourceBinding],
@@ -377,13 +336,13 @@ async def materialize_mcp_capabilities(
     policy, required = _selector_policy(selectors)
     descriptor = managed_tool_descriptor_from_metadata(_MCP_TOOL_METADATA)
     values: list[AbstractCapability[AgentContext[object]]] = []
-    current_policy = _current_execution_policy(workspace)
-    if workspace is not None and not isinstance(
+    current_policy = _current_execution_policy(sandbox)
+    if sandbox is not None and not isinstance(
         sandbox_session,
         StdioSandboxSession,
     ):
         raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-    if policy and workspace is None and host_cwd is None:
+    if policy and sandbox is None and host_cwd is None:
         raise AIError(
             ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
             safe_details={"reason": "mcp_cwd_unavailable"},
@@ -399,7 +358,7 @@ async def materialize_mcp_capabilities(
             if dict(binding.execution_policy) != dict(current_policy):
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
             allowed = policy[server.id]
-            if workspace is None:
+            if sandbox is None:
                 transport = StdioTransport(
                     server.command,
                     list(cast("Sequence[str]", projection.args)),
@@ -459,11 +418,10 @@ async def materialize_mcp_capabilities(
     return tuple(values)
 
 
-async def _materialize_resource_versions(
+def _bound_resource_versions(
     server: MCPServerSpec,
     binding: _MCPResourceBinding,
-    asset_reader: AssetStoreReader,
-) -> "tempfile.TemporaryDirectory[str]":
+) -> "dict[str, AssetVersionRef]":
     if binding.versions is None or binding.resource_semantic_digest is None:
         raise AIError(
             ErrorCode.CAPABILITY_REQUIRED_MISSING,
@@ -502,28 +460,7 @@ async def _materialize_resource_versions(
             relative = argument[len("resource:") :]
             if relative not in values:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    versions = tuple(values[relative] for relative in sorted(values))
-    bodies = await asset_reader.read_versions(versions)
-    directory = tempfile.TemporaryDirectory(prefix="linktools-mcp-")
-    try:
-        for relative, body in zip(sorted(values), bodies, strict=True):
-            target = _resource_target(directory.name, relative)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(body)
-        return directory
-    except BaseException as primary_error:
-        try:
-            await _cleanup_resource_directory(directory)
-        except BaseException as cleanup_error:
-            _raise_primary_after_cleanup(primary_error, cleanup_error)
-        raise
-
-def _resource_target(root: str, relative: str) -> Path:
-    validate_resource_path(relative)
-    target = os.path.abspath(os.path.join(root, *relative.split("/")))
-    if not target.startswith(os.path.abspath(root) + os.sep):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return Path(target)
+    return {relative: values[relative] for relative in sorted(values)}
 
 
 def _selector_policy(
@@ -580,14 +517,13 @@ def _model_tool_name(server_id: str, tool_name: str) -> str:
 
 
 def _current_execution_policy(
-    workspace: Workspace | None,
+    sandbox: Sandbox | None,
 ) -> Mapping[str, JsonValue]:
-    if workspace is None:
+    if sandbox is None:
         return {"version": 1, "boundary": "host-stdio"}
-    backend = workspace.sandbox
-    if not isinstance(backend, StdioSandbox):
+    if not isinstance(sandbox, StdioSandbox):
         raise AIError(ErrorCode.SANDBOX_UNAVAILABLE)
-    return backend.stdio_execution_policy()
+    return sandbox.stdio_execution_policy()
 
 
 __all__ = []

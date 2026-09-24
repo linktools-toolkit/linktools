@@ -22,7 +22,7 @@ from ..workspace import (
 
 
 class _SandboxMCPTransport(ClientTransport):
-    """Use a Workspace session's supervised stdio process as an MCP transport."""
+    """Use a Sandbox session's supervised stdio process as an MCP transport."""
 
     def __init__(
         self,

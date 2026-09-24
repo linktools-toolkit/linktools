@@ -79,6 +79,15 @@ class AssetVersionRef:
             "size": self.size,
         }
 
+    def matches_info(self, info: "AssetInfo") -> bool:
+        """Check the captured key, entry revision, and byte integrity fields."""
+        return (
+            self.key == info.key
+            and self.revision == info.revision
+            and self.etag == info.etag
+            and self.size == info.size
+        )
+
     @classmethod
     def from_payload(cls, value: object) -> "AssetVersionRef":
         if not isinstance(value, Mapping) or set(value) != {

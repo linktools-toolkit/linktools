@@ -6,14 +6,40 @@ from pathlib import Path
 
 import pytest
 
+from linktools.ai.asset import (
+    AssetStore,
+    DirectoryAssetBackend,
+    PrefixAssetPathAdapter,
+)
 from linktools.ai.capability import CapabilityGroup
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import Runtime, RuntimeState
 from linktools.ai.runtime import _factory as runtime_factory
-from linktools.ai.workspace import Workspace
+from linktools.ai.storage import StorageOverlay
+from linktools.ai.workspace import (
+    DisabledSandbox,
+    LocalSandbox,
+    SandboxResource,
+    SandboxSession,
+    Workspace,
+)
 
 from ._runtime_test_helpers import RuntimeUsageModels
+
+
+class _RecordingLocalSandbox:
+    def __init__(self) -> None:
+        self.opened: list[tuple[Path, tuple[SandboxResource, ...]]] = []
+
+    async def open(
+        self,
+        *,
+        root: Path,
+        resources: tuple[SandboxResource, ...] = (),
+    ) -> SandboxSession:
+        self.opened.append((root, resources))
+        return await LocalSandbox().open(root=root, resources=resources)
 
 
 @pytest.mark.asyncio
@@ -61,6 +87,138 @@ async def test_workspace_less_runtime_rejects_files_and_explicit_cwd() -> None:
             "field": "cwd",
             "reason": "workspace_required",
         }
+
+
+@pytest.mark.asyncio
+async def test_workspace_group_sandbox_controls_input_reads(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
+    (tmp_path / "evidence.txt").write_text("evidence", encoding="utf-8")
+    group = CapabilityGroup(
+        "workspace",
+        workspace=workspace,
+        sandbox=DisabledSandbox(),
+    )
+
+    async with Runtime.open(
+        "workspace-sandbox",
+        models=RuntimeUsageModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(group,),
+    ) as runtime:
+        with pytest.raises(AIError) as error:
+            await runtime.agent("default").run(
+                "inspect",
+                files=("evidence.txt",),
+            )
+
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_sandbox_group_can_be_composed_without_workspace() -> None:
+    sandbox = DisabledSandbox()
+    group = CapabilityGroup("sandbox", sandbox=sandbox)
+    snapshot = await group.snapshot()
+    assert snapshot.workspace is None
+    assert snapshot.sandbox is sandbox
+
+    async with Runtime.open(
+        "sandbox-only",
+        models=RuntimeUsageModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(group,),
+    ) as runtime:
+        result = await runtime.agent("default").run("hello", timeout_seconds=10)
+    assert result.status is ExecutionStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_sandbox_without_workspace_exposes_local_skill_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "assets" / "skills" / "review"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review files\n---\n\nRun the script.\n",
+        encoding="utf-8",
+    )
+    script = package / "run.sh"
+    script.write_text("#!/bin/sh\necho ready\n", encoding="utf-8")
+    script.chmod(0o755)
+    store = AssetStore(
+        StorageOverlay(
+            DirectoryAssetBackend(
+                str(tmp_path / "assets"),
+                path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
+                kinds=("skill",),
+            )
+        )
+    )
+    await store.initialize()
+    sandbox = _RecordingLocalSandbox()
+    monkeypatch.chdir(tmp_path)
+    try:
+        async with Runtime.open(
+            "sandbox-skill",
+            models=RuntimeUsageModels(),  # type: ignore[arg-type]
+            state=RuntimeState.in_memory(),
+            capabilities=(
+                CapabilityGroup("assets", assets=store),
+                CapabilityGroup("sandbox", sandbox=sandbox),
+            ),
+        ) as runtime:
+            result = await runtime.agent("default").run(
+                "review",
+                timeout_seconds=10,
+            )
+        assert result.status is ExecutionStatus.SUCCEEDED
+        assert len(sandbox.opened) == 1
+        root, resources = sandbox.opened[0]
+        assert root == tmp_path.resolve()
+        assert len(resources) == 1
+        assert resources[0].files is not None
+        assert resources[0].files["run.sh"] == script.resolve()
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_separate_sandbox_group_controls_workspace_input_reads(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "evidence.txt").write_text("evidence", encoding="utf-8")
+    async with Runtime.open(
+        "separate-sandbox",
+        models=RuntimeUsageModels(),  # type: ignore[arg-type]
+        state=RuntimeState.in_memory(),
+        capabilities=(
+            CapabilityGroup("workspace", workspace=Workspace.load(tmp_path)),
+            CapabilityGroup("sandbox", sandbox=DisabledSandbox()),
+        ),
+    ) as runtime:
+        with pytest.raises(AIError) as error:
+            await runtime.agent("default").run(
+                "inspect",
+                files=("evidence.txt",),
+            )
+    assert error.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_multiple_sandbox_groups_conflict() -> None:
+    with pytest.raises(AIError) as error:
+        async with Runtime.open(
+            "sandbox-conflict",
+            models=RuntimeUsageModels(),  # type: ignore[arg-type]
+            state=RuntimeState.in_memory(),
+            capabilities=(
+                CapabilityGroup("first", sandbox=DisabledSandbox()),
+                CapabilityGroup("second", sandbox=DisabledSandbox()),
+            ),
+        ):
+            pass
+    assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
 @pytest.mark.asyncio
@@ -114,6 +272,6 @@ async def test_workspace_less_runtime_does_not_require_host_cwd(
     )
     try:
         backend = components.execution.runtime_backend()
-        assert backend._mcp_cwd is None  # type: ignore[attr-defined]
+        assert backend._execution_cwd is None  # type: ignore[attr-defined]
     finally:
         await components.close_callback()

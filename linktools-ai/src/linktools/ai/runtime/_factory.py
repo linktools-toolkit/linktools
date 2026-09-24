@@ -36,9 +36,11 @@ from ..spec import AgentSpec, MCPServerSpec
 from ..storage import ObjectStore, PayloadPolicy
 from ..task import DefaultTaskGraphService, LocalTaskGraphLauncher, TaskNodeHandler
 from ..workspace import (
+    AssetRuleCatalog,
     LocalRepositoryInstructionResolver,
-    LocalRuleCatalog,
+    LocalSandbox,
     RepositoryInstructionResolver,
+    Sandbox,
     Workspace,
 )
 from ._agent_executor import AgentExecutor
@@ -136,7 +138,15 @@ async def compose_runtime_components(
     workspace_groups = tuple(group for group in groups if group.workspace is not None)
     if len(workspace_groups) > 1:
         raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+    sandbox_groups = tuple(group for group in groups if group.sandbox is not None)
+    if len(sandbox_groups) > 1:
+        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
     workspace = None if not workspace_groups else workspace_groups[0].workspace
+    sandbox = (
+        sandbox_groups[0].sandbox
+        if sandbox_groups
+        else LocalSandbox() if workspace is not None else None
+    )
     if workspace is not None:
         workspace.policy.validate()
 
@@ -234,16 +244,21 @@ async def compose_runtime_components(
         if workspace is None:
             instruction_resolver: RepositoryInstructionResolver | None = None
             workspace_access = None
-            mcp_cwd = _capture_host_cwd()
+            execution_cwd = _capture_host_cwd()
         else:
-            rules = await LocalRuleCatalog.load(workspace.root, workspace.policy)
+            rules = await AssetRuleCatalog.load(asset_sources, workspace.policy)
+            for group in groups:
+                await group.verify_source_revision()
             instruction_resolver = LocalRepositoryInstructionResolver(
                 workspace.root,
                 workspace.policy,
                 rules,
             )
-            workspace_access = WorkspaceAccess.for_workspace(workspace)
-            mcp_cwd = str(workspace.root)
+            workspace_access = WorkspaceAccess.for_workspace(
+                workspace,
+                sandbox=sandbox,
+            )
+            execution_cwd = str(workspace.root)
         object_key_factory = RuntimeObjectKeyFactory(resolved_namespace)
         payload_policy = PayloadPolicy()
         input_materializer = ExecutionInputMaterializer(
@@ -278,8 +293,9 @@ async def compose_runtime_components(
             tenant_id=effective_tenant_id,
             namespace=resolved_namespace,
             workspace=workspace,
+            sandbox=sandbox,
             limits=selected_limits,
-            mcp_cwd=mcp_cwd,
+            execution_cwd=execution_cwd,
             app=app,
             task_handlers=task_handlers,
             task_expanders=task_expanders,
@@ -466,8 +482,9 @@ async def _build_local_components(
     tenant_id: str,
     namespace: str,
     workspace: "Workspace | None",
+    sandbox: "Sandbox | None",
     limits: PromptLimits,
-    mcp_cwd: "str | None",
+    execution_cwd: "str | None",
     app: AppT,
     task_handlers: Sequence[TaskNodeHandler[AppT]],
     task_expanders: Sequence[TaskExpander],
@@ -522,7 +539,7 @@ async def _build_local_components(
         binding_resolver = _RuntimeBindingResolver(
             catalog,
             compiler,
-            workspace=workspace,
+            sandbox=sandbox,
             mcp_assets=mcp_assets,
         )
         execution = DefaultExecutionService(
@@ -554,6 +571,7 @@ async def _build_local_components(
             skill_sources,
             asset_sources=asset_sources,
             metrics=metric_buffer,
+            sandbox=sandbox,
         )
     except BaseException:
         actions: list[tuple[str, Callable[[], Awaitable[None]]]] = [
@@ -609,7 +627,7 @@ async def _build_local_components(
             tenant_id=tenant_id,
             workspace=workspace,
             limits=limits,
-            mcp_cwd=mcp_cwd,
+            execution_cwd=execution_cwd,
             instruction_resolver=instruction_resolver,
             app=app,
             step_reads={

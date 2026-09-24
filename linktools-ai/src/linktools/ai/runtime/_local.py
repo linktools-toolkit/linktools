@@ -249,7 +249,7 @@ class LocalExecutionBackend:
         restore_binding: "Callable[[AgentBindingSnapshot], AgentBinding] | None" = None,
         workspace: "Workspace | None",
         limits: PromptLimits,
-        mcp_cwd: "str | None",
+        execution_cwd: "str | None",
         instruction_resolver: RepositoryInstructionResolver | None = None,
         app: object,
         tenant_id: str,
@@ -279,7 +279,7 @@ class LocalExecutionBackend:
         self._restore_binding = restore_binding
         self._workspace = workspace
         self._limits = limits
-        self._mcp_cwd = mcp_cwd
+        self._execution_cwd = execution_cwd
         self._app = app
         self._tenant_id = validate_tenant_id(tenant_id)
         self._memory_store_factory = memory_store_factory
@@ -2893,7 +2893,7 @@ class LocalExecutionBackend:
                         context=public_context,
                         workspace=self._workspace,
                         limits=self._limits,
-                        mcp_cwd=self._mcp_cwd,
+                        execution_cwd=self._execution_cwd,
                         user_prompt=run_user_prompt,
                         initial_attachments=stored_input_attachment_views(
                             current.stored_user_input
