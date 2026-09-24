@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
@@ -107,10 +107,6 @@ class RepositoryInstructions:
         if wire_documents != _ordered_documents(wire_documents):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         return cls(wire_documents)
-
-    @property
-    def digest(self) -> str:
-        return canonical_sha256(self.to_payload())
 
     def render(self, *, include_preamble: bool = True) -> str:
         if not self.documents:

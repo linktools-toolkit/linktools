@@ -442,8 +442,6 @@ class DefaultExecutionService:
         if self._object_key_factory is None or self._payload_policy is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         payload = instructions.to_payload()
-        if canonical_sha256(payload) != instructions.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         inline = StoredPayload.inline_json(payload)
         if payload_fits_inline(inline, self._payload_policy):
             stored = inline
@@ -456,8 +454,6 @@ class DefaultExecutionService:
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
-        if stored.digest != instructions.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return RuntimePayloadRef(stored, RuntimeDomain.EXECUTION)
 
     async def _canonicalize_request(

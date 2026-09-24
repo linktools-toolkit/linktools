@@ -11,6 +11,7 @@ from pydantic_ai.messages import InstructionPart
 
 from ..capability import AgentContext
 from ..capability import ToolCallRetry
+from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..workspace import RepositoryInstructions
 from ._tool_boundary import RepositoryInstructionBoundary
@@ -82,9 +83,10 @@ def _validate_repository_instruction_frontier(
         return
     if overlay is None or not barriers:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    overlay_digest = canonical_sha256(overlay.to_payload())
     if (
-        reference.payload.digest != overlay.digest
-        or barriers[-1].resulting_overlay_digest != overlay.digest
+        reference.payload.digest != overlay_digest
+        or barriers[-1].resulting_overlay_digest != overlay_digest
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 

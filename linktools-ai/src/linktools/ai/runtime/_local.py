@@ -1306,10 +1306,7 @@ class LocalExecutionBackend:
             if error.code is ErrorCode.STORAGE_VERSION_UNSUPPORTED:
                 raise
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        if (
-            instructions.digest != payload.digest
-            or canonical_sha256(instructions.to_payload()) != payload.digest
-        ):
+        if canonical_sha256(instructions.to_payload()) != payload.digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return instructions
 
@@ -3842,8 +3839,6 @@ class LocalExecutionBackend:
         instructions: RepositoryInstructions,
     ) -> RuntimePayloadRef:
         payload = instructions.to_payload()
-        if canonical_sha256(payload) != instructions.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         inline = StoredPayload.inline_json(payload)
         if payload_fits_inline(inline, self._payload_policy):
             stored = inline
@@ -3856,8 +3851,6 @@ class LocalExecutionBackend:
                 canonical_json_bytes(payload),
             )
             stored = StoredPayload.object(reference)
-        if stored.digest != instructions.digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return RuntimePayloadRef(stored, RuntimeDomain.RECOVERY)
 
     async def commit_repository_instruction_barrier(
@@ -3867,7 +3860,7 @@ class LocalExecutionBackend:
         overlay: RepositoryInstructions,
         barrier: RepositoryInstructionBarrier,
     ) -> RecoveryCheckpoint:
-        if barrier.resulting_overlay_digest != overlay.digest:
+        if barrier.resulting_overlay_digest != canonical_sha256(overlay.to_payload()):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing = tuple(
             item

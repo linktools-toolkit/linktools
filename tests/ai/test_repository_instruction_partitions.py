@@ -67,15 +67,19 @@ def _checkpoint(
         "step",
         "call-a",
         canonical_sha256(arguments),
-        first.digest,
+        canonical_sha256(first.to_payload()),
     )
     latest_barrier = RepositoryInstructionBarrier(
         "step",
         "call-b",
         canonical_sha256({"path": "pkg/deep/file.txt"}),
-        latest.digest if latest_barrier_digest is None else latest_barrier_digest,
+        canonical_sha256(latest.to_payload())
+        if latest_barrier_digest is None
+        else latest_barrier_digest,
     )
-    reference = SimpleNamespace(payload=SimpleNamespace(digest=latest.digest))
+    reference = SimpleNamespace(
+        payload=SimpleNamespace(digest=canonical_sha256(latest.to_payload()))
+    )
     checkpoint = SimpleNamespace(
         state=RecoveryCheckpointState.ACTIVE,
         step_run_id="step",
