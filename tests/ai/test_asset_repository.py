@@ -78,6 +78,11 @@ async def test_group_snapshot_exposes_only_read_only_asset_access() -> None:
     assert not hasattr(reader, "put")
     assert await reader.get(key) == b"contents"
 
+    await store.put(key, b"changed")
+    with pytest.raises(AIError) as error:
+        await reader.get(key)
+    assert error.value.code is ErrorCode.SNAPSHOT_CONFLICT
+
 
 @pytest.mark.asyncio
 async def test_asset_snapshot_rejects_wrong_object_store_owner() -> None:
