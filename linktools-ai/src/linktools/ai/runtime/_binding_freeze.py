@@ -41,8 +41,6 @@ class _RuntimeBindingFreezer:
         *,
         workspace: Workspace | None,
         mcp_assets: "Mapping[str, AssetStoreReader] | None" = None,
-        asset_sources: "Mapping[str, tuple[AssetStoreReader, StorageRevision]] | None" = None,
-        mcp_revisions: "Mapping[str, StorageRevision] | None" = None,
     ) -> None:
         if not isinstance(catalog, AgentCatalog):
             raise TypeError("catalog must be AgentCatalog")
@@ -56,8 +54,6 @@ class _RuntimeBindingFreezer:
         self._objects = object_store
         self._workspace = workspace
         self._mcp_assets = dict(mcp_assets or {})
-        self._asset_sources = dict(asset_sources or {})
-        self._mcp_revisions = dict(mcp_revisions or {})
 
     @property
     def root_ids(self) -> tuple[str, ...]:
@@ -169,19 +165,12 @@ class _RuntimeBindingFreezer:
                             "server_id": server.id,
                         },
                     )
-                expected_revision = self._mcp_revisions.get(server.id)
-                if (
-                    expected_revision is not None
-                    and await store.current_revision() != expected_revision
-                ):
-                    raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
                 reference, resource_semantic_digest = (
                     await _snapshot_mcp_resources(
                         store,
                         server.resource_root,
                         server.args,
                         object_store=self._objects,
-                        expected_revision=expected_revision,
                     )
                 )
             elif any(argument.startswith("resource:") for argument in server.args):
@@ -218,7 +207,6 @@ class _RuntimeBindingFreezer:
             if source_ref is None or source_ref.snapshot is not None:
                 selected.append(pin)
                 continue
-            await self._verify_asset_source(source_ref.source_id)
             source = self._skill_sources.resolve(source_ref.source_id)
             if not isinstance(source, SnapshotSkillResourceSource):
                 raise AIError(
@@ -249,7 +237,6 @@ class _RuntimeBindingFreezer:
             resource_semantic_digest = await frozen_source.semantic_digest(
                 source_ref.root
             )
-            await self._verify_asset_source(source_ref.source_id)
             frozen_skill = SkillDefinition(
                 skill.spec,
                 source_ref.with_snapshot(reference, resource_semantic_digest),
@@ -262,15 +249,6 @@ class _RuntimeBindingFreezer:
                 )
             )
         return replace(snapshot, selected=tuple(selected))
-
-    async def _verify_asset_source(self, source_id: str) -> None:
-        asset_source = self._asset_sources.get(source_id)
-        if asset_source is None:
-            return
-        store, expected_revision = asset_source
-        if await store.current_revision() != expected_revision:
-            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
-
 
 def _mcp_execution_policy(
     workspace: Workspace | None,
