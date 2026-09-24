@@ -355,7 +355,6 @@ class SkillCapability(AbstractCapability[AgentContext[object]]):
         if source_ref is None:
             return result
         source = self._sources.resolve(source_ref.source_id)
-        await _verify_resource_semantics(source_ref, source)
         view = await source.inspect(source_ref.root)
         _validate_view(view)
         if definition.id in self._resource_paths:
