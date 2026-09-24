@@ -278,27 +278,45 @@ class _SemanticContribution(CapabilityContribution[AppT]):
 @dataclass(frozen=True, slots=True)
 class _CapabilityAssetReader:
     _store: AssetStore = field(repr=False, compare=False)
+    _revision: StorageRevision
+
+    async def _verify(self) -> None:
+        if await self._store.current_revision() != self._revision:
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
 
     async def current_revision(self) -> StorageRevision:
-        return await self._store.current_revision()
+        await self._verify()
+        return self._revision
 
     async def get(self, key: AssetKey) -> "bytes | None":
-        return await self._store.get(key)
+        await self._verify()
+        value = await self._store.get(key)
+        await self._verify()
+        return value
 
     async def get_many(
         self,
         keys: Sequence[AssetKey],
     ) -> "tuple[bytes | None, ...]":
-        return await self._store.get_many(keys)
+        await self._verify()
+        values = await self._store.get_many(keys)
+        await self._verify()
+        return values
 
     async def local_paths(
         self,
         keys: Sequence[AssetKey],
     ) -> "tuple[Path | None, ...]":
-        return await self._store.local_paths(keys)
+        await self._verify()
+        values = await self._store.local_paths(keys)
+        await self._verify()
+        return values
 
     async def metadata_snapshot(self) -> "tuple[AssetInfo, ...]":
-        return await self._store.metadata_snapshot()
+        await self._verify()
+        values = await self._store.metadata_snapshot()
+        await self._verify()
+        return values
 
     async def snapshot(
         self,
@@ -307,11 +325,19 @@ class _CapabilityAssetReader:
         object_store: ObjectStore,
         expected_revision: "StorageRevision | None" = None,
     ) -> ObjectRef:
-        return await self._store.snapshot(
+        if (
+            expected_revision is not None
+            and expected_revision != self._revision
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+        await self._verify()
+        reference = await self._store.snapshot(
             keys,
             object_store=object_store,
-            expected_revision=expected_revision,
+            expected_revision=self._revision,
         )
+        await self._verify()
+        return reference
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +360,11 @@ class CapabilityGroupSnapshot(Generic[AppT]):
         ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         if (self._asset_reader is None) != (self.source_revision is None):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            self.source_revision is not None
+            and not isinstance(self.source_revision, StorageRevision)
+        ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         object.__setattr__(self, "contributions", contributions)
 
@@ -780,7 +811,9 @@ class CapabilityGroup(Generic[AppT]):
             frozen_contributions,
             source_revision,
             self._workspace,
-            None if store is None else _CapabilityAssetReader(store),
+            None
+            if store is None
+            else _CapabilityAssetReader(store, cast(StorageRevision, source_revision)),
         )
         _logger.info(
             "capability group frozen: group=%s contributions=%d source_revision=%s",
