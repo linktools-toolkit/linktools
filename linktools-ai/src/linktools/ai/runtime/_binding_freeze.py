@@ -21,7 +21,7 @@ from ..capability import (
     validate_resource_path,
     validate_resource_tree,
 )
-from ..asset import AssetKey, AssetStoreReader
+from ..asset import AssetKey, AssetStoreReader, AssetVersionRef
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
@@ -136,21 +136,19 @@ class _RuntimeBindingFreezer:
             codec = MCPServerSpecCodec()
             if execution_policy is None:
                 execution_policy = _mcp_execution_policy(self._workspace)
-            server, resource_snapshot = codec.from_frozen_payload(
+            server, resource_versions = codec.from_frozen_payload(
                 cast("Mapping[str, object]", pin.contract)
             )
             current_policy = dict(execution_policy)
             frozen_policy = pin.contract.get("execution_policy")
             if frozen_policy is not None and dict(frozen_policy) != current_policy:
                 raise AIError(ErrorCode.CAPABILITY_POLICY_CONFLICT)
-            if resource_snapshot is not None:
-                if resource_snapshot.store_id != RUNTIME_OBJECT_STORE_ID:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if resource_versions is not None:
                 if frozen_policy is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 selected.append(pin)
                 continue
-            reference = None
+            frozen_versions = None
             resource_semantic_digest = None
             if server.resource_root is not None:
                 store = self._mcp_assets.get(server.id)
@@ -162,19 +160,12 @@ class _RuntimeBindingFreezer:
                             "server_id": server.id,
                         },
                     )
-                physical_reference, resource_semantic_digest = (
-                    await _snapshot_mcp_resources(
+                frozen_versions, resource_semantic_digest = (
+                    await _resolve_mcp_resource_versions(
                         store,
                         server.resource_root,
                         server.args,
-                        object_store=self._objects,
                     )
-                )
-                reference = ObjectRef(
-                    RUNTIME_OBJECT_STORE_ID,
-                    physical_reference.key,
-                    physical_reference.digest,
-                    physical_reference.size,
                 )
             elif any(argument.startswith("resource:") for argument in server.args):
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
@@ -184,7 +175,7 @@ class _RuntimeBindingFreezer:
                     pin.id,
                     codec.to_frozen_payload(
                         server,
-                        reference,
+                        frozen_versions,
                         resource_semantic_digest=resource_semantic_digest,
                         execution_policy=execution_policy,
                     ),
@@ -258,23 +249,18 @@ def _mcp_execution_policy(
 __all__ = ["_RuntimeBindingFreezer"]
 
 
-async def _snapshot_mcp_resources(
+async def _resolve_mcp_resource_versions(
     store: AssetStoreReader,
     root: AssetKey,
     args: Sequence[str],
-    *,
-    object_store: ObjectStore,
-    expected_revision: "StorageRevision | None" = None,
-) -> tuple[ObjectRef, str]:
-    revision = await store.current_revision()
-    if expected_revision is not None and revision != expected_revision:
-        raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
+) -> tuple[tuple[AssetVersionRef, ...], str]:
     infos = await store.metadata_snapshot()
     prefix = f"{root.id}/"
     selected_infos = tuple(
         info
         for info in infos
-        if info.key.kind == root.kind and info.key.id.startswith(prefix)
+        if info.key.kind == root.kind
+        and info.key.id.startswith(prefix)
         and info.key.id[len(prefix) :] not in {"mcp.json", "mcp.yaml"}
     )
     selected = tuple(info.key for info in selected_infos)
@@ -290,13 +276,14 @@ async def _snapshot_mcp_resources(
         validate_resource_path(relative)
         if relative not in available:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    reference = await store.snapshot(
-        selected,
-        object_store=object_store,
-        expected_revision=(
-            revision if expected_revision is None else expected_revision
-        ),
-    )
+    versions = await store.resolve_versions(selected)
+    for info, version in zip(selected_infos, versions, strict=True):
+        if (
+            version.key != info.key
+            or version.etag != info.etag
+            or version.size != info.size
+        ):
+            raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     resource_files = [
         {
             "path": info.key.id[len(prefix) :],
@@ -312,4 +299,5 @@ async def _snapshot_mcp_resources(
             "files": resource_files,
         }
     )
-    return reference, resource_semantic_digest
+    return tuple(versions), resource_semantic_digest
+
