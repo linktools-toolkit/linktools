@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal, Protocol, cast, runtime_checkable
 
-from ..asset import AssetInfo, AssetKey, AssetStoreReader
+from ..asset import AssetInfo, AssetKey, AssetStoreReader, AssetVersionRef
 from ..core import (
     DEFAULT_DISCOVERY_POLICY,
     JsonValue,
@@ -24,39 +24,64 @@ from ..storage import ObjectRef, ObjectStore, StorageRevision, read_object
 
 
 @dataclass(frozen=True, slots=True)
+class SkillResourceVersion:
+    path: str
+    asset: AssetVersionRef
+    executable_bits: int = 0
+
+    def __post_init__(self) -> None:
+        _normalize_resource_path(self.path)
+        if not isinstance(self.asset, AssetVersionRef):
+            raise TypeError("skill resource asset must be AssetVersionRef")
+        _validate_resource_mode(self.executable_bits)
+
+
+@dataclass(frozen=True, slots=True)
 class SkillSourceRef:
     source_id: str
     root: str
-    snapshot: "ObjectRef | None" = None
+    resource_versions: tuple[SkillResourceVersion, ...] = ()
     resource_semantic_digest: "str | None" = None
+    sandbox_materialize: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_id, str) or not self.source_id.strip():
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if self.snapshot is not None and not isinstance(self.snapshot, ObjectRef):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         try:
             validate_logical_id(self.root)
         except (TypeError, ValueError) as error:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-        if self.snapshot is None:
-            if self.resource_semantic_digest is not None:
+        versions = tuple(self.resource_versions)
+        if any(not isinstance(item, SkillResourceVersion) for item in versions):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        ordered = tuple(sorted(versions, key=lambda item: item.path))
+        if ordered != versions or len({item.path for item in versions}) != len(versions):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if self.resource_semantic_digest is None:
+            if versions or self.sandbox_materialize:
                 raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         elif not _valid_digest(self.resource_semantic_digest):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if not isinstance(self.sandbox_materialize, bool):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
-    def with_snapshot(
+    @property
+    def frozen(self) -> bool:
+        return self.resource_semantic_digest is not None
+
+    def with_versions(
         self,
-        snapshot: ObjectRef,
+        resource_versions: Sequence[SkillResourceVersion],
         resource_semantic_digest: str,
+        *,
+        sandbox_materialize: bool,
     ) -> "SkillSourceRef":
-        if not isinstance(snapshot, ObjectRef):
-            raise TypeError("snapshot must be ObjectRef")
         return SkillSourceRef(
             self.source_id,
             self.root,
-            snapshot,
+            tuple(sorted(resource_versions, key=lambda item: item.path)),
             resource_semantic_digest,
+            sandbox_materialize,
         )
 
 
@@ -101,18 +126,8 @@ class SkillResourceSource(Protocol):
 
 
 @runtime_checkable
-class SnapshotSkillResourceSource(SkillResourceSource, Protocol):
-    async def current_revision(self, root: str) -> StorageRevision: ...
-
-    async def resource_mode(self, root: str, path: str) -> int: ...
-
-    async def snapshot(
-        self,
-        root: str,
-        *,
-        expected_revision: StorageRevision,
-        object_store: ObjectStore,
-    ) -> ObjectRef: ...
+class VersionedSkillResourceSource(SkillResourceSource, Protocol):
+    async def freeze(self, root: str) -> SkillSourceRef: ...
 
 
 class LocalSkillResourceSource:
