@@ -760,7 +760,7 @@ class _RacingMCPAssetStore(AssetStore):
 
 
 @pytest.mark.asyncio
-async def test_mcp_resource_freeze_rejects_selected_asset_version_race() -> None:
+async def test_mcp_resource_resolution_rejects_selected_asset_version_race() -> None:
     backend = InMemoryAssetBackend()
     store = _RacingMCPAssetStore(backend)
     await store.initialize()
