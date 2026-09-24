@@ -68,6 +68,7 @@ def _mcp_tool_metadata(base: Mapping[str, object] | None) -> dict[str, object]:
 @dataclass(frozen=True, slots=True)
 class _FrozenMCPResources:
     versions: "tuple[AssetVersionRef, ...] | None"
+    source_id: "str | None"
     resource_semantic_digest: str | None
     execution_policy: Mapping[str, JsonValue]
 
@@ -304,11 +305,17 @@ async def prepare_mcp_resource_projections(
                     None,
                 )
                 continue
-            reader = asset_readers.get(server.id)
+            if frozen.source_id is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            reader = asset_readers.get(frozen.source_id)
             if reader is None:
                 raise AIError(
                     ErrorCode.CAPABILITY_REQUIRED_MISSING,
-                    safe_details={"kind": "mcp_asset_source", "server_id": server.id},
+                    safe_details={
+                        "kind": "mcp_asset_source",
+                        "source_id": frozen.source_id,
+                        "server_id": server.id,
+                    },
                 )
             directory = await _materialize_resource_versions(
                 server,
