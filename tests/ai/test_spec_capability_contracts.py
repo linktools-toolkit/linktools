@@ -19,6 +19,7 @@ import linktools.ai.agent._compiler as agent_compiler
 import linktools.ai.runtime._mcp as mcp_runtime
 from linktools.ai.agent import AgentCompiler
 from linktools.ai.capability import (
+    CapabilityContribution,
     CapabilityGroup,
     FrozenSkillResourceSource,
     SkillCapability,
