@@ -777,8 +777,38 @@ async def test_mcp_resource_resolution_rejects_selected_asset_version_race() -> 
 
 
 @pytest.mark.asyncio
+async def test_mcp_resource_resolution_excludes_declaration_files() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        root = AssetKey("mcp", "server")
+        declaration = AssetKey("mcp", "server/mcp.json")
+        resource = AssetKey("mcp", "server/tool.py")
+        await store.put(declaration, b"declaration")
+        await store.put(resource, b"resource")
+
+        versions, _digest = await _resolve_mcp_resource_versions(store, root, ())
+
+        assert tuple(item.key for item in versions) == (resource,)
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "paths", (("a/./b.py",), ("a//b.py",), ("../escape.py",), ("lib", "lib/helper.py"))
+    "paths",
+    (
+        ("a/./b.py",),
+        ("a//b.py",),
+        ("../escape.py",),
+        ("./tool.py",),
+        ("tool.py/",),
+        ("C:/tool.py",),
+        ("file:tool.py",),
+        ("virtual:tool.py",),
+        ("lib", "lib/helper.py"),
+    ),
 )
 @pytest.mark.parametrize("boundary", ("resolution", "materialization"))
 async def test_mcp_resource_versions_reject_unmaterializable_tree(

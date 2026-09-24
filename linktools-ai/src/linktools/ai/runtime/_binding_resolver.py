@@ -13,7 +13,11 @@ from ..agent import (
     AgentCompiler,
     SemanticPin,
 )
-from ..capability import validate_resource_path, validate_resource_tree
+from ..capability import (
+    mcp_resource_path,
+    validate_resource_path,
+    validate_resource_tree,
+)
 from ..asset import AssetKey, AssetStoreReader, AssetVersionRef
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -167,19 +171,13 @@ async def _resolve_mcp_resource_versions(
     args: Sequence[str],
 ) -> tuple[tuple[AssetVersionRef, ...], str]:
     infos = await store.metadata_snapshot()
-    prefix = f"{root.id}/"
     selected_infos = tuple(
-        info
+        (info, relative)
         for info in infos
-        if info.key.kind == root.kind
-        and info.key.id.startswith(prefix)
-        and info.key.id[len(prefix) :] not in {"mcp.json", "mcp.yaml"}
+        if (relative := mcp_resource_path(info.key, root)) is not None
     )
-    selected = tuple(info.key for info in selected_infos)
-    available = {
-        info.key.id[len(prefix) :]
-        for info in selected_infos
-    }
+    selected = tuple(info.key for info, _relative in selected_infos)
+    available = {relative for _info, relative in selected_infos}
     validate_resource_tree(available)
     for argument in args:
         if not argument.startswith("resource:"):
@@ -189,7 +187,7 @@ async def _resolve_mcp_resource_versions(
         if relative not in available:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     versions = await store.resolve_versions(selected)
-    for info, version in zip(selected_infos, versions, strict=True):
+    for (info, _relative), version in zip(selected_infos, versions, strict=True):
         if (
             version.key != info.key
             or version.etag != info.etag
@@ -198,10 +196,10 @@ async def _resolve_mcp_resource_versions(
             raise AIError(ErrorCode.SNAPSHOT_CONFLICT)
     resource_files = [
         {
-            "path": info.key.id[len(prefix) :],
+            "path": relative,
             "sha256": info.etag,
         }
-        for info in selected_infos
+        for info, relative in selected_infos
     ]
     resource_files.sort(key=lambda item: cast(str, item["path"]))
     resource_semantic_digest = canonical_sha256(

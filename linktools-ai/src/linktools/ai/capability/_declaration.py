@@ -4,10 +4,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
-from ..asset import AssetKey
 from ..core import ImmutableJsonMapping, JsonValue, validate_logical_id
 from ..errors import AIError, ErrorCode
 from ..spec import (
@@ -19,6 +18,11 @@ from ..spec import (
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
     SkillSpecCodec,
+)
+from ._resource_path import (
+    mcp_resource_path,
+    validate_resource_path,
+    validate_resource_tree,
 )
 from ._skill import SkillDefinition
 from ._skill_source import SkillSourceRef
@@ -203,7 +207,6 @@ async def _load_mcp(
             _validate_package_resource_args(
                 context,
                 package_id,
-                key,
                 value,
             )
         else:
@@ -218,16 +221,16 @@ async def _load_mcp(
 def _validate_package_resource_args(
     context: CapabilityLoadContext,
     package_id: str,
-    main_key: AssetKey,
     server: MCPServerSpec,
 ) -> None:
-    prefix = f"{package_id}/"
-    members = tuple(
-        entry
-        for entry in context.list(kind="mcp")
-        if entry.key.id.startswith(prefix) and entry.key != main_key
-    )
-    available = {entry.key.id[len(prefix) :] for entry in members}
+    root = server.resource_root
+    if root is None or root.kind != "mcp" or root.id != package_id:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    available = {
+        relative
+        for entry in context.list(kind=root.kind)
+        if (relative := mcp_resource_path(entry.key, root)) is not None
+    }
     validate_resource_tree(available)
     _validate_resource_arguments(server.args, available)
 
@@ -241,11 +244,10 @@ def _validate_resource_args(
         if any(argument.startswith("resource:") for argument in server.args):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return
-    prefix = f"{root.id}/"
     available = {
-        entry.key.id[len(prefix) :]
+        relative
         for entry in context.list(kind=root.kind)
-        if entry.key.id.startswith(prefix)
+        if (relative := mcp_resource_path(entry.key, root)) is not None
     }
     validate_resource_tree(available)
     _validate_resource_arguments(server.args, available)
@@ -311,29 +313,7 @@ def _inside_package(identifier: str, roots: Sequence[str]) -> bool:
     return any(identifier.startswith(f"{root}/") for root in roots)
 
 
-def validate_resource_path(path: str) -> None:
-    if (
-        not isinstance(path, str)
-        or not path
-        or "\\" in path
-        or "\x00" in path
-        or any(part in {"", ".", ".."} for part in path.split("/"))
-    ):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
-def validate_resource_tree(paths: Iterable[str]) -> None:
-    files = set(paths)
-    for path in files:
-        validate_resource_path(path)
-        parts = path.split("/")
-        if any("/".join(parts[:end]) in files for end in range(1, len(parts))):
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-
-
 __all__ = [
     "AgentDeclarationLoader",
     "BuiltinDeclarationLoader",
-    "validate_resource_path",
-    "validate_resource_tree",
 ]

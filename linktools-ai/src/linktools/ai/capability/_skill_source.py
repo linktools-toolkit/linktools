@@ -18,6 +18,7 @@ from ..core import (
     validate_logical_id,
 )
 from ..errors import AIError, ErrorCode
+from ._resource_path import normalize_resource_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -516,7 +517,13 @@ def normalize_skill_resource_path(path: str) -> str:
 
 
 def _normalize_resource_path(path: str) -> str:
-    return _normalize_relative_path(path, field_name="skill resource path")
+    try:
+        return normalize_resource_path(path)
+    except ValueError as error:
+        raise AIError(
+            ErrorCode.REQUEST_FIELD_INVALID,
+            "skill resource path is invalid",
+        ) from error
 
 
 def _valid_digest(value: object) -> bool:

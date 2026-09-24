@@ -3,8 +3,9 @@
 """Public capability extension contracts."""
 
 from ._context import AgentContext
-from ._declaration import (
-    AgentDeclarationLoader,
+from ._declaration import AgentDeclarationLoader
+from ._resource_path import (
+    mcp_resource_path,
     validate_resource_path,
     validate_resource_tree,
 )
@@ -89,6 +90,7 @@ __all__ = [
     "ToolCallFailed",
     "ToolCallRetry",
     "WorkspaceAccess",
+    "mcp_resource_path",
     "mcp_server_selector",
     "mcp_tool_selector",
     "workspace_capabilities",

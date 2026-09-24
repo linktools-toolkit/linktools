@@ -363,6 +363,35 @@ async def test_declaration_loaders_are_backend_agnostic(
 
 
 @pytest.mark.asyncio
+async def test_explicit_mcp_resource_root_reserves_declaration_filenames() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    try:
+        server = MCPServerSpec(
+            "server",
+            "python",
+            ("resource:mcp.json",),
+            AssetKey("mcp", "server/assets"),
+        )
+        await store.put(
+            AssetKey("mcp", "server"),
+            MCPServerSpecCodec().encode(server),
+        )
+        await store.put(
+            AssetKey("mcp", "server/assets/mcp.json"),
+            b"resource-like declaration",
+        )
+
+        with pytest.raises(AIError) as error:
+            await CapabilityGroup("application", assets=store).snapshot()
+
+        assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
 async def test_builtin_loader_rejects_multiple_mcp_package_declarations() -> None:
     backend = InMemoryAssetBackend()
     store = AssetStore(StorageOverlay(backend, writer=backend))
