@@ -9,14 +9,9 @@ from ._resource_path import (
     validate_resource_path,
     validate_resource_tree,
 )
-from ._group import (
-    CapabilityContribution,
-    CapabilityGroup,
-    CapabilityGroupSnapshot,
-    CapabilityLoadContext,
-    CapabilityLoadEntry,
-    CapabilityLoader,
-)
+from ._contribution import CapabilityContribution
+from ._group import CapabilityGroup, CapabilityGroupSnapshot
+from ._loading import CapabilityLoadContext, CapabilityLoadEntry, CapabilityLoader
 from ._skill import SkillCapability, SkillDefinition
 from ._skill_source import (
     AssetSkillResourceSource,
