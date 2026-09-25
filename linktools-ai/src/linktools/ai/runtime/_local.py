@@ -25,9 +25,8 @@ from pydantic_ai.tools import (
 
 from ..agent import AgentBinding, AgentBindingSnapshot, AgentCatalog, SubagentRef
 from ..capability import AgentContext, SubagentDelegate
+from ..spec import RepositoryInstructionResolver, RepositoryInstructions
 from ..workspace import (
-    RepositoryInstructionResolver,
-    RepositoryInstructions,
     Workspace,
 )
 from ._agent_executor import (
