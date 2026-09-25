@@ -14,15 +14,14 @@ from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCMessage
 
 from ..errors import AIError, ErrorCode
-_JSON_RPC_MESSAGE_ADAPTER = TypeAdapter(JSONRPCMessage)
-
-
 from ..workspace import (
     SandboxResource,
     SandboxResourcePath,
     SandboxStdioProcess,
     StdioSandboxSession,
 )
+
+_JSON_RPC_MESSAGE_ADAPTER = TypeAdapter(JSONRPCMessage)
 
 
 class _SandboxMCPTransport(ClientTransport):
