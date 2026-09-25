@@ -134,14 +134,14 @@ async def test_opaque_capability_restore_requires_exact_current_semantic_pin() -
 
     with pytest.raises(AIError) as missing:
         _compiler().restore(binding.snapshot)
-    assert missing.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert missing.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
     changed_group = CapabilityGroup[None]("changed")
     changed_group.capability(_RegisteredCapability(), revision=4)
     changed_candidates = (await changed_group.snapshot()).contributions
     with pytest.raises(AIError) as changed:
         _compiler(candidates=changed_candidates).restore(binding.snapshot)
-    assert changed.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert changed.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
 
 @pytest.mark.asyncio

@@ -9,8 +9,9 @@ from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import AgentSpec, MCPServerSpec
 
+
 @dataclass(frozen=True, slots=True)
-class AgentDefinition:
+class CompiledAgent:
     spec: AgentSpec
     model: ModelBinding
     selected_tools: "tuple[CapabilityContribution[object], ...]"
@@ -63,4 +64,4 @@ class AgentDefinition:
         return tuple(value.id for value in self.selected_tools)
 
 
-__all__ = ["AgentDefinition"]
+__all__ = ["CompiledAgent"]

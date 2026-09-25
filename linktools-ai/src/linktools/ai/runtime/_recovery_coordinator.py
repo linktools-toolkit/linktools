@@ -1044,7 +1044,7 @@ class _RecoveryCoordinator:
                 try:
                     await self.reconcile_checkpoint(checkpoint)
                 except AIError as error:
-                    if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+                    if error.code is not ErrorCode.AGENT_BINDING_UNAVAILABLE:
                         raise
                     if error.safe_details.get("reason") == "workspace_mismatch":
                         raise

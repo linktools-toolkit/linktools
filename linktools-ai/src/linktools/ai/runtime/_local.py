@@ -231,7 +231,7 @@ _CheckpointT = TypeVar("_CheckpointT")
 
 
 class LocalExecutionBackend:
-    """Resolve immutable definitions and persist one execution lifecycle."""
+    """Resolve compiled Agent semantics and persist one execution lifecycle."""
 
     def __init__(
         self,
@@ -1017,7 +1017,7 @@ class LocalExecutionBackend:
             )
         )
         _logger.debug(
-            "local execution launched: execution=%s definition=%s",
+            "local execution launched: execution=%s compiled_agent=%s",
             execution.execution_id,
             execution.binding_digest,
         )
@@ -2652,7 +2652,7 @@ class LocalExecutionBackend:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             binding = self._execution_binding(current)
-            definition = binding.definition
+            compiled_agent = binding.compiled_agent
             initial_repository_instructions = await self.load_repository_instructions(
                 current.repository_instructions
             )
@@ -2844,7 +2844,7 @@ class LocalExecutionBackend:
             )
             memory = None
             selected_memory = select_harness_memory_tools(
-                definition.ordinary_tool_policy
+                compiled_agent.ordinary_tool_policy
             )
             if current.memory_scope is not None and selected_memory:
                 if self._memory_store_factory is None:
@@ -4767,7 +4767,7 @@ def _is_infrastructure_error(error: Exception) -> bool:
     if not isinstance(error, AIError):
         return False
     return error.code.value.startswith("STORAGE_") or error.code in {
-        ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+        ErrorCode.AGENT_BINDING_UNAVAILABLE,
         ErrorCode.EXECUTION_HISTORY_UNAVAILABLE,
         ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
         ErrorCode.SERVICE_NOT_READY,

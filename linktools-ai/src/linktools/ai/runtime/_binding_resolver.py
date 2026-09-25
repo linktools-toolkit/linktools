@@ -13,6 +13,7 @@ from ..agent import (
     AgentCompiler,
     CapabilityPin,
 )
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec, MCPServerSpecCodec
 from ..workspace import Sandbox
@@ -52,9 +53,9 @@ class _RuntimeBindingResolver:
 
     async def resolve_root(self, agent_id: str) -> AgentBindingSnapshot:
         """Resolve one Agent as a root execution target and its direct children."""
-        definition = self._catalog.root_definition(agent_id)
+        compiled_agent = self._catalog.root_agent(agent_id)
         return await self.resolve_snapshot(
-            self._compiler.bind(definition, output=None).snapshot
+            self._compiler.bind(compiled_agent, output=None).snapshot
         )
 
     async def resolve_snapshot(
@@ -76,8 +77,8 @@ class _RuntimeBindingResolver:
         return replace(resolved, subagent_bindings=children)
 
     async def _resolve_child(self, agent_id: str) -> AgentBindingSnapshot:
-        definition = self._catalog.root_definition(agent_id)
-        snapshot = self._compiler.bind_subagent(definition).snapshot
+        compiled_agent = self._catalog.root_agent(agent_id)
+        snapshot = self._compiler.bind_subagent(compiled_agent).snapshot
         return await self._resolve_mcp(snapshot)
 
     async def _resolve_mcp(
@@ -131,4 +132,3 @@ class _RuntimeBindingResolver:
 
 
 __all__ = ["_RuntimeBindingResolver"]
-

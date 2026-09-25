@@ -241,7 +241,7 @@ def test_model_registry_restore_requires_exact_model_contract() -> None:
             route_id="default",
         )
 
-    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
 
 def test_openai_route_materializes_settings_and_retries() -> None:

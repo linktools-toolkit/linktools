@@ -34,7 +34,7 @@ def _binding_snapshot() -> AgentBindingSnapshot:
 
 def _binding() -> object:
     snapshot = _binding_snapshot()
-    definition = SimpleNamespace(
+    compiled_agent = SimpleNamespace(
         digest="b" * 64,
         spec=SimpleNamespace(id="default"),
         selected_tools=(),
@@ -42,7 +42,7 @@ def _binding() -> object:
     return SimpleNamespace(
         digest=snapshot.binding_digest,
         snapshot=snapshot,
-        definition=definition,
+        compiled_agent=compiled_agent,
     )
 
 
@@ -179,7 +179,7 @@ async def test_prepare_start_persists_exact_binding_and_execution_policy() -> No
         (ValueError("business"), False),
         (AIError(ErrorCode.OUTPUT_VALIDATION_FAILED), False),
         (AIError(ErrorCode.STORAGE_INTEGRITY_ERROR), True),
-        (AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE), True),
+        (AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE), True),
         (AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE), True),
         (AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY), True),
         (AIError(ErrorCode.SERVICE_NOT_READY), True),

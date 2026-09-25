@@ -302,7 +302,7 @@ async def test_workspace_tool_binding_restores_before_disabled_sandbox_materiali
         agents={spec.id: spec},
     ).restore(binding.snapshot)
     assert restored.snapshot == binding.snapshot
-    selected = tuple(candidate.id for candidate in restored.definition.selected_tools)
+    selected = tuple(candidate.id for candidate in restored.compiled_agent.selected_tools)
     with pytest.raises(AIError) as missing_session:
         workspace_capabilities(workspace, selected)
     assert missing_session.value.code is ErrorCode.SANDBOX_SESSION_CLOSED

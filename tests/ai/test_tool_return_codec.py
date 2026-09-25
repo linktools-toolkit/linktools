@@ -163,14 +163,14 @@ async def test_agent_executor_rehydrates_deferred_results_before_pydantic(
             assert run_id == "step-run"
             return 0
 
-    definition = SimpleNamespace(
-        digest="definition",
+    compiled_agent = SimpleNamespace(
+        digest="compiled-agent",
         model=SimpleNamespace(materialize=lambda: TestModel()),
         spec=SimpleNamespace(id="agent"),
         selected_tools=(),
     )
     binding = SimpleNamespace(
-        definition=definition,
+        compiled_agent=compiled_agent,
         output_binding=bind_output(),
     )
     context = SimpleNamespace(

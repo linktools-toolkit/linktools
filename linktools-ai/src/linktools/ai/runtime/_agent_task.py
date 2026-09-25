@@ -180,7 +180,7 @@ class _AgentTaskNodeHandler:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if binding.snapshot != snapshot or binding.binding_digest != snapshot.binding_digest:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        validate_agent_id(binding.definition.spec.id)
+        validate_agent_id(binding.compiled_agent.spec.id)
         if isinstance(base_user_prompt, str):
             validate_user_prompt(base_user_prompt)
         return {
@@ -206,7 +206,7 @@ class _AgentTaskNodeHandler:
         except AIError as error:
             cause = error.__cause__
             if isinstance(cause, AIError) and cause.code in {
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                ErrorCode.AGENT_BINDING_UNAVAILABLE,
                 ErrorCode.STORAGE_VERSION_UNSUPPORTED,
             }:
                 raise cause
@@ -561,7 +561,7 @@ class _AgentTaskNodeHandler:
         return (
             binding.binding_digest,
             request,
-            binding.definition.spec.id,
+            binding.compiled_agent.spec.id,
             cast("str | None", normalized["session_id"]),
             binding.snapshot,
         )

@@ -139,7 +139,7 @@ class _ModelRegistrySnapshot:
         if binding is None:
             raise AIError(ErrorCode.MODEL_CONNECTION_NOT_FOUND)
         if dict(binding.contract) != dict(payload):
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+            raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
         return binding
 
 

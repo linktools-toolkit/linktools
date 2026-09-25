@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable Agent definitions plus exact binding lookup."""
+"""Immutable compiled Agent semantics plus exact binding lookup."""
 
 from collections.abc import Mapping
 from types import MappingProxyType
@@ -9,14 +9,14 @@ from ..core import validate_agent_id
 from ..errors import AIError, ErrorCode
 from ..spec import AgentSpecCodec
 from ._binding import AgentBinding
-from ._definition import AgentDefinition
+from ._compiled import CompiledAgent
 
 
 class AgentCatalog:
-    def __init__(self, roots: Mapping[str, AgentDefinition]) -> None:
-        for agent_id, definition in roots.items():
+    def __init__(self, roots: Mapping[str, CompiledAgent]) -> None:
+        for agent_id, compiled_agent in roots.items():
             validate_agent_id(agent_id)
-            if definition.spec.id != agent_id:
+            if compiled_agent.spec.id != agent_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._roots = MappingProxyType(dict(roots))
         self._bindings: dict[str, AgentBinding] = {}
@@ -25,21 +25,21 @@ class AgentCatalog:
     def root_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._roots))
 
-    def root_definition(self, agent_id: str) -> AgentDefinition:
+    def root_agent(self, agent_id: str) -> CompiledAgent:
         validate_agent_id(agent_id)
         try:
             return self._roots[agent_id]
         except KeyError as error:
             raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                ErrorCode.AGENT_BINDING_UNAVAILABLE,
                 safe_details={"agent_id": agent_id},
             ) from error
 
     def register_binding(self, binding: AgentBinding) -> AgentBinding:
         existing = self._bindings.get(binding.binding_digest)
-        if existing is not None and _same_runtime_definition(
-            existing.definition,
-            binding.definition,
+        if existing is not None and _same_runtime_compiled_agent(
+            existing.compiled_agent,
+            binding.compiled_agent,
         ):
             return existing
         self._bindings[binding.binding_digest] = binding
@@ -50,12 +50,12 @@ class AgentCatalog:
             return self._bindings[binding_digest]
         except KeyError as error:
             raise AIError(
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                ErrorCode.AGENT_BINDING_UNAVAILABLE,
                 safe_details={"binding_digest": binding_digest},
             ) from error
 
 
-def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
+def _same_compiled_agent(left: CompiledAgent, right: CompiledAgent) -> bool:
     return (
         AgentSpecCodec().to_payload(left.spec)
         == AgentSpecCodec().to_payload(right.spec)
@@ -70,11 +70,11 @@ def _same_definition(left: AgentDefinition, right: AgentDefinition) -> bool:
     )
 
 
-def _same_runtime_definition(
-    left: AgentDefinition,
-    right: AgentDefinition,
+def _same_runtime_compiled_agent(
+    left: CompiledAgent,
+    right: CompiledAgent,
 ) -> bool:
-    if not _same_definition(left, right) or left.model is not right.model:
+    if not _same_compiled_agent(left, right) or left.model is not right.model:
         return False
     for left_values, right_values in (
         (left.selected_tools, right.selected_tools),

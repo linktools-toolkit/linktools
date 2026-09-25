@@ -18,7 +18,7 @@ from ..spec import (
 from ._output import OutputBinding, OutputMode
 
 if TYPE_CHECKING:
-    from ._definition import AgentDefinition
+    from ._compiled import CompiledAgent
 
 _PIN_KINDS = frozenset({"tool", "skill", "mcp", "capability"})
 _PIN_FIELDS = frozenset({"kind", "id", "contract"})
@@ -286,23 +286,23 @@ class AgentBindingSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class AgentBinding:
-    definition: "AgentDefinition"
+    compiled_agent: "CompiledAgent"
     output_binding: OutputBinding
     snapshot: AgentBindingSnapshot
 
     def __post_init__(self) -> None:
-        from ._definition import AgentDefinition
+        from ._compiled import CompiledAgent
 
         if (
-            not isinstance(self.definition, AgentDefinition)
+            not isinstance(self.compiled_agent, CompiledAgent)
             or not isinstance(self.output_binding, OutputBinding)
             or not isinstance(self.snapshot, AgentBindingSnapshot)
-            or AgentSpecCodec().to_payload(self.definition.spec)
+            or AgentSpecCodec().to_payload(self.compiled_agent.spec)
             != AgentSpecCodec().to_payload(self.snapshot.agent_spec)
-            or dict(self.definition.model.contract)
+            or dict(self.compiled_agent.model.contract)
             != dict(self.snapshot.base_model)
-            or _definition_selected_pins(self.definition) != self.snapshot.selected
-            or self.definition.selected_subagents != self.snapshot.subagent_ids
+            or _compiled_agent_selected_pins(self.compiled_agent) != self.snapshot.selected
+            or self.compiled_agent.selected_subagents != self.snapshot.subagent_ids
             or self.output_binding.mode != self.snapshot.output_mode
             or self.output_binding.schema_definition != dict(self.snapshot.output_schema)
         ):
@@ -317,19 +317,19 @@ class AgentBinding:
         return self.output_binding.runtime_output_type
 
 
-def _definition_selected_pins(
-    definition: "AgentDefinition",
+def _compiled_agent_selected_pins(
+    compiled_agent: "CompiledAgent",
 ) -> "tuple[CapabilityPin, ...]":
     candidates = (
         *sorted(
             (
-                *definition.selected_tools,
-                *definition.selected_skills,
-                *definition.selected_mcp,
+                *compiled_agent.selected_tools,
+                *compiled_agent.selected_skills,
+                *compiled_agent.selected_mcp,
             ),
             key=lambda item: (item.kind, item.id),
         ),
-        *definition.selected_capabilities,
+        *compiled_agent.selected_capabilities,
     )
     return tuple(
         CapabilityPin(

@@ -16,7 +16,7 @@ from ..agent import (
     AgentBinding,
     AgentCatalog,
     AgentCompiler,
-    AgentDefinition,
+    CompiledAgent,
 )
 from ..capability import CapabilityGroup, CapabilityGroupSnapshot
 from ..core import (
@@ -121,7 +121,7 @@ class _TaskNodeRuntimePort(Protocol):
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
-        definition: "AgentDefinition | None" = None,
+        compiled_agent: "CompiledAgent | None" = None,
         dependency_policy: str = "all_succeeded",
     ) -> "TaskNode": ...
 
@@ -392,7 +392,7 @@ class Runtime(Generic[AppT]):
         """Resolve one root Agent, optionally deriving narrower call semantics."""
         self._ensure_open()
         validate_agent_id(agent_id)
-        root = self._catalog.root_definition(agent_id)
+        root = self._catalog.root_agent(agent_id)
         if all(
             value is None
             for value in (
@@ -436,21 +436,21 @@ class Runtime(Generic[AppT]):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         return Agent(self, derived.spec.id, derived.spec.revision, derived)
 
-    def _agent_definition(
+    def _compiled_agent(
         self,
         agent_id: str,
         agent_revision: int,
-        definition: "AgentDefinition | None" = None,
-    ) -> AgentDefinition:
+        compiled_agent: "CompiledAgent | None" = None,
+    ) -> CompiledAgent:
         self._ensure_open()
-        if definition is None:
-            definition = self._catalog.root_definition(agent_id)
+        if compiled_agent is None:
+            compiled_agent = self._catalog.root_agent(agent_id)
         if (
-            definition.spec.id != agent_id
-            or definition.spec.revision != agent_revision
+            compiled_agent.spec.id != agent_id
+            or compiled_agent.spec.revision != agent_revision
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return definition
+        return compiled_agent
 
     def _bind_agent(
         self,
@@ -458,9 +458,9 @@ class Runtime(Generic[AppT]):
         agent_revision: int,
         *,
         output: "type[BaseModel] | None" = None,
-        definition: "AgentDefinition | None" = None,
+        compiled_agent: "CompiledAgent | None" = None,
     ) -> AgentBinding:
-        resolved = self._agent_definition(agent_id, agent_revision, definition)
+        resolved = self._compiled_agent(agent_id, agent_revision, compiled_agent)
         return self._compiler.bind(resolved, output=output)
 
     async def _resolve_agent_binding(self, binding: AgentBinding) -> AgentBinding:
@@ -484,7 +484,7 @@ class Runtime(Generic[AppT]):
         planning: "bool | None",
         thinking: "ThinkingValue | None",
         correlation: "Mapping[str, object] | None" = None,
-        definition: "AgentDefinition | None" = None,
+        compiled_agent: "CompiledAgent | None" = None,
     ) -> "Execution[AppT]":
         self._ensure_open()
         resolved_principal = self._resolve_principal(principal)
@@ -493,15 +493,15 @@ class Runtime(Generic[AppT]):
             correlation,
         )
         resolved_files = _request_files(files)
-        definition = self._agent_definition(agent_id, agent_revision, definition)
+        compiled_agent = self._compiled_agent(agent_id, agent_revision, compiled_agent)
         resolved_mode, resolved_planning, resolved_thinking = _execution_policy(
-            definition,
+            compiled_agent,
             mode=mode,
             planning=planning,
             thinking=thinking,
         )
         binding = await self._resolve_agent_binding(
-            self._compiler.bind(definition, output=output)
+            self._compiler.bind(compiled_agent, output=output)
         )
         request = ExecutionRequest(
             user_prompt=user_prompt,
@@ -523,7 +523,7 @@ class Runtime(Generic[AppT]):
         else:
             if not isinstance(session_id, str) or not session_id.strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            await self._ensure_session(definition, session_id, resolved_principal)
+            await self._ensure_session(compiled_agent, session_id, resolved_principal)
             resume_request = ResumeSessionRequest(
                 principal=resolved_principal,
                 user_prompt=request.user_prompt,
@@ -536,7 +536,7 @@ class Runtime(Generic[AppT]):
                 files=request.files,
             )
             handle = await self.session.resume(
-                definition.spec.id,
+                compiled_agent.spec.id,
                 binding.binding_digest,
                 session_id,
                 resume_request,
@@ -546,7 +546,7 @@ class Runtime(Generic[AppT]):
             "runtime execution admitted: execution=%s agent=%s session=%s "
             "mode=%s planning=%s thinking=%s",
             handle.execution_id,
-            definition.spec.id,
+            compiled_agent.spec.id,
             session_id,
             resolved_mode,
             resolved_planning,
@@ -667,7 +667,7 @@ class Runtime(Generic[AppT]):
         principal: "Principal | None",
         idempotency_key: "str | None",
         cwd: "str | None",
-        definition: "AgentDefinition | None" = None,
+        compiled_agent: "CompiledAgent | None" = None,
     ) -> "Session[AppT]":
         resolved_principal = self._resolve_principal(principal)
         await self.session.fork(
@@ -686,7 +686,7 @@ class Runtime(Generic[AppT]):
             agent_revision,
             new_session_id,
             resolved_principal,
-            definition,
+            compiled_agent,
         )
 
     async def _update_session(
@@ -740,14 +740,14 @@ class Runtime(Generic[AppT]):
         request: StartEvaluationRequest,
         *,
         output: "type[BaseModel] | None",
-        definition: "AgentDefinition | None" = None,
+        compiled_agent: "CompiledAgent | None" = None,
     ) -> EvaluationHandle:
         binding = await self._resolve_agent_binding(
             self._bind_agent(
                 agent_id,
                 agent_revision,
                 output=output,
-                definition=definition,
+                compiled_agent=compiled_agent,
             )
         )
         return await self.evaluation.start(
@@ -794,7 +794,7 @@ class Runtime(Generic[AppT]):
         files: Sequence[str] = (),
         session_id: "str | None" = None,
         memory_scope: "str | None" = None,
-        definition: "AgentDefinition | None" = None,
+        compiled_agent: "CompiledAgent | None" = None,
         dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         return self._require_task_node_runtime().build_agent_task(
@@ -815,7 +815,7 @@ class Runtime(Generic[AppT]):
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
-            definition=definition,
+            compiled_agent=compiled_agent,
             dependency_policy=dependency_policy,
         )
 
@@ -1064,7 +1064,7 @@ class Runtime(Generic[AppT]):
 
     async def _ensure_session(
         self,
-        definition: AgentDefinition,
+        compiled_agent: CompiledAgent,
         session_id: str,
         principal: Principal,
     ) -> None:
@@ -1078,7 +1078,7 @@ class Runtime(Generic[AppT]):
                 raise
             try:
                 await self.session.create(
-                    definition.spec.id,
+                    compiled_agent.spec.id,
                     CreateSessionRequest(
                         principal,
                         session_id,
@@ -1094,7 +1094,7 @@ class Runtime(Generic[AppT]):
             session = await self.session.get(session_id, principal=principal)
         if session.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
-        if session.agent_id != definition.spec.id:
+        if session.agent_id != compiled_agent.spec.id:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
 
     def _ensure_open(self) -> None:
@@ -1170,7 +1170,7 @@ class Runtime(Generic[AppT]):
 
 
 def _execution_policy(
-    definition: AgentDefinition,
+    compiled_agent: CompiledAgent,
     *,
     mode: ExecutionMode,
     planning: "bool | None",
@@ -1179,11 +1179,11 @@ def _execution_policy(
     resolved_mode = normalize_execution_mode(mode)
     if planning is not None and not isinstance(planning, bool):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    resolved_planning = definition.spec.planning if planning is None else planning
+    resolved_planning = compiled_agent.spec.planning if planning is None else planning
     if resolved_mode == "plan":
         resolved_planning = True
     resolved_thinking = (
-        definition.spec.thinking if thinking is None else normalize_thinking(thinking)
+        compiled_agent.spec.thinking if thinking is None else normalize_thinking(thinking)
     )
     return resolved_mode, resolved_planning, resolved_thinking
 

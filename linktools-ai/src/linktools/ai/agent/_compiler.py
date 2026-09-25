@@ -24,7 +24,7 @@ from ..spec import (
     parse_mcp_tool_selector,
 )
 from ._binding import AgentBinding, AgentBindingSnapshot, CapabilityPin
-from ._definition import AgentDefinition
+from ._compiled import CompiledAgent
 from ._output import bind_output, restore_output
 
 
@@ -79,7 +79,7 @@ class AgentCompiler:
             server_tokens[token] = candidate.id
             self._mcp_by_id[candidate.id] = candidate
 
-    def compile(self, spec: AgentSpec) -> AgentDefinition:
+    def compile(self, spec: AgentSpec) -> CompiledAgent:
         """Compile one current declaration from the snapshotted candidate universe."""
         if not isinstance(spec, AgentSpec):
             raise TypeError("spec must be AgentSpec")
@@ -91,7 +91,7 @@ class AgentCompiler:
             "capability",
             spec.allow_capabilities,
         )
-        return self._build_definition(
+        return self._build_compiled_agent(
             spec,
             model=model,
             selected_tools=selected_tools,
@@ -105,13 +105,13 @@ class AgentCompiler:
 
     def bind(
         self,
-        definition: AgentDefinition,
+        compiled_agent: CompiledAgent,
         *,
         output: "type[BaseModel] | None" = None,
     ) -> AgentBinding:
-        """Bind one root Definition to the exact durable output and child targets."""
-        if not isinstance(definition, AgentDefinition):
-            raise TypeError("definition must be AgentDefinition")
+        """Bind one CompiledAgent to durable output and child targets."""
+        if not isinstance(compiled_agent, CompiledAgent):
+            raise TypeError("compiled_agent must be CompiledAgent")
         subagents = tuple(
             SubagentRef(
                 "agent",
@@ -119,35 +119,35 @@ class AgentCompiler:
                 self._agents[agent_id].description,
                 revision=self._agents[agent_id].revision,
             )
-            for agent_id in definition.selected_subagents
+            for agent_id in compiled_agent.selected_subagents
         )
-        return self._bind(definition, output=output, subagents=subagents)
+        return self._bind(compiled_agent, output=output, subagents=subagents)
 
     def bind_subagent(
         self,
-        definition: AgentDefinition,
+        compiled_agent: CompiledAgent,
         *,
         output: "type[BaseModel] | None" = None,
     ) -> AgentBinding:
         """Bind one child with delegation disabled for that execution."""
-        if not isinstance(definition, AgentDefinition):
-            raise TypeError("definition must be AgentDefinition")
-        child_definition = self._build_definition(
-            definition.spec,
-            model=definition.model,
-            selected_tools=definition.selected_tools,
-            selected_skills=definition.selected_skills,
-            selected_mcp=definition.selected_mcp,
-            selected_capabilities=definition.selected_capabilities,
+        if not isinstance(compiled_agent, CompiledAgent):
+            raise TypeError("compiled_agent must be CompiledAgent")
+        child_compiled_agent = self._build_compiled_agent(
+            compiled_agent.spec,
+            model=compiled_agent.model,
+            selected_tools=compiled_agent.selected_tools,
+            selected_skills=compiled_agent.selected_skills,
+            selected_mcp=compiled_agent.selected_mcp,
+            selected_capabilities=compiled_agent.selected_capabilities,
             selected_subagents=(),
-            ordinary_policy=definition.ordinary_tool_policy,
-            mcp_policy=definition.mcp_selector_policy,
+            ordinary_policy=compiled_agent.ordinary_tool_policy,
+            mcp_policy=compiled_agent.mcp_selector_policy,
         )
-        return self._bind(child_definition, output=output, subagents=())
+        return self._bind(child_compiled_agent, output=output, subagents=())
 
     def _bind(
         self,
-        definition: AgentDefinition,
+        compiled_agent: CompiledAgent,
         *,
         output: "type[BaseModel] | None",
         subagents: Sequence[SubagentRef],
@@ -155,16 +155,16 @@ class AgentCompiler:
         output_binding = bind_output(output)
         snapshot = AgentBindingSnapshot(
             agent_spec=AgentSpecCodec().from_payload(
-                AgentSpecCodec().to_payload(definition.spec)
+                AgentSpecCodec().to_payload(compiled_agent.spec)
             ),
-            base_model=dict(definition.model.contract),
-            selected=tuple(_pin(candidate) for candidate in _selected_candidates(definition)),
+            base_model=dict(compiled_agent.model.contract),
+            selected=tuple(_pin(candidate) for candidate in _selected_candidates(compiled_agent)),
             subagents=tuple(subagents),
             output_mode=output_binding.mode,
             output_schema=output_binding.schema_definition,
         )
         return AgentBinding(
-            definition,
+            compiled_agent,
             output_binding,
             snapshot,
         )
@@ -184,7 +184,7 @@ class AgentCompiler:
                 selected["tool"],
                 selected["mcp"],
             )
-            definition = self._build_definition(
+            compiled_agent = self._build_compiled_agent(
                 snapshot.agent_spec,
                 model=model,
                 selected_tools=selected["tool"],
@@ -200,12 +200,12 @@ class AgentCompiler:
             if error.code in {
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 ErrorCode.STORAGE_VERSION_UNSUPPORTED,
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                ErrorCode.AGENT_BINDING_UNAVAILABLE,
             }:
                 raise
-            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+            raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE) from error
         return AgentBinding(
-            definition,
+            compiled_agent,
             output_binding,
             snapshot,
         )
@@ -227,7 +227,7 @@ class AgentCompiler:
                 )
                 candidate = CapabilityContribution.from_declaration(value)
                 if candidate.id != pin.id or candidate.revision != pin.revision:
-                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
             elif pin.kind == "mcp":
                 candidate = CapabilityContribution.from_mcp_contract(
                     pin.contract,
@@ -239,7 +239,7 @@ class AgentCompiler:
                     or current.revision != pin.revision
                     or current.contract != dict(pin.contract)
                 ):
-                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
                 candidate = current
             selected[pin.kind].append(candidate)
         return {
@@ -377,7 +377,7 @@ class AgentCompiler:
                 )
             elif parse_mcp_tool_selector(selector) is None:
                 if selector not in selected_tool_names:
-                    raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                    raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
                 ordinary.add(selector)
         allowed_server_ids = {item.id for item in selected_mcp}
         mcp_policy = (
@@ -395,11 +395,11 @@ class AgentCompiler:
             if parsed is None:
                 continue
             if parsed[0] not in allowed_server_ids:
-                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+                raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
             mcp_policy.append(selector)
         return tuple(sorted(ordinary)), tuple(sorted(set(mcp_policy)))
 
-    def _build_definition(
+    def _build_compiled_agent(
         self,
         spec: AgentSpec,
         *,
@@ -411,11 +411,11 @@ class AgentCompiler:
         selected_subagents: Sequence[str],
         ordinary_policy: Sequence[str],
         mcp_policy: Sequence[str],
-    ) -> AgentDefinition:
+    ) -> CompiledAgent:
         selected_skill_ids = {candidate.id for candidate in selected_skills}
         if any(skill_id not in selected_skill_ids for skill_id in spec.preload_skills):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        return AgentDefinition(
+        return CompiledAgent(
             spec=spec,
             model=model,
             selected_tools=tuple(sorted(selected_tools, key=lambda item: item.id)),
@@ -429,19 +429,19 @@ class AgentCompiler:
 
 
 def _selected_candidates(
-    definition: AgentDefinition,
+    compiled_agent: CompiledAgent,
 ) -> "tuple[CapabilityContribution[object], ...]":
     return tuple(
         (
             *sorted(
                 (
-                    *definition.selected_tools,
-                    *definition.selected_skills,
-                    *definition.selected_mcp,
+                    *compiled_agent.selected_tools,
+                    *compiled_agent.selected_skills,
+                    *compiled_agent.selected_mcp,
                 ),
                 key=lambda item: (item.kind, item.id),
             ),
-            *definition.selected_capabilities,
+            *compiled_agent.selected_capabilities,
         )
     )
 

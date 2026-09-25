@@ -210,11 +210,11 @@ async def compose_runtime_components(
             ),
             agents=agents,
         )
-        definitions = {
+        root_agents = {
             agent_id: compiler.compile(agents[agent_id])
             for agent_id in sorted(agents)
         }
-        catalog = AgentCatalog(definitions)
+        catalog = AgentCatalog(root_agents)
 
         effective_tenant_id = (
             "default" if tenant_id is None else validate_tenant_id(tenant_id)

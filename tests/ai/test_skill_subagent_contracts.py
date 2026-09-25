@@ -109,7 +109,7 @@ def test_durable_subagent_binding_does_not_fall_back_to_current_catalog() -> Non
             for agent_id, spec in agents.items()
         }
     )
-    snapshot = compiler.bind(catalog.root_definition("parent")).snapshot
+    snapshot = compiler.bind(catalog.root_agent("parent")).snapshot
     dispatcher = SubagentDispatcher(
         catalog,
         compiler,

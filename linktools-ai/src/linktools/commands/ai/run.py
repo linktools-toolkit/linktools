@@ -32,7 +32,7 @@ _logger = environ.get_logger("commands.ai.run")
 
 
 class Command(BaseCommand):
-    """Run a prompt against the Agent definitions in the current workspace."""
+    """Run a prompt against Agent specs in the current workspace."""
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", help="the prompt")

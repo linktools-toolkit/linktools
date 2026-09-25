@@ -100,7 +100,7 @@ def bind_output(output: "type[BaseModel] | None" = None) -> OutputBinding:
 def restore_output(mode: JsonValue, schema: JsonValue) -> OutputBinding:
     """Restore an output binding only from its historical v1 semantics."""
     if mode not in {"text", "structured"} or not isinstance(schema, Mapping):
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE)
     try:
         binding = OutputBinding.create(
             cast(OutputMode, mode),
@@ -112,7 +112,7 @@ def restore_output(mode: JsonValue, schema: JsonValue) -> OutputBinding:
     except AIError:
         raise
     except Exception as error:
-        raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE) from error
+        raise AIError(ErrorCode.AGENT_BINDING_UNAVAILABLE) from error
 
 
 def _durable_runtime_type(

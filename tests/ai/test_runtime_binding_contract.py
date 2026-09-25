@@ -381,13 +381,13 @@ def test_agent_identity_ignores_model_route_but_catalog_uses_current_binding() -
     first = compiler.bind(compiler.compile(AgentSpec("agent", model_route="first")))
     second = compiler.bind(compiler.compile(AgentSpec("agent", model_route="second")))
 
-    assert first.definition.spec.id == second.definition.spec.id
-    assert first.definition.spec.revision == second.definition.spec.revision
+    assert first.compiled_agent.spec.id == second.compiled_agent.spec.id
+    assert first.compiled_agent.spec.revision == second.compiled_agent.spec.revision
     assert first.binding_digest == second.binding_digest
     assert first.snapshot != second.snapshot
-    assert first.definition.model is not second.definition.model
+    assert first.compiled_agent.model is not second.compiled_agent.model
 
-    catalog = AgentCatalog({"agent": first.definition})
+    catalog = AgentCatalog({"agent": first.compiled_agent})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is second
     assert catalog.binding(first.binding_digest) is second
@@ -478,10 +478,10 @@ def test_restore_rejects_tool_contract_drift_without_revision_bump() -> None:
     with pytest.raises(AIError) as raised:
         second_compiler.restore(original.snapshot)
 
-    assert raised.value.code is ErrorCode.AGENT_DEFINITION_UNAVAILABLE
+    assert raised.value.code is ErrorCode.AGENT_BINDING_UNAVAILABLE
 
 
-def test_catalog_reuses_binding_for_nonsemantic_definition_differences() -> None:
+def test_catalog_reuses_binding_for_unchanged_compiled_semantics() -> None:
     compiler = _compiler()
     first = compiler.bind(
         compiler.compile(AgentSpec("agent", description="first label"))
@@ -493,22 +493,22 @@ def test_catalog_reuses_binding_for_nonsemantic_definition_differences() -> None
     assert first.snapshot == second.snapshot
     assert first.binding_digest == second.binding_digest
 
-    catalog = AgentCatalog({"agent": first.definition})
+    catalog = AgentCatalog({"agent": first.compiled_agent})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is first
 
 
 def test_same_json_schema_produces_same_binding_identity() -> None:
     compiler = _compiler()
-    definition = compiler.compile(AgentSpec("agent"))
-    first = compiler.bind(definition, output=_SchemaTwinA)
-    second = compiler.bind(definition, output=_SchemaTwinB)
+    compiled_agent = compiler.compile(AgentSpec("agent"))
+    first = compiler.bind(compiled_agent, output=_SchemaTwinA)
+    second = compiler.bind(compiled_agent, output=_SchemaTwinB)
 
     assert first.binding_digest == second.binding_digest
     assert first.snapshot == second.snapshot
     assert first.output_binding.schema_definition == second.output_binding.schema_definition
 
-    catalog = AgentCatalog({"agent": definition})
+    catalog = AgentCatalog({"agent": compiled_agent})
     assert catalog.register_binding(first) is first
     assert catalog.register_binding(second) is first
     assert catalog.binding(first.binding_digest) is first
@@ -516,8 +516,8 @@ def test_same_json_schema_produces_same_binding_identity() -> None:
 
 def test_restored_binding_uses_only_snapshot_semantics() -> None:
     compiler = _compiler()
-    definition = compiler.compile(AgentSpec("agent"))
-    current = compiler.bind(definition, output=_SchemaTwinA)
+    compiled_agent = compiler.compile(AgentSpec("agent"))
+    current = compiler.bind(compiled_agent, output=_SchemaTwinA)
 
     restored = compiler.restore(current.snapshot)
 
@@ -527,11 +527,11 @@ def test_restored_binding_uses_only_snapshot_semantics() -> None:
     assert restored.output_type is not _SchemaTwinA
 
 
-def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
+def test_binding_rejects_selected_compiled_agent_snapshot_mismatch() -> None:
     compiler = _compiler()
     binding = compiler.bind(compiler.compile(AgentSpec("agent")))
-    mismatched_definition = replace(
-        binding.definition,
+    mismatched_compiled_agent = replace(
+        binding.compiled_agent,
         selected_tools=(
             SimpleNamespace(
                 kind="tool",
@@ -543,7 +543,7 @@ def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
 
     with pytest.raises(AIError) as raised:
         AgentBinding(
-            mismatched_definition,
+            mismatched_compiled_agent,
             binding.output_binding,
             binding.snapshot,
         )
@@ -553,8 +553,8 @@ def test_binding_rejects_selected_definition_snapshot_mismatch() -> None:
 def test_binding_preserves_selected_pin_version_error() -> None:
     compiler = _compiler()
     binding = compiler.bind(compiler.compile(AgentSpec("agent")))
-    invalid_definition = replace(
-        binding.definition,
+    invalid_compiled_agent = replace(
+        binding.compiled_agent,
         selected_tools=(
             SimpleNamespace(
                 kind="tool",
@@ -566,7 +566,7 @@ def test_binding_preserves_selected_pin_version_error() -> None:
 
     with pytest.raises(AIError) as raised:
         AgentBinding(
-            invalid_definition,
+            invalid_compiled_agent,
             binding.output_binding,
             binding.snapshot,
         )

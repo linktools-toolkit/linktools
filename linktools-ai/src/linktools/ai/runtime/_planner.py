@@ -18,7 +18,7 @@ from ..agent import (
     AgentBindingSnapshot,
     AgentCatalog,
     AgentCompiler,
-    AgentDefinition,
+    CompiledAgent,
     bind_output,
     restore_output,
 )
@@ -1526,28 +1526,28 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         files: Sequence[str] = (),
         session_id: str | None = None,
         memory_scope: str | None = None,
-        definition: AgentDefinition | None = None,
+        compiled_agent: CompiledAgent | None = None,
         dependency_policy: str = "all_succeeded",
     ) -> TaskNode:
         validate_agent_id(agent_id)
-        if definition is None:
-            definition = self._catalog.root_definition(agent_id)
+        if compiled_agent is None:
+            compiled_agent = self._catalog.root_agent(agent_id)
         if (
-            definition.spec.id != agent_id
-            or definition.spec.revision != agent_revision
+            compiled_agent.spec.id != agent_id
+            or compiled_agent.spec.revision != agent_revision
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if planning is not None and not isinstance(planning, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         resolved_planning = (
-            definition.spec.planning if planning is None else planning
+            compiled_agent.spec.planning if planning is None else planning
         )
         resolved_thinking = (
-            definition.spec.thinking
+            compiled_agent.spec.thinking
             if thinking is None
             else normalize_thinking(thinking)
         )
-        binding = self._compiler.bind(definition, output=output)
+        binding = self._compiler.bind(compiled_agent, output=output)
         return TaskNode(
             node_id,
             dependencies,
@@ -1603,8 +1603,8 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
                 safe_details={"kind": "agent", "agent_id": agent_id},
             )
-        definition = self._compiler.restore(root).definition
-        binding = self._compiler.bind(definition, output=output).snapshot
+        compiled_agent = self._compiler.restore(root).compiled_agent
+        binding = self._compiler.bind(compiled_agent, output=output).snapshot
         binding = replace(
             binding,
             subagent_bindings=root.subagent_bindings,
@@ -1612,12 +1612,12 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
         if not _binding_matches_snapshot_root(binding, root):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         resolved_planning = (
-            definition.spec.planning if planning is None else planning
+            compiled_agent.spec.planning if planning is None else planning
         )
         if not isinstance(resolved_planning, bool):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         resolved_thinking = (
-            definition.spec.thinking
+            compiled_agent.spec.thinking
             if thinking is None
             else normalize_thinking(thinking)
         )
@@ -1669,9 +1669,9 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
     ) -> TaskNode:
         validate_agent_id(agent_id)
         try:
-            definition = self._catalog.root_definition(agent_id)
+            compiled_agent = self._catalog.root_agent(agent_id)
         except AIError as error:
-            if error.code is not ErrorCode.AGENT_DEFINITION_UNAVAILABLE:
+            if error.code is not ErrorCode.AGENT_BINDING_UNAVAILABLE:
                 raise
             raise AIError(
                 ErrorCode.CAPABILITY_REQUIRED_MISSING,
@@ -1679,7 +1679,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             ) from error
         return self.build_agent_task(
             agent_id,
-            definition.spec.revision,
+            compiled_agent.spec.revision,
             node_id,
             user_prompt,
             dependencies=dependencies,
@@ -1695,7 +1695,7 @@ class RuntimeTaskNodeRunner(Generic[AppT]):
             files=files,
             session_id=session_id,
             memory_scope=memory_scope,
-            definition=definition,
+            compiled_agent=compiled_agent,
             dependency_policy=dependency_policy,
         )
 

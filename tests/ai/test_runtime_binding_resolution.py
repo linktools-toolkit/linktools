@@ -139,7 +139,7 @@ async def _fixture() -> _BindingFixture:
         catalog,
         resolver,
         assets,
-        compiler.bind(catalog.root_definition("parent")),
+        compiler.bind(catalog.root_agent("parent")),
     )
 
 
@@ -255,10 +255,10 @@ async def test_runtime_start_admits_resolved_binding() -> None:
             _binding_resolver=fixture.resolver,
         )
 
-        definition = fixture.catalog.root_definition("parent")
+        compiled_agent = fixture.catalog.root_agent("parent")
         started = await runtime._start_for_agent(
-            definition.spec.id,
-            definition.spec.revision,
+            compiled_agent.spec.id,
+            compiled_agent.spec.revision,
             "prompt",
             files=(),
             output=None,
@@ -319,11 +319,11 @@ async def test_binding_resolution_restores_mcp_execution_contract() -> None:
     )
 
     resolved = await resolver.resolve(
-        compiler.bind(catalog.root_definition(specification.id))
+        compiler.bind(catalog.root_agent(specification.id))
     )
 
     pin = next(item for item in resolved.snapshot.selected if item.kind == "mcp")
-    selected = resolved.definition.selected_mcp
+    selected = resolved.compiled_agent.selected_mcp
     assert pin.contract["execution_policy"] == {
         "version": 1,
         "boundary": "host-stdio",
@@ -376,7 +376,7 @@ async def test_binding_resolution_uses_sandbox_policy_without_workspace(
     )
 
     resolved = await resolver.resolve(
-        compiler.bind(catalog.root_definition(specification.id))
+        compiler.bind(catalog.root_agent(specification.id))
     )
 
     pin = next(item for item in resolved.snapshot.selected if item.kind == "mcp")
@@ -411,7 +411,7 @@ async def test_existing_child_mcp_resolves_asset_versions(
         )
         child = replace(
             fixture.compiler.bind_subagent(
-                fixture.catalog.root_definition("child")
+                fixture.catalog.root_agent("child")
             ).snapshot,
             selected=(pin,),
         )

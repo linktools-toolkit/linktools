@@ -217,14 +217,14 @@ class SubagentDispatcher:
         if child is not None:
             return child
         if frozen_binding is None:
-            definition = self._catalog.root_definition(ref.id)
-            child_binding = self._compiler.bind_subagent(definition)
+            compiled_agent = self._catalog.root_agent(ref.id)
+            child_binding = self._compiler.bind_subagent(compiled_agent)
         else:
             if frozen_binding.agent_spec.id != ref.id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             child_binding = self._compiler.restore(frozen_binding)
-            definition = child_binding.definition
-        child_planning = True if child_mode == "plan" else definition.spec.planning
+            compiled_agent = child_binding.compiled_agent
+        child_planning = True if child_mode == "plan" else compiled_agent.spec.planning
         request = ExecutionRequest(
             user_prompt=user_prompt,
             principal=principal,
@@ -232,7 +232,7 @@ class SubagentDispatcher:
             memory_scope=memory_scope,
             mode=child_mode,
             planning=child_planning,
-            thinking=definition.spec.thinking,
+            thinking=compiled_agent.spec.thinking,
             files=files,
         )
         try:

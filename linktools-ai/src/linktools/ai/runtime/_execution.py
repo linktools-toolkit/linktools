@@ -1623,7 +1623,7 @@ class DefaultExecutionService:
         if execution is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         binding = self._binding(execution.binding_digest, execution.binding)
-        if binding.definition.spec.id != agent_id:
+        if binding.compiled_agent.spec.id != agent_id:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if (
             execution.lineage_kind is not ExecutionLineageKind.SUBAGENT

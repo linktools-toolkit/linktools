@@ -42,7 +42,7 @@ def _binding() -> AgentBindingSnapshot:
     )
 
 
-class _DefinitionCatalog:
+class _BindingCatalog:
     def binding(self, digest: str) -> object:
         binding = _binding()
         assert digest == binding.binding_digest
@@ -164,7 +164,7 @@ def _service(
         state.object_store(RuntimeDomain.EXECUTION),
         TenantAuthorizationPolicy(),
         sessions=state.conversation.sessions,
-        catalog=_DefinitionCatalog(),
+        catalog=_BindingCatalog(),
         compiler=object(),
         runtime_bridge=runtime_bridge,
         live_broker=LiveExecutionEventBroker(),
