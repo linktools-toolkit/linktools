@@ -86,11 +86,16 @@ class AgentMarkdownSpecCodec:
 def _canonicalize_agent_fields(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
+    aliases = {
+        "allow-tools": "allow_tools",
+        "allow-skills": "allow_skills",
+        "allow-subagents": "allow_subagents",
+    }
     result: dict[str, object] = {}
     for key, value in payload.items():
         if not isinstance(key, str):
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        canonical = key.replace("-", "_")
+        canonical = aliases.get(key, key)
         if canonical in result:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         result[canonical] = value
