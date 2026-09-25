@@ -183,8 +183,12 @@ Registry/Provider abstraction is required.
 
 The built-in Agent loader accepts flat JSON at `<id>` and Markdown packages
 at `<id>/AGENT.md`; Skill packages use `<id>/SKILL.md`, and MCP packages use
-`<id>/mcp.json` or `<id>/mcp.yaml`. `AgentMarkdownSpecCodec` exposes strict
-`parse()`, `from_payload()`, and `decode()` entry points for `AGENT.md`.
+`<id>/mcp.json` or `<id>/mcp.yaml`. Author parsers validate syntax and the
+core fields they consume, but do not reject unrelated fields. Built-in Agent,
+Skill, and MCP decoders simply ignore fields outside their small authoring
+surface; custom loaders may still inspect those fields through the public
+parsers. `AgentMarkdownSpecCodec` exposes `parse()`, `from_payload()`, and
+`decode()` entry points for `AGENT.md`.
 Custom source kinds such as `worker` can use
 `AgentDeclarationLoader("worker", defaults=...)` to load the same Agent
 layouts with validated defaults. Defaults fill missing declaration fields;
